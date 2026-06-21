@@ -3,9 +3,10 @@
 Status: accepted
 
 Этот документ фиксирует первые срезы разработки после финального target design.
-Он не заменяет [`feature-registry.md`](feature-registry.md): регистр хранит
-полный searchable backlog функций, а этот документ задает порядок сборки
-минимального core продукта.
+Он не заменяет
+[`system-design/feature-registry.md`](system-design/feature-registry.md):
+регистр хранит полный searchable backlog функций, а этот документ задает
+порядок сборки минимального core продукта.
 
 ## Решение
 

@@ -3,9 +3,9 @@
 Lumi is an open-source app for deliberate reading and learning over materials
 the user already chose: books, articles, threads, messages and notes.
 
-The product direction is described in [docs/VISION.md](docs/VISION.md). The
-accepted technical design for `v01` lives in
-[docs/system-design](docs/system-design).
+The canonical development-facing product direction is described in
+[docs/en/vision.md](docs/en/vision.md). The accepted technical design for `v01`
+lives in [docs/en/system-design](docs/en/system-design).
 
 ## Current State
 
@@ -20,7 +20,7 @@ developer scaffold includes:
 - `make` targets and pre-commit hooks for local quality gates.
 
 The first implementation slice is S0 Core Architecture Skeleton from
-[docs/system-design/early-slices.md](docs/system-design/early-slices.md).
+[docs/en/early-slices.md](docs/en/early-slices.md).
 
 ## Local Setup
 
@@ -65,7 +65,30 @@ available:
 make web-e2e
 ```
 
-More detail is in [docs/runbooks/local-dev.md](docs/runbooks/local-dev.md).
+More detail is in
+[docs/en/runbooks/local-dev.md](docs/en/runbooks/local-dev.md).
+
+## Documentation Workflow
+
+Documentation is split by language and should stay path-synchronized:
+
+- [`docs/en`](docs/en) - canonical English documentation used for development.
+- [`docs/ru`](docs/ru) - Russian drafts, source notes and working discussion.
+- [`docs/tmp-plans`](docs/tmp-plans) - temporary implementation plans for active
+  intermediate slices.
+
+Workflow:
+
+1. Discuss and draft product or architecture ideas in Russian under `docs/ru`
+   when that is the clearest working language.
+2. Translate and stabilize durable decisions in the matching `docs/en` path
+   before using them as implementation guidance.
+3. Keep the same relative Markdown document set in `docs/en` and `docs/ru`.
+4. If one language has a document that the other language lacks, add the missing
+   mirror instead of deleting the source document.
+5. Temporary plans are not part of the language mirror. If a temporary plan
+   creates a durable product, architecture or process decision, promote that
+   decision into both language trees, with `docs/en` as the development canon.
 
 ## Repository Shape
 
@@ -73,7 +96,9 @@ More detail is in [docs/runbooks/local-dev.md](docs/runbooks/local-dev.md).
 apps/web/             Dioxus web shell and platform adapter surface
 crates/lumi-core/     shared domain contracts
 crates/lumi-server/   Axum API boundary and server entrypoint
-docs/                 vision, system design, ADRs and runbooks
+docs/en/              canonical English product, design, ADRs and runbooks
+docs/ru/              Russian drafts, source notes and working docs
+docs/tmp-plans/       temporary implementation plans
 tests/e2e/            Playwright browser tests and agent inspection harness
 ```
 

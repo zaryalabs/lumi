@@ -1,7 +1,8 @@
 # Architecture Decision Records
 
 ADRs capture durable implementation decisions. Use ADRs for the decision classes
-listed in `docs/system-design/quality.md`, including schema, anchor, sync,
+listed in [`../system-design/quality.md`](../system-design/quality.md),
+including schema, anchor, sync,
 plugin, AI, search and account/auth boundaries.
 
 ## Template

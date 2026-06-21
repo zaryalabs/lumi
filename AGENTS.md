@@ -10,9 +10,11 @@ Quick guide for agents working in this repository.
 ## Start Here
 
 - Read `README.md` first.
-- Treat `docs/VISION.md` and `docs/system-design/` as the canonical product and
-  architecture sources.
-- Use `docs/runbooks/` for local workflow details.
+- Treat `docs/en/` as the canonical product, architecture, ADR and runbook
+  documentation used for development.
+- Use `docs/ru/` for Russian drafts, source notes and working discussion when
+  useful, then stabilize durable decisions in `docs/en/`.
+- Use `docs/en/runbooks/` for local workflow details.
 - Keep architecture and process decisions in `docs/`; keep this file short and
   operational.
 
@@ -26,7 +28,9 @@ Quick guide for agents working in this repository.
 
 ## Project Shape
 
-- `docs/` - product vision, accepted system design, ADRs and runbooks.
+- `docs/en/` - canonical English product, design, ADRs and runbooks.
+- `docs/ru/` - Russian drafts, source notes and working docs.
+- `docs/tmp-plans/` - temporary implementation plans for active slices.
 - `crates/lumi-core/` - shared domain contracts and platform-independent reader
   foundations.
 - `crates/lumi-server/` - Axum API boundary and server process.
@@ -37,7 +41,8 @@ Quick guide for agents working in this repository.
 
 ## Technical Direction
 
-Follow the stack documented in `docs/VISION.md` and `docs/system-design/`:
+Follow the stack documented in `docs/en/vision.md` and
+`docs/en/system-design/`:
 
 - Rust workspace for shared domain, import, reader, sync and service code.
 - Dioxus 0.7 for Web first, then Desktop/WebView and Mobile/WebView candidates.
@@ -57,10 +62,10 @@ Follow the stack documented in `docs/VISION.md` and `docs/system-design/`:
 - Keep imported material handling source-backed: `Material -> DocumentRevision
   -> Normalized Content Package -> ReadingDocument`.
 - Do not store highlights or notes as DOM paths only; use the target anchor
-  model from `docs/system-design/normalized-content.md`.
+  model from `docs/en/system-design/normalized-content.md`.
 - Prefer DDD style in code;
 - Add ADRs for schema, sync, anchor, plugin, AI, search and auth decisions listed
-  in `docs/system-design/quality.md`.
+  in `docs/en/system-design/quality.md`.
 
 ## Agent-Readable UI
 
