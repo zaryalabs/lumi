@@ -9,18 +9,21 @@ use std::sync::{Arc, RwLock, RwLockReadGuard, RwLockWriteGuard};
 use std::time::Duration;
 
 use axum::{
+    body::Body,
     extract::{Path, State},
     http::{header, StatusCode},
     response::{IntoResponse, Response},
-    routing::{get, post},
+    routing::{get, patch, post, put},
     Json, Router,
 };
 use lumi_core::{
-    import_epub_fixture, rich_epub_fixture, s0_schema_migrations, simple_epub_fixture, Annotation,
-    BlobManifest, BlobManifestId, CreateAnnotationCommand, DocumentRevision, DocumentRevisionId,
-    HealthResponse, ImportedFixture, Job, JobId, Material, MaterialId, MoveReadingPositionCommand,
-    NormalizedContentPackage, ReadingDocument, ReadingProgress, SchemaMigration,
-    ServiceCapabilities, UserId, WebAccount,
+    import_epub_fixture, rich_epub_fixture, s1_schema_migrations, simple_epub_fixture, Annotation,
+    AnnotationExport, AnnotationId, BlobManifest, BlobManifestId, CreateAnnotationCommand,
+    DiagnosticSeverity, DocumentRevision, DocumentRevisionId, EpubFixture, HealthResponse,
+    ImportDiagnostic, ImportedFixture, Job, JobId, JobKind, JobStage, JobStatus, LibraryState,
+    Material, MaterialId, MoveReadingPositionCommand, NormalizedContentPackage, ReadingDocument,
+    ReadingProgress, SchemaMigration, ServiceCapabilities, UpdateAnnotationCommand,
+    UpdateLibraryStateCommand, UserId, WebAccount,
 };
 use serde::{Deserialize, Serialize};
 use tower_http::trace::TraceLayer;
@@ -58,14 +61,15 @@ pub struct AppState {
 }
 
 impl AppState {
-    /// Build a state object seeded with the S0 rich EPUB fixture.
+    /// Build a state object seeded with the S1 rich EPUB fixture.
     #[must_use]
     pub fn seeded() -> Self {
         let owner_id = UserId::now_v7();
-        match import_epub_fixture(owner_id, &rich_epub_fixture()) {
-            Ok(imported) => Self::from_imported(imported),
+        let fixture = rich_epub_fixture();
+        match import_epub_fixture(owner_id, &fixture) {
+            Ok(imported) => Self::from_imported(imported, SourceDownload::from_fixture(&fixture)),
             Err(error) => {
-                tracing::error!(%error, "failed to seed S0 fixture repository");
+                tracing::error!(%error, "failed to seed S1 fixture repository");
                 Self::empty()
             }
         }
@@ -79,9 +83,9 @@ impl AppState {
         }
     }
 
-    fn from_imported(imported: ImportedFixture) -> Self {
+    fn from_imported(imported: ImportedFixture, source: SourceDownload) -> Self {
         let mut repository = Repository::default();
-        repository.insert_imported(imported);
+        repository.insert_imported_with_source(imported, source);
 
         Self {
             repository: Arc::new(RwLock::new(repository)),
@@ -103,10 +107,26 @@ pub fn build_router_with_state(state: AppState) -> Router {
         .route("/auth/seed-prototype/register", post(register_seed_account))
         .route("/account/me", get(account_me))
         .route("/materials", get(list_materials))
-        .route("/materials/{material_id}", get(get_material))
+        .route(
+            "/materials/{material_id}",
+            get(get_material).delete(delete_material),
+        )
+        .route(
+            "/materials/{material_id}/library-state",
+            patch(update_library_state),
+        )
+        .route("/materials/{material_id}/source", get(download_source_epub))
         .route(
             "/materials/{material_id}/annotations",
             get(list_annotations).post(create_annotation),
+        )
+        .route(
+            "/materials/{material_id}/annotations/export",
+            get(export_annotations),
+        )
+        .route(
+            "/materials/{material_id}/annotations/{annotation_id}",
+            put(update_annotation).delete(delete_annotation),
         )
         .route(
             "/materials/{material_id}/progress",
@@ -127,6 +147,7 @@ pub fn build_router_with_state(state: AppState) -> Router {
             post(import_fixture_material),
         )
         .route("/jobs/{job_id}", get(get_job))
+        .route("/jobs/{job_id}/diagnostics", get(get_job_diagnostics))
         .with_state(state);
 
     Router::new()
@@ -139,11 +160,11 @@ async fn health() -> Json<HealthResponse> {
 }
 
 async fn capabilities() -> Json<ServiceCapabilities> {
-    Json(ServiceCapabilities::s0())
+    Json(ServiceCapabilities::s1())
 }
 
 async fn schema_migrations() -> Json<Vec<SchemaMigration>> {
-    Json(s0_schema_migrations())
+    Json(s1_schema_migrations())
 }
 
 async fn register_seed_account(
@@ -171,7 +192,12 @@ async fn account_me(State(state): State<AppState>) -> Result<Json<WebAccount>, A
 
 async fn list_materials(State(state): State<AppState>) -> Result<Json<Vec<Material>>, AppError> {
     let repository = read_repository(&state)?;
-    let mut materials = repository.materials.values().cloned().collect::<Vec<_>>();
+    let mut materials = repository
+        .materials
+        .values()
+        .filter(|material| material.library_state != LibraryState::Deleted)
+        .cloned()
+        .collect::<Vec<_>>();
     materials.sort_by(|left, right| left.canonical_title.cmp(&right.canonical_title));
 
     Ok(Json(materials))
@@ -189,6 +215,69 @@ async fn get_material(
         .ok_or(AppError::NotFound("material"))?;
 
     Ok(Json(material))
+}
+
+async fn update_library_state(
+    State(state): State<AppState>,
+    Path(material_id): Path<MaterialId>,
+    Json(command): Json<UpdateLibraryStateCommand>,
+) -> Result<Json<Material>, AppError> {
+    if command.material_id != material_id {
+        return Err(AppError::BadRequest(
+            "material id in path and body must match".to_owned(),
+        ));
+    }
+
+    let mut repository = write_repository(&state)?;
+    let material = repository
+        .materials
+        .get_mut(&material_id)
+        .ok_or(AppError::NotFound("material"))?;
+    material.library_state = command.library_state;
+
+    Ok(Json(material.clone()))
+}
+
+async fn delete_material(
+    State(state): State<AppState>,
+    Path(material_id): Path<MaterialId>,
+) -> Result<StatusCode, AppError> {
+    let mut repository = write_repository(&state)?;
+    let material = repository
+        .materials
+        .get_mut(&material_id)
+        .ok_or(AppError::NotFound("material"))?;
+    material.library_state = LibraryState::Deleted;
+
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn download_source_epub(
+    State(state): State<AppState>,
+    Path(material_id): Path<MaterialId>,
+) -> Result<Response, AppError> {
+    let repository = read_repository(&state)?;
+    repository.ensure_material(material_id)?;
+    let source = repository
+        .source_downloads
+        .get(&material_id)
+        .cloned()
+        .ok_or(AppError::NotFound("source_epub"))?;
+    let file_name = source
+        .file_name
+        .chars()
+        .filter(|character| !matches!(character, '"' | '\\'))
+        .collect::<String>();
+
+    Response::builder()
+        .status(StatusCode::OK)
+        .header(header::CONTENT_TYPE, source.media_type)
+        .header(
+            header::CONTENT_DISPOSITION,
+            format!("attachment; filename=\"{file_name}\""),
+        )
+        .body(Body::from(source.bytes))
+        .map_err(|_| AppError::Internal("failed to build source response"))
 }
 
 async fn get_revision(
@@ -254,6 +343,7 @@ async fn import_fixture_material(
     let fixture = match fixture_slug.as_str() {
         "simple" | "simple-epub" => simple_epub_fixture(),
         "rich" | "rich-epub" => rich_epub_fixture(),
+        "empty" | "bad-empty" => empty_epub_fixture(),
         _ => return Err(AppError::BadRequest("unknown fixture slug".to_owned())),
     };
     let owner_id = {
@@ -262,15 +352,28 @@ async fn import_fixture_material(
             .first_account_id()
             .ok_or(AppError::NotFound("account"))?
     };
-    let imported = import_epub_fixture(owner_id, &fixture)
-        .map_err(|error| AppError::BadRequest(error.to_string()))?;
+    let imported = match import_epub_fixture(owner_id, &fixture) {
+        Ok(imported) => imported,
+        Err(error) => {
+            let job = failed_import_job(owner_id, error.to_string());
+            let response = ImportFixtureResponse {
+                material: None,
+                revision: None,
+                job: job.clone(),
+            };
+            let mut repository = write_repository(&state)?;
+            repository.jobs.insert(job.id, job);
+
+            return Ok(Json(response));
+        }
+    };
     let response = ImportFixtureResponse {
-        material: imported.material.clone(),
-        revision: imported.revision.clone(),
+        material: Some(imported.material.clone()),
+        revision: Some(imported.revision.clone()),
         job: imported.job.clone(),
     };
     let mut repository = write_repository(&state)?;
-    repository.insert_imported(imported);
+    repository.insert_imported_with_source(imported, SourceDownload::from_fixture(&fixture));
 
     Ok(Json(response))
 }
@@ -287,6 +390,20 @@ async fn get_job(
         .ok_or(AppError::NotFound("job"))?;
 
     Ok(Json(job))
+}
+
+async fn get_job_diagnostics(
+    State(state): State<AppState>,
+    Path(job_id): Path<JobId>,
+) -> Result<Json<Vec<ImportDiagnostic>>, AppError> {
+    let repository = read_repository(&state)?;
+    let diagnostics = repository
+        .jobs
+        .get(&job_id)
+        .map(|job| job.diagnostics.clone())
+        .ok_or(AppError::NotFound("job"))?;
+
+    Ok(Json(diagnostics))
 }
 
 async fn list_annotations(
@@ -327,6 +444,76 @@ async fn create_annotation(
         .push(annotation.clone());
 
     Ok(Json(annotation))
+}
+
+async fn update_annotation(
+    State(state): State<AppState>,
+    Path((material_id, annotation_id)): Path<(MaterialId, AnnotationId)>,
+    Json(command): Json<UpdateAnnotationCommand>,
+) -> Result<Json<Annotation>, AppError> {
+    if command.material_id != material_id || command.annotation_id != annotation_id {
+        return Err(AppError::BadRequest(
+            "material or annotation id in path and body must match".to_owned(),
+        ));
+    }
+
+    let mut repository = write_repository(&state)?;
+    repository.ensure_material(material_id)?;
+    let annotations = repository
+        .annotations_by_material
+        .get_mut(&material_id)
+        .ok_or(AppError::NotFound("annotation"))?;
+    let annotation = annotations
+        .iter_mut()
+        .find(|stored| stored.id == annotation_id)
+        .ok_or(AppError::NotFound("annotation"))?;
+
+    if annotation.revision != command.expected_revision {
+        return Err(AppError::Conflict(format!(
+            "annotation revision conflict: expected {}, found {}",
+            command.expected_revision, annotation.revision
+        )));
+    }
+
+    annotation.update_kind(command.kind, lumi_core::now_timestamp_ms());
+
+    Ok(Json(annotation.clone()))
+}
+
+async fn delete_annotation(
+    State(state): State<AppState>,
+    Path((material_id, annotation_id)): Path<(MaterialId, AnnotationId)>,
+) -> Result<Json<Annotation>, AppError> {
+    let mut repository = write_repository(&state)?;
+    repository.ensure_material(material_id)?;
+    let annotations = repository
+        .annotations_by_material
+        .get_mut(&material_id)
+        .ok_or(AppError::NotFound("annotation"))?;
+    let index = annotations
+        .iter()
+        .position(|stored| stored.id == annotation_id)
+        .ok_or(AppError::NotFound("annotation"))?;
+
+    Ok(Json(annotations.remove(index)))
+}
+
+async fn export_annotations(
+    State(state): State<AppState>,
+    Path(material_id): Path<MaterialId>,
+) -> Result<Json<AnnotationExport>, AppError> {
+    let repository = read_repository(&state)?;
+    let material = repository
+        .materials
+        .get(&material_id)
+        .ok_or(AppError::NotFound("material"))?;
+    let annotations = repository
+        .annotations_by_material
+        .get(&material_id)
+        .map(Vec::as_slice)
+        .unwrap_or(&[]);
+
+    Ok(Json(AnnotationExport::for_material(material, annotations)))
 }
 
 async fn get_progress(
@@ -431,19 +618,22 @@ struct Repository {
     packages_by_revision: HashMap<DocumentRevisionId, NormalizedContentPackage>,
     reading_documents_by_revision: HashMap<DocumentRevisionId, ReadingDocument>,
     blob_manifests: HashMap<BlobManifestId, BlobManifest>,
+    source_downloads: HashMap<MaterialId, SourceDownload>,
     annotations_by_material: HashMap<MaterialId, Vec<Annotation>>,
     progress_by_material: HashMap<MaterialId, ReadingProgress>,
     jobs: HashMap<JobId, Job>,
 }
 
 impl Repository {
-    fn insert_imported(&mut self, imported: ImportedFixture) {
+    fn insert_imported_with_source(&mut self, imported: ImportedFixture, source: SourceDownload) {
+        let material_id = imported.material.id;
         self.accounts
             .insert(imported.account.user_id, imported.account);
         self.blob_manifests.insert(
             imported.package.resources.id,
             imported.package.resources.clone(),
         );
+        self.source_downloads.insert(material_id, source);
         self.reading_documents_by_revision
             .insert(imported.revision.id, imported.reading_document);
         self.packages_by_revision
@@ -476,10 +666,62 @@ impl Repository {
     }
 }
 
+#[derive(Clone)]
+struct SourceDownload {
+    file_name: String,
+    media_type: String,
+    bytes: Vec<u8>,
+}
+
+impl SourceDownload {
+    fn from_fixture(fixture: &EpubFixture) -> Self {
+        Self {
+            file_name: fixture.file_name.clone(),
+            media_type: "application/epub+zip".to_owned(),
+            bytes: fixture.source_bytes(),
+        }
+    }
+}
+
+fn empty_epub_fixture() -> EpubFixture {
+    EpubFixture {
+        slug: "empty-epub".to_owned(),
+        file_name: "empty.epub".to_owned(),
+        title: "Empty EPUB".to_owned(),
+        creators: Vec::new(),
+        language: Some("en".to_owned()),
+        sections: Vec::new(),
+        resources: Vec::new(),
+    }
+}
+
+fn failed_import_job(account_id: UserId, detail: String) -> Job {
+    let timestamp = lumi_core::now_timestamp_ms();
+
+    Job {
+        id: JobId::now_v7(),
+        account_id,
+        kind: JobKind::Import,
+        status: JobStatus::Failed,
+        stage: JobStage::SourceAccepted,
+        material_id: None,
+        revision_id: None,
+        diagnostics: vec![ImportDiagnostic {
+            severity: DiagnosticSeverity::Error,
+            code: "epub_fixture_import_failed".to_owned(),
+            message: detail,
+            source_path: Some("empty.epub".to_owned()),
+        }],
+        created_at: timestamp,
+        updated_at: timestamp,
+    }
+}
+
 #[derive(Debug)]
 enum AppError {
     NotFound(&'static str),
     BadRequest(String),
+    Conflict(String),
     Internal(&'static str),
 }
 
@@ -492,6 +734,7 @@ impl IntoResponse for AppError {
                 format!("Requested {resource} was not found."),
             ),
             AppError::BadRequest(detail) => (StatusCode::BAD_REQUEST, "bad_request", detail),
+            AppError::Conflict(detail) => (StatusCode::CONFLICT, "conflict", detail),
             AppError::Internal(detail) => (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "internal_server_error",
@@ -550,8 +793,8 @@ impl RegisterSeedAccountRequest {
 
 #[derive(Serialize, Deserialize)]
 struct ImportFixtureResponse {
-    material: Material,
-    revision: DocumentRevision,
+    material: Option<Material>,
+    revision: Option<DocumentRevision>,
     job: Job,
 }
 
@@ -584,24 +827,24 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn capabilities_route_reports_s0_contracts() -> Result<(), Box<dyn std::error::Error>> {
+    async fn capabilities_route_reports_s1_contracts() -> Result<(), Box<dyn std::error::Error>> {
         let capabilities: ServiceCapabilities =
             json_get(build_router(), "/api/v1/capabilities").await?;
 
         assert!(capabilities
             .features
             .iter()
-            .any(|feature| feature == "anchor-backed-annotations"));
+            .any(|feature| feature == "annotation-export"));
         Ok(())
     }
 
     #[tokio::test]
-    async fn migrations_route_reports_basic_domain_migrations(
+    async fn migrations_route_reports_s1_domain_migrations(
     ) -> Result<(), Box<dyn std::error::Error>> {
         let migrations: Vec<SchemaMigration> =
             json_get(build_router(), "/api/v1/schema/migrations").await?;
 
-        assert_eq!(migrations.len(), 4);
+        assert_eq!(migrations.len(), 6);
         Ok(())
     }
 
@@ -677,8 +920,92 @@ mod tests {
             Body::empty(),
         )
         .await?;
+        let material = response
+            .material
+            .ok_or_else(|| std::io::Error::other("import material missing"))?;
+        let revision = response
+            .revision
+            .ok_or_else(|| std::io::Error::other("import revision missing"))?;
 
-        assert_eq!(response.material.active_revision_id, response.revision.id);
+        assert_eq!(material.active_revision_id, revision.id);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn failed_fixture_import_keeps_diagnostic_job() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let app = build_router();
+        let response: ImportFixtureResponse =
+            json_post(app.clone(), "/api/v1/imports/fixtures/empty", Body::empty()).await?;
+        let diagnostics: Vec<ImportDiagnostic> = json_get(
+            app,
+            &format!("/api/v1/jobs/{}/diagnostics", response.job.id),
+        )
+        .await?;
+
+        assert!(diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.severity == DiagnosticSeverity::Error));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn library_state_can_archive_and_delete_material(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let app = build_router();
+        let imported = import_fixture(app.clone(), "simple").await?;
+        let command = UpdateLibraryStateCommand {
+            material_id: imported.material.id,
+            library_state: LibraryState::Archived,
+        };
+        let archived: Material = json_patch(
+            app.clone(),
+            &format!("/api/v1/materials/{}/library-state", imported.material.id),
+            json_body(&command)?,
+        )
+        .await?;
+
+        assert_eq!(archived.library_state, LibraryState::Archived);
+
+        let status = request_status(
+            app.clone(),
+            Request::builder()
+                .method("DELETE")
+                .uri(format!("/api/v1/materials/{}", imported.material.id))
+                .body(Body::empty())?,
+        )
+        .await?;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+
+        let materials: Vec<Material> = json_get(app, "/api/v1/materials").await?;
+        assert!(!materials
+            .iter()
+            .any(|material| material.id == imported.material.id));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn source_epub_download_returns_original_fixture_bytes(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let app = build_router();
+        let imported = import_fixture(app.clone(), "simple").await?;
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/api/v1/materials/{}/source", imported.material.id))
+                    .body(Body::empty())?,
+            )
+            .await?;
+        let content_type = response
+            .headers()
+            .get(header::CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok())
+            .unwrap_or_default()
+            .to_owned();
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX).await?;
+
+        assert_eq!(content_type, "application/epub+zip");
+        assert!(!bytes.is_empty());
         Ok(())
     }
 
@@ -784,6 +1111,68 @@ mod tests {
         Ok(())
     }
 
+    #[tokio::test]
+    async fn annotation_can_be_updated_deleted_and_exported(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let app = build_router();
+        let imported = import_fixture(app.clone(), "simple").await?;
+        let mut command = sample_fixture_highlight(&imported)
+            .ok_or_else(|| std::io::Error::other("fixture highlight missing"))?;
+        command.kind = AnnotationKind::Note {
+            body: "First note".to_owned(),
+        };
+        let annotation: Annotation = json_post(
+            app.clone(),
+            &format!("/api/v1/materials/{}/annotations", imported.material.id),
+            json_body(&command)?,
+        )
+        .await?;
+        let update = UpdateAnnotationCommand {
+            material_id: imported.material.id,
+            annotation_id: annotation.id,
+            expected_revision: annotation.revision,
+            kind: AnnotationKind::Note {
+                body: "Edited note".to_owned(),
+            },
+        };
+        let edited: Annotation = json_put(
+            app.clone(),
+            &format!(
+                "/api/v1/materials/{}/annotations/{}",
+                imported.material.id, annotation.id
+            ),
+            json_body(&update)?,
+        )
+        .await?;
+        let export: AnnotationExport = json_get(
+            app.clone(),
+            &format!(
+                "/api/v1/materials/{}/annotations/export",
+                imported.material.id
+            ),
+        )
+        .await?;
+        let deleted: Annotation = json_delete(
+            app,
+            &format!(
+                "/api/v1/materials/{}/annotations/{}",
+                imported.material.id, annotation.id
+            ),
+        )
+        .await?;
+
+        assert_eq!(edited.revision, 2);
+        assert_eq!(
+            export
+                .entries
+                .first()
+                .and_then(|entry| entry.note_body.as_deref()),
+            Some("Edited note")
+        );
+        assert_eq!(deleted.id, annotation.id);
+        Ok(())
+    }
+
     async fn import_fixture(
         app: Router,
         slug: &str,
@@ -794,17 +1183,20 @@ mod tests {
             Body::empty(),
         )
         .await?;
+        let material = response
+            .material
+            .ok_or_else(|| std::io::Error::other("import material missing"))?;
+        let revision = response
+            .revision
+            .ok_or_else(|| std::io::Error::other("import revision missing"))?;
         let document: ReadingDocument = json_get(
             app,
-            &format!(
-                "/api/v1/revisions/{}/reading-document",
-                response.revision.id
-            ),
+            &format!("/api/v1/revisions/{}/reading-document", revision.id),
         )
         .await?;
         let fixture = ImportedFixture {
             account: WebAccount {
-                user_id: response.material.owner_id,
+                user_id: material.owner_id,
                 profile: lumi_core::AccountProfile { nickname: None },
                 status: lumi_core::AccountStatus::Active,
                 auth: lumi_core::SeedAuthPrototype {
@@ -814,8 +1206,8 @@ mod tests {
                 },
                 created_at: 0,
             },
-            material: response.material,
-            revision: response.revision,
+            material,
+            revision,
             package: NormalizedContentPackage {
                 id: lumi_core::NormalizedPackageId::now_v7(),
                 revision_id: document.revision_id,
@@ -878,6 +1270,22 @@ mod tests {
         .await
     }
 
+    async fn json_patch<T: for<'de> Deserialize<'de>>(
+        app: Router,
+        uri: &str,
+        body: Body,
+    ) -> Result<T, Box<dyn std::error::Error>> {
+        request_json(
+            app,
+            Request::builder()
+                .method("PATCH")
+                .uri(uri)
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(body)?,
+        )
+        .await
+    }
+
     async fn json_put<T: for<'de> Deserialize<'de>>(
         app: Router,
         uri: &str,
@@ -892,6 +1300,27 @@ mod tests {
                 .body(body)?,
         )
         .await
+    }
+
+    async fn json_delete<T: for<'de> Deserialize<'de>>(
+        app: Router,
+        uri: &str,
+    ) -> Result<T, Box<dyn std::error::Error>> {
+        request_json(
+            app,
+            Request::builder()
+                .method("DELETE")
+                .uri(uri)
+                .body(Body::empty())?,
+        )
+        .await
+    }
+
+    async fn request_status(
+        app: Router,
+        request: Request<Body>,
+    ) -> Result<StatusCode, Box<dyn std::error::Error>> {
+        Ok(app.oneshot(request).await?.status())
     }
 
     async fn request_json<T: for<'de> Deserialize<'de>>(

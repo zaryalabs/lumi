@@ -13,5 +13,9 @@ index_on_404 = true
 [web.resource]
 style = ["./assets/main.css"]
 
+[web.resource.dev]
+style = []
+script = []
+
 [[web.proxy]]
 backend = "http://127.0.0.1:8080/api/"

@@ -19,8 +19,9 @@ developer scaffold includes:
 - Playwright E2E scaffolding in `tests/e2e`;
 - `make` targets and pre-commit hooks for local quality gates.
 
-The first implementation slice is S0 Core Architecture Skeleton from
-[docs/en/early-slices.md](docs/en/early-slices.md).
+The current implementation target is a fixture-backed S1 Web EPUB Reader slice
+from [docs/en/early-slices.md](docs/en/early-slices.md), built on the S0 core
+architecture skeleton.
 
 ## Local Setup
 

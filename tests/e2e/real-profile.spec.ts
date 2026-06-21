@@ -29,10 +29,10 @@ test.describe("real local profile", () => {
 
     await page.goto("/");
     await expect(
-      page.getByRole("heading", { name: "Reader platform adapter" }),
+      page.getByRole("heading", { name: "Web EPUB reader" }),
     ).toBeVisible();
     await expect(
-      page.getByRole("complementary", { name: "Development status" }),
+      page.getByRole("complementary", { name: "Reader side panels" }),
     ).toBeVisible();
   });
 });
