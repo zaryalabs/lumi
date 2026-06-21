@@ -1,0 +1,21 @@
+[package]
+name = "lumi-web"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+dioxus.workspace = true
+lumi-core = { path = "../../crates/lumi-core" }
+
+[features]
+default = ["web"]
+check = ["dioxus/minimal"]
+web = ["dioxus/web"]
+server = ["dioxus/server"]
+desktop = ["dioxus/desktop"]
+mobile = ["dioxus/mobile"]
+
+[lints]
+workspace = true

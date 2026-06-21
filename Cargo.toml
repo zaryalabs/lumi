@@ -1,0 +1,38 @@
+[workspace]
+members = [
+  "apps/web",
+  "crates/lumi-core",
+  "crates/lumi-server",
+]
+resolver = "2"
+
+[workspace.package]
+edition = "2021"
+license = "MIT"
+rust-version = "1.85"
+version = "0.1.0"
+
+[workspace.dependencies]
+anyhow = "1.0.102"
+axum = "0.8.9"
+dioxus = { version = "0.7.0", default-features = false }
+serde = { version = "1.0.228", features = ["derive"] }
+serde_json = "1.0.150"
+thiserror = "2.0.18"
+tokio = { version = "1.52.3", features = ["macros", "net", "rt-multi-thread", "signal"] }
+tower = { version = "0.5.3", features = ["util"] }
+tower-http = { version = "0.6.11", features = ["trace"] }
+tracing = "0.1.44"
+tracing-subscriber = { version = "0.3.23", features = ["env-filter", "fmt"] }
+uuid = { version = "1.23.3", features = ["serde", "v7"] }
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+unused_must_use = "deny"
+
+[workspace.lints.clippy]
+dbg_macro = "deny"
+expect_used = "deny"
+panic = "deny"
+todo = "deny"
+unwrap_used = "deny"

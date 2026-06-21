@@ -1,0 +1,17 @@
+[application]
+name = "lumi-web"
+asset_dir = "assets"
+sub_package = "lumi-web"
+
+[web.app]
+title = "Lumi"
+
+[web.watcher]
+watch_path = ["src", "assets", "../../crates/lumi-core/src"]
+index_on_404 = true
+
+[web.resource]
+style = ["./assets/main.css"]
+
+[[web.proxy]]
+backend = "http://127.0.0.1:8080/api/"

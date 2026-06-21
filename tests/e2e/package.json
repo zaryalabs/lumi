@@ -1,0 +1,19 @@
+{
+  "name": "@lumi/e2e",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "format": "prettier --write .",
+    "lint": "tsc --noEmit",
+    "typecheck": "tsc --noEmit",
+    "test": "playwright test",
+    "install-browsers": "playwright install chromium"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.57.0",
+    "@types/node": "^25.0.1",
+    "prettier": "^3.7.4",
+    "typescript": "^5.9.3"
+  }
+}

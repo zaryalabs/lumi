@@ -13,6 +13,23 @@ target
 # Contains mutation testing data
 **/mutants.out*/
 
+# Dioxus / web build artifacts
+dist
+apps/web/dist
+apps/web/target
+
+# Node / Playwright
+node_modules
+tests/e2e/node_modules
+tests/e2e/test-results
+tests/e2e/playwright-report
+.playwright-cli
+
+# Local environment
+.env
+.env.*
+!.env.example
+
 # RustRover
 #  JetBrains specific template is maintained in a separate JetBrains.gitignore that can
 #  be found at https://github.com/github/gitignore/blob/main/Global/JetBrains.gitignore
