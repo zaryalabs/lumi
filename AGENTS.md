@@ -58,6 +58,7 @@ Follow the stack documented in `docs/VISION.md` and `docs/system-design/`:
   -> Normalized Content Package -> ReadingDocument`.
 - Do not store highlights or notes as DOM paths only; use the target anchor
   model from `docs/system-design/normalized-content.md`.
+- Prefer DDD style in code;
 - Add ADRs for schema, sync, anchor, plugin, AI, search and auth decisions listed
   in `docs/system-design/quality.md`.
 
