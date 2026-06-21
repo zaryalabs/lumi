@@ -5,7 +5,8 @@
 интеграции и набор реализуемых подсистем.
 
 Мы проектируем полную реализацию продукта, а не MVP и не временный срез.
-Приоритизация, релизные срезы и порядок разработки будут определены отдельно.
+Ранние срезы разработки определены отдельно в
+[`early-slices.md`](early-slices.md).
 Текущее состояние документов - **Final v01**: целевая архитектура принята для
 планирования первого среза, а открытые вопросы считаются задачами прототипов,
 ADR или реализации, но не блокируют сам target design.
@@ -87,6 +88,7 @@ ADR или реализации, но не блокируют сам target desi
 docs/system-design/
   README.md
   feature-registry.md
+  early-slices.md
   normalized-content.md
   reading-screen.md
   reader-architecture.md
@@ -118,6 +120,7 @@ docs/system-design/
 | Направление | Документ | Статус |
 | --- | --- | --- |
 | Регистр функций | `feature-registry.md` | `accepted` |
+| Ранние срезы | `early-slices.md` | `accepted` |
 | Нормализованный контент | `normalized-content.md` | `accepted` |
 | Экран чтения | `reading-screen.md` | `accepted` |
 | Архитектура экрана чтения | `reader-architecture.md` | `accepted` |
@@ -152,6 +155,12 @@ design docs.
 Правило поддержки регистра: новая функция, крупная ADR или существенное
 изменение scope должны обновлять соответствующую строку регистра или добавлять
 новый stable feature id.
+
+[`early-slices.md`](early-slices.md) задает первые implementation slices:
+core architecture skeleton, web EPUB reader, macOS desktop reader and Android
+reader. Эти срезы используют ID из регистра, но остаются отдельным документом,
+потому что отвечают за порядок разработки, а не за полный функциональный
+inventory.
 
 ## Композиционная модель
 
