@@ -1,26 +1,35 @@
 #![deny(missing_docs)]
 //! Shared platform-independent contracts for Lumi.
 //!
-//! This crate is intentionally small at the scaffold stage. It establishes the
-//! workspace boundary where reader, import, sync and API contracts can grow
-//! without depending on Dioxus, DOM or Axum handler types.
+//! The S0 slice keeps EPUB-specific work behind an importer boundary and gives
+//! the server and web adapter one shared model for materials, revisions,
+//! normalized content, reading documents, anchors, annotations and jobs.
+
+mod fixtures;
+mod models;
+
+pub use fixtures::{
+    import_epub_fixture, rich_epub_fixture, sample_fixture_highlight, simple_epub_fixture,
+    EpubFixture, EpubFixtureResource, EpubFixtureSection, ImportError, ImportedFixture,
+};
+pub use models::*;
 
 use serde::{Deserialize, Serialize};
-use uuid::Uuid;
 
 /// Current public API version used by the local Axum scaffold.
 pub const API_VERSION: &str = "v1";
 
-/// Stable user identifier type.
-///
-/// The target account model uses UUIDv7 or a newer time-ordered UUID variant.
-pub type UserId = Uuid;
+/// Current domain schema marker for the S0 contracts.
+pub const DOMAIN_SCHEMA_VERSION: &str = "s0.2026-06-21";
 
-/// Stable material identifier type.
-pub type MaterialId = Uuid;
+/// Current normalized content package marker for reflowable S0 documents.
+pub const NORMALIZED_PACKAGE_VERSION: &str = "normalized.reflowable.s0";
 
-/// Stable document revision identifier type.
-pub type DocumentRevisionId = Uuid;
+/// Importer id used by the S0 EPUB fixture importer spike.
+pub const EPUB_FIXTURE_IMPORTER_ID: &str = "lumi.epub.fixture";
+
+/// Importer version used by the S0 EPUB fixture importer spike.
+pub const EPUB_FIXTURE_IMPORTER_VERSION: &str = "s0.1";
 
 /// Health state for Lumi services.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -53,6 +62,50 @@ impl HealthResponse {
     }
 }
 
+/// Capabilities exposed by an S0-compatible server.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct ServiceCapabilities {
+    /// API version served by the process.
+    pub api_version: String,
+    /// Domain schema version served by the process.
+    pub domain_schema_version: String,
+    /// Normalized package version accepted by the reader path.
+    pub normalized_package_version: String,
+    /// Route groups currently present behind `/api/v1`.
+    pub route_groups: Vec<String>,
+    /// Feature flags available in the current slice.
+    pub features: Vec<String>,
+}
+
+impl ServiceCapabilities {
+    /// Build the capabilities advertised by the S0 implementation.
+    #[must_use]
+    pub fn s0() -> Self {
+        Self {
+            api_version: API_VERSION.to_owned(),
+            domain_schema_version: DOMAIN_SCHEMA_VERSION.to_owned(),
+            normalized_package_version: NORMALIZED_PACKAGE_VERSION.to_owned(),
+            route_groups: vec![
+                "auth".to_owned(),
+                "account".to_owned(),
+                "materials".to_owned(),
+                "revisions".to_owned(),
+                "blobs".to_owned(),
+                "imports".to_owned(),
+                "jobs".to_owned(),
+                "reader".to_owned(),
+            ],
+            features: vec![
+                "seed-auth-prototype-boundary".to_owned(),
+                "content-addressed-local-dev-blobs".to_owned(),
+                "epub-fixture-importer".to_owned(),
+                "reading-document-reader-core".to_owned(),
+                "anchor-backed-annotations".to_owned(),
+            ],
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -70,5 +123,15 @@ mod tests {
 
         assert_eq!(serialized, "\"ok\"");
         Ok(())
+    }
+
+    #[test]
+    fn capabilities_include_core_s0_route_groups() {
+        let capabilities = ServiceCapabilities::s0();
+
+        assert!(capabilities
+            .route_groups
+            .iter()
+            .any(|group| group == "materials"));
     }
 }

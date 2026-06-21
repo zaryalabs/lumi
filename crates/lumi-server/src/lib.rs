@@ -4,10 +4,25 @@
 //! Product routes will grow under `/api/v1`. Dioxus server functions may be
 //! added later for narrow UI calls, but durable system contracts belong here.
 
+use std::collections::HashMap;
+use std::sync::{Arc, RwLock, RwLockReadGuard, RwLockWriteGuard};
 use std::time::Duration;
 
-use axum::{routing::get, Json, Router};
-use lumi_core::HealthResponse;
+use axum::{
+    extract::{Path, State},
+    http::{header, StatusCode},
+    response::{IntoResponse, Response},
+    routing::{get, post},
+    Json, Router,
+};
+use lumi_core::{
+    import_epub_fixture, rich_epub_fixture, s0_schema_migrations, simple_epub_fixture, Annotation,
+    BlobManifest, BlobManifestId, CreateAnnotationCommand, DocumentRevision, DocumentRevisionId,
+    HealthResponse, ImportedFixture, Job, JobId, Material, MaterialId, MoveReadingPositionCommand,
+    NormalizedContentPackage, ReadingDocument, ReadingProgress, SchemaMigration,
+    ServiceCapabilities, UserId, WebAccount,
+};
+use serde::{Deserialize, Serialize};
 use tower_http::trace::TraceLayer;
 
 /// Default bind address for local development.
@@ -36,9 +51,83 @@ impl AppConfig {
     }
 }
 
+/// Shared Axum application state.
+#[derive(Clone)]
+pub struct AppState {
+    repository: Arc<RwLock<Repository>>,
+}
+
+impl AppState {
+    /// Build a state object seeded with the S0 rich EPUB fixture.
+    #[must_use]
+    pub fn seeded() -> Self {
+        let owner_id = UserId::now_v7();
+        match import_epub_fixture(owner_id, &rich_epub_fixture()) {
+            Ok(imported) => Self::from_imported(imported),
+            Err(error) => {
+                tracing::error!(%error, "failed to seed S0 fixture repository");
+                Self::empty()
+            }
+        }
+    }
+
+    /// Build an empty state object.
+    #[must_use]
+    pub fn empty() -> Self {
+        Self {
+            repository: Arc::new(RwLock::new(Repository::default())),
+        }
+    }
+
+    fn from_imported(imported: ImportedFixture) -> Self {
+        let mut repository = Repository::default();
+        repository.insert_imported(imported);
+
+        Self {
+            repository: Arc::new(RwLock::new(repository)),
+        }
+    }
+}
+
 /// Build the Axum router without binding a socket.
 pub fn build_router() -> Router {
-    let api = Router::new().route("/health", get(health));
+    build_router_with_state(AppState::seeded())
+}
+
+/// Build the Axum router with an explicit state object.
+pub fn build_router_with_state(state: AppState) -> Router {
+    let api = Router::new()
+        .route("/health", get(health))
+        .route("/capabilities", get(capabilities))
+        .route("/schema/migrations", get(schema_migrations))
+        .route("/auth/seed-prototype/register", post(register_seed_account))
+        .route("/account/me", get(account_me))
+        .route("/materials", get(list_materials))
+        .route("/materials/{material_id}", get(get_material))
+        .route(
+            "/materials/{material_id}/annotations",
+            get(list_annotations).post(create_annotation),
+        )
+        .route(
+            "/materials/{material_id}/progress",
+            get(get_progress).put(move_reading_position),
+        )
+        .route("/revisions/{revision_id}", get(get_revision))
+        .route(
+            "/revisions/{revision_id}/package",
+            get(get_normalized_package),
+        )
+        .route(
+            "/revisions/{revision_id}/reading-document",
+            get(get_reading_document),
+        )
+        .route("/blobs/{manifest_id}", get(get_blob_manifest))
+        .route(
+            "/imports/fixtures/{fixture_slug}",
+            post(import_fixture_material),
+        )
+        .route("/jobs/{job_id}", get(get_job))
+        .with_state(state);
 
     Router::new()
         .nest("/api/v1", api)
@@ -47,6 +136,237 @@ pub fn build_router() -> Router {
 
 async fn health() -> Json<HealthResponse> {
     Json(HealthResponse::ok("lumi-server"))
+}
+
+async fn capabilities() -> Json<ServiceCapabilities> {
+    Json(ServiceCapabilities::s0())
+}
+
+async fn schema_migrations() -> Json<Vec<SchemaMigration>> {
+    Json(s0_schema_migrations())
+}
+
+async fn register_seed_account(
+    State(state): State<AppState>,
+    Json(request): Json<RegisterSeedAccountRequest>,
+) -> Result<Json<WebAccount>, AppError> {
+    let account = request.into_account();
+    let mut repository = write_repository(&state)?;
+    repository.accounts.insert(account.user_id, account.clone());
+
+    Ok(Json(account))
+}
+
+async fn account_me(State(state): State<AppState>) -> Result<Json<WebAccount>, AppError> {
+    let repository = read_repository(&state)?;
+    let account = repository
+        .accounts
+        .values()
+        .next()
+        .cloned()
+        .ok_or(AppError::NotFound("account"))?;
+
+    Ok(Json(account))
+}
+
+async fn list_materials(State(state): State<AppState>) -> Result<Json<Vec<Material>>, AppError> {
+    let repository = read_repository(&state)?;
+    let mut materials = repository.materials.values().cloned().collect::<Vec<_>>();
+    materials.sort_by(|left, right| left.canonical_title.cmp(&right.canonical_title));
+
+    Ok(Json(materials))
+}
+
+async fn get_material(
+    State(state): State<AppState>,
+    Path(material_id): Path<MaterialId>,
+) -> Result<Json<Material>, AppError> {
+    let repository = read_repository(&state)?;
+    let material = repository
+        .materials
+        .get(&material_id)
+        .cloned()
+        .ok_or(AppError::NotFound("material"))?;
+
+    Ok(Json(material))
+}
+
+async fn get_revision(
+    State(state): State<AppState>,
+    Path(revision_id): Path<DocumentRevisionId>,
+) -> Result<Json<DocumentRevision>, AppError> {
+    let repository = read_repository(&state)?;
+    let revision = repository
+        .revisions
+        .get(&revision_id)
+        .cloned()
+        .ok_or(AppError::NotFound("revision"))?;
+
+    Ok(Json(revision))
+}
+
+async fn get_normalized_package(
+    State(state): State<AppState>,
+    Path(revision_id): Path<DocumentRevisionId>,
+) -> Result<Json<NormalizedContentPackage>, AppError> {
+    let repository = read_repository(&state)?;
+    let package = repository
+        .packages_by_revision
+        .get(&revision_id)
+        .cloned()
+        .ok_or(AppError::NotFound("normalized_package"))?;
+
+    Ok(Json(package))
+}
+
+async fn get_reading_document(
+    State(state): State<AppState>,
+    Path(revision_id): Path<DocumentRevisionId>,
+) -> Result<Json<ReadingDocument>, AppError> {
+    let repository = read_repository(&state)?;
+    let document = repository
+        .reading_documents_by_revision
+        .get(&revision_id)
+        .cloned()
+        .ok_or(AppError::NotFound("reading_document"))?;
+
+    Ok(Json(document))
+}
+
+async fn get_blob_manifest(
+    State(state): State<AppState>,
+    Path(manifest_id): Path<BlobManifestId>,
+) -> Result<Json<BlobManifest>, AppError> {
+    let repository = read_repository(&state)?;
+    let manifest = repository
+        .blob_manifests
+        .get(&manifest_id)
+        .cloned()
+        .ok_or(AppError::NotFound("blob_manifest"))?;
+
+    Ok(Json(manifest))
+}
+
+async fn import_fixture_material(
+    State(state): State<AppState>,
+    Path(fixture_slug): Path<String>,
+) -> Result<Json<ImportFixtureResponse>, AppError> {
+    let fixture = match fixture_slug.as_str() {
+        "simple" | "simple-epub" => simple_epub_fixture(),
+        "rich" | "rich-epub" => rich_epub_fixture(),
+        _ => return Err(AppError::BadRequest("unknown fixture slug".to_owned())),
+    };
+    let owner_id = {
+        let repository = read_repository(&state)?;
+        repository
+            .first_account_id()
+            .ok_or(AppError::NotFound("account"))?
+    };
+    let imported = import_epub_fixture(owner_id, &fixture)
+        .map_err(|error| AppError::BadRequest(error.to_string()))?;
+    let response = ImportFixtureResponse {
+        material: imported.material.clone(),
+        revision: imported.revision.clone(),
+        job: imported.job.clone(),
+    };
+    let mut repository = write_repository(&state)?;
+    repository.insert_imported(imported);
+
+    Ok(Json(response))
+}
+
+async fn get_job(
+    State(state): State<AppState>,
+    Path(job_id): Path<JobId>,
+) -> Result<Json<Job>, AppError> {
+    let repository = read_repository(&state)?;
+    let job = repository
+        .jobs
+        .get(&job_id)
+        .cloned()
+        .ok_or(AppError::NotFound("job"))?;
+
+    Ok(Json(job))
+}
+
+async fn list_annotations(
+    State(state): State<AppState>,
+    Path(material_id): Path<MaterialId>,
+) -> Result<Json<Vec<Annotation>>, AppError> {
+    let repository = read_repository(&state)?;
+    repository.ensure_material(material_id)?;
+    let annotations = repository
+        .annotations_by_material
+        .get(&material_id)
+        .cloned()
+        .unwrap_or_default();
+
+    Ok(Json(annotations))
+}
+
+async fn create_annotation(
+    State(state): State<AppState>,
+    Path(material_id): Path<MaterialId>,
+    Json(command): Json<CreateAnnotationCommand>,
+) -> Result<Json<Annotation>, AppError> {
+    if command.material_id != material_id {
+        return Err(AppError::BadRequest(
+            "material id in path and body must match".to_owned(),
+        ));
+    }
+
+    let mut repository = write_repository(&state)?;
+    repository.ensure_material(command.material_id)?;
+    repository.ensure_revision(command.revision_id)?;
+
+    let annotation = Annotation::create(command, lumi_core::now_timestamp_ms());
+    repository
+        .annotations_by_material
+        .entry(material_id)
+        .or_default()
+        .push(annotation.clone());
+
+    Ok(Json(annotation))
+}
+
+async fn get_progress(
+    State(state): State<AppState>,
+    Path(material_id): Path<MaterialId>,
+) -> Result<Json<Option<ReadingProgress>>, AppError> {
+    let repository = read_repository(&state)?;
+    repository.ensure_material(material_id)?;
+
+    Ok(Json(
+        repository.progress_by_material.get(&material_id).cloned(),
+    ))
+}
+
+async fn move_reading_position(
+    State(state): State<AppState>,
+    Path(material_id): Path<MaterialId>,
+    Json(command): Json<MoveReadingPositionCommand>,
+) -> Result<Json<ReadingProgress>, AppError> {
+    if command.material_id != material_id {
+        return Err(AppError::BadRequest(
+            "material id in path and body must match".to_owned(),
+        ));
+    }
+
+    let mut repository = write_repository(&state)?;
+    repository.ensure_material(command.material_id)?;
+    repository.ensure_revision(command.revision_id)?;
+    let progress = ReadingProgress {
+        material_id,
+        revision_id: command.revision_id,
+        locator: command.locator,
+        progress_fraction: normalized_progress_fraction(command.progress_fraction),
+        updated_at: lumi_core::now_timestamp_ms(),
+    };
+    repository
+        .progress_by_material
+        .insert(material_id, progress.clone());
+
+    Ok(Json(progress))
 }
 
 /// Wait for an OS shutdown signal.
@@ -81,9 +401,164 @@ pub async fn shutdown_signal() {
     tokio::time::sleep(Duration::from_millis(25)).await;
 }
 
+fn normalized_progress_fraction(progress_fraction: f32) -> f32 {
+    if progress_fraction.is_finite() {
+        progress_fraction.clamp(0.0, 1.0)
+    } else {
+        0.0
+    }
+}
+
+fn read_repository(state: &AppState) -> Result<RwLockReadGuard<'_, Repository>, AppError> {
+    state
+        .repository
+        .read()
+        .map_err(|_| AppError::Internal("repository lock poisoned"))
+}
+
+fn write_repository(state: &AppState) -> Result<RwLockWriteGuard<'_, Repository>, AppError> {
+    state
+        .repository
+        .write()
+        .map_err(|_| AppError::Internal("repository lock poisoned"))
+}
+
+#[derive(Default)]
+struct Repository {
+    accounts: HashMap<UserId, WebAccount>,
+    materials: HashMap<MaterialId, Material>,
+    revisions: HashMap<DocumentRevisionId, DocumentRevision>,
+    packages_by_revision: HashMap<DocumentRevisionId, NormalizedContentPackage>,
+    reading_documents_by_revision: HashMap<DocumentRevisionId, ReadingDocument>,
+    blob_manifests: HashMap<BlobManifestId, BlobManifest>,
+    annotations_by_material: HashMap<MaterialId, Vec<Annotation>>,
+    progress_by_material: HashMap<MaterialId, ReadingProgress>,
+    jobs: HashMap<JobId, Job>,
+}
+
+impl Repository {
+    fn insert_imported(&mut self, imported: ImportedFixture) {
+        self.accounts
+            .insert(imported.account.user_id, imported.account);
+        self.blob_manifests.insert(
+            imported.package.resources.id,
+            imported.package.resources.clone(),
+        );
+        self.reading_documents_by_revision
+            .insert(imported.revision.id, imported.reading_document);
+        self.packages_by_revision
+            .insert(imported.revision.id, imported.package);
+        self.materials
+            .insert(imported.material.id, imported.material);
+        self.revisions
+            .insert(imported.revision.id, imported.revision);
+        self.jobs.insert(imported.job.id, imported.job);
+    }
+
+    fn first_account_id(&self) -> Option<UserId> {
+        self.accounts.keys().next().copied()
+    }
+
+    fn ensure_material(&self, material_id: MaterialId) -> Result<(), AppError> {
+        if self.materials.contains_key(&material_id) {
+            Ok(())
+        } else {
+            Err(AppError::NotFound("material"))
+        }
+    }
+
+    fn ensure_revision(&self, revision_id: DocumentRevisionId) -> Result<(), AppError> {
+        if self.revisions.contains_key(&revision_id) {
+            Ok(())
+        } else {
+            Err(AppError::NotFound("revision"))
+        }
+    }
+}
+
+#[derive(Debug)]
+enum AppError {
+    NotFound(&'static str),
+    BadRequest(String),
+    Internal(&'static str),
+}
+
+impl IntoResponse for AppError {
+    fn into_response(self) -> Response {
+        let (status, title, detail) = match self {
+            AppError::NotFound(resource) => (
+                StatusCode::NOT_FOUND,
+                "not_found",
+                format!("Requested {resource} was not found."),
+            ),
+            AppError::BadRequest(detail) => (StatusCode::BAD_REQUEST, "bad_request", detail),
+            AppError::Internal(detail) => (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "internal_server_error",
+                detail.to_owned(),
+            ),
+        };
+        let problem = ProblemDetails {
+            problem_type: "about:blank".to_owned(),
+            title: title.to_owned(),
+            status: status.as_u16(),
+            detail,
+        };
+
+        (
+            status,
+            [(header::CONTENT_TYPE, "application/problem+json")],
+            Json(problem),
+        )
+            .into_response()
+    }
+}
+
+#[derive(Serialize)]
+struct ProblemDetails {
+    #[serde(rename = "type")]
+    problem_type: String,
+    title: String,
+    status: u16,
+    detail: String,
+}
+
+#[derive(Deserialize, Serialize)]
+struct RegisterSeedAccountRequest {
+    account_lookup_key: String,
+    verifier: String,
+    nickname: Option<String>,
+}
+
+impl RegisterSeedAccountRequest {
+    fn into_account(self) -> WebAccount {
+        WebAccount {
+            user_id: UserId::now_v7(),
+            profile: lumi_core::AccountProfile {
+                nickname: self.nickname,
+            },
+            status: lumi_core::AccountStatus::Active,
+            auth: lumi_core::SeedAuthPrototype {
+                account_lookup_key: self.account_lookup_key,
+                verifier: self.verifier,
+                algorithm: lumi_core::SeedAuthAlgorithm::ReplaceableChallengeSigningSha256,
+            },
+            created_at: lumi_core::now_timestamp_ms(),
+        }
+    }
+}
+
+#[derive(Serialize, Deserialize)]
+struct ImportFixtureResponse {
+    material: Material,
+    revision: DocumentRevision,
+    job: Job,
+}
+
 #[cfg(test)]
 mod tests {
     use axum::{body::Body, http::Request};
+    use lumi_core::{sample_fixture_highlight, AnnotationKind, HighlightStyle, ImportedFixture};
     use tower::ServiceExt;
 
     use super::*;
@@ -106,5 +581,328 @@ mod tests {
         let config = AppConfig::from_env();
 
         assert!(!config.bind_address().is_empty());
+    }
+
+    #[tokio::test]
+    async fn capabilities_route_reports_s0_contracts() -> Result<(), Box<dyn std::error::Error>> {
+        let capabilities: ServiceCapabilities =
+            json_get(build_router(), "/api/v1/capabilities").await?;
+
+        assert!(capabilities
+            .features
+            .iter()
+            .any(|feature| feature == "anchor-backed-annotations"));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn migrations_route_reports_basic_domain_migrations(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let migrations: Vec<SchemaMigration> =
+            json_get(build_router(), "/api/v1/schema/migrations").await?;
+
+        assert_eq!(migrations.len(), 4);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn seeded_reader_document_opens_fixture_through_shared_core(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let app = build_router();
+        let materials: Vec<Material> = json_get(app.clone(), "/api/v1/materials").await?;
+        let material = materials
+            .first()
+            .ok_or_else(|| std::io::Error::other("seeded material missing"))?;
+        let document: ReadingDocument = json_get(
+            app,
+            &format!(
+                "/api/v1/revisions/{}/reading-document",
+                material.active_revision_id
+            ),
+        )
+        .await?;
+
+        assert_eq!(document.title, "Architecture Notes for Readers");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn seed_auth_registration_stores_verifier_boundary(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let request = RegisterSeedAccountRequest {
+            account_lookup_key: "lookup-from-client".to_owned(),
+            verifier: "verifier-from-client".to_owned(),
+            nickname: Some("reader".to_owned()),
+        };
+        let account: WebAccount = json_post(
+            build_router(),
+            "/api/v1/auth/seed-prototype/register",
+            json_body(&request)?,
+        )
+        .await?;
+
+        assert_eq!(account.auth.verifier, "verifier-from-client");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn blob_manifest_route_returns_source_and_resources(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let app = build_router();
+        let materials: Vec<Material> = json_get(app.clone(), "/api/v1/materials").await?;
+        let material = materials
+            .first()
+            .ok_or_else(|| std::io::Error::other("seeded material missing"))?;
+        let package: NormalizedContentPackage = json_get(
+            app.clone(),
+            &format!("/api/v1/revisions/{}/package", material.active_revision_id),
+        )
+        .await?;
+        let manifest: BlobManifest =
+            json_get(app, &format!("/api/v1/blobs/{}", package.resources.id)).await?;
+
+        assert!(manifest
+            .blobs
+            .iter()
+            .any(|blob| { matches!(blob.role, lumi_core::BlobRole::Source) }));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn fixture_import_creates_material_revision_and_job(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let response: ImportFixtureResponse = json_post(
+            build_router(),
+            "/api/v1/imports/fixtures/simple",
+            Body::empty(),
+        )
+        .await?;
+
+        assert_eq!(response.material.active_revision_id, response.revision.id);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn annotation_command_persists_for_material() -> Result<(), Box<dyn std::error::Error>> {
+        let app = build_router();
+        let imported = import_fixture(app.clone(), "rich").await?;
+        let command = sample_fixture_highlight(&imported)
+            .ok_or_else(|| std::io::Error::other("fixture highlight missing"))?;
+        let annotation: Annotation = json_post(
+            app.clone(),
+            &format!("/api/v1/materials/{}/annotations", imported.material.id),
+            json_body(&command)?,
+        )
+        .await?;
+        let annotations: Vec<Annotation> = json_get(
+            app,
+            &format!("/api/v1/materials/{}/annotations", imported.material.id),
+        )
+        .await?;
+
+        assert_eq!(
+            annotations.first().map(|stored| stored.id),
+            Some(annotation.id)
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn reading_progress_command_persists_for_material(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let app = build_router();
+        let imported = import_fixture(app.clone(), "rich").await?;
+        let command = sample_fixture_highlight(&imported)
+            .ok_or_else(|| std::io::Error::other("fixture highlight missing"))?;
+        let move_command = MoveReadingPositionCommand {
+            material_id: imported.material.id,
+            revision_id: imported.revision.id,
+            locator: command.anchor,
+            progress_fraction: 1.25,
+        };
+        let progress: ReadingProgress = json_put(
+            app.clone(),
+            &format!("/api/v1/materials/{}/progress", imported.material.id),
+            json_body(&move_command)?,
+        )
+        .await?;
+        let persisted: Option<ReadingProgress> = json_get(
+            app,
+            &format!("/api/v1/materials/{}/progress", imported.material.id),
+        )
+        .await?;
+
+        assert_eq!(
+            persisted.map(|stored| stored.progress_fraction),
+            Some(progress.progress_fraction)
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn annotation_kind_supports_note_payload() -> Result<(), Box<dyn std::error::Error>> {
+        let app = build_router();
+        let imported = import_fixture(app.clone(), "simple").await?;
+        let mut command = sample_fixture_highlight(&imported)
+            .ok_or_else(|| std::io::Error::other("fixture highlight missing"))?;
+        command.kind = AnnotationKind::Note {
+            body: "Durable S0 note".to_owned(),
+        };
+        let annotation: Annotation = json_post(
+            app,
+            &format!("/api/v1/materials/{}/annotations", imported.material.id),
+            json_body(&command)?,
+        )
+        .await?;
+
+        assert!(matches!(annotation.kind, AnnotationKind::Note { .. }));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn annotation_kind_supports_highlight_style() -> Result<(), Box<dyn std::error::Error>> {
+        let app = build_router();
+        let imported = import_fixture(app.clone(), "simple").await?;
+        let mut command = sample_fixture_highlight(&imported)
+            .ok_or_else(|| std::io::Error::other("fixture highlight missing"))?;
+        command.kind = AnnotationKind::Highlight {
+            style: HighlightStyle::Green,
+        };
+        let annotation: Annotation = json_post(
+            app,
+            &format!("/api/v1/materials/{}/annotations", imported.material.id),
+            json_body(&command)?,
+        )
+        .await?;
+
+        assert!(matches!(
+            annotation.kind,
+            AnnotationKind::Highlight {
+                style: HighlightStyle::Green
+            }
+        ));
+        Ok(())
+    }
+
+    async fn import_fixture(
+        app: Router,
+        slug: &str,
+    ) -> Result<ImportedFixture, Box<dyn std::error::Error>> {
+        let response: ImportFixtureResponse = json_post(
+            app.clone(),
+            &format!("/api/v1/imports/fixtures/{slug}"),
+            Body::empty(),
+        )
+        .await?;
+        let document: ReadingDocument = json_get(
+            app,
+            &format!(
+                "/api/v1/revisions/{}/reading-document",
+                response.revision.id
+            ),
+        )
+        .await?;
+        let fixture = ImportedFixture {
+            account: WebAccount {
+                user_id: response.material.owner_id,
+                profile: lumi_core::AccountProfile { nickname: None },
+                status: lumi_core::AccountStatus::Active,
+                auth: lumi_core::SeedAuthPrototype {
+                    account_lookup_key: String::new(),
+                    verifier: String::new(),
+                    algorithm: lumi_core::SeedAuthAlgorithm::ReplaceableChallengeSigningSha256,
+                },
+                created_at: 0,
+            },
+            material: response.material,
+            revision: response.revision,
+            package: NormalizedContentPackage {
+                id: lumi_core::NormalizedPackageId::now_v7(),
+                revision_id: document.revision_id,
+                manifest: lumi_core::NormalizedPackageManifest::s0(
+                    document.title.clone(),
+                    document.creators.clone(),
+                    None,
+                    document
+                        .navigation
+                        .iter()
+                        .map(|item| item.id.clone())
+                        .collect(),
+                    lumi_core::SourceIdentity {
+                        format: lumi_core::SourceFormat::Epub,
+                        source_name: "test.epub".to_owned(),
+                        source_hash: String::new(),
+                    },
+                ),
+                units: Vec::new(),
+                blocks: Vec::new(),
+                navigation: document.navigation.clone(),
+                resources: BlobManifest {
+                    id: BlobManifestId::now_v7(),
+                    schema_version: String::new(),
+                    blobs: Vec::new(),
+                },
+                diagnostics: Vec::new(),
+            },
+            reading_document: document,
+            job: response.job,
+        };
+
+        Ok(fixture)
+    }
+
+    fn json_body<T: Serialize>(value: &T) -> Result<Body, serde_json::Error> {
+        serde_json::to_vec(value).map(Body::from)
+    }
+
+    async fn json_get<T: for<'de> Deserialize<'de>>(
+        app: Router,
+        uri: &str,
+    ) -> Result<T, Box<dyn std::error::Error>> {
+        request_json(app, Request::builder().uri(uri).body(Body::empty())?).await
+    }
+
+    async fn json_post<T: for<'de> Deserialize<'de>>(
+        app: Router,
+        uri: &str,
+        body: Body,
+    ) -> Result<T, Box<dyn std::error::Error>> {
+        request_json(
+            app,
+            Request::builder()
+                .method("POST")
+                .uri(uri)
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(body)?,
+        )
+        .await
+    }
+
+    async fn json_put<T: for<'de> Deserialize<'de>>(
+        app: Router,
+        uri: &str,
+        body: Body,
+    ) -> Result<T, Box<dyn std::error::Error>> {
+        request_json(
+            app,
+            Request::builder()
+                .method("PUT")
+                .uri(uri)
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(body)?,
+        )
+        .await
+    }
+
+    async fn request_json<T: for<'de> Deserialize<'de>>(
+        app: Router,
+        request: Request<Body>,
+    ) -> Result<T, Box<dyn std::error::Error>> {
+        let response = app.oneshot(request).await?;
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX).await?;
+        let parsed = serde_json::from_slice(&bytes)?;
+
+        Ok(parsed)
     }
 }

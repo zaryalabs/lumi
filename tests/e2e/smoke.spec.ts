@@ -13,5 +13,11 @@ test("renders the accessible Lumi web shell", async ({ page }) => {
   await expect(
     page.getByRole("region", { name: "Reader contract" }),
   ).toBeVisible();
+  await expect(
+    page.getByRole("heading", { name: "Architecture Notes for Readers" }),
+  ).toBeVisible();
+  await expect(
+    page.getByRole("complementary", { name: "Fixture annotations" }),
+  ).toBeVisible();
   await expect(page.getByText("API v1")).toBeVisible();
 });
