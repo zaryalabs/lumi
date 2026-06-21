@@ -1,6 +1,6 @@
 # Нормализованный контент
 
-Status: draft
+Status: accepted
 
 ## Контекст
 

@@ -1,6 +1,6 @@
 # ИИ-функционал
 
-Status: draft
+Status: accepted
 
 ## Контекст
 

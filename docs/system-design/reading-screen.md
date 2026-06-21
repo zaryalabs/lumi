@@ -1,6 +1,6 @@
 # Экран чтения
 
-Status: draft
+Status: accepted
 
 ## Контекст
 

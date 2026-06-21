@@ -1,6 +1,6 @@
 # Markdown
 
-Status: draft
+Status: accepted
 
 ## Контекст
 

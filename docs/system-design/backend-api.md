@@ -1,6 +1,6 @@
 # Backend и API boundaries
 
-Status: draft
+Status: accepted
 
 ## Контекст
 

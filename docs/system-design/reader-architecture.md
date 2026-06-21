@@ -1,6 +1,6 @@
 # Архитектура экрана чтения
 
-Status: draft
+Status: accepted
 
 ## Контекст
 

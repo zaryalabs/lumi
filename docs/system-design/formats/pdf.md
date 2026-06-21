@@ -1,6 +1,6 @@
 # PDF
 
-Status: draft
+Status: accepted
 
 ## Контекст
 

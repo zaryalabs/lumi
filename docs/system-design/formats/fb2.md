@@ -1,6 +1,6 @@
 # FB2
 
-Status: draft
+Status: accepted
 
 ## Контекст
 

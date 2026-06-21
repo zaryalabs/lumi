@@ -6,6 +6,9 @@
 
 Мы проектируем полную реализацию продукта, а не MVP и не временный срез.
 Приоритизация, релизные срезы и порядок разработки будут определены отдельно.
+Текущее состояние документов - **Final v01**: целевая архитектура принята для
+планирования первого среза, а открытые вопросы считаются задачами прототипов,
+ADR или реализации, но не блокируют сам target design.
 
 ## Цель
 
@@ -33,12 +36,43 @@
 4. **Final v01.** Закрепляем финальную версию проектирования для последующего
    планирования срезов и разработки.
 
+Текущий проход завершает этап проектирования. Дальше работа должна идти через
+выбор вертикальных срезов, ADR для спорных implementation choices и реализацию.
+
+## Итог финального прохода
+
+Финальная композиция Lumi строится вокруг нескольких сквозных контрактов:
+
+- **Material -> DocumentRevision -> Normalized Content Package.** Все источники
+  сначала превращаются в immutable revision и нормализованный package.
+- **Reader-facing views.** Reflowable материалы открываются через
+  `ReadingDocument`; PDF и fixed-layout EPUB - через `PageFidelityDocument`.
+- **Anchor + provenance.** Заметки, хайлайты, поиск, learning, AI и social
+  ссылаются на source-backed anchors, а не на DOM, пиксели или форматные
+  offsets как единственный источник истины.
+- **Draft-to-accepted flow.** AI, generated learning items, KB drafts and
+  social publication не становятся сильными knowledge/search/social объектами
+  без принятия пользователем или явной policy.
+- **Cloud-backed web, full-copy native later.** Первый web target хранит
+  состояние в облачной реплике аккаунта. Desktop/mobile проектируются как
+  будущие full-copy replicas, а private/decentralized mode остается
+  долгосрочным accepted requirement.
+- **Shared spaces do not distribute private files.** Социальные функции
+  синхронизируют comments, highlights, activity and material claims, но не
+  раздают source blobs участникам без их собственной копии/прав.
+- **One Job engine.** Imports, indexing, AI, transcription, exports, deletion
+  workflows and anchor repair используют общий durable job/lifecycle contract.
+- **Plugin platform as target, first-party first.** Плагины проектируются как
+  полноценная extension platform, но ранние extension points должны
+  валидироваться first-party plugins before broad third-party runtime.
+
 ## Статусы решений
 
 В документах используем единые статусы:
 
 - `draft` - первичная гипотеза, требует обсуждения;
-- `accepted` - решение принято для `v01`;
+- `accepted` - целевое решение принято для `v01`; открытые вопросы внутри
+  документа остаются implementation/prototype questions;
 - `revisit` - решение временно принято, но требует возврата после проработки
   связанных подсистем;
 - `rejected` - вариант рассмотрен и отклонен с указанием причины;
@@ -52,6 +86,7 @@
 ```text
 docs/system-design/
   README.md
+  feature-registry.md
   normalized-content.md
   reading-screen.md
   reader-architecture.md
@@ -82,29 +117,60 @@ docs/system-design/
 
 | Направление | Документ | Статус |
 | --- | --- | --- |
-| Нормализованный контент | `normalized-content.md` | `draft` |
-| Экран чтения | `reading-screen.md` | `draft` |
-| Архитектура экрана чтения | `reader-architecture.md` | `draft` |
-| Backend и API boundaries | `backend-api.md` | `draft` |
-| Security и privacy | `security-privacy.md` | `draft` |
-| Quality, ADR и compatibility | `quality.md` | `draft` |
-| EPUB | `formats/epub.md` | `draft` |
-| FB2 | `formats/fb2.md` | `draft` |
-| PDF | `formats/pdf.md` | `draft` |
-| Веб-страницы в режиме чтения | `formats/web-reader.md` | `open` |
-| Telegram через бота | `formats/telegram.md` | `open` |
-| X: длинные посты и треды | `formats/x.md` | `open` |
-| Markdown | `formats/markdown.md` | `draft` |
-| Собственный формат `lum` | `formats/lum.md` | `draft` |
-| Веб-аккаунт и облачная реплика | `web-account.md` | `draft` |
-| Синхронизация | `sync.md` | `draft` |
-| База знаний | `knowledge-base.md` | `draft` |
-| Интеграция с Obsidian | `obsidian.md` | `draft` |
-| Поиск | `search.md` | `draft` |
-| Механики обучения | `learning.md` | `draft` |
-| Социальные функции | `social.md` | `draft` |
-| ИИ-функционал | `ai.md` | `draft` |
-| Плагины | `plugins.md` | `draft` |
+| Регистр функций | `feature-registry.md` | `accepted` |
+| Нормализованный контент | `normalized-content.md` | `accepted` |
+| Экран чтения | `reading-screen.md` | `accepted` |
+| Архитектура экрана чтения | `reader-architecture.md` | `accepted` |
+| Backend и API boundaries | `backend-api.md` | `accepted` |
+| Security и privacy | `security-privacy.md` | `accepted` |
+| Quality, ADR и compatibility | `quality.md` | `accepted` |
+| EPUB | `formats/epub.md` | `accepted` |
+| FB2 | `formats/fb2.md` | `accepted` |
+| PDF | `formats/pdf.md` | `accepted` |
+| Веб-страницы в режиме чтения | `formats/web-reader.md` | `accepted` |
+| Telegram через бота | `formats/telegram.md` | `accepted` |
+| X: длинные посты и треды | `formats/x.md` | `accepted` |
+| Markdown | `formats/markdown.md` | `accepted` |
+| Собственный формат `lum` | `formats/lum.md` | `accepted` |
+| Веб-аккаунт и облачная реплика | `web-account.md` | `accepted` |
+| Синхронизация | `sync.md` | `accepted` |
+| База знаний | `knowledge-base.md` | `accepted` |
+| Интеграция с Obsidian | `obsidian.md` | `accepted` |
+| Поиск | `search.md` | `accepted` |
+| Механики обучения | `learning.md` | `accepted` |
+| Социальные функции | `social.md` | `accepted` |
+| ИИ-функционал | `ai.md` | `accepted` |
+| Плагины | `plugins.md` | `accepted` |
+
+## Регистр функций
+
+[`feature-registry.md`](feature-registry.md) - поисковый индекс функций и
+подсистем. Он нужен после реализации первого среза: по нему можно быстро найти
+следующую user-visible функцию, понять ее зависимости и перейти к исходным
+design docs.
+
+Правило поддержки регистра: новая функция, крупная ADR или существенное
+изменение scope должны обновлять соответствующую строку регистра или добавлять
+новый stable feature id.
+
+## Композиционная модель
+
+Функциональные направления делятся на четыре слоя:
+
+- **Foundation layer.** Account, sync, blobs, jobs, security, normalized content,
+  anchors and API boundaries.
+- **Reading layer.** Library/import, reader, annotations, navigation,
+  page/fidelity surfaces and reader timeline.
+- **Knowledge layer.** Search, KB, learning and AI artifacts, all tied back to
+  source refs.
+- **Coordination/extension layer.** Social shared spaces, Obsidian projection,
+  plugins, external agents and future private/decentralized mode.
+
+При выборе первого или следующего среза лучше брать вертикальный пользовательский
+workflow через несколько слоев, а не реализовывать слой целиком. Например:
+`web account -> import -> normalized package -> reader -> annotation -> search
+index`, после чего следующий срез расширяет тот же путь на KB, learning, AI или
+social.
 
 ## Шаблон документа направления
 

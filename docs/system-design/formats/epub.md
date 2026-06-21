@@ -1,6 +1,6 @@
 # EPUB
 
-Status: draft
+Status: accepted
 
 ## Контекст
 

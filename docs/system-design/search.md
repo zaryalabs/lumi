@@ -1,6 +1,6 @@
 # Единый поиск
 
-Status: draft
+Status: accepted
 
 ## Контекст
 

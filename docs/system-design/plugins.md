@@ -1,6 +1,6 @@
 # Плагины
 
-Status: draft
+Status: accepted
 
 ## Контекст
 

@@ -1,6 +1,6 @@
 # Веб-аккаунт и облачная реплика
 
-Status: draft
+Status: accepted
 
 ## Контекст
 

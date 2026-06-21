@@ -1,6 +1,6 @@
 # Telegram
 
-Status: draft
+Status: accepted
 
 ## Контекст
 

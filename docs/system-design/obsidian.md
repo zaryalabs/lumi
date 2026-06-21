@@ -1,6 +1,6 @@
 # Интеграция с Obsidian
 
-Status: draft
+Status: accepted
 
 ## Контекст
 

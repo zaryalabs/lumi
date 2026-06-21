@@ -1,6 +1,6 @@
 # Социальные функции
 
-Status: draft
+Status: accepted
 
 ## Контекст
 

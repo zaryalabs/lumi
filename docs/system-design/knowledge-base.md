@@ -1,6 +1,6 @@
 # База знаний
 
-Status: draft
+Status: accepted
 
 ## Контекст
 

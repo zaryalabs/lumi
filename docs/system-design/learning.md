@@ -1,6 +1,6 @@
 # Механики обучения
 
-Status: draft
+Status: accepted
 
 ## Контекст
 

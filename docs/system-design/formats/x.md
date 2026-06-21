@@ -1,6 +1,6 @@
 # X: длинные посты и треды
 
-Status: draft
+Status: accepted
 
 ## Контекст
 

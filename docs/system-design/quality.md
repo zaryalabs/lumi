@@ -1,6 +1,6 @@
 # Quality, ADR и compatibility
 
-Status: draft
+Status: accepted
 
 ## Контекст
 

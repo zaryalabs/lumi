@@ -1,6 +1,6 @@
 # Lum
 
-Status: draft
+Status: accepted
 
 ## Контекст
 

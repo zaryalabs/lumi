@@ -1,6 +1,6 @@
 # Синхронизация
 
-Status: draft
+Status: accepted
 
 ## Контекст
 

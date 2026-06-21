@@ -1,6 +1,6 @@
 # Security и privacy
 
-Status: draft
+Status: accepted
 
 ## Контекст
 
