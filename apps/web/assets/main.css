@@ -143,7 +143,8 @@ a {
   box-shadow: 0 1px 2px rgb(20 32 28 / 6%);
 }
 
-.reader-frame h3 {
+.reader-frame h3,
+.annotation-panel h3 {
   font-size: 1.5rem;
 }
 
@@ -154,27 +155,136 @@ a {
   line-height: 1.65;
 }
 
-.reader-grid {
+.reader-document {
   display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
-  gap: 12px;
-  margin-top: 6px;
+  gap: 22px;
 }
 
-.reader-tile {
-  min-height: 118px;
+.reader-document-header {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(220px, 340px);
+  gap: 18px;
+  border-bottom: 1px solid #d8ded8;
+  padding-bottom: 18px;
+}
+
+.reader-document-header h3 {
+  max-width: 16ch;
+  font-size: 1.65rem;
+  line-height: 1.14;
+}
+
+.byline {
+  margin-top: 8px;
+  color: #52605a;
+}
+
+.metadata-list {
+  display: grid;
+  align-content: start;
+  gap: 8px;
+  margin: 0;
+  min-width: 0;
+}
+
+.metadata-list div {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+
+.metadata-list dt {
+  color: #52605a;
+  font-size: 0.74rem;
+  font-weight: 700;
+  text-transform: uppercase;
+}
+
+.metadata-list dd {
+  margin: 0;
+  overflow-wrap: anywhere;
+  color: #26322d;
+  font-size: 0.84rem;
+}
+
+.metadata-list.compact {
+  margin-top: 14px;
+}
+
+.reader-content {
+  display: grid;
+  gap: 22px;
+  max-width: 74ch;
+}
+
+.reading-section {
+  display: grid;
+  gap: 14px;
+}
+
+.reading-heading {
+  margin: 0;
+  color: #17211d;
+  font-size: 1.2rem;
+  line-height: 1.25;
+}
+
+.reading-paragraph,
+.reading-footnote,
+.reading-caption {
+  margin: 0;
+  color: #26322d;
+  font-size: 1rem;
+  line-height: 1.72;
+}
+
+.reading-footnote {
+  border-left: 3px solid #6685a6;
+  padding-left: 12px;
+  color: #3d4b58;
+}
+
+.reading-figure {
+  display: grid;
+  gap: 8px;
+  margin: 4px 0;
+}
+
+.image-placeholder {
+  min-height: 110px;
   border: 1px solid #d8ded8;
   border-radius: 8px;
-  padding: 14px;
-  background: #f9faf7;
+  background:
+    linear-gradient(135deg, rgb(47 111 94 / 12%), rgb(102 133 166 / 16%)),
+    #f9faf7;
 }
 
-.reader-tile strong {
-  display: block;
-  margin-bottom: 8px;
+.reading-figure figcaption {
+  color: #52605a;
+  font-size: 0.92rem;
+  line-height: 1.45;
 }
 
-.reader-tile span,
+.reading-figure code {
+  overflow-wrap: anywhere;
+  color: #59625e;
+  font-size: 0.75rem;
+}
+
+.annotation-panel {
+  border-top: 1px solid #d8ded8;
+  padding-top: 18px;
+}
+
+.annotation-panel blockquote {
+  margin: 12px 0 0;
+  border-left: 3px solid #c6a44d;
+  padding-left: 12px;
+  color: #283630;
+  line-height: 1.55;
+}
+
+.reader-error,
 .status-list span {
   color: #52605a;
   line-height: 1.45;
@@ -202,7 +312,7 @@ a {
     border-bottom: 1px solid #d8ded8;
   }
 
-  .reader-grid {
+  .reader-document-header {
     grid-template-columns: 1fr;
   }
 
