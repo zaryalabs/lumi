@@ -118,7 +118,9 @@ the system**.
 - В inbox попадают:
   - web UI uploads;
   - Telegram ingestion jobs;
-  - web-reader URL fetch jobs;
+  - web-reader cloud browser capture jobs;
+  - browser extension rendered snapshot uploads;
+  - mobile WebView capture/regeneration jobs;
   - future provider imports.
 - Import worker создает обычные `Material`, `DocumentRevision`, resources и
   sync changes в personal space аккаунта.
@@ -211,7 +213,7 @@ AccountProfile {
 ImportJob {
   id
   user_id
-  source_kind: web_upload | telegram | web_url | provider
+  source_kind: web_upload | telegram | web_capture | extension_snapshot | mobile_capture | provider
   status: queued | processing | ready | failed | needs_user_action
   source_ref
   result_material_id
@@ -277,8 +279,9 @@ exists, web data is gone.
   cloud replica. Sync remains full-copy/server-assisted, not server-primary.
 - **Telegram.** Bot links to `user_id`; incoming materials land in
   `ImportInbox` and become normal sync objects.
-- **Web-reader.** URL fetch and browser capture can run through authenticated
-  web account import jobs.
+- **Web-reader.** Cloud browser capture, browser extension snapshots and mobile
+  WebView capture/regeneration run through authenticated web account import
+  jobs when they need server-side processing or cloud-backed storage.
 - **Reader.** Reader opens materials from local browser store or cloud-backed
   blobs and writes changes through the same local/outbox model.
 - **Поиск.** Web can use local browser index where feasible and optional

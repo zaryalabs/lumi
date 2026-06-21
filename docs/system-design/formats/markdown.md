@@ -66,11 +66,44 @@ First-party extensions для `lumi-markdown`:
   `[[target#heading]]`.
 - Obsidian-style embeds: `![[asset-or-note]]` как image/embed placeholder.
 - Obsidian/GitHub-like callouts: `> [!note]`, `> [!warning]`, `> [!tip]`.
+- Typed fenced blocks для first-party rich rendering: `mermaid`, `math`,
+  `latex`, `svg`, `lumi:*` и позже явно разрешенные visualization blocks.
 - Tags в front matter. Inline `#tag` можно извлекать как best-effort только вне
   code/pre/link contexts.
 
 Эти расширения не должны превращать Markdown в `lum`. `lum` остается отдельным
 форматом с manifest, интерактивными блоками и контролируемым runtime.
+
+### Rich extensions
+
+Lumi должен поддерживать выразительный Markdown, но через typed blocks, а не
+через произвольный HTML/JS runtime.
+
+Базовая политика:
+
+- ` ```mermaid` -> `PluginBlock(kind = "lumi.mermaid")`.
+- ` ```math` / ` ```latex` -> math/LaTeX plugin block или display math node.
+- ` ```svg` -> SVG plugin/resource block через sanitizer или sandbox policy.
+- ` ```lumi:<type>` -> Lumi typed block, если dialect разрешает этот тип.
+- Unknown fenced languages остаются обычными code blocks.
+- Unsupported known rich block создает placeholder и `MarkdownImportIssue`;
+  видимый source text должен оставаться recoverable.
+
+Plain Markdown может содержать rich blocks для чтения, но не получает book-level
+capabilities сам по себе. Если блоку нужны manifest-declared plugins, local
+datasets, package resources, learning state или стабильные cross-file anchors,
+это должен быть `lum` project, а не одиночный Markdown-файл.
+
+Raw HTML не является способом добавлять динамику. Даже если HTML синтаксически
+валиден, importer либо мапит небольшой safe subset в `ReadingNode`, либо
+сохраняет его как escaped/placeholder content. Динамическое поведение должно
+жить в plugin blocks с явными capabilities, sandboxing, measurement hints и
+fallback.
+
+Если позже появится `lum-dynamic`, обычный Markdown importer все равно не должен
+сам включать JS runtime. Динамическое поведение должно активироваться только через
+отдельный `lum`/plugin capability profile, где пользователь явно соглашается на
+риски и видит degraded guarantees.
 
 ### Front matter
 
@@ -106,6 +139,7 @@ Block mapping:
 - list -> ordered/unordered list.
 - task list item -> task item with checked state.
 - fenced code block -> code block with language/info string.
+- recognized rich fenced code block -> typed plugin block.
 - indented code block -> code block without language.
 - table -> table nodes.
 - footnote definition -> footnote/endnote node, если extension enabled.
@@ -237,10 +271,11 @@ prefix/suffix context, content hash и `DocumentRevision`.
 6. Построить heading anchors и TOC.
 7. Преобразовать AST в `ReadingNode`.
 8. Разрешить links, wikilinks и local resources.
-9. Создать placeholders/import issues для raw HTML, missing resources и
+9. Преобразовать recognized rich fenced blocks в typed plugin blocks.
+10. Создать placeholders/import issues для raw HTML, missing resources и
    unsupported syntax.
-10. Создать `ReadingDocument`, `DocumentRevision`, source map и metadata.
-11. Передать текстовые слои в поиск и будущие ИИ/learning pipelines.
+11. Создать `ReadingDocument`, `DocumentRevision`, source map и metadata.
+12. Передать текстовые слои в поиск и будущие ИИ/learning pipelines.
 
 ### Выбор библиотек
 
@@ -319,6 +354,12 @@ Markdown importer не обязан сразу реализовывать editin
   этого нужен `lum` manifest или Obsidian vault model.
 - `rejected`: MDX как базовый Markdown input. MDX требует JS/JSX runtime и
   нарушает security boundaries.
+- `rejected`: arbitrary HTML/JS widgets inside Markdown. Это превращает reader
+  в browser runtime для недоверенного контента и ломает anchors, pagination,
+  offline behavior and sync.
+- `revisit`: разрешить JS-capable content только через будущий `lum-dynamic`
+  или equivalent plugin capability profile with explicit user consent and
+  sandboxing. Обычный Markdown не должен становиться таким runtime.
 - `revisit`: `pulldown-cmark` как основной parser, если performance/source-map
   прототип покажет, что event-based import лучше AST.
 - `revisit`: Pandoc-style extensions: definition lists, citations, attributes,

@@ -25,6 +25,23 @@ Reader не редактирует `lum` как исходник. В reader по
 чтения imported `lum` становится `DocumentRevision`, а пользовательские данные
 живут отдельно от source package.
 
+Продуктовая формулировка для `v01`: `lum` - это vault-like папка для авторинга
+и book-like документ для чтения. Пользователь может думать о source project как
+о папке с Markdown, но приложение не открывает ее как дерево заметок по
+умолчанию. Lumi компилирует проект в единый `ReadingDocument`, строит
+постраничный `PageMap` и показывает материал как сшитую книгу с сохраненными
+границами глав, source map и anchors.
+
+`lum` должен учиться у книжных форматов, но не становиться их копией:
+
+- EPUB дает лучшую модель package: single-file ZIP distribution, manifest,
+  spine, navigation document, resource list, media types, fallback и validation.
+- FB2 дает хорошую семантическую дисциплину: книга описывается через структуру
+  и смысловые элементы, а не через финальную верстку.
+- FB3 полезен как подтверждение направления "FB2 semantics + package with
+  separate resources", но сам по себе не должен быть dependency или target для
+  `lum`.
+
 ## Пользовательские сценарии
 
 - Пользователь импортирует `.lum` файл как готовую книгу или курс.
@@ -32,6 +49,8 @@ Reader не редактирует `lum` как исходник. В reader по
   source project.
 - Автор или продвинутый пользователь собирает книгу из нескольких `.md` глав,
   изображений, диаграмм, упражнений и ссылок.
+- При открытии source project читатель видит не файловое дерево, а единый
+  постраничный документ, сшитый по `spine`.
 - Читатель видит единый book-like материал: обложка, metadata, оглавление,
   части, главы, приложения, прогресс и постраничное чтение.
 - Читатель переходит по internal links, wikilinks, backlinks, сноскам,
@@ -52,7 +71,10 @@ Reader не редактирует `lum` как исходник. В reader по
 - **Source project** - папка с обязательным `lum.toml`. Удобна для authoring,
   git, Obsidian-like workflows и ручного редактирования.
 - **Package** - переносимый `.lum` файл. Технически это ZIP-архив с тем же
-  `lum.toml` в корне, Markdown-файлами, assets и generated metadata.
+  `lum.toml` в корне, Markdown-файлами, assets и generated metadata. ZIP выбран
+  для `v01`, потому что EPUB и FB3 уже идут в сторону ZIP-like package, а reader
+  получает случайный доступ к отдельным главам и ресурсам без распаковки всего
+  архива.
 
 Source project и package должны давать одинаковый `ReadingDocument`, если
 содержимое и настройки импорта совпадают.
@@ -77,6 +99,28 @@ book-source/
 ```
 
 Package `.lum` использует такую же структуру внутри архива.
+
+Package rules:
+
+- `.lum` - ZIP archive with constrained features, not arbitrary ZIP.
+- Source project может не содержать package-only files like `mimetype` and
+  `META-INF/`; `lum pack` добавляет их при сборке архива.
+- Root `mimetype` file should be the first entry, stored without compression,
+  with value `application/vnd.lumi.lum+zip`, если это не усложнит раннюю
+  реализацию. Это повторяет полезный EPUB-паттерн fast identification.
+- Root `lum.toml` is mandatory and remains the package document.
+- `META-INF/` reserved for future signatures, hashes, compatibility metadata
+  and build diagnostics.
+- Allowed compression for `v01`: stored and deflate. Другие algorithms не
+  нужны до появления убедительного production case.
+- Symlinks, hardlinks, absolute paths, platform-specific permissions and file
+  metadata are ignored or rejected.
+- Entry names are normalized as UTF-8 package-relative paths.
+
+TAR/TAR.GZ не выбран как основной package для `v01`: он лучше для streaming
+архивов и Unix tooling, но хуже подходит для random access к ресурсам книги,
+web/server processing, partial extraction, per-entry metadata и привычной
+экосистемы ebook containers.
 
 ### Manifest
 
@@ -118,10 +162,15 @@ Manifest responsibilities:
 - title, subtitle, authors, language, publisher/source metadata;
 - cover and other primary resources;
 - spine: ordered reading sequence;
-- optional parts/sections grouping;
-- included files and assets policy;
+- navigation groups: TOC, landmarks, page-list/reference pages, list of figures
+  and tables, glossary;
+- optional parts/sections grouping and reading progression direction;
+- included files, media types, roles, hashes and assets policy;
 - required/optional first-party plugins;
+- fallback policy for unsupported resources and plugin blocks;
 - external resource policy;
+- accessibility metadata: alt text requirements, language, direction and
+  semantic landmarks;
 - search/learning/AI hints, если они включены автором;
 - compatibility constraints.
 
@@ -146,9 +195,19 @@ Manifest должен быть строгим: unknown top-level sections зап
   берется из headings.
 - Parts/sections могут задаваться в manifest или выводиться из heading
   hierarchy, но manifest имеет приоритет.
+- Spine item может иметь `linear = false`, если файл входит в package как
+  appendix/reference и доступен через ссылки, но не является частью основного
+  маршрута чтения.
+- Для языков с другим направлением чтения manifest может задавать
+  `reading_direction`, но reader все равно строит страницы через общую
+  layout/pagination model.
 
 Book graph существует рядом со spine, но не заменяет его. Wikilinks и backlinks
 дают сеть смысловых связей, а spine дает читателю маршрут.
+
+Сшивка Markdown-файлов не должна быть простой конкатенацией исходников. Importer
+сохраняет границы глав, headings, source ranges и resource refs, а reader
+показывает их через общий `ReadingDocument` и постраничный `PageMap`.
 
 ### Markdown-основа
 
@@ -172,6 +231,8 @@ Front matter в главе может дополнять manifest:
 
 - `title` - chapter title, если manifest не задал title;
 - `description` - chapter description;
+- `role` - semantic role: preface, chapter, appendix, notes, glossary,
+  bibliography, index;
 - `tags` - chapter tags;
 - `draft` - файл нельзя включать в package без explicit allow;
 - `weight` - authoring hint, не заменяет `spine`;
@@ -221,10 +282,42 @@ Resource rules:
 - Абсолютные пути запрещены.
 - `..` path traversal запрещен.
 - В ZIP package запрещен zip-slip.
+- Resources are declared in manifest or discovered by import with diagnostics;
+  package build should be able to produce an exhaustive resource list.
+- Resource records include path, media type, role, content hash, size and
+  required/optional policy.
+- Unsupported required resource blocks import; unsupported optional resource
+  creates placeholder and warning.
 - Один и тот же resource должен иметь content hash.
 - Missing resource не должен падать весь import, если resource optional.
 - Required resource создает import error и блокирует package, если без него
   нарушается содержание.
+
+Главный урок FB2/FB3: не встраивать крупные binary payloads внутрь Markdown или
+TOML. Images, media, datasets and generated indexes должны быть отдельными
+package resources с hashes and media types.
+
+### Book semantics
+
+Помимо обычных Markdown-блоков, `lum` должен иметь нормализованные книжные
+семантики, вдохновленные FB2 и EPUB:
+
+- annotation/abstract;
+- dedication;
+- epigraph;
+- preface/foreword/afterword;
+- part/chapter/section;
+- poem/stanza/verse line;
+- blockquote/citation with attribution;
+- footnotes/endnotes/comments body;
+- bibliography/references;
+- glossary/concepts;
+- list of figures/tables;
+- cover/title page.
+
+Source syntax can stay Markdown/front matter/callout based, but compiled model
+should preserve these roles as `ReadingNode` metadata. Reader decides final
+visual style; source project does not impose book-specific layout.
 
 ### Interactive blocks
 
@@ -234,6 +327,31 @@ Resource rules:
 Базовое правило: interactive block декларативен. Он не приносит произвольный JS,
 HTML или platform-specific runtime. Он превращается в typed `ReadingNode` /
 plugin block и исполняется через first-party plugin contract.
+
+В `lum` есть два уровня расширенных Markdown-блоков:
+
+- **Rich Markdown fences**: `mermaid`, `math`, `latex`, `svg`, code fences and
+  similar recognized blocks. Они обрабатываются общим `lumi-markdown` importer
+  и мапятся в first-party plugin blocks.
+- **LUM-native interactive fences**: `lum:<block_type>`. Они требуют book-level
+  manifest/capability validation, могут ссылаться на package resources/data и
+  могут иметь user state outside source package.
+
+Raw HTML/JS не является третьим уровнем расширений. Если автору нужен dynamic
+UI, он должен описать typed block и required plugin capability, чтобы reader
+мог безопасно отрисовать placeholder, измерить блок для pagination и сохранить
+anchors.
+
+Future path: `lum-dynamic` может появиться как отдельный format/capability
+profile, а не как поведение обычного `lum`. Такой материал явно объявляет, что
+ему нужен JS-capable dynamic runtime, и открывается только после явного
+согласия пользователя.
+Reader должен показать, что материал может быть менее переносимым, хуже
+пагинироваться, требовать sandboxed web surface и иметь более слабые guarantees
+для anchors/offline/cross-platform rendering. Даже в этом режиме dynamic blocks
+должны идти через plugin contract, trust levels, capability prompts, resource
+limits и visible fallback, а не через raw HTML из Markdown, который исполняется
+незаметно для пользователя.
 
 Первичный portable syntax - fenced code block с `lum:<block_type>`:
 
@@ -265,6 +383,8 @@ First-party block families:
 - `lum:exercise` - открытые задания;
 - `lum:code` - executable/read-only code examples через безопасный plugin;
 - `lum:diagram` - Mermaid/SVG/diagram blocks;
+- `lum:chart` / `lum:viz` - declarative data visualizations over local package
+  data/resources;
 - `lum:math` - Math/LaTeX;
 - `lum:media` - audio/video overlays;
 - `lum:embed` - вложенный ресурс или reference material;
@@ -312,6 +432,23 @@ Imported `lum` source считается immutable для конкретного
 мигрирует anchors через общую anchor-модель: node path, quote, context,
 content hash и source map.
 
+### Редактирование и authoring
+
+Для `v01` редактирование исходного `lum` внутри reader не входит в основной
+контракт. Допустимые early paths:
+
+- редактировать source project во внешнем редакторе или Obsidian-like workflow;
+- явно переимпортировать/обновить source project в Lumi;
+- получить новый `DocumentRevision` с попыткой миграции anchors;
+- редактировать пользовательские заметки, хайлайты и KB entries отдельно от
+  исходного `lum`.
+
+Будущий authoring mode должен быть отдельным режимом или инструментом, а не
+скрытой мутацией текущего reader document. Даже если Lumi позже получит
+редактор `lum`, сохранение должно идти через source project/build step и
+создавать новую revision, чтобы не ломать anchors, прогресс и историю
+аннотаций.
+
 ## Нефункциональные требования
 
 - **Book-first.** `lum` должен всегда иметь управляемый порядок чтения, а не
@@ -348,7 +485,11 @@ LumSource
 - `LumSource` - source folder или `.lum` package.
 - `LumManifest` - parsed `lum.toml`.
 - `LumPackage` - archive metadata, entries, hashes, size limits.
+- `LumContainer` - validated `.lum` ZIP container with mimetype, root manifest
+  and reserved metadata paths.
 - `LumSpineItem` - ordered chapter/reference in reading route.
+- `LumNavigation` - TOC, landmarks, page-list/reference pages, figures, tables
+  and glossary navigation groups.
 - `LumChapter` - Markdown source file with resolved metadata.
 - `LumResource` - local/external resource with type, path, hash and policy.
 - `LumLinkTarget` - resolved target for markdown links and wikilinks.
@@ -386,11 +527,12 @@ Primary anchor все равно остается общей моделью Lumi
 ### Pipeline импорта
 
 1. Определить source type: folder with `lum.toml` или `.lum` archive.
-2. Для package: открыть ZIP, проверить paths, size limits, compression ratio и
-   manifest presence.
+2. Для package: открыть constrained ZIP, проверить `mimetype`, paths, size
+   limits, compression ratio, entry count and manifest presence.
 3. Распарсить `lum.toml`.
 4. Проверить `format_version`, required fields, `book.id`, `spine`.
-5. Построить file/resource graph.
+5. Построить file/resource graph with media types, roles, hashes and required
+   policies.
 6. Распарсить Markdown chapters через `lumi-markdown` importer.
 7. Сопоставить manifest spine с главами и generated headings.
 8. Разрешить Markdown links, wikilinks, embeds, resources and concept refs.
@@ -410,7 +552,8 @@ Primary anchor все равно остается общей моделью Lumi
 - `serde` - manifest/data schema deserialization.
 - `schemars` - generated JSON Schema or validation documentation for manifest.
 - `semver` - format/plugin compatibility constraints.
-- `zip` - `.lum` package.
+- `zip` - `.lum` package. Для `v01` используем constrained ZIP: stored/deflate,
+  normalized UTF-8 paths, no symlinks/hardlinks and strict size limits.
 - `camino` - UTF-8 package-relative paths.
 - `blake3` или `sha2` - content hashes for files, resources and revisions.
 - `comrak` - Markdown AST через уже выбранный Markdown importer.
@@ -420,7 +563,8 @@ Primary anchor все равно остается общей моделью Lumi
 
 Для package validation нужны собственные проверки поверх `zip`: path traversal,
 entry size limits, total unpacked size, duplicated paths, suspicious compression
-ratio and unsupported file types.
+ratio, unsupported file types, unsupported compression methods and invalid
+metadata.
 
 ### Stable IDs
 
@@ -459,11 +603,14 @@ Validation levels:
 Examples:
 
 - missing manifest: error;
+- missing/invalid package `mimetype`: warning in early builds, error after
+  package format stabilizes;
 - duplicate spine id: error;
 - required plugin unavailable: error or blocked material state;
 - missing optional image: warning;
 - unresolved wikilink: warning;
 - unused asset: info;
+- undeclared generated file in package: info/warning depending on policy;
 - draft chapter included in package: warning/error depending on policy.
 
 ## Интеграции и зависимости
@@ -504,6 +651,15 @@ Examples:
   JS runtime, security surface and platform-specific rendering.
 - `rejected`: один огромный Markdown-файл как основной формат книги. Это хуже
   для authoring, links, assets, chapter-level metadata and partial reimport.
+- `rejected`: TAR/TAR.GZ as primary `.lum` package for `v01`. TAR is good for
+  streaming and simple archive tooling, but ZIP fits ebook packages better:
+  random access, per-entry compression, browser/server/library support and EPUB
+  precedent.
+- `revisit`: `lum-dynamic` as separate opt-in format/capability profile for
+  JS-capable interactive books. It must require explicit user consent,
+  sandboxed plugin runtime, trust/capability prompts, resource limits and clear
+  degraded guarantees for pagination, anchors, offline and cross-platform
+  rendering.
 - `revisit`: поддержать directory package with `.lum/` suffix. Сейчас достаточно
   папки с `lum.toml` and archive `.lum`.
 - `revisit`: binary package format вместо ZIP, если ZIP окажется слабым для
@@ -523,3 +679,9 @@ Examples:
   notes, или это должно жить только в source project?
 - Как `lum` будет экспортироваться обратно в EPUB/PDF/Markdown bundle, если
   пользователь захочет вынести книгу из Lumi?
+
+## Источники
+
+- [W3C EPUB 3.3](https://www.w3.org/TR/epub-33/)
+- [`epub.md`](epub.md)
+- [`fb2.md`](fb2.md)
