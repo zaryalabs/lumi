@@ -52,8 +52,12 @@
 ```text
 docs/system-design/
   README.md
+  normalized-content.md
   reading-screen.md
   reader-architecture.md
+  backend-api.md
+  security-privacy.md
+  quality.md
   formats/
     epub.md
     fb2.md
@@ -78,8 +82,12 @@ docs/system-design/
 
 | Направление | Документ | Статус |
 | --- | --- | --- |
+| Нормализованный контент | `normalized-content.md` | `draft` |
 | Экран чтения | `reading-screen.md` | `draft` |
 | Архитектура экрана чтения | `reader-architecture.md` | `draft` |
+| Backend и API boundaries | `backend-api.md` | `draft` |
+| Security и privacy | `security-privacy.md` | `draft` |
+| Quality, ADR и compatibility | `quality.md` | `draft` |
 | EPUB | `formats/epub.md` | `draft` |
 | FB2 | `formats/fb2.md` | `draft` |
 | PDF | `formats/pdf.md` | `draft` |
@@ -152,17 +160,27 @@ Status: draft
 - Reader должен иметь унифицированную внутреннюю модель отображения, чтобы
   заметки, хайлайты, поиск, обучение и ИИ-функции работали поверх разных
   исходных форматов одинаково.
+- Все импортеры должны создавать immutable `DocumentRevision` и внутренний
+  Normalized Content Package. `ReadingDocument` и `PageFidelityDocument` являются
+  reader-facing view models поверх этого пакета, а не исходным форматом
+  хранения.
 - Исходные материалы и пользовательские данные должны оставаться переносимыми:
   Lumi не должен запирать пользователя в закрытом хранилище без экспорта.
-- Клиентские копии данных пользователя являются полноценными репликами. Сервер
-  нужен для синхронизации, хранения передаваемых между клиентами данных,
-  совместных сценариев и функций, которым действительно нужен сервер, но не
-  должен превращать клиента в тонкий терминал без доступа к своим файлам.
-- Web-версия является отдельным cloud-backed клиентом с полноценным
-  аккаунтом, seed phrase credential и облачной репликой. Это исключение нужно
-  для первого web target, Telegram/import flows и восстановления web-сессий, но
-  оно не отменяет full-copy/P2P-like модель для остальных клиентов.
+- Web-версия является cloud-backed web application: материалы, normalized
+  packages, blobs, jobs and search indexes для web живут на сервере. Browser
+  storage может использоваться только как неавторитетный cache.
+- Desktop и mobile должны получить полноценные local replicas: локальное
+  хранилище, локальные blobs/packages, outbox/sync и offline search.
+- В долгосрочной архитектуре native clients должны поддерживать private /
+  decentralized mode: пользователь может отключить web/cloud replica и хранить
+  private vault только на своих устройствах, оставляя серверу только account,
+  device registration, encrypted relay/key envelopes, social coordination and
+  explicitly shared objects.
+- Производные данные не являются источником истины: search indexes, thumbnails,
+  page maps, backlinks, caches and calculated projections must be rebuildable.
 - ИИ-слой должен быть заменяемым: пользователь может подключить свой ключ,
   использовать встроенную подписку или отключить ИИ-сценарии.
-- Архитектура должна оставлять место для плагинов: новые источники, форматы,
-  обработчики и интеграции не должны требовать переписывания ядра.
+- Архитектура должна проектировать полноценную plugin platform уровня
+  VS Code/Obsidian: manifest, activation events, commands, UI contributions,
+  capabilities, plugin data, trust levels and marketplace path. Roadmap может
+  отложить runtime/marketplace, но целевой design не должен быть урезан.

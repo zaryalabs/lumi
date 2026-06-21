@@ -6,15 +6,23 @@ Status: draft
 
 X является отдельным источником для Lumi, не вариантом обычного web-reader
 импорта. На X текст, треды, длинные посты, Articles, replies, quotes, edits,
-deletions, protected content и media живут в platform-specific модели. Поэтому
-интеграция должна идти через официальный X API, а не через scraping, browser
-automation или generic HTML extraction.
+deletions, protected content и media живут в platform-specific модели.
+Production/compliance path должен идти через официальный X API. Дополнительный
+user-initiated fallback через browser extension допускается для контента, который
+пользователь уже видит в своем браузере, но сохраняется как extension snapshot с
+degraded compliance metadata, а не как crawler/scraper path.
 
 Главное решение: X-реализация - это `XImportProvider`, который получает Post
 данные через официальный API, нормализует одиночные posts, треды и long-form
-content в `ReadingDocument`, сохраняет source map и compliance metadata.
+content в `DocumentRevision` and Normalized Content Package, сохраняет source
+map и compliance metadata.
 Reader остается общим: он отвечает за типографику, anchors, заметки, поиск,
 обучение, ИИ-действия и социальные слои.
+
+Browser extension может создать `XExtensionSnapshot` для видимого post/thread
+selection. Такой snapshot проходит через тот же normalizer where possible and
+must preserve capture provider/version, visible URL, captured_at, detected post
+ids, author handles and lower-confidence compliance state.
 
 Поддерживаем не только треды. Для `v01` направление X должно покрывать три
 материальных формы:
@@ -94,6 +102,25 @@ Lumi должен поддерживать BYO credentials mode для self-host
 spending limits. Hosted Lumi может иметь собственный app, но тогда нужен
 централизованный cost control.
 
+### Browser extension snapshot fallback
+
+Browser extension может сохранить X content, который пользователь явно выбрал в
+открытой вкладке:
+
+- одиночный видимый post;
+- видимую часть thread;
+- selected text/media metadata;
+- canonical/current URL, detected post ids, author handles and timestamps.
+
+Ограничения:
+
+- extension не становится crawler-ом и не обходит access restrictions;
+- cookies/tokens не передаются Lumi как secrets;
+- snapshot не считается равноценным official API hydration;
+- thread может быть partial and must show visible diagnostics;
+- compliance recheck через official API выполняется later, если доступен;
+- sharing/export должны учитывать degraded compliance state.
+
 ### URL import
 
 Importer должен распознавать:
@@ -133,7 +160,8 @@ numeric `post_id`. Username сохраняется как hint и использ
 
 ### Одиночный post
 
-Одиночный post превращается в `ReadingDocument` с компактной структурой:
+Одиночный post нормализуется в Normalized Content Package, из которого
+строится компактный `ReadingDocument`:
 
 - title: author display name + краткий текстовый preview;
 - metadata: post URL, author, username, created date, lang, metrics snapshot;
@@ -295,12 +323,15 @@ compliance policy.
 
 ## Нефункциональные требования
 
-- **Official API only.** Production importer использует только официальный X
-  API. Scraping, browser automation и HTML extraction X pages запрещены.
+- **API-first with extension fallback.** Production/compliance importer
+  использует официальный X API. User-initiated browser extension snapshot
+  допустим как fallback, но scraping, crawler-style browser automation и generic
+  HTML extraction X pages запрещены.
 - **Единый вид.** X posts, threads и articles отображаются через общий
   reflowable reader contract, а не через embedded X UI.
-- **Детерминированность.** Один API snapshot при одинаковой версии importer
-  должен давать одинаковые `ReadingNode` ids, source map и anchors.
+- **Детерминированность.** Один API snapshot или extension snapshot при
+  одинаковой версии importer должен давать одинаковые `ReadingNode` ids, source
+  map и anchors where possible.
 - **Cost control.** API calls должны быть bounded, кешироваться и учитывать
   pricing/rate limits. Нужны budgets, per-import estimates и retry policy.
 - **Privacy.** OAuth tokens, user bookmarks и protected content не смешиваются с
@@ -323,6 +354,8 @@ XInput
   -> XPostLookupSnapshot
   -> XThreadCandidate | XLongFormCandidate | XArticleCandidate
   -> XMediaResource[]
+  -> DocumentRevision
+  -> Normalized Content Package
   -> ReadingDocument
 ```
 
@@ -388,8 +421,8 @@ prefix/suffix context, content hash и `DocumentRevision`. X-specific source
 10. Нормализовать text/entities/media/polls/quotes в `ReadingNode`.
 11. Сохранить media resources или placeholders.
 12. Построить source map и X-specific anchor source.
-13. Создать `ReadingDocument`, `DocumentRevision`, import issues и compliance
-    state.
+13. Создать `DocumentRevision`, Normalized Content Package, `ReadingDocument`
+    view, import issues и compliance state.
 14. Передать normalized text в поиск и будущие ИИ/learning pipelines.
 
 ### Thread reconstruction details
@@ -454,8 +487,9 @@ compliance.
 
 ## Интеграции и зависимости
 
-- **Reader.** X importer выдает `ReadingDocument`; reader отвечает за
-  paginated rendering, anchors, заметки, timeline events и панели.
+- **Reader.** X importer выдает Normalized Content Package; `ReadingDocument`
+  является reader-facing view поверх него. Reader отвечает за paginated
+  rendering, anchors, заметки, timeline events и панели.
 - **Web reader.** X URLs не идут через generic web-reader. Web-reader может
   импортировать внешние links из X post только как отдельные user-initiated
   materials.
@@ -481,10 +515,12 @@ compliance.
 ## Альтернативы
 
 - `accepted`: официальный X API как production path.
+- `accepted`: browser extension snapshot as user-initiated fallback with
+  degraded compliance metadata.
 - `accepted`: поддерживать и threads, и long-form content. Thread и longread -
   разные content modes одного X importer.
-- `rejected`: scraping X pages или browser automation. Это нарушает developer
-  policy, нестабильно технически и ломает compliance.
+- `rejected`: scraping X pages или crawler-style browser automation. Это
+  нарушает developer policy, нестабильно технически и ломает compliance.
 - `rejected`: импортировать X через generic web-reader. X content имеет
   platform-specific source map, edits, deletions, protected/withheld status и
   API policy.

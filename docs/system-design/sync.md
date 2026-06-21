@@ -9,38 +9,42 @@ Status: draft
 - держать библиотеку, заметки, прогресс, базу знаний и generated artifacts
   согласованными между устройствами пользователя;
 - доставлять материалы, созданные server-side источниками вроде Telegram bot;
-- поддерживать совместное чтение и общие папки без превращения сервера в
-  единственный источник правды.
+- поддерживать совместное чтение и общие папки;
+- в долгосрочной перспективе дать native-клиентам режим максимальной
+  приватности без cloud replica личной библиотеки.
 
-Базовая модель для `v01`: **full-copy client replicas with server-assisted
-sync**. Каждый клиент Lumi должен иметь полную логическую копию состояния,
-которое доступно пользователю: материалы, metadata, заметки, generated
-artifacts, knowledge base и ссылки на blobs. Сервер используется как relay,
-durable mailbox, blob store и coordination layer, но пользователь не должен
-терять доступ к своим данным, если конкретный клиент уже синхронизирован.
+Базовая модель для первого web target: **cloud-backed web application**. Web
+client работает через server-side account state, object storage, jobs and search
+index. Browser storage не является durable Lumi vault.
 
-Web-версия является специальным случаем этой модели и описана отдельно в
-[`web-account.md`](web-account.md). Для web сервер хранит полноценный аккаунт,
-облачную реплику и файлы, потому что browser session не может быть единственным
-durable storage. Это не меняет sync contract: web остается cloud-backed
-клиентской репликой, а desktop/mobile по-прежнему должны получать полную
-логическую копию через тот же change log, manifests и blobs.
+Базовая модель для будущих native clients: **full-copy local replicas with
+server-assisted sync**. Desktop/mobile должны иметь локальную логическую копию
+состояния, которое доступно пользователю: материалы, metadata, заметки,
+generated artifacts, knowledge base, normalized packages and blob manifests.
+Blobs могут скачиваться по storage policy, но пользователь должен иметь явную
+команду скачать/экспортировать свои материалы.
+
+Future private/decentralized mode описывает следующий уровень: native clients
+могут отключить cloud replica private vault. Тогда сервер остается account,
+device registry, encrypted relay/key-envelope store, shared-room coordinator and
+public/share host, но не хранит plaintext private vault content.
 
 Это не чистый P2P в смысле прямого соединения устройств. Для web, mobile, NAT,
-offline devices и Telegram ingestion нужен серверный sync endpoint. Но модель
-должна быть P2P-like по свойствам:
+offline devices, Telegram ingestion and social rooms нужен серверный endpoint.
+Но native/private модель должна быть P2P-like по свойствам:
 
 - клиенты являются полноценными репликами, а не тонкими терминалами;
 - изменения создаются локально и затем распространяются;
-- сервер принимает и раздает изменения, а не исполняет всю доменную логику;
+- сервер принимает и раздает changes/envelopes, а не исполняет всю доменную
+  логику private vault;
 - content-addressed blobs могут быть скачаны, сохранены и экспортированы;
 - при появлении прямого P2P transport его можно добавить без смены доменной
   модели.
 
 ## Пользовательские сценарии
 
-- Пользователь импортирует книгу на web. Она появляется в desktop/mobile после
-  синхронизации.
+- Пользователь импортирует книгу на web. Она сохраняется в cloud account state и
+  позже появляется в desktop/mobile после sync/bootstrap.
 - Пользователь создает web-аккаунт по seed phrase, а затем подключает desktop
   или mobile как дополнительные реплики этого же `user_id`.
 - Пользователь читает offline, делает хайлайты, заметки и меняет прогресс.
@@ -56,25 +60,29 @@ offline devices и Telegram ingestion нужен серверный sync endpoin
   shared comments и activity синхронизируются через shared space.
 - Пользователь экспортирует свою библиотеку или vault-like данные в файлы без
   обращения к закрытому серверному формату.
+- Пользователь в будущем включает private/decentralized mode. Private vault
+  удаляется из cloud replica, desktop/mobile синхронизируются через encrypted
+  relay or future direct transport, а web остается account/social surface.
 
 ## Функциональные требования
 
 ### Реплики и источники правды
 
-- Каждый клиент хранит локальную базу состояния Lumi.
-- Клиент может работать offline для чтения, заметок, прогресса, базы знаний и
-  локального поиска.
-- Сервер хранит durable sync log, object snapshots и blobs, нужные для доставки
-  между клиентами.
-- Сервер не должен быть единственным местом, где существует пользовательский
-  материал после успешной синхронизации клиента.
-- Для web сервер хранит cloud-backed реплику аккаунта и blobs, а локальная
-  browser-копия живет в IndexedDB/browser storage/cache. При этом пользователь
-  должен иметь export/download всех файлов и данных.
+- Web-клиент использует server account state as source of truth.
+- Browser storage может содержать только rebuildable/short-lived caches.
+- Web не обязан работать offline для чтения, поиска и записи как core property.
+- Desktop/mobile хранят локальную базу состояния Lumi.
+- Desktop/mobile могут работать offline для чтения, заметок, прогресса, базы
+  знаний and local search after local data/blob availability.
+- Сервер хранит cloud account state, durable sync log, object snapshots and
+  blobs, нужные для web и доставки между native clients.
 - Desktop может дополнительно иметь folder projection: локальные файлы,
   Obsidian vault, downloaded blobs and export bundles.
 - Mobile может хранить полную логическую копию metadata и выбранные blobs
   локально с возможностью скачать missing content перед чтением.
+- В private/decentralized mode сервер не хранит private vault content as
+  plaintext cloud replica; он хранит только account/device/relay/social
+  metadata and encrypted envelopes as required.
 
 ### Sync spaces
 
@@ -86,6 +94,8 @@ offline devices и Telegram ingestion нужен серверный sync endpoin
   highlights, chat/activity и material match claims.
 - **System/provider space** - identities, device records, account import inbox,
   Telegram buffer/jobs, provider metadata and sync cursors.
+- **Private relay space** - future encrypted envelopes/key metadata for
+  decentralized native sync without cloud replica.
 
 Personal space принадлежит одному пользователю. Shared folder space имеет
 несколько участников и отдельные правила доступа.
@@ -106,11 +116,20 @@ Personal space принадлежит одному пользователю. Sha
   membership state;
 - plugin installation metadata and plugin-owned sync objects when allowed.
 
+Не синхронизируются как source of truth:
+
+- FTS/search index shards;
+- thumbnails and render caches;
+- page maps and layout measurement caches;
+- backlinks and graph projections;
+- embeddings/fastText vectors and derived ranking features;
+- calculated progress summaries which can be rebuilt from events/state;
+- temporary import/render/AI caches.
+
 Не синхронизируются обычным plaintext sync:
 
 - API keys, OAuth tokens and provider secrets;
 - OS-specific file handles and absolute local paths;
-- temporary render caches, page maps, thumbnails caches and local index shards;
 - external agent credentials and local command configuration.
 
 ### Blobs и файлы
@@ -162,7 +181,7 @@ Personal space принадлежит одному пользователю. Sha
 
 ### Server-assisted P2P
 
-Для `v01` transport:
+Для native sync transport:
 
 ```text
 Client local store
@@ -184,9 +203,30 @@ Client A outbox
 
 Прямой P2P не должен менять object format, change format and conflict rules.
 
+### Future private/decentralized mode
+
+Private mode is `revisit` for the implementation roadmap, but accepted as a
+long-term architecture requirement:
+
+- private vault content lives only on user's native devices and user-controlled
+  exports/backups;
+- server may store account record, auth verifier/public material, device
+  registry, encrypted key envelopes, relay metadata, shared-room state and
+  explicitly shared objects;
+- raw seed phrase never leaves the user;
+- hosted AI, server-side search and web private reader are disabled by default
+  unless user explicitly sends selected context/content;
+- losing all devices without export/backup/recovery can mean losing the private
+  vault; UX must state this honestly;
+- social/shared spaces use separate access rules and keys; publishing a
+  highlight/comment creates a shared representation, not a leak of private
+  notes/source files.
+
 ## Нефункциональные требования
 
-- **Offline-first.** Основные сценарии чтения и записи работают без сети.
+- **Native offline-first.** Desktop/mobile scenarios for reading, notes,
+  progress, KB and local search work without network after local data is
+  available. Web offline is optional cache behavior, not a core guarantee.
 - **Durability.** Outbox и inbox не должны терять изменения при crash/reload.
 - **Idempotency.** Повторная доставка одного change не меняет результат.
 - **Portability.** Пользователь может экспортировать данные в открытые файлы:
@@ -198,13 +238,13 @@ Client A outbox
 - **Performance.** Sync должен работать incrementally: курсоры, батчи,
   compressed payloads, lazy blob fetch and resumable upload/download.
 - **Schema evolution.** Change log должен переживать миграции моделей.
-- **Cross-platform.** Domain sync format не зависит от IndexedDB, SQLite,
+- **Cross-platform.** Domain sync format не зависит от browser storage, SQLite,
   filesystem paths, Dioxus or WebView.
 
 ## Модель данных
 
 ```text
-WebAccount / SyncAccount
+WebAccount / CloudAccount
   -> SyncDevice[]
   -> SyncSpace[]
   -> ChangeLog
@@ -277,14 +317,13 @@ SyncChange {
 
 - Rust domain model and sync reducers.
 - SQLite/SQLx для desktop/mobile/server local-like storage.
-- IndexedDB или browser-compatible persistence для web, скрытая за тем же
-  repository contract.
 - Content-addressed blob directory/cache для desktop/mobile.
-- Browser storage/blob APIs for web, plus explicit download/export.
+- Browser storage for web is cache-only and outside authoritative repository
+  contract.
 
-Reader, search, learning, AI and social layers пишут только в local store.
-Network sync читает outbox и применяет inbox. UI не должен напрямую зависеть от
-server roundtrip для локальных изменений.
+Native reader, search, learning, AI and social layers write local commands first;
+network sync reads outbox and applies inbox. Web reader/search/learning writes
+through server-side application commands.
 
 ### Сервер
 
@@ -292,18 +331,19 @@ Backend responsibilities:
 
 - authentication/session for web account and device registration;
 - device registration;
+- cloud-backed web account state and command handlers;
 - validating change envelope and access to sync space;
 - durable append to change log;
 - materialized latest object snapshots for faster bootstrap;
 - blob upload/download and deduplication;
-- web account cloud replica and import inbox integration;
+- web account cloud state and import inbox integration;
 - Telegram/server-side ingestion delivery;
 - shared folder membership and access enforcement;
 - sync cursors and batched delta API.
 
-Сервер не должен выполнять reader-specific logic вроде восстановления anchors,
-pagination or local search ranking. Исключения: server-side ingestion, shared
-folder moderation/access and optional background AI/provider tasks.
+Сервер не должен выполнять platform-specific reader rendering logic вроде
+pagination/layout measurement. Но для web target он выполняет cloud account
+commands, server-side search, import jobs and optional AI/provider tasks.
 
 ### Bootstrap
 
@@ -316,6 +356,9 @@ folder moderation/access and optional background AI/provider tasks.
 5. Строит локальную базу.
 6. Планирует загрузку blobs по policy.
 7. Перестраивает локальные индексы поиска.
+
+Web session bootstrap differs: it authenticates, loads account/server state and
+uses server APIs; it does not build a durable local Lumi vault.
 
 ### Incremental sync
 
@@ -342,10 +385,11 @@ folder moderation/access and optional background AI/provider tasks.
 ## Интеграции и зависимости
 
 - **Reader.** Reader пишет progress, annotations, bookmarks, tasks and events в
-  local store. Sync доставляет эти records на другие устройства.
-- **Веб-аккаунт.** Account/auth/profile, seed phrase login, import inbox and
-  cloud replica описаны в [`web-account.md`](web-account.md). Sync получает от
-  него `user_id`, devices, spaces and storage backend.
+  local store on native clients. Web reader writes through server-side commands.
+  Sync delivers native records to other devices.
+- **Веб-аккаунт.** Account/auth/profile, seed phrase login, cloud account state
+  and import inbox описаны в [`web-account.md`](web-account.md). Sync получает
+  от него `user_id`, devices, spaces and storage backend.
 - **Форматы.** Importers создают immutable `DocumentRevision` and resources;
   sync распространяет их metadata and blobs.
 - **База знаний.** KB Markdown documents are sync objects with text revisions
@@ -353,7 +397,8 @@ folder moderation/access and optional background AI/provider tasks.
 - **Obsidian.** Filesystem projection не является primary sync source; она
   читает/пишет через local store and conflict rules.
 - **Поиск.** Индексы перестраиваются локально из synced state. Server-side
-  search может появиться для web/shared scenarios, но не заменяет local index.
+  search is primary for web cloud state; desktop/mobile local indexes remain
+  primary for offline/full-copy modes.
 - **Learning.** Attempts and schedules должны sync-иться как user-private state.
 - **Social.** Shared folders являются отдельными spaces with membership and
   material access checks.
@@ -364,11 +409,11 @@ folder moderation/access and optional background AI/provider tasks.
 
 ## Альтернативы
 
-- `rejected`: server as primary database and thin clients. Это конфликтует с
-  переносимостью, offline-first reading and P2P-like моделью.
-- `accepted`: web as cloud-backed client replica. Web требует server-side
-  account/files, но это оформляется как отдельная реплика, а не как отказ от
-  full-copy модели.
+- `accepted`: cloud-backed web application. Web uses server-side account/files,
+  jobs and search as source of truth.
+- `rejected`: server as sole primary database for all future clients. Это
+  конфликтует с native full-copy, offline reading, exportability and future
+  private/decentralized mode.
 - `rejected`: direct P2P only without server. Web/mobile/offline/Telegram and
   shared folders требуют durable rendezvous and mailbox.
 - `rejected`: синхронизировать только metadata без content access. Это ломает
@@ -380,15 +425,18 @@ folder moderation/access and optional background AI/provider tasks.
   conflict objects.
 - `revisit`: end-to-end encryption для personal space. Важно для приватности,
   но влияет на web search, AI, shared folders and server-side ingestion.
+- `revisit`: private/decentralized mode without cloud replica. Это целевое
+  долгосрочное свойство после mature native clients, но не требование первого
+  web target.
 
 ## Открытые вопросы
 
-- Какой exact local store выбрать для web: IndexedDB напрямую, SQLite WASM или
-  hybrid?
-- Нужна ли E2EE для personal space в `v01`, если часть AI/search/server-side
+- Нужна ли E2EE для personal space в native/private mode, если часть AI/search/server-side
   сценариев требует content access?
 - Где проходит граница physical full copy vs logical full copy для mobile при
   больших PDF and media?
 - Какой CRDT/merge strategy выбрать для KB Markdown документов, если two-way
   Obsidian editing станет важным ранним сценарием?
 - Как долго хранить server-side change log до compaction snapshots?
+- Какой exact UX нужен для перехода из cloud-backed режима в private mode:
+  deletion flow, export/backup checks, device quorum and social-room effects?

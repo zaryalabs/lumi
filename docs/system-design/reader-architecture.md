@@ -50,7 +50,9 @@ platform rendering engines для фактической раскладки те
 ```text
 Source formats
   -> Format importers
-  -> ReadingDocument
+  -> DocumentRevision
+  -> Normalized Content Package
+  -> ReadingDocument | PageFidelityDocument
   -> Reader domain core
   -> Render plan
   -> Platform rendering adapter
@@ -62,14 +64,26 @@ Source formats
 ### Format Importers
 
 Импортеры отвечают за превращение EPUB, FB2, web article, Telegram, X,
-Markdown, `lum` и других источников в `ReadingDocument`.
+Markdown, `lum` и других источников в immutable `DocumentRevision` and
+Normalized Content Package.
 
 Импортеры не отвечают за UI, pagination, highlights и user interactions.
 
+### Normalized Content Package
+
+Normalized Content Package описан в
+[`normalized-content.md`](normalized-content.md). Это persisted imported
+content contract для конкретной `DocumentRevision`: metadata, reading order,
+normalized units/blocks, resources, source map, diagnostics and fingerprints.
+
+Это не пользовательский формат и не `lum`. Reader строит свои view models
+поверх package, а не поверх исходного EPUB/HTML/PDF/Markdown.
+
 ### ReadingDocument
 
-`ReadingDocument` - формат-независимая модель чтения. Она не содержит DOM,
-WebView, Dioxus components, platform handles или CSSOM.
+`ReadingDocument` - формат-независимая reader-facing модель чтения для
+reflowable content. Она строится из Normalized Content Package и не содержит
+DOM, WebView, Dioxus components, platform handles или CSSOM.
 
 Модель должна быть:
 
@@ -308,7 +322,8 @@ Plugin block contract:
 
 PDF и fixed-layout EPUB являются исключениями из reflowable reader.
 
-Для них используется page fidelity surface:
+Для них используется `PageFidelityDocument` поверх fixed-layout normalized
+package и page fidelity surface:
 
 ```text
 Page fidelity surface
@@ -331,7 +346,9 @@ Page fidelity surface
 Кроссплатформенность строится не на попытке идеально одинаково отрисовать
 пиксели, а на одинаковых contracts:
 
+- один Normalized Content Package contract для imported revisions;
 - один `ReadingDocument`;
+- один `PageFidelityDocument` для fixed-layout/PDF;
 - один reader domain core;
 - один anchor model;
 - один annotation model;

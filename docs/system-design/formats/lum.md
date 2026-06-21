@@ -28,9 +28,9 @@ Reader не редактирует `lum` как исходник. В reader по
 Продуктовая формулировка для `v01`: `lum` - это vault-like папка для авторинга
 и book-like документ для чтения. Пользователь может думать о source project как
 о папке с Markdown, но приложение не открывает ее как дерево заметок по
-умолчанию. Lumi компилирует проект в единый `ReadingDocument`, строит
-постраничный `PageMap` и показывает материал как сшитую книгу с сохраненными
-границами глав, source map и anchors.
+умолчанию. Lumi компилирует проект в `DocumentRevision` and Normalized Content
+Package, reader строит единый `ReadingDocument`, `PageMap` и показывает
+материал как сшитую книгу с сохраненными границами глав, source map и anchors.
 
 `lum` должен учиться у книжных форматов, но не становиться их копией:
 
@@ -464,7 +464,8 @@ content hash и source map.
 - **Portability.** `.lum` должен быть самодостаточным package для передачи,
   синхронизации и архивирования.
 - **Cross-platform.** `lum` не должен зависеть от web-only runtime; reader
-  adapters получают уже нормализованный `ReadingDocument` и typed plugin blocks.
+  adapters получают уже нормализованный package, `ReadingDocument` view и typed
+  plugin blocks.
 - **Recoverability.** Broken links, missing optional resources and unsupported
   blocks должны давать diagnostics и placeholders, а не silent data loss.
 
@@ -477,6 +478,8 @@ LumSource
   -> Markdown chapters
   -> LumBookGraph
   -> LumCompiledDocument
+  -> DocumentRevision
+  -> Normalized Content Package
   -> ReadingDocument
 ```
 
@@ -539,7 +542,8 @@ Primary anchor все равно остается общей моделью Lumi
 9. Распарсить `lum:<block_type>` fenced blocks в typed plugin block payloads.
 10. Провалидировать required plugins and capabilities.
 11. Построить `LumBookGraph`, TOC, backlinks, glossary/concept indexes.
-12. Скомпилировать `ReadingDocument` with stable node ids and source map.
+12. Скомпилировать Normalized Content Package and `ReadingDocument` view with
+    stable node ids and source map.
 13. Создать `DocumentRevision`, resource records and import diagnostics.
 14. Передать text layers в поиск, learning/AI hints - в соответствующие
     фоновые pipelines.
@@ -615,8 +619,9 @@ Examples:
 
 ## Интеграции и зависимости
 
-- **Reader.** `lum` импортируется в обычный `ReadingDocument`; reader отвечает
-  за post-paginated rendering, overlays, annotations, timeline and panels.
+- **Reader.** `lum` импортируется в Normalized Content Package; обычный
+  `ReadingDocument` является reader-facing view поверх него. Reader отвечает за
+  post-paginated rendering, overlays, annotations, timeline and panels.
 - **Markdown.** `lum` использует `lumi-markdown` as chapter syntax, но не
   равен Markdown. Manifest/spine/resource graph обязательны для book behavior.
 - **Плагины.** Interactive blocks мапятся в first-party plugin blocks. Plugin

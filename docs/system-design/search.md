@@ -38,9 +38,8 @@ cross-encoder rerankers и future hybrid search.
 - Пользователь ищет по большой книге/PDF. Lumi ищет по chunked text layer и
   показывает page/chapter context.
 - Пользователь работает offline; local index handles personal data.
-- Пользователь работает в web-клиенте; если browser runtime не тянет полный
-  local semantic index, web может использовать server-assisted index по своей
-  облачной реплике аккаунта.
+- Пользователь работает в web-клиенте; web использует server-side serious search
+  по cloud account state.
 
 ## Функциональные требования
 
@@ -170,7 +169,9 @@ itself.
 
 ## Нефункциональные требования
 
-- **Local-first.** Personal search works offline from local index.
+- **Native local-first.** Personal search works offline from local index on
+  desktop/mobile once local state is available. Web search is server-side over
+  cloud account state.
 - **Incremental.** Index updates from change events, not full rebuild each time.
 - **Rebuildable.** Index shards are derived data and can be recreated from
   synced state and blobs.
@@ -240,12 +241,11 @@ Primary candidates:
 - `whatlang` or similar language detection only if useful for tokenization.
 - SQLite tables for index metadata/jobs; index engine stores postings/vectors.
 
-Need prototype for fastText in Rust/Web:
+Need prototype for fastText in Rust/native/server:
 
 - native desktop/server path can use bindings or compiled library;
-- web path may need WASM-compatible implementation/model;
-- if fastText runtime is too heavy for web, web can use server-assisted index
-  or a lighter local semantic rerank until desktop/mobile catch up.
+- web path uses server-side search over cloud account state;
+- native clients need local runtime/model strategy for offline/full-copy mode.
 
 ### Index pipeline
 
@@ -298,9 +298,8 @@ Reindex when:
 - **Форматы.** Importers provide normalized text and source maps.
 - **Синхронизация.** Index is derived local data. Sync delivers source objects;
   indexing rebuilds locally.
-- **Веб-аккаунт.** Web может иметь server-assisted index over cloud-backed
-  account replica, но desktop/mobile local indexes остаются primary для
-  offline/full-copy модели.
+- **Веб-аккаунт.** Web uses server-side serious search over cloud account state.
+  Desktop/mobile local indexes remain primary for offline/full-copy modes.
 - **База знаний.** KB notes and graph metadata are indexed.
 - **Obsidian.** Imported/exported Markdown changes trigger KB/search indexing.
 - **Learning.** Search can find learning items and supply retrieval context for
@@ -318,8 +317,8 @@ Reindex when:
   predictable user search behavior.
 - `rejected`: LLM call for every search query. Too slow, expensive and not
   offline-first.
-- `rejected`: one global server index only. This breaks local/offline personal
-  search and privacy expectations.
+- `rejected`: one global server index only for all platforms. This breaks
+  native local/offline personal search and future private mode.
 - `revisit`: dense embeddings + ANN index. Likely useful later, but fastText
   and BM25 match the current simplicity/portability goal.
 - `revisit`: cross-encoder rerank. Better quality for AI retrieval, but

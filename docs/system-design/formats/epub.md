@@ -7,12 +7,13 @@ Status: draft
 EPUB - основной книжный формат для Lumi. Технически EPUB является zip-контейнером
 с package-документом, manifest, spine, навигацией, XHTML-контентом, CSS,
 изображениями и другими ресурсами. Для Lumi EPUB не должен иметь собственный
-экран чтения: он импортируется в общую `ReadingDocument`, а отображается через
-унифицированный reader.
+экран чтения: он импортируется в Normalized Content Package, а reader строит
+`ReadingDocument` и отображает его через унифицированный reader.
 
 Главное решение: EPUB-реализация - это importer, normalizer и resource pipeline,
-а не EPUB-renderer. Reader отвечает за типографику, постраничное отображение,
-anchors, заметки, поиск, обучение, ИИ-действия и социальные слои.
+а не EPUB-renderer. Importer создает `DocumentRevision` and Normalized Content
+Package; reader отвечает за типографику, постраничное отображение, anchors,
+заметки, поиск, обучение, ИИ-действия и социальные слои.
 Общая архитектура reader и граница между custom reader и platform layout engines
 описаны в [`../reader-architecture.md`](../reader-architecture.md).
 
@@ -203,7 +204,8 @@ Fixed-layout EPUB является исключением, схожим с PDF. 
 
 ## Модель данных
 
-EPUB importer создает общие сущности reader и формат-специфичный source map.
+EPUB importer создает `DocumentRevision`, Normalized Content Package и
+формат-специфичный source map.
 
 ```text
 EpubArchive
@@ -212,6 +214,8 @@ EpubArchive
   -> EpubSpine
   -> EpubNavigation
   -> EpubContentDocument[]
+  -> DocumentRevision
+  -> Normalized Content Package
   -> ReadingDocument
 ```
 
@@ -281,7 +285,8 @@ path, quote, prefix/suffix context, content hash и `DocumentRevision`.
     representation.
 13. Переписать links/resources во внутренние reader targets.
 14. Сгенерировать EPUB CFI для разделов, blocks и text ranges, где возможно.
-15. Создать `ReadingDocument`, `DocumentRevision`, TOC и import diagnostics.
+15. Создать `DocumentRevision`, Normalized Content Package, `ReadingDocument`
+    или `PageFidelityDocument` view, TOC и import diagnostics.
 16. Передать текстовые слои в поиск и будущие ИИ/learning pipelines.
 
 ### Выбор библиотек
@@ -357,8 +362,9 @@ Fixed-layout renderer должен быть похож на PDF-path:
 
 ## Интеграции и зависимости
 
-- **Reader.** EPUB выдает `ReadingDocument`; reader отвечает за paginated
-  rendering, anchors, заметки, timeline events и панели.
+- **Reader.** EPUB importer выдает Normalized Content Package;
+  `ReadingDocument` является reader-facing view поверх него. Reader отвечает за
+  paginated rendering, anchors, заметки, timeline events и панели.
 - **Поиск.** EPUB importer передает normalized text по spine items и nodes в
   индекс текущего документа и глобальный индекс.
 - **База знаний.** Заметки и хайлайты с EPUB anchors экспортируются с source:

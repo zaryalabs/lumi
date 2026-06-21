@@ -16,11 +16,15 @@ Status: draft
 - KB graph enrichers;
 - search extractors/fields.
 
-Модель должна быть ближе к VS Code/Obsidian по продуктовой форме: installable
-extensions with manifests, activation events, commands, settings и declared
-capabilities. Но технически Lumi не должен давать плагинам произвольный доступ
-к процессу, файлам и user data. Core data model, sync, anchors and security
-boundaries remain owned by Lumi.
+Целевая модель должна быть уровня VS Code/Obsidian: installable extensions with
+manifests, activation events, commands, settings, UI contributions, declared
+capabilities, plugin-owned data, trust levels and marketplace path. Roadmap
+может отложить runtime/marketplace, но design этого документа описывает
+предельную extension platform, а не урезанный первый срез.
+
+Технически Lumi не должен давать плагинам произвольный доступ к процессу,
+файлам и user data. Core data model, sync, anchors and security boundaries
+remain owned by Lumi.
 
 ## Пользовательские сценарии
 
@@ -46,13 +50,16 @@ Supported extension points:
 - **Post-processor** - OCR, text cleanup, entity extraction, metadata enrich.
 - **Reader block** - render typed interactive block.
 - **Reader action** - command on selection/material.
+- **UI contribution** - command palette item, side panel, settings section,
+  material badge, reader toolbar action or contribution point.
 - **AI provider/task** - provider client или new task kind/schema.
 - **Learning plugin** - exercise type, scheduler, validator.
 - **KB plugin** - note action, graph edge generator, export template.
 - **Search plugin** - text extractor, field enricher, custom analyzer.
 - **Export plugin** - output to Markdown/HTML/Anki/etc.
 
-Not all extension points need third-party support in `v01`. First-party plugins
+Implementation roadmap can enable extension points in phases, but the target
+contract should be designed as a full plugin platform. First-party plugins
 should use the same contracts where practical.
 
 ### Manifest
@@ -69,6 +76,11 @@ min_lumi_version = "0.1.0"
 [activation]
 events = ["onCommand:example.import", "onBlock:example.block"]
 
+[contributes]
+commands = ["example.import"]
+reader_blocks = ["example.block"]
+settings = "settings.schema.json"
+
 [capabilities]
 filesystem = ["read_selected_files"]
 network = ["api.example.com"]
@@ -83,6 +95,7 @@ Manifest responsibilities:
 - identity и version;
 - entrypoints;
 - extension points;
+- contributed commands/views/settings/blocks;
 - capabilities и permissions;
 - settings schema;
 - optional dependencies;
@@ -332,8 +345,8 @@ marketplace.
   specific.
 - `rejected`: no plugins, only hardcoded features. This blocks new sources,
   formats and AI providers.
-- `revisit`: marketplace and signed packages. Needed later, but not necessary
-  for first contract design.
+- `revisit`: marketplace and signed packages. Needed later in implementation,
+  but target design must leave a clear path.
 - `revisit`: TypeScript extension host. Familiar for plugin authors, but
   conflicts with Rust/core/WASM portability unless carefully sandboxed.
 

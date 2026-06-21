@@ -134,9 +134,9 @@ Learning schedule should support:
 - per-user settings;
 - opt-out per material/folder.
 
-Draft decision:
+Decision:
 
-- Use FSRS-like or SM-2-like scheduler abstraction, not hardcoded UI logic.
+- Use FSRS as the default scheduler behind a `Scheduler` port.
 - Store enough fields to replace algorithm later.
 - Keep algorithm version in schedule records.
 
@@ -289,7 +289,9 @@ review(item, previous_schedule, attempt) -> next_schedule
 ```
 
 Stored schedule includes algorithm name/version and payload. This keeps room for
-FSRS/SM-2 experimentation without migrating all attempts immediately.
+future scheduler experimentation without migrating all attempts immediately.
+FSRS is the accepted default for the target design; SM-2 or simpler algorithms
+can exist as alternative plugins/adapters if they prove useful.
 
 ## Интеграции и зависимости
 
@@ -310,14 +312,12 @@ FSRS/SM-2 experimentation without migrating all attempts immediately.
   Bad generated items damage trust and search quality.
 - `rejected`: implement explain-back as non-interactive queued artifact only.
   The core value is iterative correction.
-- `revisit`: FSRS as accepted default algorithm. Likely good, but needs
-  evaluation and implementation details.
+- `accepted`: FSRS as default scheduler through a replaceable `Scheduler` port.
 - `revisit`: Anki export/import. Useful for power users, but not core to
   first design pass.
 
 ## Открытые вопросы
 
-- Which scheduler should be default: FSRS, SM-2, or simpler custom algorithm?
 - What quality gates should generated questions pass before auto-activation?
 - How much reading timeline should affect due dates and mastery?
 - Should learning results ever be shareable in shared folders, and at what

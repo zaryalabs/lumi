@@ -19,6 +19,7 @@ PDF является осознанным исключением из общей
 ```text
 PDF file
   -> PDF access/import pipeline
+  -> fixed-layout Normalized Content Package
   -> PageFidelityDocument
   -> visual page layer
   -> text layer
@@ -562,7 +563,8 @@ page geometry или OCR/text extraction revision.
 
 ## Интеграции и зависимости
 
-- **Reader.** PDF использует общий reader domain core, но нижний surface -
+- **Reader.** PDF importer выдает fixed-layout Normalized Content Package. PDF
+  использует общий reader domain core, но нижний surface -
   `PageFidelityDocument`, а не reflowable `ReadingDocument`.
 - **Reading screen.** Панели, notes, highlights, search, AI actions, progress и
   social overlays работают так же, но позиция задается page/viewport.

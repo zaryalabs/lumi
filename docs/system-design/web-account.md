@@ -4,19 +4,20 @@ Status: draft
 
 ## Контекст
 
-Первый клиент Lumi - web. Это ускоряет проверку продукта, но создает исключение
-из базового local-first принципа: у web-клиента нет обычной пользовательской
-папки на диске, а сервер неизбежно хранит данные аккаунта и файлы.
+Первый клиент Lumi - web. Это ускоряет проверку продукта и позволяет опереться
+на классическую cloud-backed web architecture: сервер хранит состояние
+аккаунта, материалы, normalized packages, blobs, search indexes and import/job
+state, а browser client работает через API.
 
-Это исключение не должно менять общую архитектуру на server-primary модель.
-Веб-аккаунт является отдельным направлением: он дает identity, session,
-облачную реплику, хранение blobs для web, входную точку для Telegram/import
-providers и удобный bootstrap для других клиентов. При этом desktop/mobile
-должны оставаться полноценными репликами, а пользователь должен иметь полный
-доступ к своим материалам: открыть, скачать, сохранить и экспортировать.
+Это решение относится именно к web target. Оно не отменяет будущие native
+full-copy clients: desktop/mobile должны хранить локальные копии, local blobs,
+outbox/sync and offline indexes. Веб-аккаунт дает identity, session, облачное
+хранилище для web, входную точку для Telegram/import providers и bootstrap для
+других клиентов. Пользователь при этом должен иметь полный доступ к своим
+материалам: открыть, скачать, сохранить и экспортировать.
 
-Базовая формулировка: **web is a cloud-backed client replica, not the center of
-the system**.
+Базовая формулировка: **web is a cloud-backed application, while native clients
+are future full-copy replicas**.
 
 ## Пользовательские сценарии
 
@@ -37,7 +38,11 @@ the system**.
 - Пользователь скачивает исходный файл, экспортирует библиотеку или удаляет
   серверную копию аккаунта.
 - Пользователь добавляет desktop/mobile клиент, и тот строит локальную полную
-  копию состояния из облачной реплики и sync log.
+  копию состояния из cloud account state, sync log, normalized packages and
+  blobs.
+- Пользователь в будущем включает private/decentralized mode на native clients:
+  личная библиотека удаляется из cloud replica, а сервер остается только для
+  identity, encrypted relay/key envelopes and social coordination.
 
 ## Функциональные требования
 
@@ -80,19 +85,39 @@ the system**.
 - Nickname может быть неуникальным или иметь отдельный display discriminator;
   это не должно влиять на login.
 
-### Облачная реплика web-аккаунта
+### Cloud-backed web state
 
-- Для web-клиента сервер хранит полную логическую копию personal space:
-  материалы, metadata, заметки, прогресс, KB, generated artifacts, sync log и
-  blob manifests.
-- Для web-сценариев сервер также хранит blobs, которые пользователь загрузил
-  через web или которые были созданы server-side import providers.
-- Browser local storage/IndexedDB является локальным cache/репликой web session,
-  но не единственным местом хранения web-данных.
+- Для web-клиента сервер является authoritative store personal space:
+  материалы, metadata, normalized packages, blobs, заметки, прогресс, KB,
+  generated artifacts, jobs, search indexes, sync log and blob manifests.
+- Browser storage не является authoritative replica. Его можно использовать
+  только для app shell, session/UI state, thumbnails, short-lived reader cache
+  and other rebuildable caches.
+- Web-клиент не обязан поддерживать offline reading/search как core property.
+  Позже можно добавить limited read-only PWA cache, но он не меняет source of
+  truth.
 - Desktop/mobile после sync могут иметь собственную полную локальную копию и не
   должны зависеть от web session.
 - У пользователя всегда должны быть команды download/export для исходных файлов,
   attachments, Markdown/JSON export и переносимого bundle.
+
+### Future private/decentralized mode
+
+- После появления mature desktop/mobile clients пользователь должен иметь
+  возможность отключить cloud replica для private vault.
+- В этом режиме сервер не хранит plaintext личной библиотеки, notes,
+  highlights, learning history, private AI artifacts, search indexes or source
+  files.
+- Сервер может хранить account record, auth verifier/public material, device
+  registry, encrypted key envelopes, relay metadata, shared-room membership and
+  explicitly shared/public objects.
+- Seed phrase генерируется и хранится пользователем; raw seed phrase никогда не
+  хранится в облаке.
+- Если пользователь потерял все устройства и не сделал export/backup/recovery,
+  сервер не обязан и не должен уметь восстановить private vault content.
+- Web в этом режиме может работать как account/social surface, но не как
+  полноценный reader private vault без явного повторного включения cloud replica
+  или загрузки выбранного контента.
 
 ### Хранение файлов и blobs
 
@@ -140,14 +165,14 @@ the system**.
 
 ## Нефункциональные требования
 
-- **Local-first compatibility.** Web-аккаунт не отменяет full-copy replicas для
-  desktop/mobile и не превращает всю систему в thin-client SaaS.
+- **Native full-copy compatibility.** Web-аккаунт не отменяет full-copy replicas
+  для desktop/mobile и будущий private/decentralized mode.
 - **Portability.** Пользователь может скачать/export свою библиотеку без
   закрытого серверного формата.
 - **Security.** Seed phrase не хранится и не передается как plaintext. Sessions
   отзывные, provider tokens хранятся отдельно.
-- **Durability.** Облачная реплика должна переживать закрытие вкладки,
-  перезапуск backend и offline devices.
+- **Durability.** Cloud-backed web state должен переживать закрытие вкладки,
+  перезапуск backend and offline native devices.
 - **Privacy.** Nickname и social profile отделены от личной библиотеки. Импорт
   из Telegram/web не публикуется автоматически.
 - **Operational simplicity.** Для ранней версии допустим простой storage path,
@@ -163,7 +188,7 @@ WebAccount
   -> AuthIdentity[]
   -> WebSession[]
   -> SyncDevice[]
-  -> Personal SyncSpace
+  -> Cloud Personal Space
   -> ImportInbox
   -> BlobStore
 ```
@@ -174,7 +199,8 @@ WebAccount
 - `AuthIdentity` - verifier/public key material derived from seed phrase.
 - `AccountProfile` - nickname and display metadata.
 - `WebSession` - active browser session.
-- `SyncDevice` - зарегистрированная реплика: web session, desktop, mobile.
+- `SyncDevice` - зарегистрированный клиент/device: web session, desktop,
+  mobile.
 - `ProviderLink` - Telegram или future source provider binding.
 - `ImportInbox` - server-side queue входящих материалов аккаунта.
 - `ImportJob` - upload/fetch/provider processing job.
@@ -232,7 +258,7 @@ ImportJob {
 4. Server creates `user_id` as UUIDv7+, `WebAccount`, personal `SyncSpace` and
    first `SyncDevice`.
 5. Server stores auth verifier/public material, not seed phrase.
-6. Client receives session token and bootstraps local browser store.
+6. Client receives session token and bootstraps from cloud account state.
 
 Exact auth protocol is `open`: OPAQUE/PAKE or challenge signing with a key
 derived from seed phrase. The accepted constraint is stronger than the exact
@@ -245,7 +271,7 @@ protocol: raw seed phrase must not leave the client.
 3. Server finds `AuthIdentity` by lookup key and returns challenge.
 4. Client proves possession of seed-derived secret.
 5. Server issues `WebSession` and registers/updates `SyncDevice`.
-6. Client bootstraps from cloud replica and local browser cache.
+6. Client bootstraps from cloud account state and rebuildable browser cache.
 
 ### Storage implementation
 
@@ -263,30 +289,33 @@ without making S3 migration invasive.
 
 ### Web client local state
 
-Web uses browser-compatible persistence:
+Web local state is non-authoritative:
 
-- IndexedDB or SQLite WASM for local object store;
-- browser Cache/Blob APIs for local blob cache;
-- explicit export/download actions for portable files.
+- app shell/service worker cache;
+- session/UI state;
+- short-lived reader cache;
+- thumbnails or preview cache;
+- explicit export/download outputs.
 
-If browser storage is cleared, user can restore from seed phrase and cloud
-replica. If server account is deleted and no desktop/mobile replica/export
-exists, web data is gone.
+Web does not use SQLite WASM/OPFS or IndexedDB as a durable local Lumi vault in
+the target web architecture. If browser storage is cleared, the user restores
+the web app from cloud account state. If the server account is deleted and no
+desktop/mobile replica/export exists, web data is gone.
 
 ## Интеграции и зависимости
 
-- **Синхронизация.** Web account owns `SyncAccount`, personal space, devices and
-  cloud replica. Sync remains full-copy/server-assisted, not server-primary.
+- **Синхронизация.** Web account owns cloud personal space and registered
+  devices. Native clients sync from/to this cloud state or, later, use private
+  encrypted relay mode without cloud replica.
 - **Telegram.** Bot links to `user_id`; incoming materials land in
   `ImportInbox` and become normal sync objects.
 - **Web-reader.** Cloud browser capture, browser extension snapshots and mobile
   WebView capture/regeneration run through authenticated web account import
   jobs when they need server-side processing or cloud-backed storage.
-- **Reader.** Reader opens materials from local browser store or cloud-backed
-  blobs and writes changes through the same local/outbox model.
-- **Поиск.** Web can use local browser index where feasible and optional
-  server-assisted index over the account cloud replica, without replacing local
-  indexes on desktop/mobile.
+- **Reader.** Web reader opens materials through API/object storage and writes
+  annotations/progress/notes through server-side commands.
+- **Поиск.** Web uses serious server-side search over cloud account state.
+  Desktop/mobile later keep local indexes for offline/full-copy modes.
 - **ИИ.** BYOK secrets for web sessions need secure storage policy. Server-side
   AI/subscription mode can use cloud replica only with explicit context policy.
 - **Социальные функции.** Social ACL uses `user_id`; nickname is display-only.
@@ -295,15 +324,14 @@ exists, web data is gone.
 
 ## Альтернативы
 
-- `accepted`: web account with cloud-backed replica as separate direction for
-  `v01`.
+- `accepted`: web account as cloud-backed application for first web target.
 - `accepted`: seed phrase as primary credential, provided raw seed never leaves
   the client.
 - `rejected`: web without durable account. Это ломает Telegram ingestion,
   cross-device sync, restore после закрытия browser session и хранение файлов
   web-версии.
-- `rejected`: server as sole source of truth for all clients. Это конфликтует с
-  P2P-like/full-copy моделью и переносимостью.
+- `rejected`: server as sole source of truth for all future clients. Это
+  конфликтует с native full-copy, exportability and future private mode.
 - `rejected`: nickname/email as mandatory login. Nickname должен оставаться
   социальным display-полем, а email не должен быть обязательным для базовой
   регистрации.
@@ -315,6 +343,9 @@ exists, web data is gone.
   потребует S3-compatible backend.
 - `revisit`: E2EE personal space. Важно для приватности, но усложняет web
   search, AI, Telegram import и recovery.
+- `revisit`: private/decentralized native mode. Это долгосрочная цель после
+  mature desktop/mobile clients; ее нельзя обещать как свойство первого web
+  target.
 
 ## Открытые вопросы
 

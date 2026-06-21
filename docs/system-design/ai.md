@@ -73,6 +73,12 @@ Task lifecycle:
 Task has context policy: какие source chunks, notes, shared data и personal
 data можно включать.
 
+`AiTask` является domain entity. Фактическое исполнение идет через общий
+`Job` engine: тот же lifecycle, leases, retry, progress, cancellation and
+diagnostics используются для import, indexing, transcription, export/delete and
+anchor repair. Это не должна быть отдельная несовместимая очередь только для
+AI.
+
 ### Interactive chat
 
 Chat differs from background tasks:
@@ -239,6 +245,7 @@ AiTaskQueue
   -> AiRun[]
   -> AiArtifact[]
   -> AiConversation[]
+  -> Job[]
 ```
 
 Основные сущности:
@@ -247,6 +254,7 @@ AiTaskQueue
 - `AiProviderCredentialRef` - secure reference to key/secret.
 - `AiTask` - durable background work item.
 - `AiTaskClaim` - provider/agent claim with lease.
+- `Job` - execution record for task processing with retry/progress/lease.
 - `AiContextPack` - selected source chunks and permissions.
 - `AiRun` - execution attempt, model, timing, token/cost metadata.
 - `AiArtifact` - typed output.
@@ -309,7 +317,7 @@ stay in `provider_options`, not in core task schema.
 
 Workers:
 
-- local client worker for BYOK desktop/web session;
+- local client worker for BYOK desktop/native session;
 - server worker for app subscription/server-side mode later;
 - external agent worker via MCP/CLI.
 
@@ -321,6 +329,10 @@ Worker steps:
 4. Validate structured output.
 5. Write artifact and derived draft objects.
 6. Mark task succeeded/failed.
+
+Web AI tasks normally execute through server jobs because web is cloud-backed.
+Native clients may execute local/BYOK/local-model jobs and sync resulting
+artifacts according to privacy policy.
 
 ### MCP interface
 
@@ -359,6 +371,10 @@ This makes generated artifacts auditable and reproducible enough for debugging.
 - **Веб-аккаунт.** Web sessions, account-scoped server workers and secret
   storage policy описаны в [`web-account.md`](web-account.md). Облачная реплика
   может быть источником AI context только через явную context policy.
+- **Backend/jobs.** AI execution uses the common `Job` infrastructure from
+  [`backend-api.md`](backend-api.md), not a separate queue implementation.
+- **Security/privacy.** Context policy and data visibility follow
+  [`security-privacy.md`](security-privacy.md).
 - **Social.** AI can operate on shared content only where permissions allow.
 - **Плагины.** Plugins can add providers, task kinds and artifact renderers with
   capabilities.
@@ -367,6 +383,8 @@ This makes generated artifacts auditable and reproducible enough for debugging.
 
 - `accepted`: OpenRouter via OpenAI-compatible API as first provider target.
 - `accepted`: durable AI task queue for noninteractive work.
+- `accepted`: common `Job` engine for AI execution, import, indexing,
+  transcription and repair.
 - `accepted`: MCP-like external agent bridge with CLI fallback.
 - `rejected`: hardwire one LLM provider into reader UI. This breaks user
   control and replaceability.
