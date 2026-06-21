@@ -8,6 +8,8 @@ use uuid::Uuid;
 
 use crate::{DOMAIN_SCHEMA_VERSION, NORMALIZED_PACKAGE_VERSION};
 
+const S0_DOMAIN_SCHEMA_VERSION: &str = "s0.2026-06-21";
+
 /// Stable user identifier type.
 ///
 /// The target account model uses UUIDv7 or a newer time-ordered UUID variant.
@@ -91,28 +93,49 @@ pub fn s0_schema_migrations() -> Vec<SchemaMigration> {
     vec![
         SchemaMigration {
             id: "s0-0001-account-auth-boundary".to_owned(),
-            schema_version: DOMAIN_SCHEMA_VERSION.to_owned(),
+            schema_version: S0_DOMAIN_SCHEMA_VERSION.to_owned(),
             description: "Account, profile and replaceable seed-auth verifier boundary.".to_owned(),
         },
         SchemaMigration {
             id: "s0-0002-material-revision-package".to_owned(),
-            schema_version: DOMAIN_SCHEMA_VERSION.to_owned(),
+            schema_version: S0_DOMAIN_SCHEMA_VERSION.to_owned(),
             description: "Material, immutable document revision and normalized package metadata."
                 .to_owned(),
         },
         SchemaMigration {
             id: "s0-0003-reader-anchors-annotations".to_owned(),
-            schema_version: DOMAIN_SCHEMA_VERSION.to_owned(),
+            schema_version: S0_DOMAIN_SCHEMA_VERSION.to_owned(),
             description: "ReadingDocument, source-backed anchors, annotations and progress."
                 .to_owned(),
         },
         SchemaMigration {
             id: "s0-0004-blobs-jobs".to_owned(),
-            schema_version: DOMAIN_SCHEMA_VERSION.to_owned(),
+            schema_version: S0_DOMAIN_SCHEMA_VERSION.to_owned(),
             description: "Content-addressed blob manifests and common import job lifecycle."
                 .to_owned(),
         },
     ]
+}
+
+/// Return the S1 migration catalog used by the web EPUB reader slice.
+#[must_use]
+pub fn s1_schema_migrations() -> Vec<SchemaMigration> {
+    let mut migrations = s0_schema_migrations();
+    migrations.extend([
+        SchemaMigration {
+            id: "s1-0001-library-source-diagnostics".to_owned(),
+            schema_version: DOMAIN_SCHEMA_VERSION.to_owned(),
+            description: "Library archive/delete state, source download and import diagnostics."
+                .to_owned(),
+        },
+        SchemaMigration {
+            id: "s1-0002-annotation-crud-export".to_owned(),
+            schema_version: DOMAIN_SCHEMA_VERSION.to_owned(),
+            description: "Annotation update/delete commands and portable annotation export."
+                .to_owned(),
+        },
+    ]);
+    migrations
 }
 
 /// Server-side account record for the cloud-backed web personal space.
@@ -194,6 +217,25 @@ pub struct Material {
     pub source_identity: SourceIdentity,
     /// Creation timestamp.
     pub created_at: TimestampMs,
+}
+
+impl Material {
+    /// Return the user-facing material title, applying an override when present.
+    #[must_use]
+    pub fn display_title(&self) -> &str {
+        self.title_override
+            .as_deref()
+            .unwrap_or(&self.canonical_title)
+    }
+}
+
+/// Command for changing a material's library lifecycle state.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct UpdateLibraryStateCommand {
+    /// Material to update.
+    pub material_id: MaterialId,
+    /// Requested library state.
+    pub library_state: LibraryState,
 }
 
 /// Material kind.
@@ -649,6 +691,22 @@ impl Annotation {
             updated_at: timestamp,
         }
     }
+
+    /// Replace the annotation payload and advance its optimistic revision.
+    pub fn update_kind(&mut self, kind: AnnotationKind, timestamp: TimestampMs) {
+        self.kind = kind;
+        self.revision = self.revision.saturating_add(1);
+        self.updated_at = timestamp;
+    }
+
+    /// Return the note body when this annotation is a note.
+    #[must_use]
+    pub fn note_body(&self) -> Option<&str> {
+        match &self.kind {
+            AnnotationKind::Note { body } => Some(body),
+            AnnotationKind::Highlight { .. } => None,
+        }
+    }
 }
 
 /// Command for creating an annotation.
@@ -661,6 +719,19 @@ pub struct CreateAnnotationCommand {
     /// Source-backed anchor.
     pub anchor: Anchor,
     /// Annotation kind.
+    pub kind: AnnotationKind,
+}
+
+/// Command for editing an existing annotation.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct UpdateAnnotationCommand {
+    /// Parent material id.
+    pub material_id: MaterialId,
+    /// Annotation to edit.
+    pub annotation_id: AnnotationId,
+    /// Expected annotation revision for optimistic concurrency.
+    pub expected_revision: u64,
+    /// Replacement annotation payload.
     pub kind: AnnotationKind,
 }
 
@@ -705,6 +776,68 @@ pub struct ReadingProgress {
     pub progress_fraction: f32,
     /// Last update timestamp.
     pub updated_at: TimestampMs,
+}
+
+/// Portable export for annotations attached to one material.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct AnnotationExport {
+    /// Material whose annotations were exported.
+    pub material_id: MaterialId,
+    /// Active revision at export time.
+    pub revision_id: DocumentRevisionId,
+    /// User-facing material title at export time.
+    pub material_title: String,
+    /// Source identity and provenance for the material.
+    pub source: SourceIdentity,
+    /// Exported annotation entries.
+    pub entries: Vec<AnnotationExportEntry>,
+}
+
+impl AnnotationExport {
+    /// Build an annotation export for `material`.
+    #[must_use]
+    pub fn for_material(material: &Material, annotations: &[Annotation]) -> Self {
+        Self {
+            material_id: material.id,
+            revision_id: material.active_revision_id,
+            material_title: material.display_title().to_owned(),
+            source: material.source_identity.clone(),
+            entries: annotations
+                .iter()
+                .map(AnnotationExportEntry::from_annotation)
+                .collect(),
+        }
+    }
+}
+
+/// One annotation entry in a portable export.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct AnnotationExportEntry {
+    /// Annotation id.
+    pub annotation_id: AnnotationId,
+    /// Annotation revision at export time.
+    pub annotation_revision: u64,
+    /// Annotation kind and payload.
+    pub kind: AnnotationKind,
+    /// Quoted source text stored with the anchor.
+    pub quote: String,
+    /// Note body when the annotation is a note.
+    pub note_body: Option<String>,
+    /// Full source-backed anchor, serialized as JSON in the export response.
+    pub anchor: Anchor,
+}
+
+impl AnnotationExportEntry {
+    fn from_annotation(annotation: &Annotation) -> Self {
+        Self {
+            annotation_id: annotation.id,
+            annotation_revision: annotation.revision,
+            kind: annotation.kind.clone(),
+            quote: annotation.anchor.quote.clone(),
+            note_body: annotation.note_body().map(str::to_owned),
+            anchor: annotation.anchor.clone(),
+        }
+    }
 }
 
 /// Command for moving the reading position.
@@ -817,5 +950,12 @@ mod tests {
         let migrations = s0_schema_migrations();
 
         assert_eq!(migrations.len(), 4);
+    }
+
+    #[test]
+    fn migrations_cover_s1_contract_groups() {
+        let migrations = s1_schema_migrations();
+
+        assert_eq!(migrations.len(), 6);
     }
 }

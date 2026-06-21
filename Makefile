@@ -15,6 +15,8 @@ E2E_NODE_MODULES := $(E2E_DIR)/node_modules
 LUMI_SERVER_BIND ?= 127.0.0.1:8080
 LUMI_WEB_HOST ?= 127.0.0.1
 LUMI_WEB_PORT ?= 5173
+RUSTUP_TOOLCHAIN_BIN ?= $(shell if command -v rustup >/dev/null 2>&1; then dirname "$$(rustup which rustc 2>/dev/null)"; fi)
+RUSTUP_PATH_ENV := $(if $(RUSTUP_TOOLCHAIN_BIN),PATH=$(RUSTUP_TOOLCHAIN_BIN):$$PATH,)
 
 .DEFAULT_GOAL := help
 
@@ -99,9 +101,9 @@ rust-web-check: ## Check Dioxus RSX on the host without requiring a platform tar
 
 rust-web-l: ## Run Dioxus web lint when wasm target is installed
 	@if [ -f "$(WEB_PACKAGE)" ]; then \
-		WASM_LIBDIR=$$(rustc --target wasm32-unknown-unknown --print target-libdir 2>/dev/null); \
+		WASM_LIBDIR=$$($(RUSTUP_PATH_ENV) rustc --target wasm32-unknown-unknown --print target-libdir 2>/dev/null); \
 		if [ -n "$$WASM_LIBDIR" ] && [ -d "$$WASM_LIBDIR" ]; then \
-			$(CARGO) clippy -p lumi-web --target wasm32-unknown-unknown --no-default-features --features web -- -D warnings; \
+			$(RUSTUP_PATH_ENV) $(CARGO) clippy -p lumi-web --target wasm32-unknown-unknown --no-default-features --features web -- -D warnings; \
 		else \
 			echo "wasm32-unknown-unknown is not installed; skipping Dioxus web lint"; \
 		fi; \
@@ -140,7 +142,7 @@ server-r: ## Run the local Axum server
 web-r: ## Run the Dioxus web development server
 	@if [ -f "$(WEB_PACKAGE)" ]; then \
 		if command -v $(DX) >/dev/null 2>&1; then \
-			cd $(WEB_DIR) && LUMI_API_BASE=http://127.0.0.1:8080/api/v1 $(DX) serve --web --addr $(LUMI_WEB_HOST) --port $(LUMI_WEB_PORT); \
+			cd $(WEB_DIR) && $(RUSTUP_PATH_ENV) LUMI_API_BASE=http://127.0.0.1:8080/api/v1 $(DX) serve --web --addr $(LUMI_WEB_HOST) --port $(LUMI_WEB_PORT); \
 		else \
 			echo "Dioxus CLI is not installed; install dx before running web"; \
 			exit 1; \
@@ -153,7 +155,7 @@ web-r: ## Run the Dioxus web development server
 web-build: ## Build the Dioxus web app when dx is available
 	@if [ -f "$(WEB_PACKAGE)" ]; then \
 		if command -v $(DX) >/dev/null 2>&1; then \
-			cd $(WEB_DIR) && $(DX) build --web; \
+			cd $(WEB_DIR) && $(RUSTUP_PATH_ENV) $(DX) build --web; \
 		else \
 			echo "Dioxus CLI is not installed; skipping web build"; \
 		fi; \

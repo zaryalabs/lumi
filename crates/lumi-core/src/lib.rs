@@ -1,7 +1,7 @@
 #![deny(missing_docs)]
 //! Shared platform-independent contracts for Lumi.
 //!
-//! The S0 slice keeps EPUB-specific work behind an importer boundary and gives
+//! The S1 slice keeps EPUB-specific work behind an importer boundary and gives
 //! the server and web adapter one shared model for materials, revisions,
 //! normalized content, reading documents, anchors, annotations and jobs.
 
@@ -19,11 +19,14 @@ use serde::{Deserialize, Serialize};
 /// Current public API version used by the local Axum scaffold.
 pub const API_VERSION: &str = "v1";
 
-/// Current domain schema marker for the S0 contracts.
-pub const DOMAIN_SCHEMA_VERSION: &str = "s0.2026-06-21";
+/// Current domain schema marker for the S1 contracts.
+pub const DOMAIN_SCHEMA_VERSION: &str = "s1.2026-06-21";
 
-/// Current normalized content package marker for reflowable S0 documents.
-pub const NORMALIZED_PACKAGE_VERSION: &str = "normalized.reflowable.s0";
+/// Current normalized content package marker for reflowable S1 documents.
+pub const NORMALIZED_PACKAGE_VERSION: &str = "normalized.reflowable.s1";
+
+const S0_DOMAIN_SCHEMA_VERSION: &str = "s0.2026-06-21";
+const S0_NORMALIZED_PACKAGE_VERSION: &str = "normalized.reflowable.s0";
 
 /// Importer id used by the S0 EPUB fixture importer spike.
 pub const EPUB_FIXTURE_IMPORTER_ID: &str = "lumi.epub.fixture";
@@ -83,8 +86,8 @@ impl ServiceCapabilities {
     pub fn s0() -> Self {
         Self {
             api_version: API_VERSION.to_owned(),
-            domain_schema_version: DOMAIN_SCHEMA_VERSION.to_owned(),
-            normalized_package_version: NORMALIZED_PACKAGE_VERSION.to_owned(),
+            domain_schema_version: S0_DOMAIN_SCHEMA_VERSION.to_owned(),
+            normalized_package_version: S0_NORMALIZED_PACKAGE_VERSION.to_owned(),
             route_groups: vec![
                 "auth".to_owned(),
                 "account".to_owned(),
@@ -101,6 +104,39 @@ impl ServiceCapabilities {
                 "epub-fixture-importer".to_owned(),
                 "reading-document-reader-core".to_owned(),
                 "anchor-backed-annotations".to_owned(),
+            ],
+        }
+    }
+
+    /// Build the capabilities advertised by the S1 web EPUB reader slice.
+    #[must_use]
+    pub fn s1() -> Self {
+        Self {
+            api_version: API_VERSION.to_owned(),
+            domain_schema_version: DOMAIN_SCHEMA_VERSION.to_owned(),
+            normalized_package_version: NORMALIZED_PACKAGE_VERSION.to_owned(),
+            route_groups: vec![
+                "auth".to_owned(),
+                "account".to_owned(),
+                "materials".to_owned(),
+                "revisions".to_owned(),
+                "blobs".to_owned(),
+                "imports".to_owned(),
+                "jobs".to_owned(),
+                "reader".to_owned(),
+                "exports".to_owned(),
+            ],
+            features: vec![
+                "seed-auth-prototype-boundary".to_owned(),
+                "content-addressed-local-dev-blobs".to_owned(),
+                "epub-fixture-importer".to_owned(),
+                "reading-document-reader-core".to_owned(),
+                "anchor-backed-annotations".to_owned(),
+                "annotation-crud".to_owned(),
+                "annotation-export".to_owned(),
+                "library-archive-delete".to_owned(),
+                "source-epub-download".to_owned(),
+                "import-diagnostics".to_owned(),
             ],
         }
     }

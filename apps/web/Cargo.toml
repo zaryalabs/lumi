@@ -12,7 +12,7 @@ lumi-core = { path = "../../crates/lumi-core" }
 [features]
 default = ["web"]
 check = ["dioxus/minimal"]
-web = ["dioxus/web"]
+web = ["dioxus/minimal", "dioxus/web"]
 server = ["dioxus/server"]
 desktop = ["dioxus/desktop"]
 mobile = ["dioxus/mobile"]
