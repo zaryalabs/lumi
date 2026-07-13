@@ -21,6 +21,7 @@ wasm-bindgen = "0.2.114"
 wasm-bindgen-futures = "0.4.64"
 web-sys = { version = "0.3.91", features = [
   "Blob",
+  "BlobPropertyBag",
   "Document",
   "DocumentFragment",
   "FormData",
@@ -31,7 +32,9 @@ web-sys = { version = "0.3.91", features = [
   "Element",
   "Node",
   "Range",
+  "Selection",
   "Text",
+  "Url",
   "Window",
 ] }
 

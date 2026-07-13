@@ -6,12 +6,14 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use lumi_core::{
-    content_hash, import_epub, AcceptedImport, BlobManifest, BlobRef, BlobRole, DiagnosticSeverity,
-    DocumentRevision, DocumentRevisionId, EpubImportError, EpubImportRequest, EpubLimits,
-    ImportDiagnostic, ImportStatusEntry, ImportedEpub, Job, JobId, JobKind, JobStage, JobStatus,
-    LibraryEntry, LibraryState, MaterialId, MaterialImportStatus, MaterialKind,
-    MoveReadingPositionCommand, NormalizedContentPackage, ReaderSettings, ReadingDocument,
-    ReadingNode, ReadingNodeKind, ReadingProgress, SourceIdentity,
+    content_hash, import_epub, AcceptedImport, Annotation, AnnotationExport, AnnotationKind,
+    BlobManifest, BlobRef, BlobRole, CreateAnnotationCommand, DeleteAnnotationCommand,
+    DiagnosticSeverity, DocumentRevision, DocumentRevisionId, EpubImportError, EpubImportRequest,
+    EpubLimits, ImportDiagnostic, ImportStatusEntry, ImportedEpub, Job, JobId, JobKind, JobStage,
+    JobStatus, LibraryEntry, LibraryState, Material, MaterialId, MaterialImportStatus,
+    MaterialKind, MoveReadingPositionCommand, NormalizedContentPackage, ReaderSettings,
+    ReadingDocument, ReadingNode, ReadingNodeKind, ReadingProgress, RenderPlan, SourceIdentity,
+    UpdateAnnotationCommand,
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -25,6 +27,8 @@ use crate::blob::{BlobStore, BlobStoreError, LocalBlobStore, StoredBlob};
 
 mod sqlx {
     pub(crate) use sqlx_core::query::query;
+    #[cfg(test)]
+    pub(crate) use sqlx_core::query_as::query_as;
     pub(crate) use sqlx_core::query_scalar::query_scalar;
 }
 
@@ -652,7 +656,7 @@ impl ImportService {
         let now = OffsetDateTime::now_utc();
         let mut tx = self.pool.begin().await.map_err(log_storage_error)?;
         let space_id: Uuid = sqlx::query_scalar(
-            "SELECT space_id FROM sync_spaces WHERE owner_user_id = $1 AND kind = 'personal' AND deleted_at IS NULL FOR UPDATE",
+            "SELECT space_id FROM sync_spaces WHERE owner_user_id = $1 AND kind = 'personal' AND deleted_at IS NULL",
         )
         .bind(session.user_id)
         .fetch_optional(&mut *tx)
@@ -750,16 +754,24 @@ impl ImportService {
         });
         let now = OffsetDateTime::now_utc();
         let mut tx = self.pool.begin().await.map_err(log_storage_error)?;
-        let row = sqlx::query(
-            "SELECT space_id, active_revision_id FROM materials WHERE material_id = $1 AND owner_user_id = $2 AND deleted_at IS NULL FOR UPDATE",
+        let space_id: Uuid = sqlx::query_scalar(
+            "SELECT space_id FROM sync_spaces WHERE owner_user_id = $1 AND kind = 'personal' AND deleted_at IS NULL",
         )
-        .bind(command.material_id)
         .bind(session.user_id)
         .fetch_optional(&mut *tx)
         .await
         .map_err(log_storage_error)?
         .ok_or(ImportServiceError::NotFound)?;
-        let space_id: Uuid = row.try_get("space_id").map_err(log_storage_error)?;
+        let row = sqlx::query(
+            "SELECT active_revision_id FROM materials WHERE material_id = $1 AND owner_user_id = $2 AND space_id = $3 AND deleted_at IS NULL FOR UPDATE",
+        )
+        .bind(command.material_id)
+        .bind(session.user_id)
+        .bind(space_id)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(log_storage_error)?
+        .ok_or(ImportServiceError::NotFound)?;
         let active_revision_id: Option<Uuid> = row
             .try_get("active_revision_id")
             .map_err(log_storage_error)?;
@@ -768,6 +780,20 @@ impl ImportService {
         {
             return Err(ImportServiceError::Conflict);
         }
+        let package_value: serde_json::Value = sqlx::query_scalar(
+            "SELECT p.payload FROM normalized_packages p JOIN document_revisions r ON r.revision_id = p.revision_id WHERE p.revision_id = $1 AND r.material_id = $2 AND r.space_id = $3",
+        )
+        .bind(command.revision_id)
+        .bind(command.material_id)
+        .bind(space_id)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(log_storage_error)?
+        .ok_or(ImportServiceError::NotFound)?;
+        let package: NormalizedContentPackage =
+            serde_json::from_value(package_value).map_err(|_| ImportServiceError::Unavailable)?;
+        let document = reading_document_from_package(&package, command.material_id);
+        validate_progress_locator(&RenderPlan::from_document(&document), &command.locator)?;
         if reader_change_exists(
             &mut tx,
             space_id,
@@ -820,6 +846,364 @@ impl ImportService {
             progress_fraction,
             updated_at: timestamp_ms(now),
         })
+    }
+
+    pub(crate) async fn annotations(
+        &self,
+        user_id: Uuid,
+        material_id: MaterialId,
+    ) -> Result<Vec<Annotation>, ImportServiceError> {
+        let exists: bool = sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM materials WHERE material_id = $1 AND owner_user_id = $2 AND deleted_at IS NULL)",
+        )
+        .bind(material_id)
+        .bind(user_id)
+        .fetch_one(&self.pool)
+        .await
+        .map_err(log_storage_error)?;
+        if !exists {
+            return Err(ImportServiceError::NotFound);
+        }
+        let rows = sqlx::query(
+            "SELECT a.annotation_id, a.material_id, a.revision_id, a.anchor, a.kind, a.object_revision, a.created_at, a.updated_at FROM annotations a JOIN materials m ON m.material_id = a.material_id AND m.space_id = a.space_id WHERE a.material_id = $1 AND m.owner_user_id = $2 AND m.deleted_at IS NULL AND a.deleted_at IS NULL ORDER BY a.created_at, a.annotation_id",
+        )
+        .bind(material_id)
+        .bind(user_id)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(log_storage_error)?;
+        rows.iter().map(annotation_from_row).collect()
+    }
+
+    pub(crate) async fn create_annotation(
+        &self,
+        session: &AuthenticatedSession,
+        mut command: CreateAnnotationCommand,
+        idempotency_key: &str,
+    ) -> Result<Annotation, ImportServiceError> {
+        validate_idempotency_key(idempotency_key)?;
+        canonicalize_anchor(&mut command.anchor);
+        validate_annotation_kind(&command.kind)?;
+        validate_anchor_shape(command.revision_id, &command.anchor)?;
+        let command_value =
+            serde_json::to_value(&command).map_err(|_| ImportServiceError::Unavailable)?;
+        let now = OffsetDateTime::now_utc();
+        let mut tx = self.pool.begin().await.map_err(log_storage_error)?;
+        let space_id: Uuid = sqlx::query_scalar(
+            "SELECT space_id FROM sync_spaces WHERE owner_user_id = $1 AND kind = 'personal' AND deleted_at IS NULL",
+        )
+        .bind(session.user_id)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(log_storage_error)?
+        .ok_or(ImportServiceError::NotFound)?;
+        lock_idempotency_key(&mut tx, space_id, idempotency_key).await?;
+        if let Some(annotation) =
+            annotation_retry(&mut tx, space_id, idempotency_key, &command_value).await?
+        {
+            tx.commit().await.map_err(log_storage_error)?;
+            return Ok(annotation);
+        }
+        let package_value: serde_json::Value = sqlx::query_scalar(
+            "SELECT p.payload FROM normalized_packages p JOIN document_revisions r ON r.revision_id = p.revision_id JOIN materials m ON m.material_id = r.material_id AND m.space_id = r.space_id WHERE p.revision_id = $1 AND r.material_id = $2 AND m.owner_user_id = $3 AND m.active_revision_id = $1 AND m.deleted_at IS NULL",
+        )
+        .bind(command.revision_id)
+        .bind(command.material_id)
+        .bind(session.user_id)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(log_storage_error)?
+        .ok_or(ImportServiceError::NotFound)?;
+        let package: NormalizedContentPackage =
+            serde_json::from_value(package_value).map_err(|_| ImportServiceError::Unavailable)?;
+        let document = reading_document_from_package(&package, command.material_id);
+        validate_anchor_exact(&RenderPlan::from_document(&document), &command.anchor)?;
+        let row = sqlx::query(
+            "SELECT active_revision_id FROM materials WHERE material_id = $1 AND owner_user_id = $2 AND space_id = $3 AND deleted_at IS NULL FOR UPDATE",
+        )
+        .bind(command.material_id)
+        .bind(session.user_id)
+        .bind(space_id)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(log_storage_error)?
+        .ok_or(ImportServiceError::NotFound)?;
+        let active_revision_id: Option<Uuid> = row
+            .try_get("active_revision_id")
+            .map_err(log_storage_error)?;
+        if active_revision_id != Some(command.revision_id) {
+            return Err(ImportServiceError::Conflict);
+        }
+        let annotation = Annotation::create(command, timestamp_ms(now));
+        let anchor = serde_json::to_value(&annotation.anchor)
+            .map_err(|_| ImportServiceError::Unavailable)?;
+        let kind =
+            serde_json::to_value(&annotation.kind).map_err(|_| ImportServiceError::Unavailable)?;
+        sqlx::query(
+            "INSERT INTO annotations (annotation_id, space_id, material_id, revision_id, kind, anchor, object_revision, created_at, updated_at) VALUES ($1, $2, $3, $4, $5, $6, 1, $7, $7)",
+        )
+        .bind(annotation.id)
+        .bind(space_id)
+        .bind(annotation.material_id)
+        .bind(annotation.revision_id)
+        .bind(kind)
+        .bind(anchor)
+        .bind(now)
+        .execute(&mut *tx)
+        .await
+        .map_err(log_storage_error)?;
+        append_annotation_change(
+            &mut tx,
+            AnnotationChange {
+                space_id,
+                annotation: &annotation,
+                base_revision: None,
+                device_id: session.device_id,
+                idempotency_key,
+                change_kind: "create",
+                command: command_value,
+                now,
+            },
+        )
+        .await?;
+        tx.commit().await.map_err(log_storage_error)?;
+        Ok(annotation)
+    }
+
+    pub(crate) async fn update_annotation(
+        &self,
+        session: &AuthenticatedSession,
+        command: UpdateAnnotationCommand,
+        idempotency_key: &str,
+    ) -> Result<Annotation, ImportServiceError> {
+        validate_idempotency_key(idempotency_key)?;
+        validate_annotation_kind(&command.kind)?;
+        let command_value =
+            serde_json::to_value(&command).map_err(|_| ImportServiceError::Unavailable)?;
+        let now = OffsetDateTime::now_utc();
+        let mut tx = self.pool.begin().await.map_err(log_storage_error)?;
+        let space_id: Uuid = sqlx::query_scalar(
+            "SELECT space_id FROM sync_spaces WHERE owner_user_id = $1 AND kind = 'personal' AND deleted_at IS NULL",
+        )
+        .bind(session.user_id)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(log_storage_error)?
+        .ok_or(ImportServiceError::NotFound)?;
+        lock_idempotency_key(&mut tx, space_id, idempotency_key).await?;
+        if let Some(annotation) =
+            annotation_retry(&mut tx, space_id, idempotency_key, &command_value).await?
+        {
+            tx.commit().await.map_err(log_storage_error)?;
+            return Ok(annotation);
+        }
+        let owned: Option<i32> = sqlx::query_scalar(
+            "SELECT 1 FROM materials WHERE material_id = $1 AND owner_user_id = $2 AND space_id = $3 AND deleted_at IS NULL FOR UPDATE",
+        )
+        .bind(command.material_id)
+        .bind(session.user_id)
+        .bind(space_id)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(log_storage_error)?;
+        if owned.is_none() {
+            return Err(ImportServiceError::NotFound);
+        }
+        let row = sqlx::query(
+            "UPDATE annotations SET kind = $1, object_revision = object_revision + 1, updated_at = $2 WHERE annotation_id = $3 AND material_id = $4 AND space_id = $5 AND object_revision = $6 AND deleted_at IS NULL RETURNING annotation_id, material_id, revision_id, anchor, kind, object_revision, created_at, updated_at",
+        )
+        .bind(serde_json::to_value(&command.kind).map_err(|_| ImportServiceError::Unavailable)?)
+        .bind(now)
+        .bind(command.annotation_id)
+        .bind(command.material_id)
+        .bind(space_id)
+        .bind(i64::try_from(command.expected_revision).map_err(|_| ImportServiceError::Conflict)?)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(log_storage_error)?;
+        let annotation = match row {
+            Some(row) => annotation_from_row(&row)?,
+            None => {
+                let exists: bool = sqlx::query_scalar(
+                    "SELECT EXISTS(SELECT 1 FROM annotations WHERE annotation_id = $1 AND material_id = $2 AND space_id = $3 AND deleted_at IS NULL)",
+                )
+                .bind(command.annotation_id)
+                .bind(command.material_id)
+                .bind(space_id)
+                .fetch_one(&mut *tx)
+                .await
+                .map_err(log_storage_error)?;
+                return Err(if exists {
+                    ImportServiceError::Conflict
+                } else {
+                    ImportServiceError::NotFound
+                });
+            }
+        };
+        append_annotation_change(
+            &mut tx,
+            AnnotationChange {
+                space_id,
+                annotation: &annotation,
+                base_revision: Some(command.expected_revision),
+                device_id: session.device_id,
+                idempotency_key,
+                change_kind: "update",
+                command: command_value,
+                now,
+            },
+        )
+        .await?;
+        tx.commit().await.map_err(log_storage_error)?;
+        Ok(annotation)
+    }
+
+    pub(crate) async fn delete_annotation(
+        &self,
+        session: &AuthenticatedSession,
+        command: DeleteAnnotationCommand,
+        idempotency_key: &str,
+    ) -> Result<Annotation, ImportServiceError> {
+        validate_idempotency_key(idempotency_key)?;
+        let command_value =
+            serde_json::to_value(command).map_err(|_| ImportServiceError::Unavailable)?;
+        let now = OffsetDateTime::now_utc();
+        let mut tx = self.pool.begin().await.map_err(log_storage_error)?;
+        let space_id: Uuid = sqlx::query_scalar(
+            "SELECT space_id FROM sync_spaces WHERE owner_user_id = $1 AND kind = 'personal' AND deleted_at IS NULL",
+        )
+        .bind(session.user_id)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(log_storage_error)?
+        .ok_or(ImportServiceError::NotFound)?;
+        lock_idempotency_key(&mut tx, space_id, idempotency_key).await?;
+        if let Some(annotation) =
+            annotation_retry(&mut tx, space_id, idempotency_key, &command_value).await?
+        {
+            tx.commit().await.map_err(log_storage_error)?;
+            return Ok(annotation);
+        }
+        let owned: Option<i32> = sqlx::query_scalar(
+            "SELECT 1 FROM materials WHERE material_id = $1 AND owner_user_id = $2 AND space_id = $3 AND deleted_at IS NULL FOR UPDATE",
+        )
+        .bind(command.material_id)
+        .bind(session.user_id)
+        .bind(space_id)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(log_storage_error)?;
+        if owned.is_none() {
+            return Err(ImportServiceError::NotFound);
+        }
+        let row = sqlx::query(
+            "UPDATE annotations SET object_revision = object_revision + 1, updated_at = $1, deleted_at = $1 WHERE annotation_id = $2 AND material_id = $3 AND space_id = $4 AND object_revision = $5 AND deleted_at IS NULL RETURNING annotation_id, material_id, revision_id, anchor, kind, object_revision, created_at, updated_at",
+        )
+        .bind(now)
+        .bind(command.annotation_id)
+        .bind(command.material_id)
+        .bind(space_id)
+        .bind(i64::try_from(command.expected_revision).map_err(|_| ImportServiceError::Conflict)?)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(log_storage_error)?;
+        let annotation = match row {
+            Some(row) => annotation_from_row(&row)?,
+            None => {
+                let exists: bool = sqlx::query_scalar(
+                    "SELECT EXISTS(SELECT 1 FROM annotations WHERE annotation_id = $1 AND material_id = $2 AND space_id = $3 AND deleted_at IS NULL)",
+                )
+                .bind(command.annotation_id)
+                .bind(command.material_id)
+                .bind(space_id)
+                .fetch_one(&mut *tx)
+                .await
+                .map_err(log_storage_error)?;
+                return Err(if exists {
+                    ImportServiceError::Conflict
+                } else {
+                    ImportServiceError::NotFound
+                });
+            }
+        };
+        append_annotation_change(
+            &mut tx,
+            AnnotationChange {
+                space_id,
+                annotation: &annotation,
+                base_revision: Some(command.expected_revision),
+                device_id: session.device_id,
+                idempotency_key,
+                change_kind: "delete",
+                command: command_value,
+                now,
+            },
+        )
+        .await?;
+        tx.commit().await.map_err(log_storage_error)?;
+        Ok(annotation)
+    }
+
+    pub(crate) async fn export_annotations(
+        &self,
+        user_id: Uuid,
+        material_id: MaterialId,
+    ) -> Result<AnnotationExport, ImportServiceError> {
+        let mut tx = self.pool.begin().await.map_err(log_storage_error)?;
+        sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ")
+            .execute(&mut *tx)
+            .await
+            .map_err(log_storage_error)?;
+        let row = sqlx::query(
+            "SELECT material_id, owner_user_id, kind, canonical_title, title_override, active_revision_id, library_state, source_identity, created_at FROM materials WHERE material_id = $1 AND owner_user_id = $2 AND deleted_at IS NULL",
+        )
+        .bind(material_id)
+        .bind(user_id)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(log_storage_error)?
+        .ok_or(ImportServiceError::NotFound)?;
+        let revision_id: Option<Uuid> = row
+            .try_get("active_revision_id")
+            .map_err(log_storage_error)?;
+        let kind: String = row.try_get("kind").map_err(log_storage_error)?;
+        let library_state: String = row.try_get("library_state").map_err(log_storage_error)?;
+        let source_identity: serde_json::Value =
+            row.try_get("source_identity").map_err(log_storage_error)?;
+        let material = Material {
+            id: row.try_get("material_id").map_err(log_storage_error)?,
+            owner_id: row.try_get("owner_user_id").map_err(log_storage_error)?,
+            kind: match kind.as_str() {
+                "epub" => MaterialKind::Epub,
+                _ => return Err(ImportServiceError::Unavailable),
+            },
+            canonical_title: row.try_get("canonical_title").map_err(log_storage_error)?,
+            title_override: row.try_get("title_override").map_err(log_storage_error)?,
+            active_revision_id: revision_id.ok_or(ImportServiceError::Conflict)?,
+            library_state: match library_state.as_str() {
+                "active" => LibraryState::Active,
+                "archived" => LibraryState::Archived,
+                _ => return Err(ImportServiceError::Unavailable),
+            },
+            source_identity: serde_json::from_value(source_identity)
+                .map_err(|_| ImportServiceError::Unavailable)?,
+            created_at: timestamp_ms(row.try_get("created_at").map_err(log_storage_error)?),
+        };
+        let rows = sqlx::query(
+            "SELECT annotation_id, material_id, revision_id, anchor, kind, object_revision, created_at, updated_at FROM annotations WHERE material_id = $1 AND space_id = (SELECT space_id FROM materials WHERE material_id = $1 AND owner_user_id = $2) AND deleted_at IS NULL ORDER BY created_at, annotation_id",
+        )
+        .bind(material_id)
+        .bind(user_id)
+        .fetch_all(&mut *tx)
+        .await
+        .map_err(log_storage_error)?;
+        let annotations = rows
+            .iter()
+            .map(annotation_from_row)
+            .collect::<Result<Vec<_>, _>>()?;
+        let export = AnnotationExport::for_material(&material, &annotations);
+        tx.commit().await.map_err(log_storage_error)?;
+        Ok(export)
     }
 
     pub(crate) async fn resource(
@@ -1323,6 +1707,17 @@ struct ReaderChange<'a> {
     now: OffsetDateTime,
 }
 
+struct AnnotationChange<'a> {
+    space_id: Uuid,
+    annotation: &'a Annotation,
+    base_revision: Option<u64>,
+    device_id: Uuid,
+    idempotency_key: &'a str,
+    change_kind: &'a str,
+    command: serde_json::Value,
+    now: OffsetDateTime,
+}
+
 async fn append_import_change(
     tx: &mut Transaction<'_, Postgres>,
     change: ImportChange<'_>,
@@ -1453,6 +1848,228 @@ async fn reader_change_exists(
     } else {
         Err(ImportServiceError::Conflict)
     }
+}
+
+async fn append_annotation_change(
+    tx: &mut Transaction<'_, Postgres>,
+    change: AnnotationChange<'_>,
+) -> Result<(), ImportServiceError> {
+    let payload = serde_json::json!({
+        "command": change.command,
+        "annotation": change.annotation,
+    });
+    sqlx::query(
+        "INSERT INTO sync_changes (change_id, space_id, object_type, object_id, object_revision, base_revision, change_kind, payload, device_id, hlc, schema_version, idempotency_key, created_at) VALUES ($1, $2, 'annotation', $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)",
+    )
+    .bind(Uuid::now_v7())
+    .bind(change.space_id)
+    .bind(change.annotation.id)
+    .bind(i64::try_from(change.annotation.revision).map_err(|_| ImportServiceError::Unavailable)?)
+    .bind(change.base_revision.and_then(|value| i64::try_from(value).ok()))
+    .bind(change.change_kind)
+    .bind(payload)
+    .bind(change.device_id)
+    .bind(format!("{}-0000-server", change.now.unix_timestamp_nanos()))
+    .bind(lumi_core::DOMAIN_SCHEMA_VERSION)
+    .bind(change.idempotency_key)
+    .bind(change.now)
+    .execute(&mut **tx)
+    .await
+    .map_err(log_storage_error)?;
+    Ok(())
+}
+
+async fn annotation_retry(
+    tx: &mut Transaction<'_, Postgres>,
+    space_id: Uuid,
+    idempotency_key: &str,
+    command: &serde_json::Value,
+) -> Result<Option<Annotation>, ImportServiceError> {
+    let existing = sqlx::query(
+        "SELECT object_type, payload FROM sync_changes WHERE space_id = $1 AND idempotency_key = $2",
+    )
+    .bind(space_id)
+    .bind(idempotency_key)
+    .fetch_optional(&mut **tx)
+    .await
+    .map_err(log_storage_error)?;
+    let Some(existing) = existing else {
+        return Ok(None);
+    };
+    let object_type: String = existing.try_get("object_type").map_err(log_storage_error)?;
+    let payload: serde_json::Value = existing.try_get("payload").map_err(log_storage_error)?;
+    if object_type != "annotation" || payload.get("command") != Some(command) {
+        return Err(ImportServiceError::Conflict);
+    }
+    payload
+        .get("annotation")
+        .cloned()
+        .ok_or(ImportServiceError::Unavailable)
+        .and_then(|value| {
+            serde_json::from_value(value).map_err(|_| ImportServiceError::Unavailable)
+        })
+        .map(Some)
+}
+
+async fn lock_idempotency_key(
+    tx: &mut Transaction<'_, Postgres>,
+    space_id: Uuid,
+    idempotency_key: &str,
+) -> Result<(), ImportServiceError> {
+    sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
+        .bind(format!("{space_id}:{idempotency_key}"))
+        .execute(&mut **tx)
+        .await
+        .map_err(log_storage_error)?;
+    Ok(())
+}
+
+fn annotation_from_row(row: &PgRow) -> Result<Annotation, ImportServiceError> {
+    let anchor: serde_json::Value = row.try_get("anchor").map_err(log_storage_error)?;
+    let kind: serde_json::Value = row.try_get("kind").map_err(log_storage_error)?;
+    let revision: i64 = row.try_get("object_revision").map_err(log_storage_error)?;
+    Ok(Annotation {
+        id: row.try_get("annotation_id").map_err(log_storage_error)?,
+        material_id: row.try_get("material_id").map_err(log_storage_error)?,
+        revision_id: row.try_get("revision_id").map_err(log_storage_error)?,
+        anchor: serde_json::from_value(anchor).map_err(|_| ImportServiceError::Unavailable)?,
+        kind: serde_json::from_value(kind).map_err(|_| ImportServiceError::Unavailable)?,
+        revision: u64::try_from(revision).map_err(|_| ImportServiceError::Unavailable)?,
+        created_at: timestamp_ms(row.try_get("created_at").map_err(log_storage_error)?),
+        updated_at: timestamp_ms(row.try_get("updated_at").map_err(log_storage_error)?),
+    })
+}
+
+fn validate_annotation_kind(kind: &AnnotationKind) -> Result<(), ImportServiceError> {
+    if let AnnotationKind::Note { body } = kind {
+        if body.trim().is_empty() {
+            return Err(ImportServiceError::BadRequest(
+                "note body must not be empty",
+            ));
+        }
+        if body.len() > 100_000 {
+            return Err(ImportServiceError::BadRequest(
+                "note body exceeds the 100,000 byte limit",
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn validate_anchor_shape(
+    revision_id: DocumentRevisionId,
+    anchor: &lumi_core::Anchor,
+) -> Result<(), ImportServiceError> {
+    let range = anchor.text_range.ok_or(ImportServiceError::BadRequest(
+        "annotation anchor needs a text range",
+    ))?;
+    if anchor.revision_id != revision_id
+        || anchor.node_path.is_empty()
+        || anchor.node_path.len() > 32
+        || anchor.effective_end_node_path().is_empty()
+        || anchor.effective_end_node_path().len() > 32
+        || anchor.quote.trim().is_empty()
+        || anchor.quote.len() > 64 * 1024
+        || anchor.prefix.len() > 512
+        || anchor.suffix.len() > 512
+        || anchor.content_hash.is_empty()
+        || anchor.content_hash.len() > 128
+        || anchor.source_locator.is_none()
+        || anchor.page_rects.len() > 256
+        || anchor
+            .node_path
+            .iter()
+            .chain(anchor.effective_end_node_path())
+            .any(|component| component.is_empty() || component.len() > 512)
+        || (anchor.node_path == anchor.effective_end_node_path() && range.start >= range.end)
+    {
+        return Err(ImportServiceError::BadRequest(
+            "annotation anchor is incomplete or inconsistent",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_anchor_exact(
+    plan: &RenderPlan,
+    submitted: &lumi_core::Anchor,
+) -> Result<(), ImportServiceError> {
+    let range = submitted.text_range.ok_or(ImportServiceError::BadRequest(
+        "annotation anchor needs a text range",
+    ))?;
+    let expected = plan
+        .anchor_from_selection(
+            &submitted.node_path,
+            range.start,
+            submitted.effective_end_node_path(),
+            range.end,
+        )
+        .map_err(|_| ImportServiceError::BadRequest("annotation anchor does not match source"))?;
+    if submitted.revision_id != expected.revision_id
+        || submitted.node_path != expected.node_path
+        || submitted.effective_end_node_path() != expected.effective_end_node_path()
+        || submitted.text_range != expected.text_range
+        || submitted.quote != expected.quote
+        || submitted.prefix != expected.prefix
+        || submitted.suffix != expected.suffix
+        || submitted.content_hash != expected.content_hash
+        || submitted.source_locator != expected.source_locator
+        || submitted
+            .end_source_locator
+            .as_ref()
+            .or(submitted.source_locator.as_ref())
+            != expected.end_source_locator.as_ref()
+        || !submitted.page_rects.is_empty()
+    {
+        return Err(ImportServiceError::BadRequest(
+            "annotation anchor does not match persisted normalized content",
+        ));
+    }
+    Ok(())
+}
+
+fn canonicalize_anchor(anchor: &mut lumi_core::Anchor) {
+    if anchor.end_node_path.is_empty() {
+        anchor.end_node_path = anchor.node_path.clone();
+    }
+    if anchor.end_source_locator.is_none() {
+        anchor.end_source_locator = anchor.source_locator.clone();
+    }
+}
+
+fn validate_progress_locator(
+    plan: &RenderPlan,
+    locator: &lumi_core::Anchor,
+) -> Result<(), ImportServiceError> {
+    let block = plan
+        .block(&locator.node_path)
+        .ok_or(ImportServiceError::BadRequest(
+            "progress locator path is unknown",
+        ))?;
+    let range = locator.text_range.ok_or(ImportServiceError::BadRequest(
+        "progress locator needs an offset",
+    ))?;
+    let text_len = block
+        .text
+        .as_deref()
+        .map_or(1, |text| text.chars().count().max(1));
+    if locator.revision_id != plan.revision_id
+        || locator.effective_end_node_path() != locator.node_path
+        || range.start != range.end
+        || range.start > text_len
+        || locator.content_hash != block.anchor.content_hash
+        || locator.source_locator != block.anchor.source_locator
+        || locator
+            .end_source_locator
+            .as_ref()
+            .or(locator.source_locator.as_ref())
+            != block.anchor.source_locator.as_ref()
+    {
+        return Err(ImportServiceError::BadRequest(
+            "progress locator does not match persisted normalized content",
+        ));
+    }
+    Ok(())
 }
 
 fn library_entry_from_row(
@@ -1694,6 +2311,7 @@ fn log_storage_error(error: impl std::fmt::Display) -> ImportServiceError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use lumi_core::{import_epub_fixture, rich_epub_fixture, AnnotationKind, HighlightStyle};
 
     #[test]
     fn safe_file_name_should_strip_client_path() {
@@ -1709,6 +2327,223 @@ mod tests {
         };
 
         assert!(matches!(error, ImportServiceError::BadRequest(_)));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn postgres_annotations_are_idempotent_conflict_safe_and_tombstoned(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let Ok(database_url) = std::env::var("LUMI_TEST_DATABASE_URL") else {
+            return Ok(());
+        };
+        crate::run_migrations(&database_url).await?;
+        let pool = sqlx_postgres::PgPoolOptions::new()
+            .max_connections(6)
+            .connect(&database_url)
+            .await?;
+        let user_id = Uuid::now_v7();
+        let foreign_user_id = Uuid::now_v7();
+        let device_id = Uuid::now_v7();
+        let space_id = Uuid::now_v7();
+        let imported = import_epub_fixture(user_id, &rich_epub_fixture())?;
+        sqlx::query("INSERT INTO accounts (user_id, status) VALUES ($1, 'active'), ($2, 'active')")
+            .bind(user_id)
+            .bind(foreign_user_id)
+            .execute(&pool)
+            .await?;
+        sqlx::query("INSERT INTO sync_devices (device_id, user_id, name, kind) VALUES ($1, $2, 'Stage 5 test', 'web')")
+            .bind(device_id)
+            .bind(user_id)
+            .execute(&pool)
+            .await?;
+        sqlx::query(
+            "INSERT INTO sync_spaces (space_id, owner_user_id, kind) VALUES ($1, $2, 'personal')",
+        )
+        .bind(space_id)
+        .bind(user_id)
+        .execute(&pool)
+        .await?;
+        let mut tx = pool.begin().await?;
+        sqlx::query("INSERT INTO materials (material_id, space_id, owner_user_id, kind, canonical_title, active_revision_id, library_state, source_identity, import_status) VALUES ($1, $2, $3, 'epub', $4, NULL, 'active', $5, 'ready')")
+            .bind(imported.material.id)
+            .bind(space_id)
+            .bind(user_id)
+            .bind(&imported.material.canonical_title)
+            .bind(serde_json::to_value(&imported.material.source_identity)?)
+            .execute(&mut *tx)
+            .await?;
+        sqlx::query("INSERT INTO document_revisions (revision_id, material_id, space_id, source_format, source_hash, importer_id, importer_version, normalized_hash, package_format_version) VALUES ($1, $2, $3, 'epub', $4, $5, $6, $7, $8)")
+            .bind(imported.revision.id)
+            .bind(imported.material.id)
+            .bind(space_id)
+            .bind(&imported.revision.source_hash)
+            .bind(&imported.revision.importer_id)
+            .bind(&imported.revision.importer_version)
+            .bind(&imported.revision.normalized_hash)
+            .bind(&imported.revision.package_format_version)
+            .execute(&mut *tx)
+            .await?;
+        sqlx::query("UPDATE materials SET active_revision_id = $1 WHERE material_id = $2")
+            .bind(imported.revision.id)
+            .bind(imported.material.id)
+            .execute(&mut *tx)
+            .await?;
+        sqlx::query("INSERT INTO normalized_packages (package_id, revision_id, schema_version, payload, source_map) VALUES ($1, $2, $3, $4, '[]'::jsonb)")
+            .bind(imported.package.id)
+            .bind(imported.revision.id)
+            .bind(&imported.package.manifest.package_format_version)
+            .bind(serde_json::to_value(&imported.package)?)
+            .execute(&mut *tx)
+            .await?;
+        tx.commit().await?;
+
+        let service = ImportService::local(pool.clone(), std::env::temp_dir());
+        let session = AuthenticatedSession {
+            user_id,
+            session_id: Uuid::now_v7(),
+            device_id,
+            csrf_hash: [0; 32],
+        };
+        let plan = RenderPlan::from_document(&imported.reading_document);
+        let block = plan
+            .blocks
+            .iter()
+            .find(|block| {
+                block
+                    .text
+                    .as_deref()
+                    .is_some_and(|text| text.chars().count() > 12)
+            })
+            .ok_or_else(|| std::io::Error::other("fixture block missing"))?;
+        let anchor = plan.anchor_from_selection(&block.node_path, 1, &block.node_path, 9)?;
+        let command = CreateAnnotationCommand {
+            material_id: imported.material.id,
+            revision_id: imported.revision.id,
+            anchor: anchor.clone(),
+            kind: AnnotationKind::Note {
+                body: "original".to_owned(),
+            },
+        };
+        let created = service
+            .create_annotation(&session, command.clone(), "stage5-create")
+            .await?;
+        let edited = service
+            .update_annotation(
+                &session,
+                UpdateAnnotationCommand {
+                    material_id: imported.material.id,
+                    annotation_id: created.id,
+                    expected_revision: created.revision,
+                    kind: AnnotationKind::Note {
+                        body: "edited".to_owned(),
+                    },
+                },
+                "stage5-update",
+            )
+            .await?;
+        let replay = service
+            .create_annotation(&session, command.clone(), "stage5-create")
+            .await?;
+        assert_eq!(replay, created);
+        let mut different = command.clone();
+        different.kind = AnnotationKind::Highlight {
+            style: HighlightStyle::Blue,
+        };
+        assert!(matches!(
+            service
+                .create_annotation(&session, different, "stage5-create")
+                .await,
+            Err(ImportServiceError::Conflict)
+        ));
+        assert!(matches!(
+            service
+                .update_annotation(
+                    &session,
+                    UpdateAnnotationCommand {
+                        material_id: imported.material.id,
+                        annotation_id: created.id,
+                        expected_revision: 1,
+                        kind: AnnotationKind::Note {
+                            body: "stale".to_owned(),
+                        },
+                    },
+                    "stage5-stale",
+                )
+                .await,
+            Err(ImportServiceError::Conflict)
+        ));
+
+        let concurrent_command = CreateAnnotationCommand {
+            kind: AnnotationKind::Highlight {
+                style: HighlightStyle::Green,
+            },
+            ..command
+        };
+        let left_service = service.clone();
+        let left_session = session.clone();
+        let left_command = concurrent_command.clone();
+        let right_service = service.clone();
+        let right_session = session.clone();
+        let (left, right) = tokio::join!(
+            left_service.create_annotation(&left_session, left_command, "stage5-concurrent"),
+            right_service.create_annotation(
+                &right_session,
+                concurrent_command,
+                "stage5-concurrent"
+            )
+        );
+        assert_eq!(left?.id, right?.id);
+
+        let deleted = service
+            .delete_annotation(
+                &session,
+                DeleteAnnotationCommand {
+                    material_id: imported.material.id,
+                    annotation_id: created.id,
+                    expected_revision: edited.revision,
+                },
+                "stage5-delete",
+            )
+            .await?;
+        assert_eq!(deleted.revision, 3);
+        assert!(!service
+            .annotations(user_id, imported.material.id)
+            .await?
+            .iter()
+            .any(|annotation| annotation.id == created.id));
+        assert!(!service
+            .export_annotations(user_id, imported.material.id)
+            .await?
+            .entries
+            .iter()
+            .any(|entry| entry.annotation_id == created.id));
+        assert!(matches!(
+            service
+                .annotations(foreign_user_id, imported.material.id)
+                .await,
+            Err(ImportServiceError::NotFound)
+        ));
+        let tombstoned: bool = sqlx::query_scalar(
+            "SELECT deleted_at IS NOT NULL FROM annotations WHERE annotation_id = $1",
+        )
+        .bind(created.id)
+        .fetch_one(&pool)
+        .await?;
+        assert!(tombstoned);
+        let changes: Vec<(String, Option<i64>, i64)> = sqlx::query_as(
+            "SELECT change_kind, base_revision, object_revision FROM sync_changes WHERE object_id = $1 ORDER BY change_seq",
+        )
+        .bind(created.id)
+        .fetch_all(&pool)
+        .await?;
+        assert_eq!(
+            changes,
+            vec![
+                ("create".to_owned(), None, 1),
+                ("update".to_owned(), Some(1), 2),
+                ("delete".to_owned(), Some(2), 3),
+            ]
+        );
         Ok(())
     }
 }

@@ -387,7 +387,7 @@ reader model без рендера исходного EPUB XHTML/CSS как prod
 - локальный workflow описан в
   [`../runbooks/working-reader.md`](../runbooks/working-reader.md).
 
-### Этап 5. Annotations и progress
+### Этап 5. Annotations и progress — выполнен
 
 - Реализовать selection-to-anchor flow.
 - Добавить создание, редактирование и удаление highlight и note.
@@ -398,6 +398,24 @@ reader model без рендера исходного EPUB XHTML/CSS как prod
 
 Критерий завершения: position, highlights и notes переживают закрытие браузера
 и рестарт сервера, а изменение reader settings не ломает привязки.
+
+Результат:
+
+- browser Selection/Range adapter мапит только source-text DOM spans в
+  multi-block anchor с Unicode scalar offsets, quote/context, hashes и typed
+  start/end source locators;
+- PostgreSQL annotation service выполняет owner-scoped idempotent CRUD,
+  optimistic revision checks, tombstones и append-only sync changes в одной
+  transaction;
+- Dioxus reader показывает optimistic highlights/notes, durable ack/error,
+  conflict draft, overlays и mobile notes panel с переходом к anchor;
+- progress восстанавливается по точному path+offset после repagination, а
+  settings/progress writes сериализуются и имеют честный save state;
+- portable JSON export содержит provenance, timestamps, quote/body и полный
+  anchor; compatibility/recovery решение закреплено в
+  [`../adr/0009-source-backed-anchor-v2.md`](../adr/0009-source-backed-anchor-v2.md);
+- локальная проверка описана в
+  [`../runbooks/durable-annotations.md`](../runbooks/durable-annotations.md).
 
 ### Этап 6. Baseline-источники Web и Telegram
 

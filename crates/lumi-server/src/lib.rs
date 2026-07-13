@@ -25,12 +25,13 @@ use axum::{
 use lumi_core::{
     import_epub_fixture, rich_epub_fixture, s1_schema_migrations, simple_epub_fixture,
     AcceptedImport, Annotation, AnnotationExport, AnnotationId, BlobManifest, BlobManifestId,
-    CreateAnnotationCommand, DiagnosticSeverity, DocumentRevision, DocumentRevisionId, EpubFixture,
-    EpubLimits, HealthResponse, ImportDiagnostic, ImportStatusEntry, ImportedFixture, Job, JobId,
-    JobKind, JobStage, JobStatus, LibraryEntry, LibraryState, Material, MaterialId,
-    MaterialImportStatus, MoveReadingPositionCommand, NormalizedContentPackage, ReaderSettings,
-    ReadingDocument, ReadingProgress, SchemaMigration, ServiceCapabilities,
-    UpdateAnnotationCommand, UpdateLibraryStateCommand, UpdateReaderSettingsCommand, UserId,
+    CreateAnnotationCommand, DeleteAnnotationCommand, DiagnosticSeverity, DocumentRevision,
+    DocumentRevisionId, EpubFixture, EpubLimits, HealthResponse, ImportDiagnostic,
+    ImportStatusEntry, ImportedFixture, Job, JobId, JobKind, JobStage, JobStatus, LibraryEntry,
+    LibraryState, Material, MaterialId, MaterialImportStatus, MoveReadingPositionCommand,
+    NormalizedContentPackage, ReaderSettings, ReadingDocument, ReadingProgress, SchemaMigration,
+    ServiceCapabilities, UpdateAnnotationCommand, UpdateLibraryStateCommand,
+    UpdateReaderSettingsCommand, UserId,
 };
 use serde::{Deserialize, Serialize};
 use tower_http::{
@@ -304,7 +305,9 @@ pub fn build_router_with_state(state: AppState) -> Router {
         .route("/materials/{material_id}/source", get(download_source_epub))
         .route(
             "/materials/{material_id}/annotations",
-            get(list_annotations).post(create_annotation),
+            get(list_annotations)
+                .post(create_annotation)
+                .layer(DefaultBodyLimit::max(512 * 1024)),
         )
         .route(
             "/materials/{material_id}/annotations/export",
@@ -312,7 +315,9 @@ pub fn build_router_with_state(state: AppState) -> Router {
         )
         .route(
             "/materials/{material_id}/annotations/{annotation_id}",
-            put(update_annotation).delete(delete_annotation),
+            put(update_annotation)
+                .delete(delete_annotation)
+                .layer(DefaultBodyLimit::max(512 * 1024)),
         )
         .route(
             "/materials/{material_id}/progress",
@@ -483,9 +488,9 @@ async fn update_library_state(
             "material id in path and body must match".to_owned(),
         ));
     }
+    let idempotency_key = required_idempotency_key(&headers)?;
 
     if let Some(imports) = state.imports.as_ref() {
-        let idempotency_key = required_idempotency_key(&headers)?;
         return imports
             .update_library_state(
                 &session,
@@ -842,6 +847,13 @@ async fn list_annotations(
     Extension(session): Extension<AuthenticatedSession>,
     Path(material_id): Path<MaterialId>,
 ) -> Result<Json<Vec<Annotation>>, AppError> {
+    if let Some(imports) = state.imports.as_ref() {
+        return imports
+            .annotations(session.user_id, material_id)
+            .await
+            .map(Json)
+            .map_err(map_import_error);
+    }
     let repository = read_repository(&state)?;
     repository.ensure_material_owned(session.user_id, material_id)?;
     let annotations = repository
@@ -857,12 +869,22 @@ async fn create_annotation(
     State(state): State<AppState>,
     Extension(session): Extension<AuthenticatedSession>,
     Path(material_id): Path<MaterialId>,
+    headers: HeaderMap,
     Json(command): Json<CreateAnnotationCommand>,
 ) -> Result<Json<Annotation>, AppError> {
     if command.material_id != material_id {
         return Err(AppError::BadRequest(
             "material id in path and body must match".to_owned(),
         ));
+    }
+    let idempotency_key = required_idempotency_key(&headers)?;
+
+    if let Some(imports) = state.imports.as_ref() {
+        return imports
+            .create_annotation(&session, command, idempotency_key)
+            .await
+            .map(Json)
+            .map_err(map_import_error);
     }
 
     let mut repository = write_repository(&state)?;
@@ -883,12 +905,22 @@ async fn update_annotation(
     State(state): State<AppState>,
     Extension(session): Extension<AuthenticatedSession>,
     Path((material_id, annotation_id)): Path<(MaterialId, AnnotationId)>,
+    headers: HeaderMap,
     Json(command): Json<UpdateAnnotationCommand>,
 ) -> Result<Json<Annotation>, AppError> {
     if command.material_id != material_id || command.annotation_id != annotation_id {
         return Err(AppError::BadRequest(
             "material or annotation id in path and body must match".to_owned(),
         ));
+    }
+    let idempotency_key = required_idempotency_key(&headers)?;
+
+    if let Some(imports) = state.imports.as_ref() {
+        return imports
+            .update_annotation(&session, command, idempotency_key)
+            .await
+            .map(Json)
+            .map_err(map_import_error);
     }
 
     let mut repository = write_repository(&state)?;
@@ -918,7 +950,22 @@ async fn delete_annotation(
     State(state): State<AppState>,
     Extension(session): Extension<AuthenticatedSession>,
     Path((material_id, annotation_id)): Path<(MaterialId, AnnotationId)>,
+    headers: HeaderMap,
+    Json(command): Json<DeleteAnnotationCommand>,
 ) -> Result<Json<Annotation>, AppError> {
+    if command.material_id != material_id || command.annotation_id != annotation_id {
+        return Err(AppError::BadRequest(
+            "material or annotation id in path and body must match".to_owned(),
+        ));
+    }
+    let idempotency_key = required_idempotency_key(&headers)?;
+    if let Some(imports) = state.imports.as_ref() {
+        return imports
+            .delete_annotation(&session, command, idempotency_key)
+            .await
+            .map(Json)
+            .map_err(map_import_error);
+    }
     let mut repository = write_repository(&state)?;
     repository.ensure_material_owned(session.user_id, material_id)?;
     let annotations = repository
@@ -930,6 +977,13 @@ async fn delete_annotation(
         .position(|stored| stored.id == annotation_id)
         .ok_or(AppError::NotFound("annotation"))?;
 
+    if annotations[index].revision != command.expected_revision {
+        return Err(AppError::Conflict(format!(
+            "annotation revision conflict: expected {}, found {}",
+            command.expected_revision, annotations[index].revision
+        )));
+    }
+
     Ok(Json(annotations.remove(index)))
 }
 
@@ -937,7 +991,14 @@ async fn export_annotations(
     State(state): State<AppState>,
     Extension(session): Extension<AuthenticatedSession>,
     Path(material_id): Path<MaterialId>,
-) -> Result<Json<AnnotationExport>, AppError> {
+) -> Result<Response, AppError> {
+    if let Some(imports) = state.imports.as_ref() {
+        let export = imports
+            .export_annotations(session.user_id, material_id)
+            .await
+            .map_err(map_import_error)?;
+        return annotation_export_response(export);
+    }
     let repository = read_repository(&state)?;
     let material = repository.material_owned_by(session.user_id, material_id)?;
     let annotations = repository
@@ -946,7 +1007,18 @@ async fn export_annotations(
         .map(Vec::as_slice)
         .unwrap_or(&[]);
 
-    Ok(Json(AnnotationExport::for_material(material, annotations)))
+    annotation_export_response(AnnotationExport::for_material(material, annotations))
+}
+
+fn annotation_export_response(export: AnnotationExport) -> Result<Response, AppError> {
+    let file_name = format!("lumi-annotations-{}.json", export.material_id);
+    let mut response = Json(export).into_response();
+    response.headers_mut().insert(
+        header::CONTENT_DISPOSITION,
+        HeaderValue::from_str(&format!("attachment; filename=\"{file_name}\""))
+            .map_err(|_| AppError::Internal("invalid annotation export filename"))?,
+    );
+    Ok(response)
 }
 
 async fn get_progress(
@@ -1424,7 +1496,7 @@ mod tests {
         let migrations: Vec<SchemaMigration> =
             json_get(build_router(), "/api/v1/schema/migrations").await?;
 
-        assert_eq!(migrations.len(), 8);
+        assert_eq!(migrations.len(), 9);
         Ok(())
     }
 
@@ -1744,6 +1816,11 @@ mod tests {
                 "/api/v1/materials/{}/annotations/{}",
                 imported.material.id, annotation.id
             ),
+            json_body(&DeleteAnnotationCommand {
+                material_id: imported.material.id,
+                annotation_id: annotation.id,
+                expected_revision: edited.revision,
+            })?,
         )
         .await?;
 
@@ -2045,13 +2122,15 @@ mod tests {
     async fn json_delete<T: for<'de> Deserialize<'de>>(
         app: Router,
         uri: &str,
+        body: Body,
     ) -> Result<T, Box<dyn std::error::Error>> {
         request_json(
             app,
             Request::builder()
                 .method("DELETE")
                 .uri(uri)
-                .body(Body::empty())?,
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(body)?,
         )
         .await
     }
@@ -2091,6 +2170,13 @@ mod tests {
                 header::HeaderName::from_static("x-lumi-csrf"),
                 HeaderValue::from_static("lumi-local-seeded-csrf"),
             );
+            request
+                .headers_mut()
+                .entry("idempotency-key")
+                .or_insert_with(|| {
+                    HeaderValue::from_str(&uuid::Uuid::now_v7().to_string())
+                        .unwrap_or_else(|_| HeaderValue::from_static("test-idempotency"))
+                });
         }
         request
     }
