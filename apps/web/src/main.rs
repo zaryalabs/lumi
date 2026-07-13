@@ -315,6 +315,25 @@ fn ReaderNode(node: ReadingNode) -> Element {
             let text = node.text.unwrap_or_default();
             rsx! { p { class: "reading-paragraph", "data-node-id": "{node.id}", "{text}" } }
         }
+        ReadingNodeKind::Blockquote => {
+            let text = node.text.unwrap_or_default();
+            rsx! { blockquote { class: "reading-quote", "data-node-id": "{node.id}", "{text}" } }
+        }
+        ReadingNodeKind::ListItem => {
+            let text = node.text.unwrap_or_default();
+            rsx! { ul { class: "reading-list", "data-node-id": "{node.id}", li { "{text}" } } }
+        }
+        ReadingNodeKind::Table => {
+            let text = node.text.unwrap_or_default();
+            rsx! { div { class: "reading-table", role: "table", "data-node-id": "{node.id}", "{text}" } }
+        }
+        ReadingNodeKind::CodeBlock => {
+            let text = node.text.unwrap_or_default();
+            rsx! { pre { class: "reading-code", "data-node-id": "{node.id}", code { "{text}" } } }
+        }
+        ReadingNodeKind::HorizontalRule => rsx! {
+            hr { "data-node-id": "{node.id}" }
+        },
         ReadingNodeKind::Image => {
             let text = node.text.unwrap_or_default();
             let resource = node
@@ -375,6 +394,7 @@ fn job_status_label(status: JobStatus) -> &'static str {
         JobStatus::Running => "Running",
         JobStatus::Succeeded => "Imported",
         JobStatus::Failed => "Failed",
+        JobStatus::Cancelled => "Cancelled",
     }
 }
 

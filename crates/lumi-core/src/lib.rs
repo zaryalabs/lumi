@@ -6,10 +6,12 @@
 //! normalized content, reading documents, anchors, annotations and jobs.
 
 mod auth;
+mod epub;
 mod fixtures;
 mod models;
 
 pub use auth::*;
+pub use epub::*;
 pub use fixtures::{
     import_epub_fixture, rich_epub_fixture, sample_fixture_highlight, simple_epub_fixture,
     EpubFixture, EpubFixtureResource, EpubFixtureSection, ImportError, ImportedFixture,
@@ -35,6 +37,12 @@ pub const EPUB_FIXTURE_IMPORTER_ID: &str = "lumi.epub.fixture";
 
 /// Importer version used by the S0 EPUB fixture importer spike.
 pub const EPUB_FIXTURE_IMPORTER_VERSION: &str = "s0.1";
+
+/// Importer id used by the real DRM-free EPUB pipeline.
+pub const EPUB_IMPORTER_ID: &str = "lumi.epub";
+
+/// Version of the deterministic real EPUB importer.
+pub const EPUB_IMPORTER_VERSION: &str = "s1.1";
 
 /// Health state for Lumi services.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -106,7 +114,9 @@ impl ServiceCapabilities {
                 "account-scoped-routes".to_owned(),
                 "sync-ready-postgresql".to_owned(),
                 "content-addressed-local-dev-blobs".to_owned(),
-                "epub-fixture-importer".to_owned(),
+                "real-epub-importer".to_owned(),
+                "durable-import-jobs".to_owned(),
+                "import-cancel-retry-recovery".to_owned(),
                 "reading-document-reader-core".to_owned(),
                 "anchor-backed-annotations".to_owned(),
             ],

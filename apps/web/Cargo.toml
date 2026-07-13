@@ -18,8 +18,11 @@ getrandom = { version = "0.2.17", features = ["js"] }
 gloo-net = { version = "0.6.0", features = ["http", "json"] }
 js-sys = "0.3.91"
 wasm-bindgen = "0.2.114"
+wasm-bindgen-futures = "0.4.64"
 web-sys = { version = "0.3.91", features = [
+  "Blob",
   "Document",
+  "FormData",
   "HtmlDocument",
   "Location",
   "Window",
