@@ -15,12 +15,33 @@ version = "0.1.0"
 
 [workspace.dependencies]
 anyhow = "1.0.103"
+async-trait = "0.1.89"
 axum = "0.8.9"
+base64 = "0.22.1"
 dioxus = { version = "0.7.0", default-features = false }
+ed25519-dalek = { version = "2.2.0", default-features = false, features = [
+  "fast",
+  "rand_core",
+] }
+hkdf = "0.12.4"
+rand = "0.8.5"
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.150"
 sha2 = "0.10.9"
+sqlx-core = { version = "=0.8.6", default-features = false, features = [
+  "_rt-tokio",
+  "_tls-rustls-ring-webpki",
+  "json",
+  "migrate",
+] }
+sqlx-postgres = { version = "=0.8.6", default-features = false, features = [
+  "json",
+  "migrate",
+  "time",
+  "uuid",
+] }
 thiserror = "2.0.18"
+time = { version = "0.3.44", features = ["serde"] }
 tokio = { version = "1.52.3", features = [
   "macros",
   "net",
@@ -28,10 +49,11 @@ tokio = { version = "1.52.3", features = [
   "signal",
 ] }
 tower = { version = "0.5.3", features = ["util"] }
-tower-http = { version = "0.6.11", features = ["trace"] }
+tower-http = { version = "0.6.11", features = ["cors", "request-id", "trace"] }
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter", "fmt"] }
 uuid = { version = "1.23.3", features = ["js", "serde", "v7"] }
+zeroize = "1.8.2"
 
 [workspace.lints.rust]
 unsafe_code = "forbid"

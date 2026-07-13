@@ -5,9 +5,11 @@
 //! the server and web adapter one shared model for materials, revisions,
 //! normalized content, reading documents, anchors, annotations and jobs.
 
+mod auth;
 mod fixtures;
 mod models;
 
+pub use auth::*;
 pub use fixtures::{
     import_epub_fixture, rich_epub_fixture, sample_fixture_highlight, simple_epub_fixture,
     EpubFixture, EpubFixtureResource, EpubFixtureSection, ImportError, ImportedFixture,
@@ -99,7 +101,10 @@ impl ServiceCapabilities {
                 "reader".to_owned(),
             ],
             features: vec![
-                "seed-auth-prototype-boundary".to_owned(),
+                "seed-derived-ed25519-auth".to_owned(),
+                "persistent-web-sessions".to_owned(),
+                "account-scoped-routes".to_owned(),
+                "sync-ready-postgresql".to_owned(),
                 "content-addressed-local-dev-blobs".to_owned(),
                 "epub-fixture-importer".to_owned(),
                 "reading-document-reader-core".to_owned(),
