@@ -7,15 +7,15 @@ architecture while the first slices are still small.
 ## Canonical Sources
 
 - `README.md` explains the current scaffold and local workflow.
-- `docs/VISION.md` explains the product direction.
-- `docs/system-design/` contains the accepted `v01` technical design.
+- `docs/vision.md` explains the product direction.
+- `docs/systems/` contains the accepted `v01` technical design.
 - `AGENTS.md` contains short operational instructions for agents and
   contributors.
 - `Makefile` is the gateway to local tooling.
 
 When a technical or product decision changes, update the relevant document in
 `docs/`. If the decision touches one of the boundaries listed in
-`docs/system-design/quality.md`, add or update an ADR.
+`docs/systems/quality.md`, add or update an ADR.
 
 ## Development Flow
 
@@ -126,7 +126,7 @@ Use `make` targets instead of calling these directly in routine workflows.
 
 ## Web Standards
 
-The web app follows `docs/system-design/reader-architecture.md`:
+The web app follows `docs/systems/reader-architecture.md`:
 
 - Dioxus Web is the first platform adapter.
 - Browser layout/selection/accessibility engines should do low-level text work.
@@ -159,7 +159,7 @@ Update docs when a change affects:
 - quality gates.
 
 Keep temporary implementation notes in `docs/tmp-plans/`. Promote durable
-decisions into `docs/system-design/`, `docs/adr/` or a runbook.
+decisions into `docs/systems/`, `docs/adr/` or a runbook.
 
 ## Local Quality Gate
 

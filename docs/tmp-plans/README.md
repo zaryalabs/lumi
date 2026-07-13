@@ -16,14 +16,13 @@ coordination document.
 - Every temporary plan must link to the product or architecture documents it
   implements.
 - Every temporary plan must have a status, scope and completion criteria.
-- Temporary plans can be written in the working language that is most useful to
-  the team at that stage.
+- Temporary plans are written in Russian while the repository uses Russian as
+  its single documentation language.
 - If a temporary plan records a durable product, architecture or process
-  decision, that decision must be promoted into the synchronized documentation
-  under `docs/en` and `docs/ru`.
+  decision, that decision must be promoted into the canonical documentation
+  under `docs/`.
 - Do not use this section as the final roadmap. Long-lived sequencing should
-  stay in `docs/en/early-slices.md`, `docs/ru/early-slices.md` or the relevant
-  canonical design documents.
+  stay in `docs/early-slices.md` or the relevant canonical systems documents.
 - After a slice ships or is superseded, archive, replace or delete its
   temporary plan.
 
