@@ -30,3 +30,6 @@ coordination document.
 
 - [`playwright-agent-inspection.md`](playwright-agent-inspection.md) - local
   browser inspection notes for the Dioxus Web shell and reader surface.
+- [`s1-web-epub-reader.md`](s1-web-epub-reader.md) - staged implementation plan
+  from the current scaffold and UI/UX prototype to a working S1 Web EPUB
+  Reader.
