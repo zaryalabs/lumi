@@ -91,6 +91,29 @@ function createReaderEpub(): Buffer {
   ]);
 }
 
+async function selectReaderText(page: import("@playwright/test").Page) {
+  const source = page
+    .locator("[data-reader-source='true']")
+    .filter({
+      hasText: /\S/,
+    })
+    .first();
+  await expect(source).toBeVisible();
+  await source.evaluate((element) => {
+    const text = element.firstChild;
+    if (!text || text.nodeType !== Node.TEXT_NODE) {
+      throw new Error("reader source span has no direct text node");
+    }
+    const range = document.createRange();
+    range.setStart(text, 0);
+    range.setEnd(text, Math.min(12, text.textContent?.length ?? 0));
+    const selection = window.getSelection();
+    selection?.removeAllRanges();
+    selection?.addRange(range);
+    element.dispatchEvent(new MouseEvent("mouseup", { bubbles: true }));
+  });
+}
+
 test("persists an API-backed EPUB library lifecycle", async ({ page }) => {
   await page.goto("/");
 
@@ -138,6 +161,69 @@ test("persists an API-backed EPUB library lifecycle", async ({ page }) => {
   await expect(
     page.getByRole("article", { name: /Страница 1 из/ }),
   ).toBeVisible();
+
+  await selectReaderText(page);
+  const highlightSaved = page.waitForResponse(
+    (response) =>
+      response.url().endsWith("/annotations") &&
+      response.request().method() === "POST" &&
+      response.ok(),
+  );
+  await page.getByRole("button", { name: "Выделить" }).click();
+  await highlightSaved;
+  await expect(page.locator(".annotation-highlight").first()).toBeVisible();
+
+  await selectReaderText(page);
+  await page.getByLabel("Текст заметки").fill("Заметка Stage 5");
+  const noteSaved = page.waitForResponse(
+    (response) =>
+      response.url().endsWith("/annotations") &&
+      response.request().method() === "POST" &&
+      response.ok(),
+  );
+  await page.getByRole("button", { name: "Сохранить заметку" }).click();
+  await noteSaved;
+  await page.getByRole("button", { name: /Заметки \(2\)/ }).click();
+  const notes = page.getByRole("complementary", {
+    name: "Личные заметки и выделения",
+  });
+  await expect(notes.getByText("Заметка Stage 5")).toBeVisible();
+  await notes.getByRole("button", { name: "Изменить" }).click();
+  await notes
+    .getByLabel("Редактировать заметку")
+    .fill("Заметка Stage 5 · edit");
+  const noteUpdated = page.waitForResponse(
+    (response) =>
+      response.url().includes("/annotations/") &&
+      response.request().method() === "PUT" &&
+      response.ok(),
+  );
+  await notes.getByRole("button", { name: "Сохранить изменения" }).click();
+  await noteUpdated;
+  await expect(notes.getByText("Заметка Stage 5 · edit")).toBeVisible();
+  page.once("dialog", (dialog) => dialog.accept());
+  const highlightDeleted = page.waitForResponse(
+    (response) =>
+      response.url().includes("/annotations/") &&
+      response.request().method() === "DELETE" &&
+      response.ok(),
+  );
+  await notes
+    .locator("li")
+    .filter({ hasText: "Highlight" })
+    .getByRole("button", { name: "Удалить" })
+    .click();
+  await highlightDeleted;
+  await expect(
+    page.getByRole("button", { name: /Заметки \(1\)/ }),
+  ).toBeVisible();
+  const annotationExport = page.waitForEvent("download");
+  await page.getByRole("button", { name: "Экспорт" }).click();
+  expect((await annotationExport).suggestedFilename()).toMatch(
+    /^lumi-annotations-.*\.json$/,
+  );
+  await notes.getByRole("button", { name: "Закрыть заметки" }).click();
+
   await page.getByRole("button", { name: "Дальше" }).click();
   await expect(
     page.getByRole("article", { name: /Страница 2 из/ }),
@@ -193,6 +279,9 @@ test("persists an API-backed EPUB library lifecycle", async ({ page }) => {
   await expect(
     page.getByRole("article", { name: /Страница (?:[2-9]|[1-9][0-9]+) из/ }),
   ).toBeVisible();
+  await page.getByRole("button", { name: /Заметки \(1\)/ }).click();
+  await expect(page.getByText("Заметка Stage 5 · edit")).toBeVisible();
+  await page.getByRole("button", { name: "Закрыть заметки" }).click();
   await page.setViewportSize({ width: 390, height: 844 });
   await expect(page.getByRole("article", { name: /Страница/ })).toBeVisible();
   await page.getByRole("button", { name: "Библиотека", exact: false }).click();

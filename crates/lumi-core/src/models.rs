@@ -146,6 +146,12 @@ pub fn s1_schema_migrations() -> Vec<SchemaMigration> {
             description: "Account-wide reader settings and source-backed durable progress."
                 .to_owned(),
         },
+        SchemaMigration {
+            id: "s1-0005-durable-annotations".to_owned(),
+            schema_version: DOMAIN_SCHEMA_VERSION.to_owned(),
+            description: "Selection anchors, durable annotation conflicts and portable export."
+                .to_owned(),
+        },
     ]);
     migrations
 }
@@ -635,6 +641,10 @@ pub struct Anchor {
     pub revision_id: DocumentRevisionId,
     /// Stable normalized node path.
     pub node_path: Vec<String>,
+    /// Stable normalized end-node path for selections spanning multiple blocks.
+    /// Empty values from older payloads mean the same path as `node_path`.
+    #[serde(default)]
+    pub end_node_path: Vec<String>,
     /// Optional text range within the node.
     pub text_range: Option<TextRange>,
     /// Selected quote or block text excerpt.
@@ -647,6 +657,9 @@ pub struct Anchor {
     pub content_hash: String,
     /// Optional source-format locator.
     pub source_locator: Option<SourceLocator>,
+    /// Optional source-format locator for the end block of a multi-block range.
+    #[serde(default)]
+    pub end_source_locator: Option<SourceLocator>,
     /// Optional measured page rectangles.
     pub page_rects: Vec<PageRect>,
 }
@@ -660,13 +673,25 @@ impl Anchor {
         Self {
             revision_id,
             node_path: node.path.clone(),
+            end_node_path: node.path.clone(),
             text_range: quote_range(&quote),
             quote,
             prefix: String::new(),
             suffix: String::new(),
             content_hash: node.content_hash.clone(),
             source_locator: Some(node.source_locator.clone()),
+            end_source_locator: Some(node.source_locator.clone()),
             page_rects: Vec::new(),
+        }
+    }
+
+    /// Return the effective end path, including backward-compatible anchors.
+    #[must_use]
+    pub fn effective_end_node_path(&self) -> &[String] {
+        if self.end_node_path.is_empty() {
+            &self.node_path
+        } else {
+            &self.end_node_path
         }
     }
 }
@@ -786,6 +811,17 @@ pub struct UpdateAnnotationCommand {
     pub kind: AnnotationKind,
 }
 
+/// Command for deleting an annotation with optimistic concurrency.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct DeleteAnnotationCommand {
+    /// Parent material id.
+    pub material_id: MaterialId,
+    /// Annotation to delete.
+    pub annotation_id: AnnotationId,
+    /// Expected annotation revision for optimistic concurrency.
+    pub expected_revision: u64,
+}
+
 /// Annotation kind.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", tag = "type")]
@@ -832,6 +868,8 @@ pub struct ReadingProgress {
 /// Portable export for annotations attached to one material.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct AnnotationExport {
+    /// Portable annotation export schema marker.
+    pub schema_version: String,
     /// Material whose annotations were exported.
     pub material_id: MaterialId,
     /// Active revision at export time.
@@ -849,6 +887,7 @@ impl AnnotationExport {
     #[must_use]
     pub fn for_material(material: &Material, annotations: &[Annotation]) -> Self {
         Self {
+            schema_version: "lumi.annotations.v1".to_owned(),
             material_id: material.id,
             revision_id: material.active_revision_id,
             material_title: material.display_title().to_owned(),
@@ -876,6 +915,10 @@ pub struct AnnotationExportEntry {
     pub note_body: Option<String>,
     /// Full source-backed anchor, serialized as JSON in the export response.
     pub anchor: Anchor,
+    /// Annotation creation timestamp.
+    pub created_at: TimestampMs,
+    /// Annotation last-update timestamp.
+    pub updated_at: TimestampMs,
 }
 
 impl AnnotationExportEntry {
@@ -887,6 +930,8 @@ impl AnnotationExportEntry {
             quote: annotation.anchor.quote.clone(),
             note_body: annotation.note_body().map(str::to_owned),
             anchor: annotation.anchor.clone(),
+            created_at: annotation.created_at,
+            updated_at: annotation.updated_at,
         }
     }
 }
@@ -1080,6 +1125,6 @@ mod tests {
     fn migrations_cover_s1_contract_groups() {
         let migrations = s1_schema_migrations();
 
-        assert_eq!(migrations.len(), 8);
+        assert_eq!(migrations.len(), 9);
     }
 }

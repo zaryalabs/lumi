@@ -127,6 +127,12 @@ body {
   background: var(--reader-ink);
 }
 
+.reader-save-state {
+  color: var(--reader-muted);
+  font-size: 0.78rem;
+  white-space: nowrap;
+}
+
 .reader-layout {
   position: relative;
   display: grid;
@@ -234,6 +240,17 @@ body {
   opacity: 0.5;
 }
 
+.source-text.annotation-highlight {
+  border-radius: 2px;
+  background: rgb(242 201 76 / 48%);
+  box-decoration-break: clone;
+}
+
+.source-text.annotation-note {
+  border-bottom: 2px solid #6f63c2;
+  background: rgb(111 99 194 / 12%);
+}
+
 .inline-link {
   display: inline;
   margin-left: 0.5em;
@@ -288,6 +305,69 @@ body {
 
 .settings-drawer {
   right: 16px;
+}
+
+.notes-drawer {
+  right: 16px;
+  padding-bottom: max(20px, env(safe-area-inset-bottom));
+}
+
+.private-label,
+.notes-empty {
+  margin: 4px 0 0;
+  color: var(--reader-muted);
+  font-size: 0.8rem;
+}
+
+.annotation-target {
+  width: 100%;
+  border: 0;
+  padding: 0;
+  text-align: left;
+}
+
+.annotation-target blockquote {
+  margin: 0;
+  border-left: 3px solid #d3ae4f;
+  padding-left: 10px;
+}
+
+.note-editor,
+.note-composer {
+  display: grid;
+  gap: 10px;
+}
+
+.note-editor textarea,
+.note-composer textarea {
+  width: 100%;
+  min-height: 112px;
+  resize: vertical;
+}
+
+.selection-actions,
+.note-composer {
+  position: fixed;
+  z-index: 35;
+  right: 20px;
+  bottom: 20px;
+  width: min(420px, calc(100vw - 40px));
+  border: 1px solid rgb(70 67 57 / 25%);
+  border-radius: 14px;
+  padding: 14px;
+  color: var(--reader-ink);
+  background: var(--reader-paper);
+  box-shadow: 0 18px 60px rgb(20 20 17 / 25%);
+}
+
+.selection-actions {
+  display: flex;
+  bottom: 186px;
+  gap: 8px;
+}
+
+.annotation-conflict {
+  color: #8b2f36;
 }
 
 .drawer-heading {
@@ -377,15 +457,13 @@ body {
     width: 40px;
     overflow: hidden;
     padding: 8px;
-    text-indent: -999px;
+    font-size: 0;
   }
 
-  .reader-tools button::after {
-    float: right;
-    content: "⋯";
-    text-indent: 0;
-  }
-
+  .reader-tools button:nth-child(1)::after { content: "☰"; font-size: 1rem; }
+  .reader-tools button:nth-child(2)::after { content: "Aa"; font-size: 0.9rem; }
+  .reader-tools button:nth-child(3)::after { content: "✎"; font-size: 1rem; }
+  .reader-tools button:nth-child(4)::after { content: "⇩"; font-size: 1rem; }
   .reader-stage {
     grid-template-rows: auto minmax(460px, 66vh) auto;
     padding: 12px 10px 20px;
@@ -400,7 +478,29 @@ body {
     width: auto;
     max-height: 68vh;
     border-radius: 18px;
+    padding-bottom: max(20px, env(safe-area-inset-bottom));
   }
+
+  .reader-save-state {
+    position: fixed;
+    z-index: 40;
+    right: 8px;
+    bottom: max(8px, env(safe-area-inset-bottom));
+    border-radius: 999px;
+    padding: 5px 9px;
+    color: var(--reader-ink);
+    background: var(--reader-paper);
+    box-shadow: 0 4px 18px rgb(0 0 0 / 16%);
+  }
+
+  .selection-actions,
+  .note-composer {
+    right: 8px;
+    bottom: max(8px, env(safe-area-inset-bottom));
+    width: calc(100vw - 16px);
+  }
+
+  .selection-actions { bottom: 184px; }
 
   .reader-pagination {
     gap: 8px;
@@ -409,6 +509,15 @@ body {
   .reader-pagination button {
     padding: 7px 9px;
     font-size: 0.84rem;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .reader-workspace *,
+  .reader-workspace *::before,
+  .reader-workspace *::after {
+    scroll-behavior: auto !important;
+    transition-duration: 0.01ms !important;
   }
 }
 

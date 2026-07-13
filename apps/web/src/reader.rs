@@ -1,20 +1,22 @@
 //! Dioxus/DOM adapter for the shared Stage 4 reader contracts.
 
 use std::cell::RefCell;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 
+use dioxus::dioxus_core::spawn_forever;
 use dioxus::prelude::*;
 use gloo_net::http::Request;
 use lumi_core::{
-    LibraryEntry, MoveReadingPositionCommand, PageBoundary, PageFragment, PageMap,
-    ReaderNavigation, ReaderPage, ReaderSettings, ReaderTheme, ReaderWidth, ReadingDocument,
-    ReadingLink, ReadingLinkKind, ReadingProgress, RenderBlock, RenderPlan, TextRange,
-    UpdateReaderSettingsCommand,
+    Anchor, AnchorResolution, Annotation, AnnotationId, AnnotationKind, CreateAnnotationCommand,
+    DeleteAnnotationCommand, HighlightStyle, LibraryEntry, MoveReadingPositionCommand,
+    PageBoundary, PageFragment, PageMap, ReaderNavigation, ReaderPage, ReaderSettings, ReaderTheme,
+    ReaderWidth, ReadingDocument, ReadingLink, ReadingLinkKind, ReadingProgress, RenderBlock,
+    RenderPlan, TextRange, UpdateAnnotationCommand, UpdateReaderSettingsCommand,
 };
 use uuid::Uuid;
 use wasm_bindgen::JsCast;
 use wasm_bindgen_futures::JsFuture;
-use web_sys::{HtmlElement, RequestCredentials};
+use web_sys::{Element as DomElement, HtmlElement, Node, RequestCredentials};
 
 use super::account::API_BASE;
 
@@ -32,7 +34,63 @@ struct ReaderView {
     navigation: ReaderNavigation,
     toc_open: bool,
     settings_open: bool,
+    notes_open: bool,
     footnote: Option<ReadingLink>,
+    annotations: Vec<AnnotationItem>,
+    selected_anchor: Option<Anchor>,
+    note_draft: String,
+    edit_note_draft: String,
+    editing_note: Option<AnnotationId>,
+    conflict_draft: Option<String>,
+    annotation_message: Option<String>,
+}
+
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum ItemSyncState {
+    Synced,
+    Saving,
+    Failed,
+    Conflicted,
+}
+
+#[derive(Clone, PartialEq)]
+struct AnnotationItem {
+    annotation: Annotation,
+    sync_state: ItemSyncState,
+    pending: Option<PendingMutation>,
+}
+
+#[derive(Clone, PartialEq)]
+enum PendingMutation {
+    Create {
+        command: Box<CreateAnnotationCommand>,
+        idempotency_key: String,
+    },
+    Update {
+        command: UpdateAnnotationCommand,
+        idempotency_key: String,
+    },
+    Delete {
+        command: DeleteAnnotationCommand,
+        idempotency_key: String,
+    },
+}
+
+#[derive(Clone, Eq, PartialEq)]
+struct SaveState {
+    pending: usize,
+    latest_subject: &'static str,
+    failures: BTreeMap<String, String>,
+}
+
+impl Default for SaveState {
+    fn default() -> Self {
+        Self {
+            pending: 0,
+            latest_subject: "изменения",
+            failures: BTreeMap::new(),
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -53,10 +111,13 @@ pub(crate) fn ReaderApp(
     let csrf = use_signal(|| csrf_token);
     let settings_generation = use_signal(|| 0_u64);
     let progress_generation = use_signal(|| 0_u64);
+    let settings_in_flight = use_signal(|| false);
+    let progress_in_flight = use_signal(|| false);
+    let save_state = use_signal(SaveState::default);
     use_effect(move || {
         spawn(async move {
             match load_reader(material_id).await {
-                Ok((entry, document, settings, progress)) => {
+                Ok((entry, document, settings, progress, annotations)) => {
                     let plan = RenderPlan::from_document(&document);
                     match browser_page_map(&plan, settings) {
                         Ok(page_map) => {
@@ -79,7 +140,22 @@ pub(crate) fn ReaderApp(
                                 navigation,
                                 toc_open: false,
                                 settings_open: false,
+                                notes_open: false,
                                 footnote: None,
+                                annotations: annotations
+                                    .into_iter()
+                                    .map(|annotation| AnnotationItem {
+                                        annotation,
+                                        sync_state: ItemSyncState::Synced,
+                                        pending: None,
+                                    })
+                                    .collect(),
+                                selected_anchor: None,
+                                note_draft: String::new(),
+                                edit_note_draft: String::new(),
+                                editing_note: None,
+                                conflict_draft: None,
+                                annotation_message: None,
                             })));
                         }
                         Err(error) => state.set(ReaderState::Failed(error)),
@@ -126,6 +202,15 @@ pub(crate) fn ReaderApp(
                 ReaderWidth::Balanced => "balanced",
                 ReaderWidth::Wide => "wide",
             };
+            let export_material_id = view.entry.id;
+            let current_save_state = save_state.read().clone();
+            let save_label = if current_save_state.pending > 0 {
+                format!("Сохраняем {}…", current_save_state.latest_subject)
+            } else if let Some(detail) = current_save_state.failures.values().next() {
+                format!("Не сохранено: {detail}")
+            } else {
+                "Сохранено".to_owned()
+            };
             rsx! {
                 main {
                     class: "reader-workspace {theme_class}",
@@ -144,7 +229,15 @@ pub(crate) fn ReaderApp(
                             button { r#type: "button", aria_pressed: view.settings_open, onclick: move |_| {
                                 if let ReaderState::Ready(current) = &mut *state.write() { current.settings_open = !current.settings_open; }
                             }, "Настройки" }
+                            button { id: "reader-notes-button", r#type: "button", aria_expanded: view.notes_open, aria_controls: "reader-notes-panel", onclick: move |_| {
+                                if let ReaderState::Ready(current) = &mut *state.write() {
+                                    current.notes_open = !current.notes_open;
+                                    if current.notes_open { spawn(async move { browser_delay(20).await; focus_reader_node("reader-notes-panel"); }); }
+                                }
+                            }, "Заметки ({view.annotations.len()})" }
+                            button { r#type: "button", onclick: move |_| export_annotations(export_material_id), "Экспорт" }
                         }
+                        span { class: "reader-save-state", role: "status", aria_live: "polite", "{save_label}" }
                     }
 
                     div { class: "reader-layout",
@@ -158,7 +251,7 @@ pub(crate) fn ReaderApp(
                                 }
                                 ol {
                                     for item in view.document.navigation.clone() {
-                                        li { button { r#type: "button", onclick: move |_| jump_to_path(state, &item.target_path, csrf, progress_generation), "{item.label}" } }
+                                        li { button { r#type: "button", onclick: move |_| jump_to_path(state, &item.target_path, csrf, progress_generation, progress_in_flight, save_state), "{item.label}" } }
                                     }
                                 }
                             }
@@ -167,28 +260,28 @@ pub(crate) fn ReaderApp(
                         section { class: "reader-stage {width_class}", aria_label: "Страница книги",
                             div { class: "reader-history", aria_label: "История переходов",
                                 button { r#type: "button", aria_label: "Назад по истории", disabled: !view.navigation.can_go_back(), onclick: move |_| {
-                                    if let ReaderState::Ready(current) = &mut *state.write() { current.navigation.go_back(); persist_current(current, csrf, progress_generation); }
+                                    if let ReaderState::Ready(current) = &mut *state.write() { current.navigation.go_back(); persist_current(current, csrf, progress_generation, progress_in_flight, save_state); }
                                 }, "↶" }
                                 button { r#type: "button", aria_label: "Вперёд по истории", disabled: !view.navigation.can_go_forward(), onclick: move |_| {
-                                    if let ReaderState::Ready(current) = &mut *state.write() { current.navigation.go_forward(); persist_current(current, csrf, progress_generation); }
+                                    if let ReaderState::Ready(current) = &mut *state.write() { current.navigation.go_forward(); persist_current(current, csrf, progress_generation, progress_in_flight, save_state); }
                                 }, "↷" }
                             }
-                            article { class: "reader-page-surface", aria_label: "Страница {current_page + 1} из {page_count}",
+                            article { class: "reader-page-surface", aria_label: "Страница {current_page + 1} из {page_count}", onmouseup: move |_| capture_browser_selection(state), onkeyup: move |_| capture_browser_selection(state), ontouchend: move |_| capture_browser_selection(state),
                                 if let Some(page) = page {
                                     for fragment in page.fragments {
                                         if let Some(block) = view.plan.block(&fragment.node_path).cloned() {
-                                            RenderedFragment { block, range: fragment.range, revision_id: view.document.revision_id, on_link: move |link: ReadingLink| activate_link(state, link, csrf, progress_generation) }
+                                            RenderedFragment { block, range: fragment.range, revision_id: view.document.revision_id, plan: view.plan.clone(), annotations: view.annotations.clone(), on_link: move |link: ReadingLink| activate_link(state, link, csrf, progress_generation, progress_in_flight, save_state) }
                                         }
                                     }
                                 }
                             }
                             footer { class: "reader-pagination", aria_label: "Навигация по страницам",
-                                button { r#type: "button", disabled: current_page == 0, onclick: move |_| move_page(state, current_page.saturating_sub(1), csrf, progress_generation), "← Назад" }
+                                button { r#type: "button", disabled: current_page == 0, onclick: move |_| move_page(state, current_page.saturating_sub(1), csrf, progress_generation, progress_in_flight, save_state), "← Назад" }
                                 div {
                                     span { "{current_page + 1} / {page_count}" }
                                     progress { max: "{page_count}", value: "{current_page + 1}", aria_label: "Прогресс чтения" }
                                 }
-                                button { r#type: "button", disabled: current_page + 1 >= page_count, onclick: move |_| move_page(state, current_page + 1, csrf, progress_generation), "Дальше →" }
+                                button { r#type: "button", disabled: current_page + 1 >= page_count, onclick: move |_| move_page(state, current_page + 1, csrf, progress_generation, progress_in_flight, save_state), "Дальше →" }
                             }
                         }
 
@@ -202,27 +295,35 @@ pub(crate) fn ReaderApp(
                                 }
                                 fieldset {
                                     legend { "Тема" }
-                                    label { input { r#type: "radio", name: "theme", checked: view.settings.theme == ReaderTheme::Paper, onchange: move |_| update_settings(state, csrf, settings_generation, |settings| settings.theme = ReaderTheme::Paper) } "Бумага" }
-                                    label { input { r#type: "radio", name: "theme", checked: view.settings.theme == ReaderTheme::Night, onchange: move |_| update_settings(state, csrf, settings_generation, |settings| settings.theme = ReaderTheme::Night) } "Ночь" }
+                                    label { input { r#type: "radio", name: "theme", checked: view.settings.theme == ReaderTheme::Paper, onchange: move |_| update_settings(state, csrf, settings_generation, settings_in_flight, save_state, |settings| settings.theme = ReaderTheme::Paper) } "Бумага" }
+                                    label { input { r#type: "radio", name: "theme", checked: view.settings.theme == ReaderTheme::Night, onchange: move |_| update_settings(state, csrf, settings_generation, settings_in_flight, save_state, |settings| settings.theme = ReaderTheme::Night) } "Ночь" }
                                 }
                                 label { class: "settings-control",
                                     span { "Размер текста: {view.settings.font_size_px}px" }
                                     input { r#type: "range", min: "15", max: "30", value: "{view.settings.font_size_px}", aria_label: "Размер текста", oninput: move |event| {
-                                        if let Ok(value) = event.value().parse::<u16>() { update_settings(state, csrf, settings_generation, |settings| settings.font_size_px = value); }
+                                        if let Ok(value) = event.value().parse::<u16>() { update_settings(state, csrf, settings_generation, settings_in_flight, save_state, |settings| settings.font_size_px = value); }
                                     } }
                                 }
                                 fieldset {
                                     legend { "Ширина строки" }
-                                    label { input { r#type: "radio", name: "width", checked: view.settings.width == ReaderWidth::Narrow, onchange: move |_| update_settings(state, csrf, settings_generation, |settings| settings.width = ReaderWidth::Narrow) } "Узкая" }
-                                    label { input { r#type: "radio", name: "width", checked: view.settings.width == ReaderWidth::Balanced, onchange: move |_| update_settings(state, csrf, settings_generation, |settings| settings.width = ReaderWidth::Balanced) } "Средняя" }
-                                    label { input { r#type: "radio", name: "width", checked: view.settings.width == ReaderWidth::Wide, onchange: move |_| update_settings(state, csrf, settings_generation, |settings| settings.width = ReaderWidth::Wide) } "Широкая" }
+                                    label { input { r#type: "radio", name: "width", checked: view.settings.width == ReaderWidth::Narrow, onchange: move |_| update_settings(state, csrf, settings_generation, settings_in_flight, save_state, |settings| settings.width = ReaderWidth::Narrow) } "Узкая" }
+                                    label { input { r#type: "radio", name: "width", checked: view.settings.width == ReaderWidth::Balanced, onchange: move |_| update_settings(state, csrf, settings_generation, settings_in_flight, save_state, |settings| settings.width = ReaderWidth::Balanced) } "Средняя" }
+                                    label { input { r#type: "radio", name: "width", checked: view.settings.width == ReaderWidth::Wide, onchange: move |_| update_settings(state, csrf, settings_generation, settings_in_flight, save_state, |settings| settings.width = ReaderWidth::Wide) } "Широкая" }
                                 }
                                 p { class: "settings-note", "Настройки сохраняются для аккаунта. Карта страниц пересчитывается на этом устройстве." }
                             }
                         }
+
+                        if view.notes_open {
+                            NotesPanel { state, csrf, save_state, progress_generation, progress_in_flight }
+                        }
                     }
 
-                    if let Some(link) = view.footnote {
+                    if let Some(anchor) = view.selected_anchor.clone() {
+                        SelectionComposer { state, csrf, save_state, anchor, draft: view.note_draft.clone() }
+                    }
+
+                    if let Some(link) = view.footnote.clone() {
                         dialog { class: "footnote-dialog", open: true, aria_label: "Сноска",
                             p { class: "eyebrow", "Примечание" }
                             if let Some(block) = view.plan.block(&link.target_path) {
@@ -246,14 +347,23 @@ fn RenderedFragment(
     block: RenderBlock,
     range: TextRange,
     revision_id: Uuid,
+    plan: RenderPlan,
+    annotations: Vec<AnnotationItem>,
     on_link: EventHandler<ReadingLink>,
 ) -> Element {
-    let text = block.text.as_deref().unwrap_or_default();
-    let visible = scalar_slice(text, range.start, range.end);
+    let segments = annotation_segments(&block, range, &plan, &annotations);
     let continued = range.start > 0;
     let content = rsx! {
         if continued { span { class: "continued-marker", aria_hidden: "true", "…" } }
-        "{visible}"
+        for segment in segments {
+            span {
+                class: "source-text {segment.class_name}",
+                "data-reader-source": "true",
+                "data-node-id": "{block.node_id}",
+                "data-scalar-start": "{segment.scalar_start}",
+                "{segment.text}"
+            }
+        }
         for link in block.links.iter().filter(|link| ranges_intersect(link.text_range, range)).cloned() {
             button { class: "inline-link", r#type: "button", onclick: move |_| on_link.call(link.clone()), "Перейти: {link.label}" }
         }
@@ -295,17 +405,872 @@ fn RenderedFragment(
     }
 }
 
+#[derive(Clone)]
+struct TextSegment {
+    text: String,
+    scalar_start: usize,
+    class_name: &'static str,
+}
+
+fn annotation_segments(
+    block: &RenderBlock,
+    visible: TextRange,
+    plan: &RenderPlan,
+    annotations: &[AnnotationItem],
+) -> Vec<TextSegment> {
+    let text = block.text.as_deref().unwrap_or_default();
+    let chars: Vec<char> = scalar_slice(text, visible.start, visible.end)
+        .chars()
+        .collect();
+    if chars.is_empty() {
+        return Vec::new();
+    }
+    let mut classes = vec![""; chars.len()];
+    for item in annotations {
+        let resolved = match plan.resolve_anchor(&item.annotation.anchor) {
+            AnchorResolution::Resolved { anchor, .. } => anchor,
+            AnchorResolution::Unresolved => continue,
+        };
+        let Some(annotation_range) = plan.anchor_range_for_block(&resolved, &block.node_path)
+        else {
+            continue;
+        };
+        let start = annotation_range.start.max(visible.start);
+        let end = annotation_range.end.min(visible.end);
+        let class_name = match item.annotation.kind {
+            AnnotationKind::Highlight { .. } => "annotation-highlight",
+            AnnotationKind::Note { .. } => "annotation-note",
+        };
+        for scalar in start..end {
+            if let Some(value) = classes.get_mut(scalar.saturating_sub(visible.start)) {
+                *value = class_name;
+            }
+        }
+    }
+    let mut output = Vec::new();
+    let mut start = 0;
+    while start < chars.len() {
+        let class_name = classes[start];
+        let mut end = start + 1;
+        while end < chars.len() && classes[end] == class_name {
+            end += 1;
+        }
+        output.push(TextSegment {
+            text: chars[start..end].iter().collect(),
+            scalar_start: visible.start + start,
+            class_name,
+        });
+        start = end;
+    }
+    output
+}
+
+#[component]
+fn NotesPanel(
+    state: Signal<ReaderState>,
+    csrf: Signal<String>,
+    save_state: Signal<SaveState>,
+    progress_generation: Signal<u64>,
+    progress_in_flight: Signal<bool>,
+) -> Element {
+    let snapshot = state.read().clone();
+    let ReaderState::Ready(view) = snapshot else {
+        return rsx! {};
+    };
+    rsx! {
+        aside { id: "reader-notes-panel", class: "reader-drawer notes-drawer", tabindex: "-1", aria_label: "Личные заметки и выделения", onkeydown: move |event| if event.key() == Key::Escape { close_notes(state); },
+            div { class: "drawer-heading",
+                div { h2 { "Заметки" } p { class: "private-label", "Только для вас" } }
+                button { r#type: "button", aria_label: "Закрыть заметки", onclick: move |_| close_notes(state), "×" }
+            }
+            if view.annotations.is_empty() {
+                p { class: "notes-empty", "Выделите фрагмент на странице, чтобы сохранить highlight или заметку." }
+            } else {
+                ol { class: "annotation-list",
+                    for item in view.annotations.clone() {
+                        AnnotationPanelItem { state, csrf, save_state, progress_generation, progress_in_flight, item, editing: view.editing_note, draft: view.edit_note_draft.clone() }
+                    }
+                }
+            }
+            if let Some(message) = view.annotation_message { p { class: "library-alert", role: "alert", "{message}" } }
+            if let Some(draft) = view.conflict_draft { details { open: true, summary { "Несохранённая версия" } p { "{draft}" } } }
+        }
+    }
+}
+
+#[component]
+fn SelectionComposer(
+    state: Signal<ReaderState>,
+    csrf: Signal<String>,
+    save_state: Signal<SaveState>,
+    anchor: Anchor,
+    draft: String,
+) -> Element {
+    let highlight_anchor = anchor.clone();
+    rsx! {
+        div { class: "selection-actions", role: "toolbar", aria_label: "Действия с выделением",
+            button { r#type: "button", onclick: move |_| create_highlight(state, highlight_anchor.clone(), csrf, save_state), "Выделить" }
+            button { r#type: "button", onclick: move |_| if let ReaderState::Ready(current) = &mut *state.write() { current.note_draft.clear(); current.annotation_message = None; }, "Заметка" }
+        }
+        form { class: "note-composer", onsubmit: move |event| { event.prevent_default(); create_note(state, anchor.clone(), csrf, save_state); },
+            label { "Текст заметки", textarea { value: "{draft}", oninput: move |event| if let ReaderState::Ready(current) = &mut *state.write() { current.note_draft = event.value(); } } }
+            button { r#type: "submit", disabled: draft.trim().is_empty(), "Сохранить заметку" }
+        }
+    }
+}
+
+#[component]
+fn AnnotationPanelItem(
+    state: Signal<ReaderState>,
+    csrf: Signal<String>,
+    save_state: Signal<SaveState>,
+    progress_generation: Signal<u64>,
+    progress_in_flight: Signal<bool>,
+    item: AnnotationItem,
+    editing: Option<AnnotationId>,
+    draft: String,
+) -> Element {
+    let target_anchor = item.annotation.anchor.clone();
+    let delete_value = item.annotation.clone();
+    let retry_value = item.annotation.clone();
+    let edit_value = item.annotation.clone();
+    let annotation_id = item.annotation.id;
+    let quote = item.annotation.anchor.quote.clone();
+    rsx! {
+        li { class: "annotation-item",
+            button { class: "annotation-target", r#type: "button", onclick: move |_| navigate_to_annotation(state, &target_anchor, csrf, progress_generation, progress_in_flight, save_state), blockquote { "{quote}" } }
+            match item.annotation.kind.clone() {
+                AnnotationKind::Highlight { style } => rsx! { p { class: "annotation-kind", "Highlight · {style:?}" } },
+                AnnotationKind::Note { body } => rsx! {
+                    p { class: "annotation-kind", "Заметка" }
+                    p { "{body}" }
+                    button { r#type: "button", onclick: move |_| if let ReaderState::Ready(current) = &mut *state.write() { current.editing_note = Some(annotation_id); current.edit_note_draft = body.clone(); current.conflict_draft = None; }, "Изменить" }
+                },
+            }
+            button { class: "danger-link", r#type: "button", onclick: move |_| delete_annotation_optimistic(state, delete_value.clone(), csrf, save_state), "Удалить" }
+            if item.sync_state == ItemSyncState::Saving { span { role: "status", "Сохраняем…" } }
+            if item.sync_state == ItemSyncState::Failed { button { r#type: "button", onclick: move |_| retry_failed_annotation(state, retry_value.clone(), csrf, save_state), "Повторить" } }
+            if item.sync_state == ItemSyncState::Conflicted { p { class: "annotation-conflict", role: "alert", "Заметка изменилась в другом окне. Ваш текст сохранён в редакторе." } }
+            if editing == Some(annotation_id) {
+                form { class: "note-editor", onsubmit: move |event| { event.prevent_default(); update_note_optimistic(state, edit_value.clone(), csrf, save_state); },
+                    label { "Редактировать заметку", textarea { value: "{draft}", oninput: move |event| if let ReaderState::Ready(current) = &mut *state.write() { current.edit_note_draft = event.value(); } } }
+                    button { r#type: "submit", disabled: draft.trim().is_empty(), "Сохранить изменения" }
+                }
+            }
+        }
+    }
+}
+
+fn capture_browser_selection(mut state: Signal<ReaderState>) {
+    let result = (|| -> Result<Anchor, String> {
+        let window = web_sys::window().ok_or_else(|| "Browser window недоступен".to_owned())?;
+        let selection = window
+            .get_selection()
+            .map_err(|_| "Browser Selection недоступен".to_owned())?
+            .ok_or_else(|| "Выделение пусто".to_owned())?;
+        if selection.is_collapsed() || selection.range_count() == 0 {
+            return Err("Выделение пусто".to_owned());
+        }
+        let range = selection
+            .get_range_at(0)
+            .map_err(|_| "Не удалось прочитать browser Range".to_owned())?;
+        let start_node = range
+            .start_container()
+            .map_err(|_| "Начало выделения вне текста книги".to_owned())?;
+        let end_node = range
+            .end_container()
+            .map_err(|_| "Конец выделения вне текста книги".to_owned())?;
+        let ReaderState::Ready(view) = &*state.read() else {
+            return Err("Reader ещё не готов".to_owned());
+        };
+        let (start_path, start_offset) = selection_boundary(
+            &view.plan,
+            &start_node,
+            range.start_offset().unwrap_or_default(),
+        )?;
+        let (end_path, end_offset) = selection_boundary(
+            &view.plan,
+            &end_node,
+            range.end_offset().unwrap_or_default(),
+        )?;
+        let anchor = view
+            .plan
+            .anchor_from_selection(&start_path, start_offset, &end_path, end_offset)
+            .map_err(|error| error.to_string())?;
+        selection
+            .remove_all_ranges()
+            .map_err(|_| "Не удалось очистить browser Selection".to_owned())?;
+        Ok(anchor)
+    })();
+    if let ReaderState::Ready(view) = &mut *state.write() {
+        match result {
+            Ok(anchor) => {
+                view.selected_anchor = Some(anchor);
+                view.annotation_message = None;
+            }
+            Err(error) if error != "Выделение пусто" => {
+                view.annotation_message = Some(error)
+            }
+            Err(_) => {}
+        }
+    }
+}
+
+fn selection_boundary(
+    plan: &RenderPlan,
+    node: &Node,
+    utf16_offset: u32,
+) -> Result<(Vec<String>, usize), String> {
+    let element = source_element(node)
+        .ok_or_else(|| "Выделение должно начинаться и заканчиваться в тексте книги".to_owned())?;
+    let node_id = element
+        .get_attribute("data-node-id")
+        .ok_or_else(|| "DOM fragment не содержит stable node id".to_owned())?;
+    let block = plan
+        .blocks
+        .iter()
+        .find(|block| block.node_id == node_id)
+        .ok_or_else(|| "DOM fragment не принадлежит ReadingDocument".to_owned())?;
+    let fragment_start = element
+        .get_attribute("data-scalar-start")
+        .and_then(|value| value.parse::<usize>().ok())
+        .ok_or_else(|| "DOM fragment не содержит scalar offset".to_owned())?;
+    let fragment_text = element.text_content().unwrap_or_default();
+    let boundary_utf16 = if node.dyn_ref::<DomElement>().is_some() {
+        let children = node.child_nodes();
+        let child_limit = utf16_offset.min(children.length());
+        let mut length = 0_u32;
+        for index in 0..child_limit {
+            if let Some(child) = children.item(index) {
+                length = length.saturating_add(
+                    child
+                        .text_content()
+                        .unwrap_or_default()
+                        .encode_utf16()
+                        .count()
+                        .min(u32::MAX as usize) as u32,
+                );
+            }
+        }
+        length
+    } else {
+        utf16_offset
+    };
+    let local_offset = scalar_offset_from_utf16(&fragment_text, boundary_utf16)?;
+    Ok((block.node_path.clone(), fragment_start + local_offset))
+}
+
+fn source_element(node: &Node) -> Option<DomElement> {
+    let mut current = Some(node.clone());
+    while let Some(node) = current {
+        if let Some(element) = node.dyn_ref::<DomElement>() {
+            if element.get_attribute("data-reader-source").as_deref() == Some("true") {
+                return Some(element.clone());
+            }
+        }
+        current = node.parent_node();
+    }
+    None
+}
+
+fn scalar_offset_from_utf16(text: &str, offset: u32) -> Result<usize, String> {
+    let mut utf16 = 0_u32;
+    for (scalar, character) in text.chars().enumerate() {
+        if utf16 == offset {
+            return Ok(scalar);
+        }
+        utf16 = utf16.saturating_add(character.len_utf16() as u32);
+        if utf16 > offset {
+            return Err("Граница Selection попала внутрь Unicode scalar".to_owned());
+        }
+    }
+    if utf16 == offset {
+        Ok(text.chars().count())
+    } else {
+        Err("Граница Selection выходит за пределы fragment".to_owned())
+    }
+}
+
+fn create_highlight(
+    state: Signal<ReaderState>,
+    anchor: Anchor,
+    csrf: Signal<String>,
+    save_state: Signal<SaveState>,
+) {
+    create_annotation_optimistic(
+        state,
+        anchor,
+        AnnotationKind::Highlight {
+            style: HighlightStyle::Yellow,
+        },
+        csrf,
+        save_state,
+    );
+}
+
+fn create_note(
+    state: Signal<ReaderState>,
+    anchor: Anchor,
+    csrf: Signal<String>,
+    save_state: Signal<SaveState>,
+) {
+    let body = match &*state.read() {
+        ReaderState::Ready(view) => view.note_draft.trim().to_owned(),
+        _ => return,
+    };
+    if !body.is_empty() {
+        create_annotation_optimistic(
+            state,
+            anchor,
+            AnnotationKind::Note { body },
+            csrf,
+            save_state,
+        );
+    }
+}
+
+fn create_annotation_optimistic(
+    mut state: Signal<ReaderState>,
+    anchor: Anchor,
+    kind: AnnotationKind,
+    csrf: Signal<String>,
+    save_state: Signal<SaveState>,
+) {
+    let (material_id, revision_id) = match &*state.read() {
+        ReaderState::Ready(view) => (view.entry.id, view.document.revision_id),
+        _ => return,
+    };
+    let temporary_id = Uuid::now_v7();
+    let temporary = Annotation {
+        id: temporary_id,
+        material_id,
+        revision_id,
+        anchor: anchor.clone(),
+        kind: kind.clone(),
+        revision: 0,
+        created_at: 0,
+        updated_at: 0,
+    };
+    let pending = PendingMutation::Create {
+        command: Box::new(CreateAnnotationCommand {
+            material_id,
+            revision_id,
+            anchor,
+            kind,
+        }),
+        idempotency_key: Uuid::now_v7().to_string(),
+    };
+    if let ReaderState::Ready(view) = &mut *state.write() {
+        view.annotations.push(AnnotationItem {
+            annotation: temporary,
+            sync_state: ItemSyncState::Saving,
+            pending: Some(pending.clone()),
+        });
+        view.selected_anchor = None;
+        view.note_draft.clear();
+        view.annotation_message = None;
+    }
+    begin_save(save_state, pending_key(&pending), pending_subject(&pending));
+    dispatch_pending(state, temporary_id, pending, csrf, save_state);
+}
+
+fn retry_failed_annotation(
+    mut state: Signal<ReaderState>,
+    annotation: Annotation,
+    csrf: Signal<String>,
+    save_state: Signal<SaveState>,
+) {
+    let pending = match &*state.read() {
+        ReaderState::Ready(view) => view
+            .annotations
+            .iter()
+            .find(|item| item.annotation.id == annotation.id)
+            .and_then(|item| item.pending.clone()),
+        _ => None,
+    };
+    if let Some(pending) = pending {
+        if let ReaderState::Ready(view) = &mut *state.write() {
+            if let Some(item) = view
+                .annotations
+                .iter_mut()
+                .find(|item| item.annotation.id == annotation.id)
+            {
+                item.sync_state = ItemSyncState::Saving;
+            }
+        }
+        begin_save(save_state, pending_key(&pending), pending_subject(&pending));
+        dispatch_pending(state, annotation.id, pending, csrf, save_state);
+    }
+}
+
+fn update_note_optimistic(
+    mut state: Signal<ReaderState>,
+    previous: Annotation,
+    csrf: Signal<String>,
+    save_state: Signal<SaveState>,
+) {
+    let draft = match &*state.read() {
+        ReaderState::Ready(view) => view.edit_note_draft.trim().to_owned(),
+        _ => return,
+    };
+    if draft.is_empty() {
+        return;
+    }
+    if let ReaderState::Ready(view) = &mut *state.write() {
+        if let Some(item) = view
+            .annotations
+            .iter_mut()
+            .find(|item| item.annotation.id == previous.id)
+        {
+            item.annotation.kind = AnnotationKind::Note {
+                body: draft.clone(),
+            };
+            item.sync_state = ItemSyncState::Saving;
+        }
+        view.editing_note = None;
+    }
+    let command = UpdateAnnotationCommand {
+        material_id: previous.material_id,
+        annotation_id: previous.id,
+        expected_revision: previous.revision,
+        kind: AnnotationKind::Note {
+            body: draft.clone(),
+        },
+    };
+    let pending = PendingMutation::Update {
+        command,
+        idempotency_key: Uuid::now_v7().to_string(),
+    };
+    begin_save(save_state, pending_key(&pending), pending_subject(&pending));
+    if let ReaderState::Ready(view) = &mut *state.write() {
+        if let Some(item) = view
+            .annotations
+            .iter_mut()
+            .find(|item| item.annotation.id == previous.id)
+        {
+            item.pending = Some(pending.clone());
+        }
+    }
+    dispatch_pending(state, previous.id, pending, csrf, save_state);
+}
+
+fn delete_annotation_optimistic(
+    mut state: Signal<ReaderState>,
+    annotation: Annotation,
+    csrf: Signal<String>,
+    save_state: Signal<SaveState>,
+) {
+    let confirmed = web_sys::window()
+        .and_then(|window| window.confirm_with_message("Удалить эту аннотацию?").ok())
+        .unwrap_or(false);
+    if !confirmed {
+        return;
+    }
+    let command = DeleteAnnotationCommand {
+        material_id: annotation.material_id,
+        annotation_id: annotation.id,
+        expected_revision: annotation.revision,
+    };
+    let pending = PendingMutation::Delete {
+        command,
+        idempotency_key: Uuid::now_v7().to_string(),
+    };
+    if let ReaderState::Ready(view) = &mut *state.write() {
+        if let Some(item) = view
+            .annotations
+            .iter_mut()
+            .find(|item| item.annotation.id == annotation.id)
+        {
+            item.sync_state = ItemSyncState::Saving;
+            item.pending = Some(pending.clone());
+        }
+    }
+    begin_save(save_state, pending_key(&pending), pending_subject(&pending));
+    dispatch_pending(state, annotation.id, pending, csrf, save_state);
+}
+
+fn replace_annotation(
+    state: &mut Signal<ReaderState>,
+    old_id: AnnotationId,
+    annotation: Annotation,
+) {
+    if let ReaderState::Ready(view) = &mut *state.write() {
+        if let Some(item) = view
+            .annotations
+            .iter_mut()
+            .find(|item| item.annotation.id == old_id)
+        {
+            item.annotation = annotation;
+            item.sync_state = ItemSyncState::Synced;
+            item.pending = None;
+        }
+        view.annotation_message = None;
+        view.conflict_draft = None;
+    }
+}
+
+fn dispatch_pending(
+    mut state: Signal<ReaderState>,
+    local_id: AnnotationId,
+    pending: PendingMutation,
+    csrf: Signal<String>,
+    save_state: Signal<SaveState>,
+) {
+    let csrf_token = csrf.read().clone();
+    let save_key = pending_key(&pending).to_owned();
+    spawn_forever(async move {
+        let result = match &pending {
+            PendingMutation::Create {
+                command,
+                idempotency_key,
+            } => post_annotation(command, idempotency_key, &csrf_token).await,
+            PendingMutation::Update {
+                command,
+                idempotency_key,
+            } => put_annotation(command, idempotency_key, &csrf_token).await,
+            PendingMutation::Delete {
+                command,
+                idempotency_key,
+            } => delete_annotation_api(command, idempotency_key, &csrf_token).await,
+        };
+        match result {
+            Ok(annotation) => {
+                if matches!(pending, PendingMutation::Delete { .. }) {
+                    if let ReaderState::Ready(view) = &mut *state.write() {
+                        view.annotations
+                            .retain(|item| item.annotation.id != local_id);
+                    }
+                } else {
+                    replace_annotation(&mut state, local_id, annotation);
+                }
+                finish_save(save_state, &save_key, Ok(()));
+            }
+            Err(ApiMutationError::Conflict) => {
+                let (material_id, draft) = match &*state.read() {
+                    ReaderState::Ready(view) => (view.entry.id, view.edit_note_draft.clone()),
+                    _ => return,
+                };
+                match get_json::<Vec<Annotation>>(&format!("/materials/{material_id}/annotations"))
+                    .await
+                {
+                    Ok(annotations) => {
+                        if let ReaderState::Ready(view) = &mut *state.write() {
+                            let server_annotation = annotations
+                                .into_iter()
+                                .find(|annotation| annotation.id == local_id);
+                            match (
+                                view.annotations
+                                    .iter_mut()
+                                    .find(|item| item.annotation.id == local_id),
+                                server_annotation,
+                            ) {
+                                (Some(item), Some(annotation)) => {
+                                    item.annotation = annotation;
+                                    item.sync_state = ItemSyncState::Conflicted;
+                                    item.pending = None;
+                                }
+                                (None, Some(annotation)) => view.annotations.push(AnnotationItem {
+                                    annotation,
+                                    sync_state: ItemSyncState::Conflicted,
+                                    pending: None,
+                                }),
+                                (Some(item), None) => {
+                                    item.sync_state = ItemSyncState::Conflicted;
+                                    item.pending = None;
+                                }
+                                (None, None) => {}
+                            }
+                            view.conflict_draft = (!draft.is_empty()).then_some(draft);
+                            view.editing_note = view
+                                .annotations
+                                .iter()
+                                .any(|item| item.annotation.id == local_id)
+                                .then_some(local_id);
+                            view.annotation_message = Some(
+                                "Серверная версия загружена; ваш текст сохранён отдельно"
+                                    .to_owned(),
+                            );
+                        }
+                        finish_save(save_state, &save_key, Ok(()));
+                    }
+                    Err(error) => {
+                        mark_annotation_failed(&mut state, local_id, error.clone());
+                        finish_save(save_state, &save_key, Err(error));
+                    }
+                }
+            }
+            Err(error) => {
+                mark_annotation_failed(&mut state, local_id, error.message());
+                finish_save(save_state, &save_key, Err(error.message()));
+            }
+        }
+    });
+}
+
+fn pending_subject(pending: &PendingMutation) -> &'static str {
+    match pending {
+        PendingMutation::Create { .. } => "аннотацию",
+        PendingMutation::Update { .. } => "заметку",
+        PendingMutation::Delete { .. } => "удаление",
+    }
+}
+
+fn pending_key(pending: &PendingMutation) -> &str {
+    match pending {
+        PendingMutation::Create {
+            idempotency_key, ..
+        }
+        | PendingMutation::Update {
+            idempotency_key, ..
+        }
+        | PendingMutation::Delete {
+            idempotency_key, ..
+        } => idempotency_key,
+    }
+}
+
+fn begin_save(mut save_state: Signal<SaveState>, key: &str, subject: &'static str) {
+    let mut current = save_state.write();
+    current.pending = current.pending.saturating_add(1);
+    current.latest_subject = subject;
+    current.failures.remove(key);
+}
+
+fn finish_save(mut save_state: Signal<SaveState>, key: &str, result: Result<(), String>) {
+    let mut current = save_state.write();
+    current.pending = current.pending.saturating_sub(1);
+    if let Err(error) = result {
+        current.failures.insert(key.to_owned(), error);
+    }
+}
+
+fn mark_annotation_failed(state: &mut Signal<ReaderState>, id: AnnotationId, message: String) {
+    if let ReaderState::Ready(view) = &mut *state.write() {
+        if let Some(item) = view
+            .annotations
+            .iter_mut()
+            .find(|item| item.annotation.id == id)
+        {
+            item.sync_state = ItemSyncState::Failed;
+        }
+        view.annotation_message = Some(message);
+    }
+}
+
+fn navigate_to_annotation(
+    mut state: Signal<ReaderState>,
+    anchor: &Anchor,
+    csrf: Signal<String>,
+    generation: Signal<u64>,
+    in_flight: Signal<bool>,
+    save_state: Signal<SaveState>,
+) {
+    if let ReaderState::Ready(view) = &mut *state.write() {
+        let resolved = match view.plan.resolve_anchor(anchor) {
+            AnchorResolution::Resolved { anchor, .. } => anchor,
+            AnchorResolution::Unresolved => {
+                view.annotation_message =
+                    Some("Anchor не удалось разрешить в текущей версии".to_owned());
+                return;
+            }
+        };
+        let offset = resolved.text_range.map_or(0, |range| range.start);
+        if let Some(page) = view.page_map.page_for_boundary(&resolved.node_path, offset) {
+            view.navigation.jump_to(page, view.page_map.pages.len());
+            view.notes_open = false;
+            let node_id = view
+                .plan
+                .block(&resolved.node_path)
+                .map(|block| block.node_id.clone());
+            persist_current(view, csrf, generation, in_flight, save_state);
+            if let Some(node_id) = node_id {
+                spawn(async move {
+                    browser_delay(20).await;
+                    focus_reader_node(&node_id);
+                });
+            }
+        } else {
+            view.annotation_message =
+                Some("Anchor не удалось разрешить в текущей версии".to_owned());
+        }
+    }
+}
+
+fn focus_reader_node(node_id: &str) {
+    let Some(document) = web_sys::window().and_then(|window| window.document()) else {
+        return;
+    };
+    let Some(element) = document.get_element_by_id(node_id) else {
+        return;
+    };
+    let _ = element.set_attribute("tabindex", "-1");
+    if let Ok(element) = element.dyn_into::<HtmlElement>() {
+        let _ = element.focus();
+    }
+}
+
+fn close_notes(mut state: Signal<ReaderState>) {
+    if let ReaderState::Ready(view) = &mut *state.write() {
+        view.notes_open = false;
+    }
+    spawn(async move {
+        browser_delay(20).await;
+        focus_reader_node("reader-notes-button");
+    });
+}
+
+fn export_annotations(material_id: Uuid) {
+    spawn(async move {
+        let Ok(response) = Request::get(&format!(
+            "{API_BASE}/materials/{material_id}/annotations/export"
+        ))
+        .credentials(RequestCredentials::Include)
+        .send()
+        .await
+        else {
+            return;
+        };
+        if !response.ok() {
+            return;
+        }
+        let Ok(json) = response.text().await else {
+            return;
+        };
+        let parts = js_sys::Array::new();
+        parts.push(&wasm_bindgen::JsValue::from_str(&json));
+        let options = web_sys::BlobPropertyBag::new();
+        options.set_type("application/json");
+        let Ok(blob) = web_sys::Blob::new_with_str_sequence_and_options(&parts, &options) else {
+            return;
+        };
+        let Ok(url) = web_sys::Url::create_object_url_with_blob(&blob) else {
+            return;
+        };
+        let Some(document) = web_sys::window().and_then(|window| window.document()) else {
+            return;
+        };
+        let Ok(element) = document.create_element("a") else {
+            return;
+        };
+        let _ = element.set_attribute("href", &url);
+        let _ = element.set_attribute("download", &format!("lumi-annotations-{material_id}.json"));
+        if let Ok(element) = element.dyn_into::<HtmlElement>() {
+            element.click();
+        }
+        let _ = web_sys::Url::revoke_object_url(&url);
+    });
+}
+
+#[derive(Clone, Eq, PartialEq)]
+enum ApiMutationError {
+    Conflict,
+    Unauthorized,
+    Other(String),
+}
+
+impl ApiMutationError {
+    fn message(&self) -> String {
+        match self {
+            Self::Conflict => "Конфликт версии: сервер сохранил более новую запись".to_owned(),
+            Self::Unauthorized => "Сессия истекла — войдите снова".to_owned(),
+            Self::Other(message) => message.clone(),
+        }
+    }
+}
+
+async fn post_annotation(
+    command: &CreateAnnotationCommand,
+    idempotency_key: &str,
+    csrf: &str,
+) -> Result<Annotation, ApiMutationError> {
+    annotation_request(
+        Request::post(&format!(
+            "{API_BASE}/materials/{}/annotations",
+            command.material_id
+        )),
+        command,
+        idempotency_key,
+        csrf,
+    )
+    .await
+}
+
+async fn put_annotation(
+    command: &UpdateAnnotationCommand,
+    idempotency_key: &str,
+    csrf: &str,
+) -> Result<Annotation, ApiMutationError> {
+    annotation_request(
+        Request::put(&format!(
+            "{API_BASE}/materials/{}/annotations/{}",
+            command.material_id, command.annotation_id
+        )),
+        command,
+        idempotency_key,
+        csrf,
+    )
+    .await
+}
+
+async fn delete_annotation_api(
+    command: &DeleteAnnotationCommand,
+    idempotency_key: &str,
+    csrf: &str,
+) -> Result<Annotation, ApiMutationError> {
+    annotation_request(
+        Request::delete(&format!(
+            "{API_BASE}/materials/{}/annotations/{}",
+            command.material_id, command.annotation_id
+        )),
+        command,
+        idempotency_key,
+        csrf,
+    )
+    .await
+}
+
+async fn annotation_request<T: serde::Serialize>(
+    request: gloo_net::http::RequestBuilder,
+    command: &T,
+    idempotency_key: &str,
+    csrf: &str,
+) -> Result<Annotation, ApiMutationError> {
+    let request = request
+        .credentials(RequestCredentials::Include)
+        .header("X-Lumi-CSRF", csrf)
+        .header("Idempotency-Key", idempotency_key)
+        .json(command)
+        .map_err(|error| ApiMutationError::Other(error.to_string()))?;
+    let response = request
+        .send()
+        .await
+        .map_err(|error| ApiMutationError::Other(error.to_string()))?;
+    match response.status() {
+        200..=299 => response
+            .json()
+            .await
+            .map_err(|error| ApiMutationError::Other(error.to_string())),
+        401 => Err(ApiMutationError::Unauthorized),
+        409 => Err(ApiMutationError::Conflict),
+        status => Err(ApiMutationError::Other(format!(
+            "Lumi API вернул HTTP {status}"
+        ))),
+    }
+}
+
 fn move_page(
     mut state: Signal<ReaderState>,
     page: usize,
     csrf: Signal<String>,
     generation: Signal<u64>,
+    in_flight: Signal<bool>,
+    save_state: Signal<SaveState>,
 ) {
     if let ReaderState::Ready(current) = &mut *state.write() {
         current
             .navigation
             .move_to(page, current.page_map.pages.len());
-        persist_current(current, csrf, generation);
+        persist_current(current, csrf, generation, in_flight, save_state);
     }
 }
 
@@ -314,13 +1279,15 @@ fn jump_to_path(
     path: &[String],
     csrf: Signal<String>,
     generation: Signal<u64>,
+    in_flight: Signal<bool>,
+    save_state: Signal<SaveState>,
 ) {
     if let ReaderState::Ready(current) = &mut *state.write() {
         if let Some(page) = current.page_map.page_for_path(path) {
             current
                 .navigation
                 .jump_to(page, current.page_map.pages.len());
-            persist_current(current, csrf, generation);
+            persist_current(current, csrf, generation, in_flight, save_state);
         }
     }
 }
@@ -330,6 +1297,8 @@ fn activate_link(
     link: ReadingLink,
     csrf: Signal<String>,
     generation: Signal<u64>,
+    in_flight: Signal<bool>,
+    save_state: Signal<SaveState>,
 ) {
     if let ReaderState::Ready(current) = &mut *state.write() {
         if link.kind == ReadingLinkKind::Footnote {
@@ -338,7 +1307,7 @@ fn activate_link(
             current
                 .navigation
                 .jump_to(page, current.page_map.pages.len());
-            persist_current(current, csrf, generation);
+            persist_current(current, csrf, generation, in_flight, save_state);
         }
     }
 }
@@ -347,20 +1316,24 @@ fn update_settings(
     mut state: Signal<ReaderState>,
     csrf: Signal<String>,
     mut generation: Signal<u64>,
+    mut in_flight: Signal<bool>,
+    save_state: Signal<SaveState>,
     update: impl FnOnce(&mut ReaderSettings),
 ) {
     if let ReaderState::Ready(current) = &mut *state.write() {
-        let current_path = current
+        let current_boundary = current
             .page_map
             .pages
             .get(current.navigation.current())
-            .map(|page| page.start.node_path.clone());
+            .map(|page| page.start.clone());
         update(&mut current.settings);
         current.settings = current.settings.normalized();
         if let Ok(page_map) = browser_page_map(&current.plan, current.settings) {
-            let restored = current_path
-                .as_deref()
-                .and_then(|path| page_map.page_for_path(path))
+            let restored = current_boundary
+                .as_ref()
+                .and_then(|boundary| {
+                    page_map.page_for_boundary(&boundary.node_path, boundary.offset)
+                })
                 .unwrap_or_default();
             current.page_map = page_map;
             current
@@ -371,10 +1344,23 @@ fn update_settings(
         let csrf_token = csrf.read().clone();
         let next_generation = generation().saturating_add(1);
         generation.set(next_generation);
+        begin_save(save_state, "settings", "настройки");
         spawn(async move {
             browser_delay(180).await;
+            while generation() == next_generation && in_flight() {
+                browser_delay(40).await;
+            }
+            if generation() != next_generation {
+                finish_save(save_state, "settings", Ok(()));
+                return;
+            }
+            in_flight.set(true);
+            let result = save_settings(settings, &csrf_token).await;
+            in_flight.set(false);
             if generation() == next_generation {
-                let _ = save_settings(settings, &csrf_token).await;
+                finish_save(save_state, "settings", result);
+            } else {
+                finish_save(save_state, "settings", Ok(()));
             }
         });
     }
@@ -392,7 +1378,13 @@ async fn browser_delay(milliseconds: i32) {
     let _ = JsFuture::from(promise).await;
 }
 
-fn persist_current(current: &ReaderView, csrf: Signal<String>, mut generation: Signal<u64>) {
+fn persist_current(
+    current: &ReaderView,
+    csrf: Signal<String>,
+    mut generation: Signal<u64>,
+    mut in_flight: Signal<bool>,
+    save_state: Signal<SaveState>,
+) {
     let Some(page) = current.page_map.pages.get(current.navigation.current()) else {
         return;
     };
@@ -415,10 +1407,23 @@ fn persist_current(current: &ReaderView, csrf: Signal<String>, mut generation: S
     let csrf_token = csrf.read().clone();
     let next_generation = generation().saturating_add(1);
     generation.set(next_generation);
+    begin_save(save_state, "progress", "позицию");
     spawn(async move {
         browser_delay(120).await;
+        while generation() == next_generation && in_flight() {
+            browser_delay(40).await;
+        }
+        if generation() != next_generation {
+            finish_save(save_state, "progress", Ok(()));
+            return;
+        }
+        in_flight.set(true);
+        let result = save_progress(command, &csrf_token).await;
+        in_flight.set(false);
         if generation() == next_generation {
-            let _ = save_progress(command, &csrf_token).await;
+            finish_save(save_state, "progress", result);
+        } else {
+            finish_save(save_state, "progress", Ok(()));
         }
     });
 }
@@ -431,6 +1436,7 @@ async fn load_reader(
         ReadingDocument,
         ReaderSettings,
         Option<ReadingProgress>,
+        Vec<Annotation>,
     ),
     String,
 > {
@@ -441,7 +1447,8 @@ async fn load_reader(
     let document = get_json(&format!("/revisions/{revision_id}/reading-document")).await?;
     let settings = get_json("/reader/settings").await?;
     let progress = get_json(&format!("/materials/{material_id}/progress")).await?;
-    Ok((entry, document, settings, progress))
+    let annotations = get_json(&format!("/materials/{material_id}/annotations")).await?;
+    Ok((entry, document, settings, progress, annotations))
 }
 
 async fn get_json<T: for<'de> serde::Deserialize<'de>>(path: &str) -> Result<T, String> {

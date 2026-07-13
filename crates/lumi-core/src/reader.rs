@@ -133,6 +133,390 @@ impl RenderPlan {
     pub fn block(&self, path: &[String]) -> Option<&RenderBlock> {
         self.blocks.iter().find(|block| block.node_path == path)
     }
+
+    /// Build a complete source-backed anchor from adapter selection boundaries.
+    ///
+    /// Offsets are Unicode scalar-value offsets. The selection may span
+    /// adjacent render blocks, but both boundaries must belong to this plan.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for reversed, empty, missing or out-of-bounds ranges.
+    pub fn anchor_from_selection(
+        &self,
+        start_path: &[String],
+        start_offset: usize,
+        end_path: &[String],
+        end_offset: usize,
+    ) -> Result<Anchor, AnchorSelectionError> {
+        let start_index = self
+            .blocks
+            .iter()
+            .position(|block| block.node_path == start_path)
+            .ok_or(AnchorSelectionError::UnknownStart)?;
+        let end_index = self
+            .blocks
+            .iter()
+            .position(|block| block.node_path == end_path)
+            .ok_or(AnchorSelectionError::UnknownEnd)?;
+        if start_index > end_index {
+            return Err(AnchorSelectionError::Reversed);
+        }
+        let start_block = &self.blocks[start_index];
+        let end_block = &self.blocks[end_index];
+        let start_text = start_block.text.as_deref().unwrap_or_default();
+        let end_text = end_block.text.as_deref().unwrap_or_default();
+        if start_offset > start_text.chars().count() || end_offset > end_text.chars().count() {
+            return Err(AnchorSelectionError::OutOfBounds);
+        }
+        if start_index == end_index && start_offset >= end_offset {
+            return Err(AnchorSelectionError::Empty);
+        }
+
+        let mut quote_parts = Vec::new();
+        for (index, block) in self.blocks[start_index..=end_index].iter().enumerate() {
+            let text = block.text.as_deref().unwrap_or_default();
+            let from = if index == 0 { start_offset } else { 0 };
+            let to = if start_index + index == end_index {
+                end_offset
+            } else {
+                text.chars().count()
+            };
+            let part: String = text
+                .chars()
+                .skip(from)
+                .take(to.saturating_sub(from))
+                .collect();
+            if !part.is_empty() {
+                quote_parts.push(part);
+            }
+        }
+        let quote = quote_parts.join("\n");
+        if quote.is_empty() {
+            return Err(AnchorSelectionError::Empty);
+        }
+        let prefix = start_text
+            .chars()
+            .take(start_offset)
+            .collect::<Vec<_>>()
+            .into_iter()
+            .rev()
+            .take(48)
+            .collect::<Vec<_>>()
+            .into_iter()
+            .rev()
+            .collect();
+        let suffix = end_text.chars().skip(end_offset).take(48).collect();
+        let content_hash = if start_index == end_index {
+            start_block.anchor.content_hash.clone()
+        } else {
+            crate::content_hash(
+                self.blocks[start_index..=end_index]
+                    .iter()
+                    .flat_map(|block| block.anchor.content_hash.as_bytes())
+                    .copied()
+                    .collect::<Vec<_>>()
+                    .as_slice(),
+            )
+        };
+
+        Ok(Anchor {
+            revision_id: self.revision_id,
+            node_path: start_path.to_vec(),
+            end_node_path: end_path.to_vec(),
+            text_range: Some(TextRange {
+                start: start_offset,
+                end: end_offset,
+            }),
+            quote,
+            prefix,
+            suffix,
+            content_hash,
+            source_locator: start_block.anchor.source_locator.clone(),
+            end_source_locator: end_block.anchor.source_locator.clone(),
+            page_rects: Vec::new(),
+        })
+    }
+
+    /// Return the selected range that intersects one render block.
+    #[must_use]
+    pub fn anchor_range_for_block(&self, anchor: &Anchor, path: &[String]) -> Option<TextRange> {
+        let start_index = self
+            .blocks
+            .iter()
+            .position(|block| block.node_path == anchor.node_path)?;
+        let end_index = self
+            .blocks
+            .iter()
+            .position(|block| block.node_path == anchor.effective_end_node_path())?;
+        let index = self
+            .blocks
+            .iter()
+            .position(|block| block.node_path == path)?;
+        if index < start_index || index > end_index {
+            return None;
+        }
+        let block = &self.blocks[index];
+        let end = block.text.as_deref().map_or(1, |text| text.chars().count());
+        let selection = anchor.text_range?;
+        Some(TextRange {
+            start: if index == start_index {
+                selection.start
+            } else {
+                0
+            },
+            end: if index == end_index {
+                selection.end
+            } else {
+                end
+            },
+        })
+    }
+}
+
+/// Invalid browser/native selection mapped to a render plan.
+#[derive(Clone, Copy, Debug, Eq, Error, PartialEq)]
+pub enum AnchorSelectionError {
+    /// Start block does not belong to the render plan.
+    #[error("selection start does not belong to the reading document")]
+    UnknownStart,
+    /// End block does not belong to the render plan.
+    #[error("selection end does not belong to the reading document")]
+    UnknownEnd,
+    /// Adapter reported boundaries in reverse source order.
+    #[error("selection boundaries are reversed")]
+    Reversed,
+    /// Selection does not contain source text.
+    #[error("selection is empty")]
+    Empty,
+    /// One of the scalar offsets lies outside its source block.
+    #[error("selection offset lies outside source text")]
+    OutOfBounds,
+}
+
+/// Recovery strategy used to resolve a persisted anchor against a render plan.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AnchorResolutionStrategy {
+    /// Exact revision, normalized path, offsets and content hash.
+    ExactPath,
+    /// Exact quote found inside the original normalized block.
+    QuoteInBlock,
+    /// Quote and surrounding context matched another block.
+    QuoteWithContext,
+    /// Source locator and checksum identified the normalized block.
+    SourceLocatorChecksum,
+    /// Bounded character-distance match inside the original block.
+    FuzzyLocal,
+}
+
+/// Result of the bounded anchor recovery ladder.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", tag = "status")]
+pub enum AnchorResolution {
+    /// Anchor resolved to a current source-backed range.
+    Resolved {
+        /// Recovered anchor for the current plan revision.
+        anchor: Box<Anchor>,
+        /// Recovery strategy used.
+        strategy: AnchorResolutionStrategy,
+        /// Confidence from 0.0 to 1.0.
+        confidence: f32,
+    },
+    /// No candidate met the conservative recovery threshold.
+    Unresolved,
+}
+
+impl RenderPlan {
+    /// Resolve an anchor using the accepted bounded recovery ladder.
+    #[must_use]
+    pub fn resolve_anchor(&self, anchor: &Anchor) -> AnchorResolution {
+        if anchor.revision_id == self.revision_id {
+            if let Some(range) = anchor.text_range {
+                if let Ok(expected) = self.anchor_from_selection(
+                    &anchor.node_path,
+                    range.start,
+                    anchor.effective_end_node_path(),
+                    range.end,
+                ) {
+                    if anchor_payload_matches(anchor, &expected) {
+                        return AnchorResolution::Resolved {
+                            anchor: Box::new(expected),
+                            strategy: AnchorResolutionStrategy::ExactPath,
+                            confidence: 1.0,
+                        };
+                    }
+                }
+            }
+        }
+        if let Some(block) = self.block(&anchor.node_path) {
+            let matches = exact_quote_ranges(block.text.as_deref(), &anchor.quote);
+            if matches.len() == 1 {
+                return resolved_for_block(
+                    self,
+                    block,
+                    matches.first().copied(),
+                    AnchorResolutionStrategy::QuoteInBlock,
+                    0.94,
+                );
+            }
+        }
+
+        let context_candidates: Vec<_> = self
+            .blocks
+            .iter()
+            .flat_map(|block| {
+                exact_quote_ranges(block.text.as_deref(), &anchor.quote)
+                    .into_iter()
+                    .filter(|range| {
+                        context_matches(block.text.as_deref().unwrap_or_default(), *range, anchor)
+                    })
+                    .map(move |range| (block, range))
+            })
+            .collect();
+        if let [(block, range)] = context_candidates.as_slice() {
+            return resolved_for_block(
+                self,
+                block,
+                Some(*range),
+                AnchorResolutionStrategy::QuoteWithContext,
+                0.86,
+            );
+        }
+
+        if let Some(block) = anchor.source_locator.as_ref().and_then(|locator| {
+            self.blocks.iter().find(|block| {
+                block.anchor.source_locator.as_ref() == Some(locator)
+                    && block.anchor.content_hash == anchor.content_hash
+            })
+        }) {
+            return resolved_for_block(
+                self,
+                block,
+                anchor.text_range,
+                AnchorResolutionStrategy::SourceLocatorChecksum,
+                0.78,
+            );
+        }
+
+        if let Some(block) = self.block(&anchor.node_path) {
+            if let Some((range, confidence)) =
+                fuzzy_quote_range(block.text.as_deref(), &anchor.quote)
+            {
+                return resolved_for_block(
+                    self,
+                    block,
+                    Some(range),
+                    AnchorResolutionStrategy::FuzzyLocal,
+                    confidence,
+                );
+            }
+        }
+        AnchorResolution::Unresolved
+    }
+}
+
+fn anchor_payload_matches(left: &Anchor, right: &Anchor) -> bool {
+    left.revision_id == right.revision_id
+        && left.node_path == right.node_path
+        && left.effective_end_node_path() == right.effective_end_node_path()
+        && left.text_range == right.text_range
+        && left.quote == right.quote
+        && left.prefix == right.prefix
+        && left.suffix == right.suffix
+        && left.content_hash == right.content_hash
+        && left.source_locator == right.source_locator
+        && left
+            .end_source_locator
+            .as_ref()
+            .or(left.source_locator.as_ref())
+            == right.end_source_locator.as_ref()
+}
+
+fn resolved_for_block(
+    plan: &RenderPlan,
+    block: &RenderBlock,
+    range: Option<TextRange>,
+    strategy: AnchorResolutionStrategy,
+    confidence: f32,
+) -> AnchorResolution {
+    let Some(range) = range else {
+        return AnchorResolution::Unresolved;
+    };
+    match plan.anchor_from_selection(&block.node_path, range.start, &block.node_path, range.end) {
+        Ok(anchor) => AnchorResolution::Resolved {
+            anchor: Box::new(anchor),
+            strategy,
+            confidence,
+        },
+        Err(_) => AnchorResolution::Unresolved,
+    }
+}
+
+fn exact_quote_ranges(text: Option<&str>, quote: &str) -> Vec<TextRange> {
+    let Some(text) = text else {
+        return Vec::new();
+    };
+    if quote.is_empty() || quote.contains('\n') {
+        return Vec::new();
+    }
+    text.match_indices(quote)
+        .map(|(byte_start, _)| {
+            let start = text[..byte_start].chars().count();
+            TextRange {
+                start,
+                end: start + quote.chars().count(),
+            }
+        })
+        .collect()
+}
+
+fn context_matches(text: &str, range: TextRange, anchor: &Anchor) -> bool {
+    let prefix: String = text.chars().take(range.start).collect();
+    let suffix: String = text.chars().skip(range.end).collect();
+    (anchor.prefix.is_empty() || prefix.ends_with(&anchor.prefix))
+        && (anchor.suffix.is_empty() || suffix.starts_with(&anchor.suffix))
+}
+
+fn fuzzy_quote_range(text: Option<&str>, quote: &str) -> Option<(TextRange, f32)> {
+    let text: Vec<char> = text?.chars().collect();
+    let quote: Vec<char> = quote.chars().collect();
+    if quote.len() < 8 || text.len() < quote.len() {
+        return None;
+    }
+    let maximum_mismatches = (quote.len() / 10).clamp(1, 8);
+    let candidates: Vec<_> = text
+        .windows(quote.len())
+        .enumerate()
+        .map(|(start, candidate)| {
+            let mismatches = candidate
+                .iter()
+                .zip(&quote)
+                .filter(|(left, right)| left != right)
+                .count();
+            (start, mismatches)
+        })
+        .collect();
+    let mismatches = candidates.iter().map(|(_, value)| *value).min()?;
+    if mismatches > maximum_mismatches {
+        return None;
+    }
+    let mut best = candidates
+        .iter()
+        .filter(|(_, value)| *value == mismatches)
+        .map(|(start, _)| *start);
+    let start = best.next()?;
+    if best.next().is_some() {
+        return None;
+    }
+    let confidence = 1.0 - mismatches as f32 / quote.len() as f32;
+    Some((
+        TextRange {
+            start,
+            end: start + quote.len(),
+        },
+        confidence,
+    ))
 }
 
 fn append_render_blocks(
@@ -415,5 +799,140 @@ mod tests {
 
         assert_eq!(settings.font_size_px, 30);
         assert_eq!(settings.line_height_percent, 135);
+    }
+
+    #[test]
+    fn selection_anchor_retains_paths_quote_context_and_source_locators() {
+        let document = crate::import_epub_fixture(crate::UserId::now_v7(), &rich_epub_fixture())
+            .map(|imported| imported.reading_document);
+        assert!(document.is_ok());
+        let plan = RenderPlan::from_document(&document.unwrap_or_else(|_| unreachable!()));
+        let first = &plan.blocks[0];
+        let text = first.text.as_deref().unwrap_or_default();
+        let end = text.chars().count().min(8);
+
+        let anchor = plan.anchor_from_selection(&first.node_path, 1, &first.node_path, end);
+
+        assert!(anchor.is_ok());
+        let anchor = anchor.unwrap_or_else(|_| unreachable!());
+        assert_eq!(anchor.node_path, anchor.end_node_path);
+        assert!(!anchor.quote.is_empty());
+        assert!(anchor.source_locator.is_some());
+        assert!(anchor.end_source_locator.is_some());
+    }
+
+    #[test]
+    fn resolver_recovers_exact_quote_after_hash_change() {
+        let document = crate::import_epub_fixture(crate::UserId::now_v7(), &rich_epub_fixture())
+            .map(|imported| imported.reading_document);
+        assert!(document.is_ok());
+        let plan = RenderPlan::from_document(&document.unwrap_or_else(|_| unreachable!()));
+        let first = &plan.blocks[0];
+        let mut anchor = plan
+            .anchor_from_selection(&first.node_path, 0, &first.node_path, 8)
+            .unwrap_or_else(|_| unreachable!());
+        anchor.content_hash = "changed".to_owned();
+
+        let resolved = plan.resolve_anchor(&anchor);
+
+        assert!(matches!(
+            resolved,
+            AnchorResolution::Resolved {
+                strategy: AnchorResolutionStrategy::QuoteInBlock,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn resolver_keeps_unknown_quote_unresolved() {
+        let document = crate::import_epub_fixture(crate::UserId::now_v7(), &rich_epub_fixture())
+            .map(|imported| imported.reading_document);
+        assert!(document.is_ok());
+        let plan = RenderPlan::from_document(&document.unwrap_or_else(|_| unreachable!()));
+        let first = &plan.blocks[0];
+        let mut anchor = first.anchor.clone();
+        anchor.quote = "this quote does not exist in the document".to_owned();
+        anchor.content_hash = "changed".to_owned();
+
+        assert_eq!(plan.resolve_anchor(&anchor), AnchorResolution::Unresolved);
+    }
+
+    #[test]
+    fn resolver_preserves_exact_multi_block_selection() {
+        let document = crate::import_epub_fixture(crate::UserId::now_v7(), &rich_epub_fixture())
+            .map(|imported| imported.reading_document);
+        assert!(document.is_ok());
+        let plan = RenderPlan::from_document(&document.unwrap_or_else(|_| unreachable!()));
+        let first = &plan.blocks[0];
+        let second = &plan.blocks[1];
+        let anchor = plan
+            .anchor_from_selection(&first.node_path, 1, &second.node_path, 3)
+            .unwrap_or_else(|_| unreachable!());
+
+        let resolved = plan.resolve_anchor(&anchor);
+
+        assert!(matches!(
+            resolved,
+            AnchorResolution::Resolved {
+                anchor: resolved,
+                strategy: AnchorResolutionStrategy::ExactPath,
+                ..
+            } if resolved.effective_end_node_path() == second.node_path
+        ));
+    }
+
+    #[test]
+    fn resolver_rejects_ambiguous_quote_without_context() {
+        let document = crate::import_epub_fixture(crate::UserId::now_v7(), &rich_epub_fixture())
+            .map(|imported| imported.reading_document);
+        assert!(document.is_ok());
+        let mut plan = RenderPlan::from_document(&document.unwrap_or_else(|_| unreachable!()));
+        let quote: String = plan.blocks[0]
+            .text
+            .as_deref()
+            .unwrap_or_default()
+            .chars()
+            .take(8)
+            .collect();
+        plan.blocks[1].text = Some(format!("{quote} duplicate"));
+        let mut anchor = plan.blocks[0].anchor.clone();
+        anchor.node_path = vec!["missing".to_owned()];
+        anchor.end_node_path = anchor.node_path.clone();
+        anchor.quote = quote;
+        anchor.prefix.clear();
+        anchor.suffix.clear();
+        anchor.content_hash = "changed".to_owned();
+        anchor.source_locator = None;
+        anchor.end_source_locator = None;
+
+        assert_eq!(plan.resolve_anchor(&anchor), AnchorResolution::Unresolved);
+    }
+
+    #[test]
+    fn legacy_anchor_json_defaults_end_selector_to_start_selector() {
+        let document = crate::import_epub_fixture(crate::UserId::now_v7(), &rich_epub_fixture())
+            .map(|imported| imported.reading_document);
+        assert!(document.is_ok());
+        let plan = RenderPlan::from_document(&document.unwrap_or_else(|_| unreachable!()));
+        let block = &plan.blocks[0];
+        let anchor = plan
+            .anchor_from_selection(&block.node_path, 0, &block.node_path, 4)
+            .unwrap_or_else(|_| unreachable!());
+        let mut value = serde_json::to_value(anchor).unwrap_or_else(|_| unreachable!());
+        if let Some(object) = value.as_object_mut() {
+            object.remove("end_node_path");
+            object.remove("end_source_locator");
+        }
+        let legacy: Anchor = serde_json::from_value(value).unwrap_or_else(|_| unreachable!());
+
+        assert_eq!(legacy.effective_end_node_path(), block.node_path);
+        assert!(matches!(
+            plan.resolve_anchor(&legacy),
+            AnchorResolution::Resolved {
+                strategy: AnchorResolutionStrategy::ExactPath,
+                ..
+            }
+        ));
     }
 }
