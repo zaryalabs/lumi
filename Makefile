@@ -15,6 +15,7 @@ E2E_NODE_MODULES := $(E2E_DIR)/node_modules
 LUMI_SERVER_BIND ?= 127.0.0.1:8080
 LUMI_WEB_HOST ?= 127.0.0.1
 LUMI_WEB_PORT ?= 5173
+LUMI_PROTOTYPE_PORT ?= 4173
 RUSTUP_TOOLCHAIN_BIN ?= $(shell if command -v rustup >/dev/null 2>&1; then dirname "$$(rustup which rustc 2>/dev/null)"; fi)
 RUSTUP_PATH_ENV := $(if $(RUSTUP_TOOLCHAIN_BIN),PATH=$(RUSTUP_TOOLCHAIN_BIN):$$PATH,)
 
@@ -152,6 +153,17 @@ web-r: ## Run the Dioxus web development server
 		exit 1; \
 	fi
 
+prototype-r: ## Run the static UI/UX prototype without backend
+	@python3 -m http.server $(LUMI_PROTOTYPE_PORT) --bind 127.0.0.1 --directory docs/visuals/prototype
+
+prototype-e2e: ## Run Playwright tests for the static UI/UX prototype
+	@if [ -f "$(E2E_PACKAGE)" ]; then \
+		if [ -d "$(E2E_NODE_MODULES)" ]; then $(NPM) --prefix $(E2E_DIR) run test:prototype; else echo "E2E dependencies are not installed; run make init"; exit 1; fi; \
+	else \
+		echo "No $(E2E_PACKAGE) found; cannot run prototype E2E tests"; \
+		exit 1; \
+	fi
+
 web-build: ## Build the Dioxus web app when dx is available
 	@if [ -f "$(WEB_PACKAGE)" ]; then \
 		if command -v $(DX) >/dev/null 2>&1; then \
@@ -203,4 +215,4 @@ clean: ## Remove common local build and cache artifacts
 	rm -rf $(WEB_DIR)/dist $(WEB_DIR)/target
 	rm -rf $(E2E_DIR)/test-results $(E2E_DIR)/playwright-report
 
-.PHONY: help init fmt l dl t c pc docs-fmt docs-l rust-fmt rust-l rust-web-check rust-web-l rust-dl rust-t server-r web-r web-build e2e-fmt e2e-l e2e-dl web-e2e agent-inspect clean
+.PHONY: help init fmt l dl t c pc docs-fmt docs-l rust-fmt rust-l rust-web-check rust-web-l rust-dl rust-t server-r web-r prototype-r prototype-e2e web-build e2e-fmt e2e-l e2e-dl web-e2e agent-inspect clean
