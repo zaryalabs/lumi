@@ -109,7 +109,7 @@ make agent-inspect
 ```
 
 Record durable observations in
-[docs/tmp-plans/playwright-agent-inspection.md](../../tmp-plans/playwright-agent-inspection.md).
+[docs/tmp-plans/playwright-agent-inspection.md](../tmp-plans/playwright-agent-inspection.md).
 
 ## Troubleshooting
 

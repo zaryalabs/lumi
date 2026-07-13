@@ -36,7 +36,7 @@ Browser-facing changes should run `make web-e2e` explicitly.
 - Dioxus-specific checks depend on local `dx` and `wasm32-unknown-unknown`.
   Missing tools are reported clearly rather than hidden.
 - The scaffold establishes the shared-domain/server/UI-adapter split required
-  by [`../system-design/reader-architecture.md`](../system-design/reader-architecture.md).
+  by [`../systems/reader-architecture.md`](../systems/reader-architecture.md).
 
 ## Alternatives
 
@@ -52,4 +52,4 @@ Browser-facing changes should run `make web-e2e` explicitly.
 This ADR does not change a product data schema. Follow-up implementation that
 changes normalized content, anchors, sync, plugin, AI, search or auth contracts
 must add dedicated ADRs and fixtures according to
-[`../system-design/quality.md`](../system-design/quality.md).
+[`../systems/quality.md`](../systems/quality.md).

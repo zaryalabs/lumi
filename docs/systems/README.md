@@ -1,4 +1,4 @@
-# System Design
+# Systems
 
 Эта папка содержит техническое проектирование Lumi: как продуктовый vision из
 [`../vision.md`](../vision.md) превращается в архитектуру, форматы данных,
@@ -85,7 +85,7 @@ ADR или реализации, но не блокируют сам target desi
 направления оформляются папкой с отдельными файлами внутри.
 
 ```text
-docs/ru/system-design/
+docs/systems/
   README.md
   feature-registry.md
   normalized-content.md

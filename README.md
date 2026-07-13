@@ -4,8 +4,8 @@ Lumi is an open-source app for deliberate reading and learning over materials
 the user already chose: books, articles, threads, messages and notes.
 
 The canonical development-facing product direction is described in
-[docs/en/vision.md](docs/en/vision.md). The accepted technical design for `v01`
-lives in [docs/en/system-design](docs/en/system-design).
+[docs/vision.md](docs/vision.md). The accepted technical design for `v01`
+lives in [docs/systems](docs/systems).
 
 ## Current State
 
@@ -20,7 +20,7 @@ developer scaffold includes:
 - `make` targets and pre-commit hooks for local quality gates.
 
 The current implementation target is a fixture-backed S1 Web EPUB Reader slice
-from [docs/en/early-slices.md](docs/en/early-slices.md), built on the S0 core
+from [docs/early-slices.md](docs/early-slices.md), built on the S0 core
 architecture skeleton.
 
 ## Local Setup
@@ -67,29 +67,26 @@ make web-e2e
 ```
 
 More detail is in
-[docs/en/runbooks/local-dev.md](docs/en/runbooks/local-dev.md).
+[docs/runbooks/local-dev.md](docs/runbooks/local-dev.md).
 
 ## Documentation Workflow
 
-Documentation is split by language and should stay path-synchronized:
+The repository temporarily keeps a single Russian documentation tree:
 
-- [`docs/en`](docs/en) - canonical English documentation used for development.
-- [`docs/ru`](docs/ru) - Russian drafts, source notes and working discussion.
+- [`docs`](docs) - canonical product, architecture, ADR and runbook
+  documentation in Russian.
 - [`docs/tmp-plans`](docs/tmp-plans) - temporary implementation plans for active
   intermediate slices.
 
 Workflow:
 
-1. Discuss and draft product or architecture ideas in Russian under `docs/ru`
-   when that is the clearest working language.
-2. Translate and stabilize durable decisions in the matching `docs/en` path
-   before using them as implementation guidance.
-3. Keep the same relative Markdown document set in `docs/en` and `docs/ru`.
-4. If one language has a document that the other language lacks, add the missing
-   mirror instead of deleting the source document.
-5. Temporary plans are not part of the language mirror. If a temporary plan
-   creates a durable product, architecture or process decision, promote that
-   decision into both language trees, with `docs/en` as the development canon.
+1. Discuss, draft and stabilize product or architecture decisions in Russian
+   under `docs/`.
+2. Keep durable product and architecture decisions in the canonical sections,
+   especially `docs/systems/`, `docs/adr/` and `docs/runbooks/`.
+3. Temporary plans are not canonical. If a temporary plan creates a durable
+   product, architecture or process decision, promote it into the appropriate
+   canonical document.
 
 ## Repository Shape
 
@@ -97,8 +94,7 @@ Workflow:
 apps/web/             Dioxus web shell and platform adapter surface
 crates/lumi-core/     shared domain contracts
 crates/lumi-server/   Axum API boundary and server entrypoint
-docs/en/              canonical English product, design, ADRs and runbooks
-docs/ru/              Russian drafts, source notes and working docs
+docs/                 canonical Russian product, systems, ADRs and runbooks
 docs/tmp-plans/       temporary implementation plans
 tests/e2e/            Playwright browser tests and agent inspection harness
 ```

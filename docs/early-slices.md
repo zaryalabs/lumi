@@ -4,7 +4,7 @@ Status: accepted
 
 Этот документ фиксирует первые срезы разработки после финального target design.
 Он не заменяет
-[`system-design/feature-registry.md`](system-design/feature-registry.md):
+[`systems/feature-registry.md`](systems/feature-registry.md):
 регистр хранит полный searchable backlog функций, а этот документ задает
 порядок сборки минимального core продукта.
 

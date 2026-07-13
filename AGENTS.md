@@ -10,11 +10,10 @@ Quick guide for agents working in this repository.
 ## Start Here
 
 - Read `README.md` first.
-- Treat `docs/en/` as the canonical product, architecture, ADR and runbook
+- Treat `docs/` as the canonical Russian product, architecture, ADR and runbook
   documentation used for development.
-- Use `docs/ru/` for Russian drafts, source notes and working discussion when
-  useful, then stabilize durable decisions in `docs/en/`.
-- Use `docs/en/runbooks/` for local workflow details.
+- Keep documentation in Russian while the repository uses a single language.
+- Use `docs/runbooks/` for local workflow details.
 - Keep architecture and process decisions in `docs/`; keep this file short and
   operational.
 
@@ -28,8 +27,7 @@ Quick guide for agents working in this repository.
 
 ## Project Shape
 
-- `docs/en/` - canonical English product, design, ADRs and runbooks.
-- `docs/ru/` - Russian drafts, source notes and working docs.
+- `docs/` - canonical Russian product, systems, ADRs and runbooks.
 - `docs/tmp-plans/` - temporary implementation plans for active slices.
 - `crates/lumi-core/` - shared domain contracts and platform-independent reader
   foundations.
@@ -41,8 +39,7 @@ Quick guide for agents working in this repository.
 
 ## Technical Direction
 
-Follow the stack documented in `docs/en/vision.md` and
-`docs/en/system-design/`:
+Follow the stack documented in `docs/vision.md` and `docs/systems/`:
 
 - Rust workspace for shared domain, import, reader, sync and service code.
 - Dioxus 0.7 for Web first, then Desktop/WebView and Mobile/WebView candidates.
@@ -62,10 +59,10 @@ Follow the stack documented in `docs/en/vision.md` and
 - Keep imported material handling source-backed: `Material -> DocumentRevision
   -> Normalized Content Package -> ReadingDocument`.
 - Do not store highlights or notes as DOM paths only; use the target anchor
-  model from `docs/en/system-design/normalized-content.md`.
+  model from `docs/systems/normalized-content.md`.
 - Prefer DDD style in code;
 - Add ADRs for schema, sync, anchor, plugin, AI, search and auth decisions listed
-  in `docs/en/system-design/quality.md`.
+  in `docs/systems/quality.md`.
 
 ## Agent-Readable UI
 

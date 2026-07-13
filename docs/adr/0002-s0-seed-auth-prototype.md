@@ -7,7 +7,7 @@ Status: accepted
 S0 needs an account/auth route boundary so materials, imports, blobs, jobs,
 annotations and progress are shaped as account-owned server state from the
 first implementation slice. The final auth protocol is still open in
-[`../system-design/web-account.md`](../system-design/web-account.md): Lumi may
+[`../systems/web-account.md`](../systems/web-account.md): Lumi may
 choose OPAQUE/PAKE or seed-derived challenge signing.
 
 S0 must not accept or store the raw seed phrase on the server, and it must not
