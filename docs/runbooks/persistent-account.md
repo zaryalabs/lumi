@@ -2,7 +2,7 @@
 
 Status: active
 
-Этот runbook описывает Этап 1 `S1 Web EPUB Reader`: PostgreSQL migrations,
+Этот runbook описывает Этап 1 `S1 Web Reader`: PostgreSQL migrations,
 seed-derived Ed25519 auth, web sessions, devices и account isolation.
 
 ## Локальный запуск

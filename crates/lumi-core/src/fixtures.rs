@@ -286,6 +286,7 @@ pub fn import_epub_fixture(
                         text_offset_end: None,
                         epub_cfi: None,
                     }),
+                    links: Vec::new(),
                     children: Vec::new(),
                 };
                 block_ids.push(node.id.clone());
@@ -315,6 +316,7 @@ pub fn import_epub_fixture(
             resource_hash: None,
             content_hash: content_hash(section.heading.as_bytes()),
             source_locator: section_locator.clone(),
+            links: Vec::new(),
             children: child_nodes,
         };
 
@@ -470,6 +472,7 @@ fn text_node(
         resource_hash: None,
         content_hash: content_hash(text.as_bytes()),
         source_locator,
+        links: Vec::new(),
         children: Vec::new(),
     }
 }
@@ -483,6 +486,7 @@ fn block_from_node(node: &ReadingNode) -> ContentBlock {
         resource_hash: node.resource_hash.clone(),
         content_hash: node.content_hash.clone(),
         source_locator: node.source_locator.clone(),
+        links: node.links.clone(),
     }
 }
 

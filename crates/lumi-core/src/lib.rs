@@ -9,6 +9,7 @@ mod auth;
 mod epub;
 mod fixtures;
 mod models;
+mod reader;
 
 pub use auth::*;
 pub use epub::*;
@@ -17,6 +18,7 @@ pub use fixtures::{
     EpubFixture, EpubFixtureResource, EpubFixtureSection, ImportError, ImportedFixture,
 };
 pub use models::*;
+pub use reader::*;
 
 use serde::{Deserialize, Serialize};
 
@@ -24,7 +26,7 @@ use serde::{Deserialize, Serialize};
 pub const API_VERSION: &str = "v1";
 
 /// Current domain schema marker for the S1 contracts.
-pub const DOMAIN_SCHEMA_VERSION: &str = "s1.2026-06-21";
+pub const DOMAIN_SCHEMA_VERSION: &str = "s1.2026-07-13";
 
 /// Current normalized content package marker for reflowable S1 documents.
 pub const NORMALIZED_PACKAGE_VERSION: &str = "normalized.reflowable.s1";
@@ -42,7 +44,7 @@ pub const EPUB_FIXTURE_IMPORTER_VERSION: &str = "s0.1";
 pub const EPUB_IMPORTER_ID: &str = "lumi.epub";
 
 /// Version of the deterministic real EPUB importer.
-pub const EPUB_IMPORTER_VERSION: &str = "s1.1";
+pub const EPUB_IMPORTER_VERSION: &str = "s1.2";
 
 /// Health state for Lumi services.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -117,6 +119,8 @@ impl ServiceCapabilities {
                 "real-epub-importer".to_owned(),
                 "durable-import-jobs".to_owned(),
                 "import-cancel-retry-recovery".to_owned(),
+                "api-backed-library".to_owned(),
+                "durable-library-lifecycle".to_owned(),
                 "reading-document-reader-core".to_owned(),
                 "anchor-backed-annotations".to_owned(),
             ],
@@ -142,10 +146,19 @@ impl ServiceCapabilities {
                 "exports".to_owned(),
             ],
             features: vec![
-                "seed-auth-prototype-boundary".to_owned(),
+                "seed-derived-ed25519-auth".to_owned(),
+                "persistent-web-sessions".to_owned(),
+                "account-scoped-routes".to_owned(),
+                "sync-ready-postgresql".to_owned(),
                 "content-addressed-local-dev-blobs".to_owned(),
-                "epub-fixture-importer".to_owned(),
+                "real-epub-importer".to_owned(),
+                "durable-import-jobs".to_owned(),
+                "api-backed-library".to_owned(),
+                "durable-library-lifecycle".to_owned(),
                 "reading-document-reader-core".to_owned(),
+                "browser-measured-page-map".to_owned(),
+                "typed-internal-links-footnotes".to_owned(),
+                "durable-reader-settings-progress".to_owned(),
                 "anchor-backed-annotations".to_owned(),
                 "annotation-crud".to_owned(),
                 "annotation-export".to_owned(),

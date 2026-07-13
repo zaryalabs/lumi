@@ -140,6 +140,12 @@ pub fn s1_schema_migrations() -> Vec<SchemaMigration> {
             description: "Annotation update/delete commands and portable annotation export."
                 .to_owned(),
         },
+        SchemaMigration {
+            id: "s1-0004-browser-reader-state".to_owned(),
+            schema_version: DOMAIN_SCHEMA_VERSION.to_owned(),
+            description: "Account-wide reader settings and source-backed durable progress."
+                .to_owned(),
+        },
     ]);
     migrations
 }
@@ -397,6 +403,9 @@ pub struct ContentBlock {
     pub content_hash: String,
     /// Source locator for this block.
     pub source_locator: SourceLocator,
+    /// Typed internal links retained from normalized source markup.
+    #[serde(default)]
+    pub links: Vec<ReadingLink>,
 }
 
 /// Reader-facing document for reflowable content.
@@ -433,8 +442,34 @@ pub struct ReadingNode {
     pub content_hash: String,
     /// Source locator for anchor export/recovery.
     pub source_locator: SourceLocator,
+    /// Typed internal links expressed as normalized text ranges and targets.
+    #[serde(default)]
+    pub links: Vec<ReadingLink>,
     /// Child nodes.
     pub children: Vec<ReadingNode>,
+}
+
+/// Reader-native link inside a text-bearing normalized node.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct ReadingLink {
+    /// Visible link label.
+    pub label: String,
+    /// Half-open Unicode scalar range within the parent node text.
+    pub text_range: TextRange,
+    /// Target normalized node path.
+    pub target_path: Vec<String>,
+    /// Link behavior supplied to reader navigation.
+    pub kind: ReadingLinkKind,
+}
+
+/// Reader-native internal link behavior.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReadingLinkKind {
+    /// Normal internal document link.
+    Internal,
+    /// Footnote marker that opens or navigates to a note body.
+    Footnote,
 }
 
 impl ReadingNode {
@@ -945,16 +980,63 @@ pub struct AcceptedImport {
     pub job: Job,
 }
 
-/// Material-level import state shown while the full API-backed library is pending.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-pub struct ImportStatusEntry {
-    /// Stable material created for the upload.
-    pub material_id: MaterialId,
-    /// Best available title: OPF title after success, upload name before it.
-    pub title: String,
-    /// Latest durable job for this material.
-    pub job: Job,
+/// Import state projected onto a material card in the web library.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MaterialImportStatus {
+    /// The durable job has not been claimed by a worker yet.
+    Queued,
+    /// The EPUB is being validated, normalized or persisted.
+    Importing,
+    /// An immutable active revision is available.
+    Ready,
+    /// Import stopped with structured diagnostics.
+    Failed,
+    /// Import was cancelled before publication.
+    Cancelled,
 }
+
+/// Server-backed projection used by the library for every import lifecycle state.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct LibraryEntry {
+    /// Stable material id allocated when upload is accepted.
+    pub id: MaterialId,
+    /// Account that owns the entry.
+    pub owner_id: UserId,
+    /// Material format.
+    pub kind: MaterialKind,
+    /// Canonical title, refined from EPUB metadata after a successful import.
+    pub canonical_title: String,
+    /// Optional user-facing title override.
+    pub title_override: Option<String>,
+    /// Active immutable revision, absent until import succeeds.
+    pub active_revision_id: Option<DocumentRevisionId>,
+    /// Library lifecycle state.
+    pub library_state: LibraryState,
+    /// Original source identity retained for details and download.
+    pub source_identity: SourceIdentity,
+    /// Material-level import status.
+    pub import_status: MaterialImportStatus,
+    /// Latest durable import job, including diagnostics.
+    pub latest_job: Job,
+    /// Material creation timestamp.
+    pub created_at: TimestampMs,
+    /// Last material or import state change timestamp.
+    pub updated_at: TimestampMs,
+}
+
+impl LibraryEntry {
+    /// Return the user-facing title, applying an override when present.
+    #[must_use]
+    pub fn display_title(&self) -> &str {
+        self.title_override
+            .as_deref()
+            .unwrap_or(&self.canonical_title)
+    }
+}
+
+/// Compatibility name for clients of the Stage 2 import-list endpoint.
+pub type ImportStatusEntry = LibraryEntry;
 
 /// Aggregate returned by the fixture importer.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -998,6 +1080,6 @@ mod tests {
     fn migrations_cover_s1_contract_groups() {
         let migrations = s1_schema_migrations();
 
-        assert_eq!(migrations.len(), 7);
+        assert_eq!(migrations.len(), 8);
     }
 }

@@ -18,8 +18,9 @@ use crate::{
     content_hash, BlobManifest, BlobManifestId, BlobRef, BlobRole, ContentBlock, ContentUnit,
     DiagnosticSeverity, DocumentRevision, DocumentRevisionId, EpubSourceLocator, ImportDiagnostic,
     MaterialId, NavigationItem, NormalizedContentPackage, NormalizedPackageManifest,
-    ReadingDocument, ReadingNode, ReadingNodeKind, SourceFormat, SourceIdentity, SourceLocator,
-    UserId, EPUB_IMPORTER_ID, EPUB_IMPORTER_VERSION, NORMALIZED_PACKAGE_VERSION,
+    ReadingDocument, ReadingLink, ReadingLinkKind, ReadingNode, ReadingNodeKind, SourceFormat,
+    SourceIdentity, SourceLocator, TextRange, UserId, EPUB_IMPORTER_ID, EPUB_IMPORTER_VERSION,
+    NORMALIZED_PACKAGE_VERSION,
 };
 
 const MIB: u64 = 1024 * 1024;
@@ -891,6 +892,7 @@ fn normalize_spine(
     let mut nodes = Vec::new();
     let mut unit_paths = HashMap::new();
     let mut diagnostics = Vec::new();
+    let mut documents = Vec::new();
     for spine_item in package.spine.iter().filter(|item| item.linear) {
         check_cancelled(is_cancelled)?;
         let item =
@@ -910,15 +912,21 @@ fn normalize_spine(
         }
         let path = resolve_reference(package_path, &item.href)?;
         ensure_known_entry(names, &path)?;
+        let unit_index = documents.len();
+        unit_paths.insert(path.clone(), vec![format!("unit-{unit_index}")]);
+        documents.push((spine_item.idref.clone(), path));
+    }
+    for (unit_index, (spine_idref, path)) in documents.into_iter().enumerate() {
+        check_cancelled(is_cancelled)?;
         let content = read_entry(archive, &path, limits.content_document_bytes, is_cancelled)?;
-        let unit_index = units.len();
         let normalized = normalize_content_document(
             &content,
             package_path,
-            &spine_item.idref,
+            &spine_idref,
             &path,
             unit_index,
             resources,
+            &unit_paths,
         )?;
         diagnostics.extend(normalized.diagnostics);
         blocks.extend(normalized.blocks.clone());
@@ -954,6 +962,7 @@ fn normalize_content_document(
     content_path: &str,
     unit_index: usize,
     resources: &ResourceHashes,
+    unit_paths: &HashMap<String, Vec<String>>,
 ) -> Result<NormalizedContentDocument, EpubImportError> {
     let source = String::from_utf8_lossy(content);
     let allowed_tags = [
@@ -1000,12 +1009,32 @@ fn normalize_content_document(
     .collect::<HashSet<_>>();
     let mut sanitizer = Builder::default();
     sanitizer.tags(allowed_tags);
+    // Source ids are parsed only into normalized target paths and are never
+    // rendered as raw EPUB markup. Retaining them here preserves footnotes.
+    sanitizer.generic_attributes(["id"].into_iter().collect());
     let cleaned = sanitizer.clean(&source).to_string();
     let document = Html::parse_document(&cleaned);
     let selector =
         Selector::parse("h1,h2,h3,h4,h5,h6,p,blockquote,li,pre,table,figcaption,aside,img,hr")
             .map_err(|error| EpubImportError::Xml(error.to_string()))?;
     let unit_path = vec![format!("unit-{unit_index}")];
+    let target_paths = document
+        .select(&selector)
+        .enumerate()
+        .filter_map(|(block_index, element)| {
+            element.value().attr("id").map(|id| {
+                (
+                    id.to_owned(),
+                    (
+                        [unit_path.clone(), vec![format!("block-{block_index}")]].concat(),
+                        element.value().name() == "aside",
+                    ),
+                )
+            })
+        })
+        .collect::<HashMap<_, _>>();
+    let link_selector =
+        Selector::parse("a[href]").map_err(|error| EpubImportError::Xml(error.to_string()))?;
     let mut children = Vec::new();
     let mut blocks = Vec::new();
     let mut diagnostics = active_content_diagnostics(&source, content_path);
@@ -1057,6 +1086,21 @@ fn normalize_content_document(
             epub_cfi: None,
         });
         let stable_input = format!("{content_path}\0{block_index}\0{tag}\0{display_text}");
+        let links = element
+            .select(&link_selector)
+            .filter_map(|link| {
+                let label = normalize_text(link.text());
+                let href = link.value().attr("href")?;
+                internal_link(
+                    &display_text,
+                    &label,
+                    href,
+                    content_path,
+                    unit_paths,
+                    &target_paths,
+                )
+            })
+            .collect();
         let node = ReadingNode {
             id: format!("block-{}", &content_hash(stable_input.as_bytes())[..20]),
             path,
@@ -1065,6 +1109,7 @@ fn normalize_content_document(
             resource_hash,
             content_hash: content_hash(display_text.as_bytes()),
             source_locator: locator,
+            links,
             children: Vec::new(),
         };
         blocks.push(block_from_node(&node));
@@ -1103,6 +1148,7 @@ fn normalize_content_document(
                 resource_hash: None,
                 content_hash: content_hash(fallback.as_bytes()),
                 source_locator: locator,
+                links: Vec::new(),
                 children: Vec::new(),
             };
             blocks.push(block_from_node(&node));
@@ -1150,6 +1196,7 @@ fn normalize_content_document(
         resource_hash: None,
         content_hash: content_hash(title.as_bytes()),
         source_locator: section_locator,
+        links: Vec::new(),
         children,
     };
     Ok(NormalizedContentDocument {
@@ -1157,6 +1204,52 @@ fn normalize_content_document(
         blocks,
         node,
         diagnostics,
+    })
+}
+
+fn internal_link(
+    parent_text: &str,
+    label: &str,
+    href: &str,
+    content_path: &str,
+    unit_paths: &HashMap<String, Vec<String>>,
+    target_paths: &HashMap<String, (Vec<String>, bool)>,
+) -> Option<ReadingLink> {
+    if label.is_empty() || href.starts_with("http:") || href.starts_with("https:") {
+        return None;
+    }
+    let (path_reference, fragment) = href
+        .split_once('#')
+        .map_or((href, None), |(path, fragment)| (path, Some(fragment)));
+    let target_document = if path_reference.is_empty() {
+        content_path.to_owned()
+    } else {
+        resolve_reference(content_path, path_reference).ok()?
+    };
+    let (target_path, footnote) = if target_document == content_path {
+        fragment
+            .and_then(|id| target_paths.get(id).cloned())
+            .or_else(|| {
+                unit_paths
+                    .get(&target_document)
+                    .cloned()
+                    .map(|path| (path, false))
+            })?
+    } else {
+        (unit_paths.get(&target_document)?.clone(), false)
+    };
+    let byte_start = parent_text.find(label)?;
+    let start = parent_text[..byte_start].chars().count();
+    let end = start + label.chars().count();
+    Some(ReadingLink {
+        label: label.to_owned(),
+        text_range: TextRange { start, end },
+        target_path,
+        kind: if footnote || fragment.is_some_and(|id| id.to_ascii_lowercase().contains("note")) {
+            ReadingLinkKind::Footnote
+        } else {
+            ReadingLinkKind::Internal
+        },
     })
 }
 
@@ -1195,6 +1288,7 @@ fn block_from_node(node: &ReadingNode) -> ContentBlock {
         resource_hash: node.resource_hash.clone(),
         content_hash: node.content_hash.clone(),
         source_locator: node.source_locator.clone(),
+        links: node.links.clone(),
     }
 }
 

@@ -14,10 +14,12 @@ E2E_PACKAGE := $(E2E_DIR)/package.json
 E2E_NODE_MODULES := $(E2E_DIR)/node_modules
 
 LUMI_SERVER_BIND ?= 127.0.0.1:8080
+LUMI_POSTGRES_HOST ?= 127.0.0.1
 LUMI_POSTGRES_PORT ?= 5432
-DATABASE_URL ?= postgres://lumi:lumi-local@127.0.0.1:$(LUMI_POSTGRES_PORT)/lumi
+DATABASE_URL ?= postgres://lumi:lumi-local@$(LUMI_POSTGRES_HOST):$(LUMI_POSTGRES_PORT)/lumi
 LUMI_WEB_HOST ?= 127.0.0.1
 LUMI_WEB_PORT ?= 5173
+LUMI_API_BASE ?= http://127.0.0.1:8080/api/v1
 LUMI_PROTOTYPE_PORT ?= 4173
 RUSTUP_TOOLCHAIN_BIN ?= $(shell if command -v rustup >/dev/null 2>&1; then dirname "$$(rustup which rustc 2>/dev/null)"; fi)
 RUSTUP_PATH_ENV := $(if $(RUSTUP_TOOLCHAIN_BIN),PATH=$(RUSTUP_TOOLCHAIN_BIN):$$PATH,)
@@ -142,6 +144,12 @@ rust-t: ## Run Rust tests for implemented crates
 
 server-r: ## Run the local Axum server
 	@if [ -f "$(RUST_MANIFEST)" ]; then \
+		if ! nc -z "$(LUMI_POSTGRES_HOST)" "$(LUMI_POSTGRES_PORT)" >/dev/null 2>&1; then \
+			echo "PostgreSQL is unavailable at $(LUMI_POSTGRES_HOST):$(LUMI_POSTGRES_PORT)"; \
+			echo "Start it with: docker compose up -d --wait postgres"; \
+			echo "Then apply migrations with: make db-migrate"; \
+			exit 1; \
+		fi; \
 		DATABASE_URL=$(DATABASE_URL) LUMI_SERVER_BIND=$(LUMI_SERVER_BIND) $(CARGO) run -p lumi-server --bin lumi-server; \
 	else \
 		echo "No Cargo.toml found; cannot run server"; \
@@ -160,7 +168,7 @@ db-migrate: ## Apply forward-only SQLx migrations
 web-r: ## Run the Dioxus web development server
 	@if [ -f "$(WEB_PACKAGE)" ]; then \
 		if command -v $(DX) >/dev/null 2>&1; then \
-			cd $(WEB_DIR) && $(RUSTUP_PATH_ENV) LUMI_API_BASE=http://127.0.0.1:8080/api/v1 $(DX) serve --web --addr $(LUMI_WEB_HOST) --port $(LUMI_WEB_PORT); \
+			cd $(WEB_DIR) && $(RUSTUP_PATH_ENV) LUMI_API_BASE=$(LUMI_API_BASE) $(DX) serve --web --addr $(LUMI_WEB_HOST) --port $(LUMI_WEB_PORT); \
 		else \
 			echo "Dioxus CLI is not installed; install dx before running web"; \
 			exit 1; \

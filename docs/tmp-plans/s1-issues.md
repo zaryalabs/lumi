@@ -1,4 +1,4 @@
-# S1 Web EPUB Reader: implementation issues
+# S1 Web Reader: implementation issues
 
 Status: `active`
 
@@ -122,15 +122,52 @@ Acceptance:
 Registry: `CORE-006`, `CORE-007`, `CORE-011`, `RD-006`, `RD-007`, `RD-009`,
 `RD-010`, `SYNC-002`, `SYNC-006`, `QUAL-003`, `QUAL-005`.
 
+## S1-08. Web and Telegram source baseline
+
+Issue number зарезервирован после исходного backlog S1-01…S1-07; в порядке
+реализации это Этап 6 основного плана перед UI/UX convergence. GitHub issue
+нужно создать при начале этапа.
+
+Title: `[ACC-005][FMT-WEB-001][FMT-WEB-004][FMT-TG-001][FMT-TG-002] S1: baseline web and Telegram ingestion`
+
+Depends on: S1-03, S1-04, S1-05; ADR для расширения normalized source locator.
+
+Scope:
+
+- generalized source kinds/refs, importer dispatch, job stages и общий
+  publication path в `Material -> DocumentRevision -> Normalized Package`;
+- public HTTP/HTTPS URL → bounded raw fetch → baseline
+  `RenderedPageSnapshot` → semantic text-first extractor;
+- SSRF/DNS/redirect/size/timeout policy и committed HTML fixtures;
+- short-lived Telegram pairing, identity/unlink и idempotency по `update_id`;
+- transport-neutral update handler, local long polling, direct/forwarded text и
+  routing одиночной обычной web-ссылки в web importer;
+- общий library/reader/progress/annotation path для EPUB, web и Telegram.
+
+Acceptance:
+
+- public server-rendered article сохраняется по URL и открывается общим reader;
+- paired Telegram user отправляет или пересылает текст и получает один durable
+  material; duplicate update не создает второй material;
+- web URL из Telegram использует тот же URL import job;
+- unsupported resources/messages дают structured diagnostics;
+- tests используют HTML/Telegram fixtures и не зависят от live sites или
+  Telegram API.
+
+Registry: partial baseline coverage of `ACC-005`, `FMT-WEB-001`, `FMT-WEB-004`,
+`FMT-TG-001`, `FMT-TG-002`, plus `CORE-002`, `CORE-003`, `CORE-008`, `CORE-010`,
+`API-002`, `SEC-002`, `QUAL-002`, `QUAL-005`.
+
 ## [S1-06. UI/UX convergence](https://github.com/zaryalabs/lumi/issues/6)
 
 Title: `[RD-004][RD-009][SYNC-007] S1: converge Dioxus UI with reader-first prototype`
 
-Depends on: S1-03, S1-04, S1-05.
+Depends on: S1-03, S1-04, S1-05, S1-08.
 
 Scope:
 
 - visual tokens, typography, cards, dialogs и reader chrome;
+- unified add-material flow для EPUB/URL и Telegram connection states;
 - honest importing/saving/save-failed/session-expired states;
 - mobile panels/bottom sheet, keyboard/focus/accessibility;
 - скрытие controls отложенных subsystems.
@@ -147,13 +184,17 @@ Registry: `RD-004`, `RD-005`, `RD-009`, `SYNC-007`, `QUAL-005`.
 
 Title: `[QUAL-002][QUAL-005][QUAL-006] S1: hardening and closed beta readiness`
 
-Depends on: S1-01…S1-06.
+Depends on: S1-01…S1-06, S1-08.
 
 Scope:
 
-- Playwright journey register → upload → read → note → reload → export;
-- golden EPUB compatibility/security corpus и performance budgets;
+- Playwright journeys register → upload/URL import → read → note → reload →
+  export;
+- golden EPUB compatibility/security corpus, web/Telegram fixtures и
+  performance budgets;
 - auth isolation/session/CSRF/rate-limit и malicious import suites;
+- SSRF corpus, Telegram pairing/update idempotency и webhook secret validation
+  when Telegram is enabled in beta;
 - staging migrations, readiness, metrics, backups/restore и privacy UX.
 
 Acceptance:
