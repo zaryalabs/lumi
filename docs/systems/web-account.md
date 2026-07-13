@@ -49,12 +49,15 @@ are future full-copy replicas**.
 ### Identity и регистрация
 
 - Primary account id: `user_id` с UUIDv7+.
+- `user_id` является стабильным доменным/ACL идентификатором. Отдельный
+  непоказываемый `lookup_id` используется только для поиска `AuthIdentity` при
+  входе и не заменяет `user_id` в API, sync или social contracts.
 - Seed phrase генерируется клиентом и является главным пользовательским
   credential для восстановления/входа.
 - Seed phrase нельзя отправлять на сервер как plaintext password.
 - Из seed phrase выводятся:
-  - auth key или PAKE secret для входа;
-  - public/account lookup key для поиска аккаунта при login;
+  - Ed25519 signing key для challenge-response входа;
+  - отдельный account lookup key для поиска auth identity при login;
   - в будущем - encryption keys для E2EE personal space, если это решение будет
     принято.
 - Сервер хранит только verifier/public auth material, session records и
@@ -221,8 +224,8 @@ WebAccount {
 AuthIdentity {
   id
   user_id
-  auth_key_id
-  verifier_or_public_key
+  lookup_id
+  public_key
   algorithm
   created_at
   revoked_at
@@ -254,21 +257,24 @@ ImportJob {
 
 1. Web client generates seed phrase and asks the user to save it.
 2. Client derives auth material from seed phrase.
-3. Client requests account creation.
+3. Client requests account creation with `lookup_id` and public key; unique
+   `lookup_id` prevents a second account for the same seed identity.
 4. Server creates `user_id` as UUIDv7+, `WebAccount`, personal `SyncSpace` and
    first `SyncDevice`.
 5. Server stores auth verifier/public material, not seed phrase.
 6. Client receives session token and bootstraps from cloud account state.
 
-Exact auth protocol is `open`: OPAQUE/PAKE or challenge signing with a key
-derived from seed phrase. The accepted constraint is stronger than the exact
-protocol: raw seed phrase must not leave the client.
+Exact auth protocol принят в
+[`../adr/0003-seed-derived-challenge-auth.md`](../adr/0003-seed-derived-challenge-auth.md):
+24-словная BIP39 phrase кодирует 256-битную entropy, а независимые HKDF keys
+используются для account lookup и Ed25519 challenge signing. Raw seed phrase и
+private/derived keys не покидают client.
 
 ### Login flow
 
 1. User enters seed phrase.
 2. Client derives account lookup key/auth key.
-3. Server finds `AuthIdentity` by lookup key and returns challenge.
+3. Server finds `AuthIdentity` by `lookup_id` and returns challenge.
 4. Client proves possession of seed-derived secret.
 5. Server issues `WebSession` and registers/updates `SyncDevice`.
 6. Client bootstraps from cloud account state and rebuildable browser cache.
@@ -349,11 +355,6 @@ desktop/mobile replica/export exists, web data is gone.
 
 ## Открытые вопросы
 
-- Какой exact auth protocol выбрать: OPAQUE/PAKE или challenge signing with
-  seed-derived key?
-- Использовать ли BIP39-compatible seed phrase или собственный wordlist/format?
-- Должен ли `user_id` быть публичным UUIDv7, а auth lookup key отдельным
-  непоказываемым идентификатором?
 - Какие quotas нужны для web v01: общий storage, максимальный файл, дневной
   import лимит?
 - Начинать ли с Postgres blob storage с жесткими лимитами или сразу подключать

@@ -8,6 +8,7 @@
     "lint": "tsc --noEmit",
     "typecheck": "tsc --noEmit",
     "test": "playwright test",
+    "test:pagination-spike": "playwright test --config pagination-spike.playwright.config.ts",
     "test:prototype": "playwright test --config prototype.playwright.config.ts",
     "install-browsers": "playwright install chromium"
   },

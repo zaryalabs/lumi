@@ -275,6 +275,12 @@ Client
 
 Предварительный формат change:
 
+Минимальная PostgreSQL-форма, transactional append и migration policy приняты в
+[`../adr/0004-postgresql-sync-ready-schema.md`](../adr/0004-postgresql-sync-ready-schema.md).
+При глобальном PostgreSQL `change_seq` клиент всё равно хранит cursor отдельно
+для каждого space. HLC используется для deterministic ordering/tie-break, но не
+разрешает содержательные конфликты заметок через LWW.
+
 ```text
 SyncChange {
   id
