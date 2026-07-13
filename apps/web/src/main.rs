@@ -5,7 +5,12 @@ use lumi_core::{
     JobStatus, Material, ReadingDocument, ReadingNode, ReadingNodeKind, UserId, API_VERSION,
 };
 
+#[cfg(target_arch = "wasm32")]
+mod account;
+
 fn main() {
+    #[cfg(target_arch = "wasm32")]
+    console_error_panic_hook::set_once();
     dioxus::launch(App);
 }
 
@@ -16,7 +21,16 @@ fn App() -> Element {
     rsx! {
         main { class: "app-shell", aria_label: "Lumi S1 web EPUB reader",
             match imported {
-                Ok(imported) => rsx! { S1Workspace { imported } },
+                Ok(imported) => {
+                    #[cfg(target_arch = "wasm32")]
+                    {
+                        rsx! { account::AccountGate { imported } }
+                    }
+                    #[cfg(not(target_arch = "wasm32"))]
+                    {
+                        rsx! { S1Workspace { imported } }
+                    }
+                },
                 Err(error) => rsx! {
                     section { class: "empty-state", aria_label: "Import failed",
                         p { class: "eyebrow", "Import failed" }

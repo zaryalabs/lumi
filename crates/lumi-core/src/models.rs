@@ -123,13 +123,19 @@ pub fn s1_schema_migrations() -> Vec<SchemaMigration> {
     let mut migrations = s0_schema_migrations();
     migrations.extend([
         SchemaMigration {
-            id: "s1-0001-library-source-diagnostics".to_owned(),
+            id: "s1-0001-persistent-account".to_owned(),
+            schema_version: DOMAIN_SCHEMA_VERSION.to_owned(),
+            description: "PostgreSQL accounts, Ed25519 auth, sessions, devices and sync changes."
+                .to_owned(),
+        },
+        SchemaMigration {
+            id: "s1-0002-library-source-diagnostics".to_owned(),
             schema_version: DOMAIN_SCHEMA_VERSION.to_owned(),
             description: "Library archive/delete state, source download and import diagnostics."
                 .to_owned(),
         },
         SchemaMigration {
-            id: "s1-0002-annotation-crud-export".to_owned(),
+            id: "s1-0003-annotation-crud-export".to_owned(),
             schema_version: DOMAIN_SCHEMA_VERSION.to_owned(),
             description: "Annotation update/delete commands and portable annotation export."
                 .to_owned(),
@@ -956,6 +962,6 @@ mod tests {
     fn migrations_cover_s1_contract_groups() {
         let migrations = s1_schema_migrations();
 
-        assert_eq!(migrations.len(), 6);
+        assert_eq!(migrations.len(), 7);
     }
 }

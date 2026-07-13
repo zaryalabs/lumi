@@ -1,7 +1,7 @@
 use std::net::SocketAddr;
 
 use anyhow::{anyhow, Context};
-use lumi_server::{build_router, shutdown_signal, AppConfig};
+use lumi_server::{build_router_with_state, shutdown_signal, AppConfig, AppState};
 use tracing_subscriber::EnvFilter;
 
 #[tokio::main]
@@ -12,6 +12,9 @@ async fn main() -> anyhow::Result<()> {
         .map_err(|error| anyhow!("failed to initialize tracing subscriber: {error}"))?;
 
     let config = AppConfig::from_env();
+    let state = AppState::persistent(&config)
+        .await
+        .context("failed to connect persistent account repository")?;
     let address: SocketAddr = config
         .bind_address()
         .parse()
@@ -23,7 +26,7 @@ async fn main() -> anyhow::Result<()> {
 
     tracing::info!(%address, "starting Lumi server");
 
-    axum::serve(listener, build_router())
+    axum::serve(listener, build_router_with_state(state))
         .with_graceful_shutdown(shutdown_signal())
         .await
         .context("Lumi server failed")?;

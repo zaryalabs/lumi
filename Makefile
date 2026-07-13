@@ -14,6 +14,8 @@ E2E_PACKAGE := $(E2E_DIR)/package.json
 E2E_NODE_MODULES := $(E2E_DIR)/node_modules
 
 LUMI_SERVER_BIND ?= 127.0.0.1:8080
+LUMI_POSTGRES_PORT ?= 5432
+DATABASE_URL ?= postgres://lumi:lumi-local@127.0.0.1:$(LUMI_POSTGRES_PORT)/lumi
 LUMI_WEB_HOST ?= 127.0.0.1
 LUMI_WEB_PORT ?= 5173
 LUMI_PROTOTYPE_PORT ?= 4173
@@ -140,11 +142,20 @@ rust-t: ## Run Rust tests for implemented crates
 
 server-r: ## Run the local Axum server
 	@if [ -f "$(RUST_MANIFEST)" ]; then \
-		LUMI_SERVER_BIND=$(LUMI_SERVER_BIND) $(CARGO) run -p lumi-server; \
+		DATABASE_URL=$(DATABASE_URL) LUMI_SERVER_BIND=$(LUMI_SERVER_BIND) $(CARGO) run -p lumi-server --bin lumi-server; \
 	else \
 		echo "No Cargo.toml found; cannot run server"; \
 		exit 1; \
 	fi
+
+db-up: ## Start the local PostgreSQL service
+	LUMI_POSTGRES_PORT=$(LUMI_POSTGRES_PORT) docker compose up -d --wait postgres
+
+db-down: ## Stop the local PostgreSQL service
+	docker compose down
+
+db-migrate: ## Apply forward-only SQLx migrations
+	DATABASE_URL=$(DATABASE_URL) $(CARGO) run -p lumi-server --bin lumi-migrate
 
 web-r: ## Run the Dioxus web development server
 	@if [ -f "$(WEB_PACKAGE)" ]; then \
@@ -236,4 +247,4 @@ clean: ## Remove common local build and cache artifacts
 	rm -rf $(WEB_DIR)/dist $(WEB_DIR)/target
 	rm -rf $(E2E_DIR)/test-results $(E2E_DIR)/playwright-report
 
-.PHONY: help init fmt l dl t c pc docs-fmt docs-l rust-fmt rust-l rust-web-check rust-web-l rust-dl rust-t server-r web-r prototype-r prototype-e2e pagination-spike-r pagination-spike-e2e stage0-spikes web-build e2e-fmt e2e-l e2e-dl web-e2e agent-inspect clean
+.PHONY: help init fmt l dl t c pc docs-fmt docs-l rust-fmt rust-l rust-web-check rust-web-l rust-dl rust-t db-up db-down db-migrate server-r web-r prototype-r prototype-e2e pagination-spike-r pagination-spike-e2e stage0-spikes web-build e2e-fmt e2e-l e2e-dl web-e2e agent-inspect clean

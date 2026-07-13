@@ -208,7 +208,7 @@ UI/UX-прототипа к работоспособной первой web-ве
 Критерий завершения: приняты необходимые ADR, а auth, EPUB и pagination риски
 проверены исполняемыми spikes или fixtures.
 
-### Этап 1. Persistent account slice
+### Этап 1. Persistent account slice — выполнен
 
 - Добавить SQLx migrations и repositories.
 - Реализовать account, auth verifier, session и device records.
@@ -218,6 +218,20 @@ UI/UX-прототипа к работоспособной первой web-ве
 
 Критерий завершения: аккаунт и сессия переживают рестарт, а пользователь не
 может прочитать или изменить объекты другого аккаунта.
+
+Результат:
+
+- добавлена PostgreSQL-схема аккаунтов, auth, sessions, devices, sync и
+  account-owned данных с отдельной deploy-time утилитой миграций;
+- регистрация, вход, recovery, logout и отзыв сессий используют локально
+  производимый Ed25519 proof без передачи recovery-фразы серверу;
+- account-owned API закрыт session middleware, CSRF-защитой и owner scoping;
+- минимальный Dioxus account UI проходит browser flow регистрации, выхода и
+  повторного входа;
+- restart persistence, challenge replay, session revocation, idempotency и
+  межаккаунтная изоляция покрыты тестами;
+- локальный запуск и модель безопасности описаны в
+  [`docs/runbooks/persistent-account.md`](../runbooks/persistent-account.md).
 
 ### Этап 2. Real EPUB import slice
 

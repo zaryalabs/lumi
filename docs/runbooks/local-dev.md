@@ -37,6 +37,15 @@ Playwright dependencies and runs `dx doctor` when Dioxus CLI exists.
 
 ## Local Processes
 
+Persistent account routes требуют PostgreSQL. Перед API нужно запустить базу и
+применить migrations; подробности — в
+[persistent-account.md](persistent-account.md):
+
+```sh
+make db-up
+make db-migrate
+```
+
 Start the API:
 
 ```sh
