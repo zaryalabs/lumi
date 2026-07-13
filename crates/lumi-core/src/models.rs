@@ -462,6 +462,16 @@ pub enum ReadingNodeKind {
     },
     /// Paragraph text block.
     Paragraph,
+    /// Quoted block preserving block-level semantics.
+    Blockquote,
+    /// One ordered or unordered list item.
+    ListItem,
+    /// Table represented as normalized text until a reader adapter renders cells.
+    Table,
+    /// Preformatted code block.
+    CodeBlock,
+    /// Semantic horizontal separator.
+    HorizontalRule,
     /// Figure image block.
     Image,
     /// Caption block for figures.
@@ -904,6 +914,8 @@ pub enum JobStatus {
     Succeeded,
     /// Job failed.
     Failed,
+    /// Job was cancelled before publication.
+    Cancelled,
 }
 
 /// Import job stage.
@@ -912,12 +924,36 @@ pub enum JobStatus {
 pub enum JobStage {
     /// Source was accepted.
     SourceAccepted,
+    /// EPUB container and package metadata are being validated.
+    ValidatingContainer,
     /// Normalization is in progress.
     Normalizing,
+    /// Immutable blobs and package records are being persisted.
+    Persisting,
     /// Reader document was built.
     ReaderDocumentBuilt,
     /// Job has committed durable records.
     Committed,
+}
+
+/// Response returned after accepting a real EPUB upload.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct AcceptedImport {
+    /// Material created immediately so failed imports remain visible.
+    pub material_id: MaterialId,
+    /// Durable import job created for the source.
+    pub job: Job,
+}
+
+/// Material-level import state shown while the full API-backed library is pending.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct ImportStatusEntry {
+    /// Stable material created for the upload.
+    pub material_id: MaterialId,
+    /// Best available title: OPF title after success, upload name before it.
+    pub title: String,
+    /// Latest durable job for this material.
+    pub job: Job,
 }
 
 /// Aggregate returned by the fixture importer.

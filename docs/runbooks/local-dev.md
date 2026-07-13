@@ -46,6 +46,9 @@ make db-up
 make db-migrate
 ```
 
+Настройка real EPUB import, blob root и restart recovery описана в
+[real-epub-import.md](real-epub-import.md).
+
 Start the API:
 
 ```sh

@@ -3461,15 +3461,21 @@ checksum = "112b39cec0b298b6c1999fee3e31427f74f676e4cb9879ed1a121b43661a4154"
 name = "lumi-core"
 version = "0.1.0"
 dependencies = [
+ "ammonia",
  "base64",
  "ed25519-dalek",
+ "flate2",
  "hkdf",
+ "quick-xml",
+ "scraper",
  "serde",
  "serde_json",
  "sha2",
  "thiserror 2.0.18",
+ "url",
  "uuid",
  "zeroize",
+ "zip",
 ]
 
 [[package]]
@@ -3529,6 +3535,7 @@ dependencies = [
  "serde",
  "uuid",
  "wasm-bindgen",
+ "wasm-bindgen-futures",
  "web-sys",
 ]
 

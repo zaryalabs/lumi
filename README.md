@@ -19,9 +19,9 @@ developer scaffold includes:
 - Playwright E2E scaffolding in `tests/e2e`;
 - `make` targets and pre-commit hooks for local quality gates.
 
-The current implementation target is a fixture-backed S1 Web EPUB Reader slice
-from [docs/early-slices.md](docs/early-slices.md), built on the S0 core
-architecture skeleton.
+The current implementation target is the S1 Web EPUB Reader slice from
+[docs/early-slices.md](docs/early-slices.md). Persistent accounts and durable
+real EPUB import are implemented; the next step is the fully API-backed library.
 
 ## Local Setup
 

@@ -233,7 +233,7 @@ UI/UX-прототипа к работоспособной первой web-ве
 - локальный запуск и модель безопасности описаны в
   [`docs/runbooks/persistent-account.md`](../runbooks/persistent-account.md).
 
-### Этап 2. Real EPUB import slice
+### Этап 2. Real EPUB import slice — выполнен
 
 Реализовать сквозной путь:
 
@@ -251,6 +251,23 @@ Upload -> source blob -> durable Job -> EPUB importer
 
 Критерий завершения: поддерживаемые реальные EPUB импортируются после restart,
 а повреждённый или неподдержанный EPUB выдаёт понятный failed state.
+
+Результат:
+
+- добавлены multipart upload, content-addressed local blob backend и scoped
+  source download через общий `BlobStore` contract;
+- durable PostgreSQL worker сохраняет queued/running/succeeded/failed/cancelled,
+  attempt, cancellation, retry и startup recovery;
+- real EPUB importer разбирает OCF, OPF, spine, EPUB 3 nav/EPUB 2 NCX, metadata
+  и resources, применяет лимиты ADR 0005 и строит typed `ReadingNode`;
+- immutable revision, normalized package, source map, blob manifest и structured
+  diagnostics публикуются атомарно и доступны после restart;
+- минимальный Dioxus upload/status UI показывает supported и failed imports,
+  diagnostic codes, cancel/retry и сохраняет состояние после browser reload;
+- решение по worker/blob lifecycle закреплено в
+  [`../adr/0007-durable-import-jobs-and-blob-store.md`](../adr/0007-durable-import-jobs-and-blob-store.md),
+  local workflow — в
+  [`../runbooks/real-epub-import.md`](../runbooks/real-epub-import.md).
 
 ### Этап 3. API-backed библиотека
 

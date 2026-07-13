@@ -15,6 +15,7 @@ version = "0.1.0"
 
 [workspace.dependencies]
 anyhow = "1.0.103"
+ammonia = "4.1.3"
 async-trait = "0.1.89"
 axum = "0.8.9"
 base64 = "0.22.1"
@@ -22,6 +23,9 @@ dioxus = { version = "0.7.0", default-features = false }
 ed25519-dalek = { version = "2.2.0", default-features = false, features = [
   "fast",
   "rand_core",
+] }
+flate2 = { version = "1.1.9", default-features = false, features = [
+  "rust_backend",
 ] }
 hkdf = "0.12.4"
 rand = "0.8.5"
@@ -43,6 +47,8 @@ sqlx-postgres = { version = "=0.8.6", default-features = false, features = [
 thiserror = "2.0.18"
 time = { version = "0.3.44", features = ["serde"] }
 tokio = { version = "1.52.3", features = [
+  "fs",
+  "io-util",
   "macros",
   "net",
   "rt-multi-thread",
@@ -52,8 +58,14 @@ tower = { version = "0.5.3", features = ["util"] }
 tower-http = { version = "0.6.11", features = ["cors", "request-id", "trace"] }
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter", "fmt"] }
+quick-xml = "0.41.0"
+scraper = "0.27.0"
+url = "2.5.8"
 uuid = { version = "1.23.3", features = ["js", "serde", "v7"] }
 zeroize = "1.8.2"
+zip = { version = "4.6.1", default-features = false, features = [
+  "deflate-flate2",
+] }
 
 [workspace.lints.rust]
 unsafe_code = "forbid"

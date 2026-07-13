@@ -6,6 +6,8 @@
 
 mod account;
 mod auth_api;
+mod blob;
+mod imports;
 
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock, RwLockReadGuard, RwLockWriteGuard};
@@ -13,21 +15,21 @@ use std::time::Duration;
 
 use axum::{
     body::Body,
-    extract::{Path, State},
-    http::{header, HeaderValue, Method, StatusCode},
+    extract::{DefaultBodyLimit, Multipart, Path, State},
+    http::{header, HeaderMap, HeaderValue, Method, StatusCode},
     middleware,
     response::{IntoResponse, Response},
     routing::{get, patch, post, put},
     Extension, Json, Router,
 };
 use lumi_core::{
-    import_epub_fixture, rich_epub_fixture, s1_schema_migrations, simple_epub_fixture, Annotation,
-    AnnotationExport, AnnotationId, BlobManifest, BlobManifestId, CreateAnnotationCommand,
-    DiagnosticSeverity, DocumentRevision, DocumentRevisionId, EpubFixture, HealthResponse,
-    ImportDiagnostic, ImportedFixture, Job, JobId, JobKind, JobStage, JobStatus, LibraryState,
-    Material, MaterialId, MoveReadingPositionCommand, NormalizedContentPackage, ReadingDocument,
-    ReadingProgress, SchemaMigration, ServiceCapabilities, UpdateAnnotationCommand,
-    UpdateLibraryStateCommand, UserId,
+    import_epub_fixture, rich_epub_fixture, s1_schema_migrations, simple_epub_fixture,
+    AcceptedImport, Annotation, AnnotationExport, AnnotationId, BlobManifest, BlobManifestId,
+    CreateAnnotationCommand, DiagnosticSeverity, DocumentRevision, DocumentRevisionId, EpubFixture,
+    EpubLimits, HealthResponse, ImportDiagnostic, ImportStatusEntry, ImportedFixture, Job, JobId,
+    JobKind, JobStage, JobStatus, LibraryState, Material, MaterialId, MoveReadingPositionCommand,
+    NormalizedContentPackage, ReadingDocument, ReadingProgress, SchemaMigration,
+    ServiceCapabilities, UpdateAnnotationCommand, UpdateLibraryStateCommand, UserId,
 };
 use serde::{Deserialize, Serialize};
 use tower_http::{
@@ -37,6 +39,7 @@ use tower_http::{
 };
 
 use account::{AccountStore, AuthenticatedSession, MemoryAccountStore, PgAccountStore};
+use imports::{ImportService, ImportServiceError};
 
 /// Default bind address for local development.
 pub const DEFAULT_BIND_ADDRESS: &str = "127.0.0.1:8080";
@@ -44,6 +47,8 @@ pub const DEFAULT_BIND_ADDRESS: &str = "127.0.0.1:8080";
 pub const DEFAULT_DATABASE_URL: &str = "postgres://lumi:lumi-local@127.0.0.1:5432/lumi";
 /// Default local web origin accepted by CORS and CSRF checks.
 pub const DEFAULT_WEB_ORIGIN: &str = "http://127.0.0.1:5173";
+/// Default content-addressed blob root for local development.
+pub const DEFAULT_BLOB_ROOT: &str = ".local/blob-store";
 
 /// Runtime configuration for the Lumi server process.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -53,6 +58,7 @@ pub struct AppConfig {
     web_origin: String,
     auth_audience: String,
     secure_cookie: bool,
+    blob_root: std::path::PathBuf,
 }
 
 impl AppConfig {
@@ -70,6 +76,9 @@ impl AppConfig {
         let secure_cookie = std::env::var("LUMI_SECURE_COOKIE")
             .map(|value| value != "0" && !value.eq_ignore_ascii_case("false"))
             .unwrap_or(false);
+        let blob_root = std::env::var_os("LUMI_BLOB_ROOT")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|| std::path::PathBuf::from(DEFAULT_BLOB_ROOT));
 
         Self {
             bind_address,
@@ -77,6 +86,7 @@ impl AppConfig {
             web_origin,
             auth_audience,
             secure_cookie,
+            blob_root,
         }
     }
 
@@ -96,6 +106,12 @@ impl AppConfig {
     #[must_use]
     pub fn web_origin(&self) -> &str {
         &self.web_origin
+    }
+
+    /// Filesystem root used by the local content-addressed blob backend.
+    #[must_use]
+    pub fn blob_root(&self) -> &std::path::Path {
+        &self.blob_root
     }
 }
 
@@ -172,6 +188,7 @@ pub struct AppState {
     repository: Arc<RwLock<Repository>>,
     accounts: Arc<dyn AccountStore>,
     security: SecurityConfig,
+    imports: Option<Arc<ImportService>>,
 }
 
 impl AppState {
@@ -199,6 +216,7 @@ impl AppState {
             repository: Arc::new(RwLock::new(Repository::default())),
             accounts: Arc::new(MemoryAccountStore::empty()),
             security: SecurityConfig::local(),
+            imports: None,
         }
     }
 
@@ -211,10 +229,19 @@ impl AppState {
         let accounts = PgAccountStore::connect(config.database_url())
             .await
             .map_err(|error| anyhow::anyhow!(error))?;
+        let imports = Arc::new(ImportService::local(
+            accounts.pool().clone(),
+            config.blob_root().to_path_buf(),
+        ));
+        imports
+            .recover()
+            .await
+            .map_err(|error| anyhow::anyhow!(error))?;
         Ok(Self {
             repository: Arc::new(RwLock::new(Repository::default())),
             accounts: Arc::new(accounts),
             security: SecurityConfig::from_app(config),
+            imports: Some(imports),
         })
     }
 
@@ -230,6 +257,7 @@ impl AppState {
             repository: Arc::new(RwLock::new(repository)),
             accounts,
             security: SecurityConfig::local(),
+            imports: None,
         }
     }
 
@@ -239,6 +267,12 @@ impl AppState {
 
     fn security(&self) -> &SecurityConfig {
         &self.security
+    }
+
+    fn imports(&self) -> Result<&Arc<ImportService>, AppError> {
+        self.imports
+            .as_ref()
+            .ok_or(AppError::Unavailable("durable import service"))
     }
 }
 
@@ -297,8 +331,12 @@ pub fn build_router_with_state(state: AppState) -> Router {
             "/imports/fixtures/{fixture_slug}",
             post(import_fixture_material),
         )
+        .route("/imports", get(list_imports).post(upload_epub))
         .route("/jobs/{job_id}", get(get_job))
         .route("/jobs/{job_id}/diagnostics", get(get_job_diagnostics))
+        .route("/jobs/{job_id}/cancel", post(cancel_job))
+        .route("/jobs/{job_id}/retry", post(retry_job))
+        .layer(DefaultBodyLimit::max(101 * 1024 * 1024))
         .route_layer(middleware::from_fn_with_state(
             state.clone(),
             auth_api::require_session,
@@ -320,6 +358,7 @@ pub fn build_router_with_state(state: AppState) -> Router {
                     header::CONTENT_TYPE,
                     header::ORIGIN,
                     header::HeaderName::from_static("x-lumi-csrf"),
+                    header::HeaderName::from_static("idempotency-key"),
                 ])
                 .allow_methods([
                     Method::GET,
@@ -453,6 +492,13 @@ async fn download_source_epub(
     Extension(session): Extension<AuthenticatedSession>,
     Path(material_id): Path<MaterialId>,
 ) -> Result<Response, AppError> {
+    if let Some(imports) = state.imports.as_ref() {
+        let (file_name, media_type, bytes) = imports
+            .source(session.user_id, material_id)
+            .await
+            .map_err(map_import_error)?;
+        return source_download_response(file_name, media_type, bytes);
+    }
     let repository = read_repository(&state)?;
     repository.ensure_material_owned(session.user_id, material_id)?;
     let source = repository
@@ -460,21 +506,7 @@ async fn download_source_epub(
         .get(&material_id)
         .cloned()
         .ok_or(AppError::NotFound("source_epub"))?;
-    let file_name = source
-        .file_name
-        .chars()
-        .filter(|character| !matches!(character, '"' | '\\'))
-        .collect::<String>();
-
-    Response::builder()
-        .status(StatusCode::OK)
-        .header(header::CONTENT_TYPE, source.media_type)
-        .header(
-            header::CONTENT_DISPOSITION,
-            format!("attachment; filename=\"{file_name}\""),
-        )
-        .body(Body::from(source.bytes))
-        .map_err(|_| AppError::Internal("failed to build source response"))
+    source_download_response(source.file_name, source.media_type, source.bytes)
 }
 
 async fn get_revision(
@@ -482,6 +514,13 @@ async fn get_revision(
     Extension(session): Extension<AuthenticatedSession>,
     Path(revision_id): Path<DocumentRevisionId>,
 ) -> Result<Json<DocumentRevision>, AppError> {
+    if let Some(imports) = state.imports.as_ref() {
+        return imports
+            .revision(session.user_id, revision_id)
+            .await
+            .map(Json)
+            .map_err(map_import_error);
+    }
     let repository = read_repository(&state)?;
     repository.ensure_revision_owned(session.user_id, revision_id)?;
     let revision = repository
@@ -498,6 +537,13 @@ async fn get_normalized_package(
     Extension(session): Extension<AuthenticatedSession>,
     Path(revision_id): Path<DocumentRevisionId>,
 ) -> Result<Json<NormalizedContentPackage>, AppError> {
+    if let Some(imports) = state.imports.as_ref() {
+        return imports
+            .package(session.user_id, revision_id)
+            .await
+            .map(Json)
+            .map_err(map_import_error);
+    }
     let repository = read_repository(&state)?;
     repository.ensure_revision_owned(session.user_id, revision_id)?;
     let package = repository
@@ -514,6 +560,13 @@ async fn get_reading_document(
     Extension(session): Extension<AuthenticatedSession>,
     Path(revision_id): Path<DocumentRevisionId>,
 ) -> Result<Json<ReadingDocument>, AppError> {
+    if let Some(imports) = state.imports.as_ref() {
+        return imports
+            .reading_document(session.user_id, revision_id)
+            .await
+            .map(Json)
+            .map_err(map_import_error);
+    }
     let repository = read_repository(&state)?;
     repository.ensure_revision_owned(session.user_id, revision_id)?;
     let document = repository
@@ -530,6 +583,13 @@ async fn get_blob_manifest(
     Extension(session): Extension<AuthenticatedSession>,
     Path(manifest_id): Path<BlobManifestId>,
 ) -> Result<Json<BlobManifest>, AppError> {
+    if let Some(imports) = state.imports.as_ref() {
+        return imports
+            .manifest(session.user_id, manifest_id)
+            .await
+            .map(Json)
+            .map_err(map_import_error);
+    }
     let repository = read_repository(&state)?;
     repository.ensure_manifest_owned(session.user_id, manifest_id)?;
     let manifest = repository
@@ -579,11 +639,76 @@ async fn import_fixture_material(
     Ok(Json(response))
 }
 
+async fn list_imports(
+    State(state): State<AppState>,
+    Extension(session): Extension<AuthenticatedSession>,
+) -> Result<Json<Vec<ImportStatusEntry>>, AppError> {
+    state
+        .imports()?
+        .list(session.user_id)
+        .await
+        .map(Json)
+        .map_err(map_import_error)
+}
+
+async fn upload_epub(
+    State(state): State<AppState>,
+    Extension(session): Extension<AuthenticatedSession>,
+    headers: HeaderMap,
+    mut multipart: Multipart,
+) -> Result<Response, AppError> {
+    let idempotency_key = headers
+        .get("idempotency-key")
+        .and_then(|value| value.to_str().ok())
+        .ok_or_else(|| AppError::BadRequest("Idempotency-Key header is required".to_owned()))?;
+    let mut upload = None;
+    while let Some(mut field) = multipart
+        .next_field()
+        .await
+        .map_err(|_| AppError::BadRequest("invalid multipart upload".to_owned()))?
+    {
+        if field.name() != Some("file") || upload.is_some() {
+            continue;
+        }
+        let file_name = field
+            .file_name()
+            .ok_or_else(|| AppError::BadRequest("EPUB file name is required".to_owned()))?
+            .to_owned();
+        let mut bytes = Vec::new();
+        while let Some(chunk) = field
+            .chunk()
+            .await
+            .map_err(|_| AppError::BadRequest("failed to read multipart upload".to_owned()))?
+        {
+            if bytes.len().saturating_add(chunk.len()) > EpubLimits::s1().source_bytes as usize {
+                return Err(AppError::PayloadTooLarge);
+            }
+            bytes.extend_from_slice(&chunk);
+        }
+        upload = Some((file_name, bytes));
+    }
+    let (file_name, bytes) = upload
+        .ok_or_else(|| AppError::BadRequest("multipart field `file` is required".to_owned()))?;
+    let accepted: AcceptedImport = state
+        .imports()?
+        .accept(&session, &file_name, idempotency_key, bytes)
+        .await
+        .map_err(map_import_error)?;
+    Ok((StatusCode::ACCEPTED, Json(accepted)).into_response())
+}
+
 async fn get_job(
     State(state): State<AppState>,
     Extension(session): Extension<AuthenticatedSession>,
     Path(job_id): Path<JobId>,
 ) -> Result<Json<Job>, AppError> {
+    if let Some(imports) = state.imports.as_ref() {
+        return imports
+            .job(session.user_id, job_id)
+            .await
+            .map(Json)
+            .map_err(map_import_error);
+    }
     let repository = read_repository(&state)?;
     let job = repository
         .jobs
@@ -600,6 +725,13 @@ async fn get_job_diagnostics(
     Extension(session): Extension<AuthenticatedSession>,
     Path(job_id): Path<JobId>,
 ) -> Result<Json<Vec<ImportDiagnostic>>, AppError> {
+    if let Some(imports) = state.imports.as_ref() {
+        return imports
+            .diagnostics(session.user_id, job_id)
+            .await
+            .map(Json)
+            .map_err(map_import_error);
+    }
     let repository = read_repository(&state)?;
     let diagnostics = repository
         .jobs
@@ -609,6 +741,32 @@ async fn get_job_diagnostics(
         .ok_or(AppError::NotFound("job"))?;
 
     Ok(Json(diagnostics))
+}
+
+async fn cancel_job(
+    State(state): State<AppState>,
+    Extension(session): Extension<AuthenticatedSession>,
+    Path(job_id): Path<JobId>,
+) -> Result<Json<Job>, AppError> {
+    state
+        .imports()?
+        .cancel(session.user_id, job_id)
+        .await
+        .map(Json)
+        .map_err(map_import_error)
+}
+
+async fn retry_job(
+    State(state): State<AppState>,
+    Extension(session): Extension<AuthenticatedSession>,
+    Path(job_id): Path<JobId>,
+) -> Result<Json<Job>, AppError> {
+    state
+        .imports()?
+        .retry(session.user_id, job_id)
+        .await
+        .map(Json)
+        .map_err(map_import_error)
 }
 
 async fn list_annotations(
@@ -805,6 +963,35 @@ fn normalized_progress_fraction(progress_fraction: f32) -> f32 {
     }
 }
 
+fn source_download_response(
+    file_name: String,
+    media_type: String,
+    bytes: Vec<u8>,
+) -> Result<Response, AppError> {
+    let safe_name = file_name
+        .chars()
+        .filter(|character| !matches!(character, '"' | '\\'))
+        .collect::<String>();
+    Response::builder()
+        .status(StatusCode::OK)
+        .header(header::CONTENT_TYPE, media_type)
+        .header(
+            header::CONTENT_DISPOSITION,
+            format!("attachment; filename=\"{safe_name}\""),
+        )
+        .body(Body::from(bytes))
+        .map_err(|_| AppError::Internal("failed to build source response"))
+}
+
+fn map_import_error(error: ImportServiceError) -> AppError {
+    match error {
+        ImportServiceError::NotFound => AppError::NotFound("import object"),
+        ImportServiceError::Conflict => AppError::Conflict("import command conflicts".to_owned()),
+        ImportServiceError::BadRequest(detail) => AppError::BadRequest(detail.to_owned()),
+        ImportServiceError::Unavailable => AppError::Unavailable("durable import service"),
+    }
+}
+
 fn read_repository(state: &AppState) -> Result<RwLockReadGuard<'_, Repository>, AppError> {
     state
         .repository
@@ -960,6 +1147,7 @@ enum AppError {
     Unauthorized,
     Forbidden(&'static str),
     Conflict(String),
+    PayloadTooLarge,
     Unavailable(&'static str),
     Internal(&'static str),
 }
@@ -980,6 +1168,11 @@ impl IntoResponse for AppError {
             ),
             AppError::Forbidden(detail) => (StatusCode::FORBIDDEN, "forbidden", detail.to_owned()),
             AppError::Conflict(detail) => (StatusCode::CONFLICT, "conflict", detail),
+            AppError::PayloadTooLarge => (
+                StatusCode::PAYLOAD_TOO_LARGE,
+                "payload_too_large",
+                "EPUB upload exceeds the configured source limit.".to_owned(),
+            ),
             AppError::Unavailable(resource) => (
                 StatusCode::SERVICE_UNAVAILABLE,
                 "service_unavailable",
