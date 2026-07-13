@@ -3,7 +3,7 @@
 Status: `active`
 
 Backlog продолжает
-[`s1-web-epub-reader.md`](s1-web-epub-reader.md) после завершения Этапа 0.
+[`s1-web-reader.md`](s1-web-reader.md) после завершения Этапа 0.
 Registry IDs стабильны по
 [`../systems/feature-registry.md`](../systems/feature-registry.md) и должны
 оставаться в title или body GitHub issue/PR.
