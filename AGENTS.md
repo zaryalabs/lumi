@@ -24,10 +24,13 @@ Quick guide for agents working in this repository.
 - Run `make l` while iterating.
 - Run `make c` before commits or handoff after code changes.
 - Run `make web-e2e` when the change affects the web surface or browser flows.
+- Run `make prototype-r` to iterate on the static UI/UX prototype without a
+  backend, and `make prototype-e2e` after prototype behavior changes.
 
 ## Project Shape
 
 - `docs/` - canonical Russian product, systems, ADRs and runbooks.
+- `docs/visuals/` - static UI/UX prototype and related visual decisions.
 - `docs/tmp-plans/` - temporary implementation plans for active slices.
 - `crates/lumi-core/` - shared domain contracts and platform-independent reader
   foundations.

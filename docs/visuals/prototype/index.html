@@ -1,0 +1,616 @@
+<!doctype html>
+<html lang="ru">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta
+      name="description"
+      content="Reader-first UI/UX prototype for Lumi deliberate reading"
+    />
+    <meta name="theme-color" content="#f4f0e8" />
+    <title>Lumi — прототип осмысленного чтения</title>
+    <link rel="icon" href="data:," />
+    <link rel="stylesheet" href="styles.css" />
+    <script src="script.js" defer></script>
+  </head>
+  <body>
+    <a class="skip-link" href="#main-content">Перейти к содержимому</a>
+
+    <div class="app-shell" data-theme="paper" data-view="library">
+      <header class="app-header">
+        <a class="brand" href="#library" aria-label="Lumi — библиотека">
+          <span class="brand-mark" aria-hidden="true">L</span>
+          <span>Lumi</span>
+        </a>
+
+        <nav class="app-navigation" aria-label="Основная навигация">
+          <button
+            class="nav-button active"
+            id="library-navigation"
+            type="button"
+            aria-current="page"
+          >
+            Библиотека
+          </button>
+        </nav>
+
+        <div class="account-cluster">
+          <span class="sync-state"
+            ><span aria-hidden="true">●</span> Всё сохранено</span
+          >
+          <button
+            class="avatar-button"
+            type="button"
+            aria-label="Открыть профиль"
+          >
+            М
+          </button>
+        </div>
+      </header>
+
+      <main id="main-content" aria-label="Lumi — прототип осмысленного чтения">
+        <section
+          id="library"
+          class="app-view library-view"
+          aria-labelledby="library-title"
+        >
+          <header class="library-header">
+            <div>
+              <p class="overline">Личное пространство</p>
+              <h1 id="library-title">Ваша библиотека</h1>
+              <p class="lead">Материалы, к которым хочется возвращаться.</p>
+            </div>
+            <button class="primary-button" type="button" id="import-button">
+              <span aria-hidden="true">＋</span> Добавить EPUB
+            </button>
+          </header>
+
+          <section class="continue-section" aria-labelledby="continue-title">
+            <div class="section-heading">
+              <div>
+                <p class="overline">Продолжить</p>
+                <h2 id="continue-title">Вернуться к чтению</h2>
+              </div>
+              <span class="last-read">Сегодня, 09:42</span>
+            </div>
+
+            <article class="continue-card">
+              <div class="book-cover cover-primary" aria-hidden="true">
+                <span class="cover-kicker">Lumi Library</span>
+                <strong>Архитектура<br />внимательного<br />чтения</strong>
+                <span>Мария Волкова</span>
+              </div>
+
+              <div class="continue-copy">
+                <div class="material-heading">
+                  <div>
+                    <span class="format-label">EPUB · книга</span>
+                    <h3>Архитектура внимательного чтения</h3>
+                    <p>Мария Волкова</p>
+                  </div>
+
+                  <details class="material-menu">
+                    <summary aria-label="Действия с материалом">•••</summary>
+                    <div class="menu-popover">
+                      <button type="button" id="download-source">
+                        Скачать исходник
+                      </button>
+                      <button type="button" id="show-details">Сведения</button>
+                      <button type="button" id="archive-button">
+                        Архивировать
+                      </button>
+                    </div>
+                  </details>
+                </div>
+
+                <p class="material-summary">
+                  О том, как замечать собственное понимание, сохранять важные
+                  мысли и превращать прочитанное в рабочее знание.
+                </p>
+
+                <div
+                  class="reading-progress"
+                  aria-label="Прочитано 34 процента"
+                >
+                  <div class="progress-track">
+                    <span style="width: 34%"></span>
+                  </div>
+                  <div class="progress-copy">
+                    <span>Глава 2 · Внимание как выбор</span>
+                    <span>34%</span>
+                  </div>
+                </div>
+
+                <div class="continue-actions">
+                  <button class="primary-button open-reader" type="button">
+                    Продолжить чтение
+                  </button>
+                  <span>Осталось около 2 ч 10 мин</span>
+                </div>
+              </div>
+            </article>
+          </section>
+
+          <section class="shelf-section" aria-labelledby="shelf-title">
+            <div class="section-heading">
+              <div>
+                <p class="overline">Все материалы</p>
+                <h2 id="shelf-title">Недавнее</h2>
+              </div>
+              <button class="text-button" type="button">
+                Фильтры <span aria-hidden="true">⌄</span>
+              </button>
+            </div>
+
+            <div class="material-grid">
+              <article class="material-card">
+                <div class="mini-cover cover-secondary" aria-hidden="true">
+                  Поля<br />смысла
+                </div>
+                <div>
+                  <span class="format-label">EPUB</span>
+                  <h3>Поля смысла</h3>
+                  <p>Алексей Миронов</p>
+                  <span class="quiet-status">Не начато</span>
+                </div>
+              </article>
+
+              <article class="material-card import-error">
+                <div class="mini-cover error-cover" aria-hidden="true">!</div>
+                <div>
+                  <span class="format-label">EPUB · требуется внимание</span>
+                  <h3>Заметки о памяти.epub</h3>
+                  <p>Не удалось найти читаемые главы.</p>
+                  <button class="text-button" type="button" id="import-details">
+                    Что случилось
+                  </button>
+                </div>
+              </article>
+            </div>
+          </section>
+
+          <dialog id="material-dialog" aria-labelledby="material-dialog-title">
+            <div class="dialog-heading">
+              <div>
+                <p class="overline">Сведения о материале</p>
+                <h2 id="material-dialog-title">
+                  Архитектура внимательного чтения
+                </h2>
+              </div>
+              <button
+                class="icon-button close-dialog"
+                type="button"
+                aria-label="Закрыть сведения"
+              >
+                ×
+              </button>
+            </div>
+            <dl class="technical-details">
+              <div>
+                <dt>Источник</dt>
+                <dd>attention-reading.epub</dd>
+              </div>
+              <div>
+                <dt>Импортирован</dt>
+                <dd>12 июля 2026</dd>
+              </div>
+              <div>
+                <dt>Материал</dt>
+                <dd>01985b1e-3475-7df4-a33a-0d615f17c174</dd>
+              </div>
+              <div>
+                <dt>Ревизия</dt>
+                <dd>01985b1e-3475-7df4-a33a-0d615f17c175</dd>
+              </div>
+            </dl>
+          </dialog>
+
+          <dialog id="import-dialog" aria-labelledby="import-dialog-title">
+            <div class="dialog-heading">
+              <div>
+                <p class="overline danger-text">Импорт не завершён</p>
+                <h2 id="import-dialog-title">
+                  В книге не найдены читаемые главы
+                </h2>
+              </div>
+              <button
+                class="icon-button close-dialog"
+                type="button"
+                aria-label="Закрыть диагностику"
+              >
+                ×
+              </button>
+            </div>
+            <p>
+              Возможно, файл повреждён или использует неподдерживаемую
+              структуру. Попробуйте загрузить другую копию EPUB.
+            </p>
+            <details class="diagnostic-details">
+              <summary>Технические подробности</summary>
+              <code>epub_fixture_import_failed · readable_spine_items: 0</code>
+            </details>
+          </dialog>
+        </section>
+
+        <section
+          id="reader"
+          class="app-view reader-view"
+          aria-label="Экран чтения"
+          hidden
+        >
+          <header class="reader-header">
+            <button class="back-button" id="back-to-library" type="button">
+              <span aria-hidden="true">←</span> Библиотека
+            </button>
+
+            <div class="reader-title-group">
+              <strong>Архитектура внимательного чтения</strong>
+              <span>Глава 2 · Внимание как выбор</span>
+            </div>
+
+            <div class="reader-actions">
+              <button
+                class="reader-action"
+                id="toggle-toc"
+                type="button"
+                aria-label="Содержание"
+                aria-expanded="false"
+                aria-controls="toc-panel"
+              >
+                Содержание
+              </button>
+              <button
+                class="reader-action compact-action"
+                id="toggle-settings"
+                type="button"
+                aria-expanded="false"
+                aria-controls="reader-settings"
+                aria-label="Настройки чтения"
+              >
+                Aa
+              </button>
+              <button
+                class="reader-action"
+                id="toggle-notes"
+                type="button"
+                aria-label="Заметки"
+                aria-expanded="false"
+                aria-controls="notes-panel"
+              >
+                Заметки <span class="count-badge">2</span>
+              </button>
+            </div>
+
+            <div class="chapter-progress" aria-hidden="true"><span></span></div>
+          </header>
+
+          <div class="reader-workspace">
+            <aside
+              id="toc-panel"
+              class="reader-panel toc-panel"
+              aria-labelledby="toc-title"
+              hidden
+            >
+              <div class="panel-heading">
+                <div>
+                  <p class="overline">Навигация</p>
+                  <h2 id="toc-title">Содержание</h2>
+                </div>
+                <button
+                  class="icon-button close-panel"
+                  type="button"
+                  data-panel="toc"
+                  aria-label="Закрыть содержание"
+                >
+                  ×
+                </button>
+              </div>
+              <nav aria-label="Оглавление книги">
+                <ol class="toc-list">
+                  <li>
+                    <button type="button" data-page="0">
+                      <span>1</span> Читать — значит выбирать
+                    </button>
+                  </li>
+                  <li class="active">
+                    <button type="button" data-page="0" aria-current="location">
+                      <span>2</span> Внимание как выбор
+                    </button>
+                  </li>
+                  <li>
+                    <button type="button" data-page="1">
+                      <span>3</span> Следы прочитанного
+                    </button>
+                  </li>
+                  <li>
+                    <button type="button" data-page="1">
+                      <span>4</span> Возвращение к идеям
+                    </button>
+                  </li>
+                </ol>
+              </nav>
+              <div class="bookmark-card">
+                <span aria-hidden="true">◆</span>
+                <div><strong>1 закладка</strong><span>В этой главе</span></div>
+              </div>
+            </aside>
+
+            <div class="reading-column">
+              <div
+                id="reader-settings"
+                class="reader-settings"
+                role="group"
+                aria-label="Настройки чтения"
+                hidden
+              >
+                <label>
+                  <span>Размер текста</span>
+                  <input
+                    id="font-size"
+                    type="range"
+                    min="92"
+                    max="122"
+                    value="104"
+                  />
+                </label>
+                <label>
+                  <span>Ширина строки</span>
+                  <input
+                    id="line-width"
+                    type="range"
+                    min="34"
+                    max="48"
+                    value="42"
+                  />
+                </label>
+                <fieldset>
+                  <legend>Тема</legend>
+                  <label
+                    ><input type="radio" name="theme" value="paper" checked />
+                    Бумага</label
+                  >
+                  <label
+                    ><input type="radio" name="theme" value="night" />
+                    Ночь</label
+                  >
+                </fieldset>
+              </div>
+
+              <article class="reading-surface" aria-labelledby="chapter-title">
+                <section class="reader-page" data-page-index="0">
+                  <header class="chapter-heading">
+                    <p>Глава вторая</p>
+                    <h1 id="chapter-title">Внимание как выбор</h1>
+                    <p class="chapter-deck">
+                      Чтение начинается не со скорости, а с решения остаться
+                      рядом с мыслью.
+                    </p>
+                  </header>
+
+                  <div class="reading-body">
+                    <p class="dropcap">
+                      Внимание редко исчезает внезапно. Сначала взгляд
+                      продолжает двигаться по строкам, хотя мысль уже ушла в
+                      сторону. Мы замечаем это лишь через несколько абзацев и
+                      возвращаемся туда, где текст перестал оставлять след.
+                    </p>
+
+                    <div class="annotated-paragraph">
+                      <p>
+                        Хороший читатель отличается не безупречной
+                        сосредоточенностью, а умением заметить момент потери
+                        контакта.
+                        <mark id="active-highlight" tabindex="0"
+                          >Возвращение к тексту — не поражение внимания, а его
+                          основная работа.</mark
+                        >
+                      </p>
+                      <button
+                        class="margin-marker"
+                        type="button"
+                        aria-label="Открыть заметку к абзацу"
+                      >
+                        1
+                      </button>
+                    </div>
+
+                    <div
+                      id="selection-toolbar"
+                      class="selection-toolbar"
+                      role="toolbar"
+                      aria-label="Действия с выделением"
+                      hidden
+                    >
+                      <button
+                        type="button"
+                        aria-label="Изменить цвет выделения"
+                      >
+                        <span class="highlight-dot" aria-hidden="true"></span>
+                      </button>
+                      <button type="button" id="selection-note">Заметка</button>
+                      <button type="button" id="selection-explain">
+                        Объяснить
+                      </button>
+                      <button type="button" id="selection-card">
+                        Карточка
+                      </button>
+                    </div>
+
+                    <p>
+                      Поэтому полезно читать не непрерывным потоком, а
+                      небольшими смысловыми участками. После каждого из них
+                      можно задать простой вопрос: что именно изменилось в моём
+                      представлении о предмете?
+                    </p>
+
+                    <blockquote>
+                      Пауза после сильной мысли — тоже часть чтения. В ней текст
+                      становится собственным опытом читателя.
+                    </blockquote>
+
+                    <h2>Следы, которые помогают вернуться</h2>
+                    <p>
+                      Выделение ценно не цветом, а причиной, по которой оно
+                      появилось. Короткая заметка на полях сохраняет эту причину
+                      и позднее возвращает не только к цитате, но и к ходу
+                      собственной мысли.
+                    </p>
+                  </div>
+                </section>
+
+                <section class="reader-page" data-page-index="1" hidden>
+                  <header class="chapter-heading">
+                    <p>Глава третья</p>
+                    <h1>Следы прочитанного</h1>
+                    <p class="chapter-deck">
+                      Заметка полезна тогда, когда ведёт обратно к источнику и
+                      вперёд — к новой идее.
+                    </p>
+                  </header>
+
+                  <div class="reading-body">
+                    <p class="dropcap">
+                      Мы редко вспоминаем текст дословно, но хорошо узнаём
+                      маршрут собственной мысли. Цитата, вопрос и связь с другой
+                      идеей образуют несколько путей к одному месту — поэтому
+                      заметка переживает первое чтение.
+                    </p>
+                    <p>
+                      Сохранённый фрагмент не обязан немедленно становиться
+                      знанием. Иногда ему достаточно остаться хорошим вопросом,
+                      к которому захочется вернуться позже.
+                    </p>
+                    <aside
+                      class="reflection-card"
+                      aria-label="Необязательное осмысление главы"
+                    >
+                      <p class="overline">Необязательно</p>
+                      <h2>Что помогает вам заметить потерю внимания?</h2>
+                      <p>
+                        Можно сохранить короткий ответ как личную заметку к этой
+                        главе.
+                      </p>
+                      <div>
+                        <button class="secondary-button" type="button">
+                          Ответить
+                        </button>
+                        <button class="text-button" type="button">
+                          Пропустить
+                        </button>
+                      </div>
+                    </aside>
+                  </div>
+                </section>
+              </article>
+
+              <nav class="page-navigation" aria-label="Навигация по страницам">
+                <button
+                  id="previous-page"
+                  type="button"
+                  disabled
+                  aria-label="Предыдущая страница"
+                >
+                  ←
+                </button>
+                <span id="page-indicator">34% · 1 из 2</span>
+                <button
+                  id="next-page"
+                  type="button"
+                  aria-label="Следующая страница"
+                >
+                  →
+                </button>
+              </nav>
+            </div>
+
+            <aside
+              id="notes-panel"
+              class="reader-panel notes-panel"
+              aria-labelledby="notes-title"
+              hidden
+            >
+              <div class="panel-heading">
+                <div>
+                  <p class="overline">Личное · приватно</p>
+                  <h2 id="notes-title">Заметки</h2>
+                </div>
+                <button
+                  class="icon-button close-panel"
+                  type="button"
+                  data-panel="notes"
+                  aria-label="Закрыть заметки"
+                >
+                  ×
+                </button>
+              </div>
+
+              <div
+                class="panel-tabs"
+                role="tablist"
+                aria-label="Типы аннотаций"
+              >
+                <button type="button" role="tab" aria-selected="true">
+                  Все <span>2</span>
+                </button>
+                <button type="button" role="tab" aria-selected="false">
+                  Заметки
+                </button>
+                <button type="button" role="tab" aria-selected="false">
+                  Выделения
+                </button>
+              </div>
+
+              <article class="annotation-card">
+                <div class="annotation-meta">
+                  <span class="highlight-dot"></span><span>Выделение</span>
+                </div>
+                <blockquote>
+                  «Возвращение к тексту — не поражение внимания…»
+                </blockquote>
+                <p>
+                  Хорошее определение метанавыка: замечать, что перестал
+                  понимать.
+                </p>
+                <button class="annotation-link" type="button">
+                  Показать в тексте
+                </button>
+              </article>
+
+              <article class="annotation-card margin-note">
+                <div class="annotation-meta">
+                  <span aria-hidden="true">◇</span><span>На полях</span>
+                </div>
+                <p>Сравнить это с заметкой о внимании из «Полей смысла».</p>
+                <button class="annotation-link" type="button">
+                  Показать в тексте
+                </button>
+              </article>
+
+              <form class="quick-note" id="quick-note-form">
+                <label for="quick-note-input"
+                  >Новая заметка к текущей странице</label
+                >
+                <textarea
+                  id="quick-note-input"
+                  name="note"
+                  rows="3"
+                  placeholder="Запишите мысль…"
+                ></textarea>
+                <div>
+                  <button class="text-button" type="button">
+                    Связать с заметкой
+                  </button>
+                  <button class="secondary-button" type="submit">
+                    Сохранить
+                  </button>
+                </div>
+              </form>
+            </aside>
+          </div>
+        </section>
+      </main>
+
+      <div id="toast" class="toast" role="status" aria-live="polite"></div>
+    </div>
+  </body>
+</html>

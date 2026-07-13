@@ -1,10 +1,10 @@
 import { defineConfig, devices } from "@playwright/test";
 
-const baseURL = process.env.PLAYWRIGHT_BASE_URL ?? "http://127.0.0.1:5173";
+const baseURL = process.env.PLAYWRIGHT_BASE_URL ?? "http://127.0.0.1:4173";
 
 export default defineConfig({
   testDir: ".",
-  testIgnore: "prototype.spec.ts",
+  testMatch: "prototype.spec.ts",
   reporter: "list",
   use: {
     baseURL,
@@ -13,9 +13,9 @@ export default defineConfig({
   webServer: process.env.PLAYWRIGHT_BASE_URL
     ? undefined
     : {
-        command: "make -C ../.. web-r",
+        command: "make -C ../.. prototype-r",
         reuseExistingServer: true,
-        timeout: 120_000,
+        timeout: 30_000,
         url: baseURL,
       },
   projects: [

@@ -12,6 +12,8 @@
 - [`adr/`](adr/) - долговечные архитектурные решения.
 - [`runbooks/local-dev.md`](runbooks/local-dev.md) - локальный workflow
   разработки.
+- [`visuals/`](visuals/) - статический UI/UX-прототип и связанные визуальные
+  решения.
 
 Временные реализационные планы живут отдельно в
 [`tmp-plans`](tmp-plans). Это tactical working documents для активных

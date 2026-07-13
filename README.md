@@ -95,8 +95,13 @@ apps/web/             Dioxus web shell and platform adapter surface
 crates/lumi-core/     shared domain contracts
 crates/lumi-server/   Axum API boundary and server entrypoint
 docs/                 canonical Russian product, systems, ADRs and runbooks
+docs/visuals/         static dependency-free UI/UX prototype and visual notes
 docs/tmp-plans/       temporary implementation plans
 tests/e2e/            Playwright browser tests and agent inspection harness
 ```
 
 Use `make help` to see the supported local commands.
+
+For fast UI/UX iteration without the Rust web stack or backend, run
+`make prototype-r` and open <http://127.0.0.1:4173>. The prototype workflow is
+documented in [`docs/visuals`](docs/visuals).
