@@ -1,6 +1,6 @@
 # ADR 0002: S0 Seed Auth Prototype Boundary
 
-Status: accepted
+Status: superseded by ADR 0003
 
 ## Context
 

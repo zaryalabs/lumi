@@ -233,8 +233,12 @@ Page {
 - lazy page-map generation по мере чтения;
 - cache `PageMap` по `DocumentRevision + ReaderSettings + viewport bucket`.
 
-Open decision: точный алгоритм pagination нужно прототипировать отдельно на
-длинных книгах, web articles, таблицах, изображениях, сносках и plugin blocks.
+Точный web-алгоритм принят в
+[`../adr/0006-browser-measured-pagination.md`](../adr/0006-browser-measured-pagination.md):
+инкрементальное наполнение page-sized measurement container, browser layout и
+binary search по text range с source-backed `PageBoundary`. Он проверяется на
+длинном тексте, таблице, изображении и сноске в
+[`../visuals/pagination-spike/`](../visuals/pagination-spike/).
 
 ## Anchors And Selection
 
@@ -412,8 +416,8 @@ Page fidelity surface
 
 ## Открытые вопросы
 
-- Какой pagination algorithm дает лучший баланс точности, скорости и
-  стабильности anchors на WebView targets?
+- Какие browser/WebView-specific invalidation и performance tuning нужны
+  принятому ADR 0006 на desktop/mobile targets?
 - Можно ли на Dioxus Mobile получить достаточно надежный text selection и
   geometry measurement для качественных highlights?
 - Нужен ли отдельный native bridge для Android/iOS DRM, или достаточно

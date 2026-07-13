@@ -347,10 +347,18 @@ Fixed-layout renderer должен быть похож на PDF-path:
 
 ### Безопасность импорта
 
+Численные defaults и порядок проверок зафиксированы в
+[`../../adr/0005-epub-import-stack-and-limits.md`](../../adr/0005-epub-import-stack-and-limits.md).
+Профиль `epub-limits.s1`: source 100 MiB, до 10 000 entries, 512 MiB total
+expanded, 64 MiB на resource, 2 MiB на package XML, 8 MiB на content document,
+1024 bytes на path и не более 100:1 compression ratio.
+
 - Запрещать zip paths с `..`, absolute paths, drive prefixes и invalid unicode.
 - Ограничивать общий распакованный размер, размер одного resource и количество
   entries.
 - Не исполнять scripts и inline handlers.
+- Отклонять DTD/external entities в package XML; parser не получает
+  network/filesystem resolver.
 - Не загружать remote resources автоматически.
 - Не доверять SVG как безопасному HTML. SVG либо проходит через отдельный
   sanitizer/plugin, либо показывается как безопасно изолированный resource.

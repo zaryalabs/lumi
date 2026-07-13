@@ -1,0 +1,80 @@
+<!doctype html>
+<html lang="ru">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Lumi — pagination spike</title>
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <main class="spike-shell" aria-labelledby="spike-title">
+      <header class="spike-header">
+        <div>
+          <p class="eyebrow">SPIKE-001 · RD-003</p>
+          <h1 id="spike-title">Browser-measured PageMap</h1>
+          <p>
+            Длинная глава, изображение, таблица, сноска и plugin block
+            разбиваются на source-backed диапазоны.
+          </p>
+        </div>
+        <div class="metrics" aria-label="Результат измерения">
+          <strong id="page-count">—</strong>
+          <span>страниц</span>
+          <span id="coverage-status" role="status" aria-live="polite"
+            >Измерение…</span
+          >
+        </div>
+      </header>
+
+      <section class="controls" aria-label="Параметры раскладки">
+        <label>
+          <span>Размер текста</span>
+          <input
+            id="font-size"
+            type="range"
+            min="15"
+            max="22"
+            value="17"
+            aria-label="Размер текста"
+          />
+          <output id="font-size-value" for="font-size">17 px</output>
+        </label>
+        <label>
+          <span>Ширина страницы</span>
+          <select id="page-width" aria-label="Ширина страницы">
+            <option value="520">Узкая · 520 px</option>
+            <option value="660" selected>Обычная · 660 px</option>
+            <option value="760">Широкая · 760 px</option>
+          </select>
+        </label>
+        <button id="reflow" type="button">Пересчитать</button>
+      </section>
+
+      <section class="reader" aria-label="Pagination spike reader">
+        <div class="page-toolbar" aria-label="Навигация по страницам">
+          <button id="previous" type="button" aria-label="Предыдущая страница">
+            ←
+          </button>
+          <span id="page-counter" data-testid="page-counter">— / —</span>
+          <button id="next" type="button" aria-label="Следующая страница">
+            →
+          </button>
+        </div>
+        <article
+          id="visible-page"
+          class="page"
+          role="region"
+          aria-label="Измеренная страница"
+        ></article>
+      </section>
+
+      <details class="page-map-panel">
+        <summary>PageMap boundaries</summary>
+        <pre id="page-map"></pre>
+      </details>
+    </main>
+
+    <div id="measurement" aria-hidden="true"></div>
+    <script src="script.js"></script>
+  </body>
+</html>

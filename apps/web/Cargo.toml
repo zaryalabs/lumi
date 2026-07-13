@@ -7,7 +7,7 @@ rust-version.workspace = true
 
 [dependencies]
 dioxus.workspace = true
-lumi-core = { path = "../../crates/lumi-core" }
+lumi-core = { version = "0.1.0", path = "../../crates/lumi-core" }
 
 [features]
 default = ["web"]

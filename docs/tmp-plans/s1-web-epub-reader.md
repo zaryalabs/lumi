@@ -181,7 +181,7 @@ UI/UX-прототипа к работоспособной первой web-ве
 
 ## Порядок реализации
 
-### Этап 0. Закрыть блокирующие решения
+### Этап 0. Закрыть блокирующие решения — выполнен
 
 - Провести auth spike и принять ADR, заменяющий или уточняющий временный
   seed-auth boundary.
@@ -190,6 +190,20 @@ UI/UX-прототипа к работоспособной первой web-ве
 - Провести pagination spike на длинной главе, изображениях, таблице и сносках.
 - Выбрать EPUB parser, sanitizer и ZIP limits.
 - Превратить этапы этого плана в issues с registry IDs.
+
+Результаты:
+
+- auth boundary: [`../adr/0003-seed-derived-challenge-auth.md`](../adr/0003-seed-derived-challenge-auth.md),
+  исполняемый spike `spikes/stage0/src/auth.rs`;
+- PostgreSQL и change model:
+  [`../adr/0004-postgresql-sync-ready-schema.md`](../adr/0004-postgresql-sync-ready-schema.md);
+- EPUB stack/limits:
+  [`../adr/0005-epub-import-stack-and-limits.md`](../adr/0005-epub-import-stack-and-limits.md),
+  исполняемый spike `spikes/stage0/src/epub.rs`;
+- pagination:
+  [`../adr/0006-browser-measured-pagination.md`](../adr/0006-browser-measured-pagination.md),
+  browser-spike `../visuals/pagination-spike/`;
+- issue backlog этапов 1–7: [`s1-issues.md`](s1-issues.md).
 
 Критерий завершения: приняты необходимые ADR, а auth, EPUB и pagination риски
 проверены исполняемыми spikes или fixtures.

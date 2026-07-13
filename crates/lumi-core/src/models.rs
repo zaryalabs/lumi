@@ -631,12 +631,12 @@ fn quote_range(quote: &str) -> Option<TextRange> {
     }
 }
 
-/// Text range in character offsets.
+/// Text range in Unicode scalar-value offsets, independent of UTF-8/UTF-16 encoding.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct TextRange {
-    /// Inclusive start character offset.
+    /// Inclusive start Unicode scalar-value offset.
     pub start: usize,
-    /// Exclusive end character offset.
+    /// Exclusive end Unicode scalar-value offset.
     pub end: usize,
 }
 

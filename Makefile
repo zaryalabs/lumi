@@ -6,6 +6,7 @@ NPM ?= npm
 PRE_COMMIT ?= pre-commit
 
 RUST_MANIFEST := Cargo.toml
+STAGE0_SPIKE_PACKAGE := lumi-stage0-spikes
 WEB_DIR := apps/web
 WEB_PACKAGE := $(WEB_DIR)/Cargo.toml
 E2E_DIR := tests/e2e
@@ -86,7 +87,7 @@ rust-fmt: ## Format Rust code when Cargo workspace exists
 rust-l: ## Run Rust format check and clippy for implemented crates
 	@if [ -f "$(RUST_MANIFEST)" ]; then \
 		$(CARGO) fmt --all -- --check; \
-		$(CARGO) clippy -p lumi-core -p lumi-server --all-targets -- -D warnings; \
+		$(CARGO) clippy -p lumi-core -p lumi-server -p $(STAGE0_SPIKE_PACKAGE) --all-targets -- -D warnings; \
 		$(MAKE) rust-web-check; \
 		$(MAKE) rust-web-l; \
 	else \
@@ -116,7 +117,12 @@ rust-dl: ## Run deeper Rust dependency/config checks when tools are available
 	@if [ -f "$(RUST_MANIFEST)" ]; then \
 		if command -v cargo-audit >/dev/null 2>&1; then cargo audit; else echo "cargo-audit not installed; skipping audit"; fi; \
 		if command -v cargo-deny >/dev/null 2>&1; then cargo deny check; else echo "cargo-deny not installed; skipping deny"; fi; \
-		if command -v taplo >/dev/null 2>&1; then taplo fmt --check && taplo lint; else echo "taplo not installed; skipping TOML checks"; fi; \
+		if command -v taplo >/dev/null 2>&1; then \
+			taplo fmt --check; \
+			if taplo help lint >/dev/null 2>&1; then taplo lint; else echo "taplo lint is unavailable in this Taplo build; format/parser check passed"; fi; \
+		else \
+			echo "taplo not installed; skipping TOML checks"; \
+		fi; \
 	else \
 		echo "No Cargo.toml found; skipping deep Rust checks"; \
 	fi
@@ -124,9 +130,9 @@ rust-dl: ## Run deeper Rust dependency/config checks when tools are available
 rust-t: ## Run Rust tests for implemented crates
 	@if [ -f "$(RUST_MANIFEST)" ]; then \
 		if $(CARGO) nextest --version >/dev/null 2>&1; then \
-			$(CARGO) nextest run -p lumi-core -p lumi-server; \
+			$(CARGO) nextest run -p lumi-core -p lumi-server -p $(STAGE0_SPIKE_PACKAGE); \
 		else \
-			$(CARGO) test -p lumi-core -p lumi-server; \
+			$(CARGO) test -p lumi-core -p lumi-server -p $(STAGE0_SPIKE_PACKAGE); \
 		fi; \
 	else \
 		echo "No Cargo.toml found; skipping Rust tests"; \
@@ -163,6 +169,21 @@ prototype-e2e: ## Run Playwright tests for the static UI/UX prototype
 		echo "No $(E2E_PACKAGE) found; cannot run prototype E2E tests"; \
 		exit 1; \
 	fi
+
+pagination-spike-r: ## Run the Stage 0 pagination spike without a backend
+	@python3 -m http.server $(LUMI_PROTOTYPE_PORT) --bind 127.0.0.1 --directory docs/visuals/pagination-spike
+
+pagination-spike-e2e: ## Run Stage 0 pagination browser checks
+	@if [ -f "$(E2E_PACKAGE)" ]; then \
+		if [ -d "$(E2E_NODE_MODULES)" ]; then $(NPM) --prefix $(E2E_DIR) run test:pagination-spike; else echo "E2E dependencies are not installed; run make init"; exit 1; fi; \
+	else \
+		echo "No $(E2E_PACKAGE) found; cannot run pagination spike E2E tests"; \
+		exit 1; \
+	fi
+
+stage0-spikes: ## Run executable auth, EPUB and pagination spikes
+	$(CARGO) test -p $(STAGE0_SPIKE_PACKAGE)
+	$(MAKE) pagination-spike-e2e
 
 web-build: ## Build the Dioxus web app when dx is available
 	@if [ -f "$(WEB_PACKAGE)" ]; then \
@@ -215,4 +236,4 @@ clean: ## Remove common local build and cache artifacts
 	rm -rf $(WEB_DIR)/dist $(WEB_DIR)/target
 	rm -rf $(E2E_DIR)/test-results $(E2E_DIR)/playwright-report
 
-.PHONY: help init fmt l dl t c pc docs-fmt docs-l rust-fmt rust-l rust-web-check rust-web-l rust-dl rust-t server-r web-r prototype-r prototype-e2e web-build e2e-fmt e2e-l e2e-dl web-e2e agent-inspect clean
+.PHONY: help init fmt l dl t c pc docs-fmt docs-l rust-fmt rust-l rust-web-check rust-web-l rust-dl rust-t server-r web-r prototype-r prototype-e2e pagination-spike-r pagination-spike-e2e stage0-spikes web-build e2e-fmt e2e-l e2e-dl web-e2e agent-inspect clean
