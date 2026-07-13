@@ -27,9 +27,10 @@ use lumi_core::{
     AcceptedImport, Annotation, AnnotationExport, AnnotationId, BlobManifest, BlobManifestId,
     CreateAnnotationCommand, DiagnosticSeverity, DocumentRevision, DocumentRevisionId, EpubFixture,
     EpubLimits, HealthResponse, ImportDiagnostic, ImportStatusEntry, ImportedFixture, Job, JobId,
-    JobKind, JobStage, JobStatus, LibraryState, Material, MaterialId, MoveReadingPositionCommand,
-    NormalizedContentPackage, ReadingDocument, ReadingProgress, SchemaMigration,
-    ServiceCapabilities, UpdateAnnotationCommand, UpdateLibraryStateCommand, UserId,
+    JobKind, JobStage, JobStatus, LibraryEntry, LibraryState, Material, MaterialId,
+    MaterialImportStatus, MoveReadingPositionCommand, NormalizedContentPackage, ReaderSettings,
+    ReadingDocument, ReadingProgress, SchemaMigration, ServiceCapabilities,
+    UpdateAnnotationCommand, UpdateLibraryStateCommand, UpdateReaderSettingsCommand, UserId,
 };
 use serde::{Deserialize, Serialize};
 use tower_http::{
@@ -317,6 +318,10 @@ pub fn build_router_with_state(state: AppState) -> Router {
             "/materials/{material_id}/progress",
             get(get_progress).put(move_reading_position),
         )
+        .route(
+            "/reader/settings",
+            get(get_reader_settings).put(update_reader_settings),
+        )
         .route("/revisions/{revision_id}", get(get_revision))
         .route(
             "/revisions/{revision_id}/package",
@@ -325,6 +330,10 @@ pub fn build_router_with_state(state: AppState) -> Router {
         .route(
             "/revisions/{revision_id}/reading-document",
             get(get_reading_document),
+        )
+        .route(
+            "/revisions/{revision_id}/resources/{content_hash}",
+            get(get_revision_resource),
         )
         .route("/blobs/{manifest_id}", get(get_blob_manifest))
         .route(
@@ -420,7 +429,14 @@ async fn schema_migrations() -> Json<Vec<SchemaMigration>> {
 async fn list_materials(
     State(state): State<AppState>,
     Extension(session): Extension<AuthenticatedSession>,
-) -> Result<Json<Vec<Material>>, AppError> {
+) -> Result<Json<Vec<LibraryEntry>>, AppError> {
+    if let Some(imports) = state.imports.as_ref() {
+        return imports
+            .list(session.user_id)
+            .await
+            .map(Json)
+            .map_err(map_import_error);
+    }
     let repository = read_repository(&state)?;
     let mut materials = repository
         .materials
@@ -428,8 +444,8 @@ async fn list_materials(
         .filter(|material| {
             material.owner_id == session.user_id && material.library_state != LibraryState::Deleted
         })
-        .cloned()
-        .collect::<Vec<_>>();
+        .map(|material| fixture_library_entry(&repository, material))
+        .collect::<Result<Vec<_>, _>>()?;
     materials.sort_by(|left, right| left.canonical_title.cmp(&right.canonical_title));
 
     Ok(Json(materials))
@@ -439,11 +455,18 @@ async fn get_material(
     State(state): State<AppState>,
     Extension(session): Extension<AuthenticatedSession>,
     Path(material_id): Path<MaterialId>,
-) -> Result<Json<Material>, AppError> {
+) -> Result<Json<LibraryEntry>, AppError> {
+    if let Some(imports) = state.imports.as_ref() {
+        return imports
+            .material(session.user_id, material_id)
+            .await
+            .map(Json)
+            .map_err(map_import_error);
+    }
     let repository = read_repository(&state)?;
     let material = repository
         .material_owned_by(session.user_id, material_id)
-        .cloned()?;
+        .and_then(|material| fixture_library_entry(&repository, material))?;
 
     Ok(Json(material))
 }
@@ -452,30 +475,60 @@ async fn update_library_state(
     State(state): State<AppState>,
     Extension(session): Extension<AuthenticatedSession>,
     Path(material_id): Path<MaterialId>,
+    headers: HeaderMap,
     Json(command): Json<UpdateLibraryStateCommand>,
-) -> Result<Json<Material>, AppError> {
+) -> Result<Json<LibraryEntry>, AppError> {
     if command.material_id != material_id {
         return Err(AppError::BadRequest(
             "material id in path and body must match".to_owned(),
         ));
     }
 
+    if let Some(imports) = state.imports.as_ref() {
+        let idempotency_key = required_idempotency_key(&headers)?;
+        return imports
+            .update_library_state(
+                &session,
+                material_id,
+                command.library_state,
+                idempotency_key,
+            )
+            .await
+            .map(Json)
+            .map_err(map_import_error);
+    }
+
     let mut repository = write_repository(&state)?;
+    {
+        let material = repository
+            .materials
+            .get_mut(&material_id)
+            .filter(|material| material.owner_id == session.user_id)
+            .ok_or(AppError::NotFound("material"))?;
+        material.library_state = command.library_state;
+    }
     let material = repository
         .materials
-        .get_mut(&material_id)
-        .filter(|material| material.owner_id == session.user_id)
+        .get(&material_id)
         .ok_or(AppError::NotFound("material"))?;
-    material.library_state = command.library_state;
 
-    Ok(Json(material.clone()))
+    Ok(Json(fixture_library_entry(&repository, material)?))
 }
 
 async fn delete_material(
     State(state): State<AppState>,
     Extension(session): Extension<AuthenticatedSession>,
     Path(material_id): Path<MaterialId>,
+    headers: HeaderMap,
 ) -> Result<StatusCode, AppError> {
+    if let Some(imports) = state.imports.as_ref() {
+        let idempotency_key = required_idempotency_key(&headers)?;
+        imports
+            .delete_material(&session, material_id, idempotency_key)
+            .await
+            .map_err(map_import_error)?;
+        return Ok(StatusCode::NO_CONTENT);
+    }
     let mut repository = write_repository(&state)?;
     let material = repository
         .materials
@@ -576,6 +629,21 @@ async fn get_reading_document(
         .ok_or(AppError::NotFound("reading_document"))?;
 
     Ok(Json(document))
+}
+
+async fn get_revision_resource(
+    State(state): State<AppState>,
+    Extension(session): Extension<AuthenticatedSession>,
+    Path((revision_id, content_hash)): Path<(DocumentRevisionId, String)>,
+) -> Result<Response, AppError> {
+    let imports = state.imports()?;
+    let (media_type, bytes) = imports
+        .resource(session.user_id, revision_id, &content_hash)
+        .await
+        .map_err(map_import_error)?;
+    let content_type = HeaderValue::from_str(&media_type)
+        .map_err(|_| AppError::Internal("stored resource media type is invalid"))?;
+    Ok(([(header::CONTENT_TYPE, content_type)], bytes).into_response())
 }
 
 async fn get_blob_manifest(
@@ -886,6 +954,13 @@ async fn get_progress(
     Extension(session): Extension<AuthenticatedSession>,
     Path(material_id): Path<MaterialId>,
 ) -> Result<Json<Option<ReadingProgress>>, AppError> {
+    if let Some(imports) = state.imports.as_ref() {
+        return imports
+            .reading_progress(session.user_id, material_id)
+            .await
+            .map(Json)
+            .map_err(map_import_error);
+    }
     let repository = read_repository(&state)?;
     repository.ensure_material_owned(session.user_id, material_id)?;
 
@@ -898,12 +973,22 @@ async fn move_reading_position(
     State(state): State<AppState>,
     Extension(session): Extension<AuthenticatedSession>,
     Path(material_id): Path<MaterialId>,
+    headers: HeaderMap,
     Json(command): Json<MoveReadingPositionCommand>,
 ) -> Result<Json<ReadingProgress>, AppError> {
     if command.material_id != material_id {
         return Err(AppError::BadRequest(
             "material id in path and body must match".to_owned(),
         ));
+    }
+
+    if let Some(imports) = state.imports.as_ref() {
+        let idempotency_key = required_idempotency_key(&headers)?;
+        return imports
+            .move_reading_position(&session, command, idempotency_key)
+            .await
+            .map(Json)
+            .map_err(map_import_error);
     }
 
     let mut repository = write_repository(&state)?;
@@ -921,6 +1006,39 @@ async fn move_reading_position(
         .insert(material_id, progress.clone());
 
     Ok(Json(progress))
+}
+
+async fn get_reader_settings(
+    State(state): State<AppState>,
+    Extension(session): Extension<AuthenticatedSession>,
+) -> Result<Json<ReaderSettings>, AppError> {
+    if let Some(imports) = state.imports.as_ref() {
+        return imports
+            .reader_settings(session.user_id)
+            .await
+            .map(Json)
+            .map_err(map_import_error);
+    }
+    Ok(Json(read_repository(&state)?.reader_settings))
+}
+
+async fn update_reader_settings(
+    State(state): State<AppState>,
+    Extension(session): Extension<AuthenticatedSession>,
+    headers: HeaderMap,
+    Json(command): Json<UpdateReaderSettingsCommand>,
+) -> Result<Json<ReaderSettings>, AppError> {
+    if let Some(imports) = state.imports.as_ref() {
+        let idempotency_key = required_idempotency_key(&headers)?;
+        return imports
+            .update_reader_settings(&session, command.settings, idempotency_key)
+            .await
+            .map(Json)
+            .map_err(map_import_error);
+    }
+    let settings = command.settings.normalized();
+    write_repository(&state)?.reader_settings = settings;
+    Ok(Json(settings))
 }
 
 /// Wait for an OS shutdown signal.
@@ -983,6 +1101,47 @@ fn source_download_response(
         .map_err(|_| AppError::Internal("failed to build source response"))
 }
 
+fn fixture_library_entry(
+    repository: &Repository,
+    material: &Material,
+) -> Result<LibraryEntry, AppError> {
+    let latest_job = repository
+        .jobs
+        .values()
+        .filter(|job| job.material_id == Some(material.id))
+        .max_by_key(|job| job.updated_at)
+        .cloned()
+        .ok_or(AppError::NotFound("material import job"))?;
+    let import_status = match latest_job.status {
+        JobStatus::Queued => MaterialImportStatus::Queued,
+        JobStatus::Running => MaterialImportStatus::Importing,
+        JobStatus::Succeeded => MaterialImportStatus::Ready,
+        JobStatus::Failed => MaterialImportStatus::Failed,
+        JobStatus::Cancelled => MaterialImportStatus::Cancelled,
+    };
+    Ok(LibraryEntry {
+        id: material.id,
+        owner_id: material.owner_id,
+        kind: material.kind.clone(),
+        canonical_title: material.canonical_title.clone(),
+        title_override: material.title_override.clone(),
+        active_revision_id: Some(material.active_revision_id),
+        library_state: material.library_state,
+        source_identity: material.source_identity.clone(),
+        import_status,
+        updated_at: latest_job.updated_at,
+        latest_job,
+        created_at: material.created_at,
+    })
+}
+
+fn required_idempotency_key(headers: &HeaderMap) -> Result<&str, AppError> {
+    headers
+        .get("idempotency-key")
+        .and_then(|value| value.to_str().ok())
+        .ok_or_else(|| AppError::BadRequest("Idempotency-Key header is required".to_owned()))
+}
+
 fn map_import_error(error: ImportServiceError) -> AppError {
     match error {
         ImportServiceError::NotFound => AppError::NotFound("import object"),
@@ -1016,6 +1175,7 @@ struct Repository {
     source_downloads: HashMap<MaterialId, SourceDownload>,
     annotations_by_material: HashMap<MaterialId, Vec<Annotation>>,
     progress_by_material: HashMap<MaterialId, ReadingProgress>,
+    reader_settings: ReaderSettings,
     jobs: HashMap<JobId, Job>,
 }
 
@@ -1264,7 +1424,7 @@ mod tests {
         let migrations: Vec<SchemaMigration> =
             json_get(build_router(), "/api/v1/schema/migrations").await?;
 
-        assert_eq!(migrations.len(), 7);
+        assert_eq!(migrations.len(), 8);
         Ok(())
     }
 
@@ -1272,16 +1432,16 @@ mod tests {
     async fn seeded_reader_document_opens_fixture_through_shared_core(
     ) -> Result<(), Box<dyn std::error::Error>> {
         let app = build_router();
-        let materials: Vec<Material> = json_get(app.clone(), "/api/v1/materials").await?;
+        let materials: Vec<LibraryEntry> = json_get(app.clone(), "/api/v1/materials").await?;
         let material = materials
             .first()
             .ok_or_else(|| std::io::Error::other("seeded material missing"))?;
+        let revision_id = material
+            .active_revision_id
+            .ok_or_else(|| std::io::Error::other("seeded revision missing"))?;
         let document: ReadingDocument = json_get(
             app,
-            &format!(
-                "/api/v1/revisions/{}/reading-document",
-                material.active_revision_id
-            ),
+            &format!("/api/v1/revisions/{revision_id}/reading-document"),
         )
         .await?;
 
@@ -1315,13 +1475,16 @@ mod tests {
     async fn blob_manifest_route_returns_source_and_resources(
     ) -> Result<(), Box<dyn std::error::Error>> {
         let app = build_router();
-        let materials: Vec<Material> = json_get(app.clone(), "/api/v1/materials").await?;
+        let materials: Vec<LibraryEntry> = json_get(app.clone(), "/api/v1/materials").await?;
         let material = materials
             .first()
             .ok_or_else(|| std::io::Error::other("seeded material missing"))?;
+        let revision_id = material
+            .active_revision_id
+            .ok_or_else(|| std::io::Error::other("seeded revision missing"))?;
         let package: NormalizedContentPackage = json_get(
             app.clone(),
-            &format!("/api/v1/revisions/{}/package", material.active_revision_id),
+            &format!("/api/v1/revisions/{revision_id}/package"),
         )
         .await?;
         let manifest: BlobManifest =
@@ -1381,7 +1544,7 @@ mod tests {
             material_id: imported.material.id,
             library_state: LibraryState::Archived,
         };
-        let archived: Material = json_patch(
+        let archived: LibraryEntry = json_patch(
             app.clone(),
             &format!("/api/v1/materials/{}/library-state", imported.material.id),
             json_body(&command)?,
@@ -1400,7 +1563,7 @@ mod tests {
         .await?;
         assert_eq!(status, StatusCode::NO_CONTENT);
 
-        let materials: Vec<Material> = json_get(app, "/api/v1/materials").await?;
+        let materials: Vec<LibraryEntry> = json_get(app, "/api/v1/materials").await?;
         assert!(!materials
             .iter()
             .any(|material| material.id == imported.material.id));

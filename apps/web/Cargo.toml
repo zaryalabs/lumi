@@ -22,9 +22,16 @@ wasm-bindgen-futures = "0.4.64"
 web-sys = { version = "0.3.91", features = [
   "Blob",
   "Document",
+  "DocumentFragment",
   "FormData",
   "HtmlDocument",
+  "HtmlElement",
   "Location",
+  "CssStyleDeclaration",
+  "Element",
+  "Node",
+  "Range",
+  "Text",
   "Window",
 ] }
 

@@ -1,14 +1,15 @@
-# S1 Web EPUB Reader: план до работоспособной версии
+# S1 Web Reader: EPUB, Web и Telegram baseline
 
 Status: `active`
 
 ## Scope
 
 Этот временный план описывает переход от текущего S0/S1 scaffold и статического
-UI/UX-прототипа к работоспособной первой web-версии Lumi, визуально и
-поведенчески близкой к прототипу.
+UI/UX-прототипа к работоспособной первой web-версии Lumi. EPUB остается
+полным reference importer, а публичные web URL и текстовые Telegram-сообщения
+входят в тот же срез как узкие, но реальные source paths.
 
-Целевой продуктовый срез — `S1 Web EPUB Reader` из
+Целевой продуктовый срез — `S1 Web Reader` из
 [`../early-slices.md`](../early-slices.md). План реализует принятые решения из:
 
 - [`../vision.md`](../vision.md);
@@ -19,6 +20,8 @@ UI/UX-прототипа к работоспособной первой web-ве
 - [`../systems/reader-architecture.md`](../systems/reader-architecture.md);
 - [`../systems/reading-screen.md`](../systems/reading-screen.md);
 - [`../systems/formats/epub.md`](../systems/formats/epub.md);
+- [`../systems/formats/web-reader.md`](../systems/formats/web-reader.md);
+- [`../systems/formats/telegram.md`](../systems/formats/telegram.md);
 - [`../systems/security-privacy.md`](../systems/security-privacy.md);
 - [`../systems/quality.md`](../systems/quality.md);
 - [`../visuals/reader-first-direction.md`](../visuals/reader-first-direction.md);
@@ -44,10 +47,19 @@ UI/UX-прототипа к работоспособной первой web-ве
    highlights и notes.
 9. Экспортировать annotations с цитатой, metadata источника и полным anchor.
 10. Использовать основные сценарии на desktop и mobile viewport.
+11. Вставить публичный HTTP/HTTPS URL, дождаться text-first импорта
+    статьи и открыть ее в общем reader.
+12. Привязать Telegram-бота, отправить или переслать текст и увидеть
+    один durable material в своей web-библиотеке; обычную web-ссылку
+    из бота обработать тем же web import path.
 
 ## Не входит в S1
 
-- PDF, FB2, web capture, Telegram, X, Markdown и `lum`.
+- PDF, FB2, X, Markdown и `lum`.
+- Cloud browser, browser extension, authenticated/JS-only pages, site-specific
+  web adapters, recapture/diff и полная resource fidelity.
+- Telegram media, captions, files, batches, public `t.me` hydration, automatic
+  grouping, delivery state по устройствам и Mini App.
 - AI, agents, MCP, карточки и generated artifacts.
 - Learning, challenges, FSRS и explain-back.
 - Global search, RAG и personal knowledge base.
@@ -78,6 +90,8 @@ UI/UX-прототипа к работоспособной первой web-ве
 - Dioxus Web строит данные прямо из fixtures и не является API client;
 - серверное состояние хранится в памяти и теряется после рестарта;
 - importer принимает fixture model, а не реальный EPUB upload;
+- domain enums, source refs, job stages и worker dispatch пока прошиты под
+  EPUB и не могут принять web/Telegram source без обобщения;
 - нет production auth/session flow и account isolation middleware;
 - нет SQLx migrations, PostgreSQL repositories и durable change records;
 - нет реального blob storage и durable background jobs;
@@ -93,6 +107,10 @@ UI/UX-прототипа к работоспособной первой web-ве
 - Описать empty, loading, importing, ready, failed, archived, deleted, saving,
   saved и save-failed states.
 - Уточнить archive, delete, restore и повторный импорт того же EPUB.
+- Добавить в общий dialog добавления материала URL input и понятные
+  ограничения baseline web capture.
+- Описать connect, connected, expired-token, unlink и unsupported-message
+  states для Telegram-бота.
 - Определить scope reader settings: account-wide или device-specific.
 - Уточнить значение progress, текущей главы и приблизительного времени чтения.
 - Не показывать «Всё сохранено», пока UI не получает реальный sync/save state.
@@ -107,6 +125,10 @@ UI/UX-прототипа к работоспособной первой web-ве
 - Реализовать versioned API client для `/api/v1`.
 - Добавить async loading, error boundaries, retry и session-expired handling.
 - Реализовать настоящий file picker/upload и отображение import job states.
+- Добавить URL import в общий add-material flow и Telegram pairing
+  section в аккаунте.
+- Показывать source kind, canonical URL/Telegram attribution и общие
+  queued/importing/ready/failed states без отдельных библиотек.
 - Сделать библиотеку полностью server-backed.
 - Реализовать reader render adapter над `ReadingDocument`.
 - Добавить TOC, links, footnotes, page navigation и reader settings.
@@ -125,6 +147,10 @@ UI/UX-прототипа к работоспособной первой web-ве
 - Добавить SQLx migrations и PostgreSQL persistence.
 - Реализовать production auth boundary, sessions, revocation и account scoping.
 - Добавить idempotency keys для upload и mutation commands.
+- Обобщить `ImportSourceKind`, typed source refs, worker dispatch и общую
+  публикацию reflowable import result без сложной plugin-системы.
+- Использовать existing durable `import_jobs` как baseline-проекцию
+  account `ImportInbox` для всех трех source paths.
 - Реализовать multipart upload и durable import job lifecycle.
 - Хранить source EPUB, normalized package, source map и diagnostics.
 - Реализовать local/dev blob backend и S3-compatible production backend за
@@ -152,11 +178,39 @@ UI/UX-прототипа к работоспособной первой web-ве
 - Виртуализировать длинные документы и не держать всю книгу в активном DOM.
 - Реализовать anchor creation, resolution и базовый recovery path.
 
+### Web и Telegram source baseline
+
+- Добавить `web_page` и `telegram` в `MaterialKind`, `SourceFormat`, source
+  identity, source map и typed source locator contracts.
+- Зафиксировать compatibility impact расширения normalized package/source
+  locator в ADR до миграции persisted schema.
+- Принимать публичный HTTP/HTTPS URL, выполнять bounded raw fetch и
+  оборачивать результат в immutable baseline `RenderedPageSnapshot`.
+- Извлекать title, canonical URL, author и semantic `article`/`main`; мапить
+  headings, paragraphs, lists, blockquotes, code и links в `ReadingNode`.
+- Сохранять source snapshot и metadata как blobs/provenance; unsupported
+  resources пропускать или заменять placeholder с diagnostic.
+- Добавить short-lived one-time Telegram pairing token, связь Telegram
+  identity с account, unlink и idempotency log по `update_id`.
+- Вынести Telegram update handling в transport-neutral service; для локальной
+  пробы дать long-polling runner, а перед публичной beta подключить тот же
+  handler к webhook с secret token.
+- Принимать direct text и forwarded text как один material на message;
+  если message состоит из одного поддержанного web URL, передавать
+  его в тот же web import path.
+- Отвечать в боте на `/start`, `/help`, `/unlink`, successful acceptance и
+  unsupported input; не обещать поддержку файлов/media/batches.
+
 ### Security, platform и эксплуатация
 
 - Ограничить upload size, expanded ZIP size, compression ratio и число файлов.
 - Защитить import от path traversal, ZIP bombs, scripts, external resources и
   HTML/SVG injection.
+- Защитить URL import от SSRF: запретить private/link-local/loopback/cloud
+  metadata addresses, повторять проверку после DNS resolution и redirects,
+  ограничить response size, redirects и timeout.
+- Хранить Telegram bot token как runtime secret, pairing token — только как
+  hash с expiry; не писать message body и raw update в logs.
 - Добавить secure session cookies, CSRF protection и rate limits.
 - Проверить tenant isolation для каждого account-owned route.
 - Настроить development, test, staging и production configuration.
@@ -168,12 +222,16 @@ UI/UX-прототипа к работоспособной первой web-ве
 
 - Собрать golden EPUB corpus: простой текст, TOC, images, footnotes, tables,
   CSS edge cases, malformed и malicious cases.
+- Добавить committed HTML snapshots для article/main, metadata, code/lists и bad
+  extraction; tests не должны зависеть от live sites.
+- Добавить Telegram update fixtures для pairing, direct/forwarded text, web link,
+  duplicate `update_id`, unpaired sender и unsupported input.
 - Добавить domain tests для anchors, progress и annotation conflicts.
 - Добавить import snapshot/compatibility tests для normalized packages.
 - Добавить repository и migration integration tests с PostgreSQL.
 - Добавить API tests для auth, idempotency, account isolation и persistence.
-- Добавить Playwright journey: register/login → upload → import → read → note →
-  reload → export.
+- Добавить Playwright journeys: register/login → upload EPUB → import → read →
+  note → reload → export и save fixture URL → import → read.
 - Проверить mobile viewport, keyboard navigation, roles, labels, focus и
   contrast.
 - Проверить performance budgets из `systems/quality.md` на normalized open,
@@ -203,7 +261,7 @@ UI/UX-прототипа к работоспособной первой web-ве
 - pagination:
   [`../adr/0006-browser-measured-pagination.md`](../adr/0006-browser-measured-pagination.md),
   browser-spike `../visuals/pagination-spike/`;
-- issue backlog этапов 1–7: [`s1-issues.md`](s1-issues.md).
+- issue backlog этапов 1–8: [`s1-issues.md`](s1-issues.md).
 
 Критерий завершения: приняты необходимые ADR, а auth, EPUB и pagination риски
 проверены исполняемыми spikes или fixtures.
@@ -269,7 +327,7 @@ Upload -> source blob -> durable Job -> EPUB importer
   local workflow — в
   [`../runbooks/real-epub-import.md`](../runbooks/real-epub-import.md).
 
-### Этап 3. API-backed библиотека
+### Этап 3. API-backed библиотека — выполнен
 
 - Перенести library UI прототипа в Dioxus.
 - Добавить empty state, upload dialog и material cards.
@@ -280,7 +338,24 @@ Upload -> source blob -> durable Job -> EPUB importer
 Критерий завершения: библиотека полностью строится из `/api/v1` и сохраняет
 состояние после перезагрузки browser и server.
 
-### Этап 4. Рабочий reader
+Результат:
+
+- добавлен единый `LibraryEntry` projection для queued, importing, ready,
+  failed и cancelled материалов с nullable active revision;
+- `/api/v1/materials` и material details переведены на owner-scoped
+  PostgreSQL application service, а fixture repository оставлен только для
+  server tests;
+- archive, restore и soft delete выполняются долговечно, принимают
+  `Idempotency-Key` и добавляют material change/tombstone в sync log;
+- Dioxus Web больше не создаёт fixture EPUB: empty/loading/error states,
+  upload dialog, material cards, diagnostics, details, archive и source
+  download строятся только из versioned API;
+- Playwright проверяет реальный import, failed state, сведения, download,
+  archive/restore, delete, browser reload, mobile viewport и повторный login;
+- локальная проверка и lifecycle semantics описаны в
+  [`../runbooks/api-backed-library.md`](../runbooks/api-backed-library.md).
+
+### Этап 4. Рабочий reader — выполнен
 
 - Добавить material reader route и загрузку `ReadingDocument`.
 - Реализовать render plan и Dioxus/DOM platform adapter.
@@ -292,6 +367,25 @@ Upload -> source blob -> durable Job -> EPUB importer
 
 Критерий завершения: реальный EPUB читается от начала до конца через shared
 reader model без рендера исходного EPUB XHTML/CSS как product model.
+
+Результат:
+
+- shared core получил `RenderPlan`, непрерывные `PageBoundary`/`PageMap`,
+  validation и platform-neutral navigation history;
+- EPUB importer `s1.2` сохраняет typed internal links и footnote targets после
+  sanitization, не передавая исходный XHTML/CSS в reader;
+- Dioxus/DOM adapter измеряет скрытый page container browser layout engine,
+  делит длинный текст binary search через `Range`, кеширует layout key и держит
+  в активном reader DOM только текущую страницу;
+- hash-route материала загружает реальный `ReadingDocument`, показывает TOC,
+  internal links, footnotes, history, resources и desktop/mobile layouts;
+- account-wide settings и source-backed material progress сохраняются в
+  PostgreSQL с idempotency и sync changes, а page number остаётся локальным
+  derived value согласно ADR 0008;
+- Playwright проверяет чтение длинного реального EPUB, pagination, TOC, links,
+  footnote, history, night theme, reload persistence и mobile viewport;
+- локальный workflow описан в
+  [`../runbooks/working-reader.md`](../runbooks/working-reader.md).
 
 ### Этап 5. Annotations и progress
 
@@ -305,11 +399,45 @@ reader model без рендера исходного EPUB XHTML/CSS как prod
 Критерий завершения: position, highlights и notes переживают закрытие браузера
 и рестарт сервера, а изменение reader settings не ломает привязки.
 
-### Этап 6. Сведение с UI/UX-прототипом
+### Этап 6. Baseline-источники Web и Telegram
+
+Обобщить уже работающий EPUB import path и добавить два узких входа,
+не создавая отдельных library или reader models:
+
+```text
+EPUB upload ---------> source adapter --\
+Public web URL ------> source adapter ----> durable ImportJob
+Telegram text/link --> source adapter --/   -> DocumentRevision
+                                           -> Normalized Content Package
+                                           -> ReadingDocument
+```
+
+- Обобщить source kinds/refs, importer dispatch, job stages и persistence
+  publication path; расширить source locator contract через ADR и migration.
+- Добавить API и UI для импорта public HTTP/HTTPS URL.
+- Реализовать bounded raw fetch → baseline `RenderedPageSnapshot` → generic
+  semantic extractor → common normalized package.
+- Добавить SSRF/redirect/DNS/size/timeout policy и fixture-backed extraction tests.
+- Добавить account-scoped one-time Telegram pairing, identity/unlink и duplicate
+  update protection.
+- Добавить transport-neutral Telegram handler и local long-polling runner для
+  `/start`, `/help`, `/unlink`, direct/forwarded text и ordinary web links.
+- Показывать web/Telegram materials в той же API-backed library и открывать
+  их тем же reader route.
+- Покрыть Playwright URL journey и API/domain tests на Telegram update fixtures.
+
+Критерий завершения: публичная server-rendered статья сохраняется по URL
+и читается в общем reader; привязанный Telegram user отправляет или
+пересылает текст и получает один durable material; повтор того же update не
+создает дубль. Оба source path поддерживают те же progress и annotations.
+
+### Этап 7. Сведение с UI/UX-прототипом
 
 - Перенести visual tokens, typography, spacing, cards, dialogs и reader chrome.
 - Подключить реальные save/sync indicators.
 - Добавить mobile panels и bottom sheet behavior.
+- Свести add-material flow для EPUB/URL и Telegram connection states с
+  общими visual tokens, diagnostics и capability flags.
 - Завершить empty, loading, error, retry и expired-session states.
 - Провести визуальное и accessibility сравнение с прототипом.
 - Удалить или скрыть controls отложенных подсистем.
@@ -317,11 +445,16 @@ reader model без рендера исходного EPUB XHTML/CSS как prod
 Критерий завершения: основные desktop и mobile user journeys визуально и
 поведенчески соответствуют reader-first прототипу.
 
-### Этап 7. Hardening и закрытая beta
+### Этап 8. Hardening и закрытая beta
 
 - Закрыть golden fixture, security и compatibility suites.
 - Добавить полный browser E2E пользовательский путь.
 - Проверить account isolation, session handling и malicious import cases.
+- Если Telegram включен в beta deployment, подключить transport-neutral
+  handler к webhook, проверяющему secret token; long polling оставить для
+  local development.
+- Проверить SSRF corpus, duplicate Telegram delivery, pairing expiry/unlink и
+  provider-secret redaction.
 - Проверить performance budgets на больших EPUB и библиотеках.
 - Настроить staging, migrations, monitoring, backups и restore drill.
 - Проверить export/download и privacy UX.
@@ -337,6 +470,7 @@ Auth и persistence
   -> API-backed library
   -> paginated reader
   -> selection и annotations
+  -> Web/Telegram source baseline
   -> UI/UX convergence
   -> beta hardening
 ```
@@ -344,9 +478,9 @@ Auth и persistence
 После стабилизации domain и API contracts параллельно могут развиваться:
 
 1. auth, SQLx, repositories, jobs и blobs;
-2. EPUB importer, normalized package, reader core и anchors;
+2. EPUB/web/Telegram source adapters, normalized package, reader core и anchors;
 3. Dioxus library, reader adapter и перенос prototype UI;
-4. fixtures, Playwright, security, CI и deployment.
+4. fixtures, Playwright, SSRF/import security, CI и deployment.
 
 ## Completion criteria
 
@@ -357,6 +491,11 @@ Auth и persistence
 - настоящий поддерживаемый EPUB загружается и импортируется через durable job;
 - библиотека показывает persisted materials и честные import/save states;
 - плохой EPUB возвращает структурированную и понятную диагностику;
+- публичный server-rendered article сохраняется по URL как immutable
+  text-first snapshot и открывается общим reader;
+- Telegram-аккаунт привязывается одноразовым token, direct/forwarded text
+  становится durable material, а duplicate update не создает дубль;
+- обычная web-ссылка из Telegram использует тот же URL import path;
 - reader использует `ReadingDocument`, render plan и platform adapter;
 - TOC, page navigation, links, footnotes и settings работают;
 - highlights, notes и progress сохраняются после browser/server restart;
@@ -364,12 +503,13 @@ Auth и persistence
 - source EPUB и portable annotations можно скачать;
 - desktop и mobile flows соответствуют прототипу и доступны с клавиатуры;
 - account isolation, import security и persistence покрыты tests;
-- golden EPUB compatibility tests и основной Playwright journey проходят;
+- golden EPUB compatibility tests, committed web/Telegram fixtures и основные
+  Playwright journeys проходят;
 - staging deployment имеет migrations, readiness, logs, backups и проверяемое
   восстановление;
 - выполнены `make c` и `make web-e2e` в локально поддерживаемом окружении.
 
-После выполнения S1 дальнейшая функциональность выбирается из
+После выполнения расширенного S1 дальнейшая функциональность выбирается из
 [`../systems/feature-registry.md`](../systems/feature-registry.md) и порядка,
 зафиксированного в [`../early-slices.md`](../early-slices.md), без расширения
 этого временного плана до общего roadmap Lumi.

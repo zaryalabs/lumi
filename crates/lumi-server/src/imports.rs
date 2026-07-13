@@ -9,7 +9,9 @@ use lumi_core::{
     content_hash, import_epub, AcceptedImport, BlobManifest, BlobRef, BlobRole, DiagnosticSeverity,
     DocumentRevision, DocumentRevisionId, EpubImportError, EpubImportRequest, EpubLimits,
     ImportDiagnostic, ImportStatusEntry, ImportedEpub, Job, JobId, JobKind, JobStage, JobStatus,
-    MaterialId, NormalizedContentPackage, ReadingDocument, ReadingNode, ReadingNodeKind,
+    LibraryEntry, LibraryState, MaterialId, MaterialImportStatus, MaterialKind,
+    MoveReadingPositionCommand, NormalizedContentPackage, ReaderSettings, ReadingDocument,
+    ReadingNode, ReadingNodeKind, ReadingProgress, SourceIdentity,
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -275,7 +277,7 @@ impl ImportService {
         user_id: Uuid,
     ) -> Result<Vec<ImportStatusEntry>, ImportServiceError> {
         let rows = sqlx::query(
-            "SELECT m.material_id, m.canonical_title, j.job_id FROM materials m JOIN import_jobs j ON j.job_id = m.latest_import_job_id WHERE m.owner_user_id = $1 AND m.deleted_at IS NULL ORDER BY m.created_at DESC",
+            "SELECT m.material_id, m.owner_user_id, m.kind, m.canonical_title, m.title_override, m.active_revision_id, m.library_state, m.source_identity, m.import_status, m.created_at, m.updated_at, j.job_id FROM materials m JOIN import_jobs j ON j.job_id = m.latest_import_job_id WHERE m.owner_user_id = $1 AND m.deleted_at IS NULL ORDER BY m.updated_at DESC, m.material_id DESC",
         )
         .bind(user_id)
         .fetch_all(&self.pool)
@@ -284,13 +286,149 @@ impl ImportService {
         let mut entries = Vec::with_capacity(rows.len());
         for row in rows {
             let job_id: Uuid = row.try_get("job_id").map_err(log_storage_error)?;
-            entries.push(ImportStatusEntry {
-                material_id: row.try_get("material_id").map_err(log_storage_error)?,
-                title: row.try_get("canonical_title").map_err(log_storage_error)?,
-                job: self.job(user_id, job_id).await?,
-            });
+            entries.push(library_entry_from_row(
+                &row,
+                self.job(user_id, job_id).await?,
+            )?);
         }
         Ok(entries)
+    }
+
+    pub(crate) async fn material(
+        &self,
+        user_id: Uuid,
+        material_id: MaterialId,
+    ) -> Result<LibraryEntry, ImportServiceError> {
+        let row = sqlx::query(
+            "SELECT m.material_id, m.owner_user_id, m.kind, m.canonical_title, m.title_override, m.active_revision_id, m.library_state, m.source_identity, m.import_status, m.created_at, m.updated_at, j.job_id FROM materials m JOIN import_jobs j ON j.job_id = m.latest_import_job_id WHERE m.material_id = $1 AND m.owner_user_id = $2 AND m.deleted_at IS NULL",
+        )
+        .bind(material_id)
+        .bind(user_id)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(log_storage_error)?
+        .ok_or(ImportServiceError::NotFound)?;
+        let job_id: Uuid = row.try_get("job_id").map_err(log_storage_error)?;
+        library_entry_from_row(&row, self.job(user_id, job_id).await?)
+    }
+
+    pub(crate) async fn update_library_state(
+        &self,
+        session: &AuthenticatedSession,
+        material_id: MaterialId,
+        library_state: LibraryState,
+        idempotency_key: &str,
+    ) -> Result<LibraryEntry, ImportServiceError> {
+        if !matches!(library_state, LibraryState::Active | LibraryState::Archived) {
+            return Err(ImportServiceError::BadRequest(
+                "library-state accepts active or archived; use DELETE for deletion",
+            ));
+        }
+        validate_idempotency_key(idempotency_key)?;
+        let state_name = library_state_name(library_state);
+        let payload = serde_json::json!({ "library_state": state_name });
+        let now = OffsetDateTime::now_utc();
+        let mut tx = self.pool.begin().await.map_err(log_storage_error)?;
+        let row = sqlx::query(
+            "SELECT space_id, object_revision FROM materials WHERE material_id = $1 AND owner_user_id = $2 AND deleted_at IS NULL FOR UPDATE",
+        )
+        .bind(material_id)
+        .bind(session.user_id)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(log_storage_error)?
+        .ok_or(ImportServiceError::NotFound)?;
+        let space_id: Uuid = row.try_get("space_id").map_err(log_storage_error)?;
+        let object_revision: i64 = row
+            .try_get::<i64, _>("object_revision")
+            .map_err(log_storage_error)?
+            .saturating_add(1);
+        if library_change_exists(&mut tx, space_id, material_id, idempotency_key, &payload).await? {
+            tx.commit().await.map_err(log_storage_error)?;
+            return self.material(session.user_id, material_id).await;
+        }
+        sqlx::query(
+            "UPDATE materials SET library_state = $3, object_revision = $4, updated_at = $5 WHERE material_id = $1 AND owner_user_id = $2",
+        )
+        .bind(material_id)
+        .bind(session.user_id)
+        .bind(state_name)
+        .bind(object_revision)
+        .bind(now)
+        .execute(&mut *tx)
+        .await
+        .map_err(log_storage_error)?;
+        append_library_change(
+            &mut tx,
+            LibraryChange {
+                space_id,
+                material_id,
+                object_revision,
+                device_id: session.device_id,
+                idempotency_key,
+                change_kind: "update",
+                payload,
+                now,
+            },
+        )
+        .await?;
+        tx.commit().await.map_err(log_storage_error)?;
+        self.material(session.user_id, material_id).await
+    }
+
+    pub(crate) async fn delete_material(
+        &self,
+        session: &AuthenticatedSession,
+        material_id: MaterialId,
+        idempotency_key: &str,
+    ) -> Result<(), ImportServiceError> {
+        validate_idempotency_key(idempotency_key)?;
+        let payload = serde_json::json!({ "library_state": "deleted" });
+        let now = OffsetDateTime::now_utc();
+        let mut tx = self.pool.begin().await.map_err(log_storage_error)?;
+        let row = sqlx::query(
+            "SELECT space_id, object_revision FROM materials WHERE material_id = $1 AND owner_user_id = $2 FOR UPDATE",
+        )
+        .bind(material_id)
+        .bind(session.user_id)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(log_storage_error)?
+        .ok_or(ImportServiceError::NotFound)?;
+        let space_id: Uuid = row.try_get("space_id").map_err(log_storage_error)?;
+        if library_change_exists(&mut tx, space_id, material_id, idempotency_key, &payload).await? {
+            tx.commit().await.map_err(log_storage_error)?;
+            return Ok(());
+        }
+        let object_revision = row
+            .try_get::<i64, _>("object_revision")
+            .map_err(log_storage_error)?
+            .saturating_add(1);
+        sqlx::query(
+            "UPDATE materials SET library_state = 'deleted', object_revision = $3, deleted_at = COALESCE(deleted_at, $4), updated_at = $4 WHERE material_id = $1 AND owner_user_id = $2",
+        )
+        .bind(material_id)
+        .bind(session.user_id)
+        .bind(object_revision)
+        .bind(now)
+        .execute(&mut *tx)
+        .await
+        .map_err(log_storage_error)?;
+        append_library_change(
+            &mut tx,
+            LibraryChange {
+                space_id,
+                material_id,
+                object_revision,
+                device_id: session.device_id,
+                idempotency_key,
+                change_kind: "delete",
+                payload,
+                now,
+            },
+        )
+        .await?;
+        tx.commit().await.map_err(log_storage_error)
     }
 
     pub(crate) async fn job(
@@ -481,6 +619,227 @@ impl ImportService {
             &package,
             revision.material_id,
         ))
+    }
+
+    pub(crate) async fn reader_settings(
+        &self,
+        user_id: Uuid,
+    ) -> Result<ReaderSettings, ImportServiceError> {
+        let value: Option<serde_json::Value> = sqlx::query_scalar(
+            "SELECT rs.settings FROM reader_settings rs JOIN sync_spaces s ON s.space_id = rs.space_id WHERE rs.user_id = $1 AND s.owner_user_id = $1 AND s.deleted_at IS NULL",
+        )
+        .bind(user_id)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(log_storage_error)?;
+        value
+            .map(serde_json::from_value)
+            .transpose()
+            .map_err(|_| ImportServiceError::Unavailable)
+            .map(|settings| settings.unwrap_or_default())
+    }
+
+    pub(crate) async fn update_reader_settings(
+        &self,
+        session: &AuthenticatedSession,
+        settings: ReaderSettings,
+        idempotency_key: &str,
+    ) -> Result<ReaderSettings, ImportServiceError> {
+        validate_idempotency_key(idempotency_key)?;
+        let settings = settings.normalized();
+        let payload =
+            serde_json::to_value(settings).map_err(|_| ImportServiceError::Unavailable)?;
+        let now = OffsetDateTime::now_utc();
+        let mut tx = self.pool.begin().await.map_err(log_storage_error)?;
+        let space_id: Uuid = sqlx::query_scalar(
+            "SELECT space_id FROM sync_spaces WHERE owner_user_id = $1 AND kind = 'personal' AND deleted_at IS NULL FOR UPDATE",
+        )
+        .bind(session.user_id)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(log_storage_error)?
+        .ok_or(ImportServiceError::NotFound)?;
+        if reader_change_exists(
+            &mut tx,
+            space_id,
+            session.user_id,
+            "reader_settings",
+            idempotency_key,
+            &payload,
+        )
+        .await?
+        {
+            tx.commit().await.map_err(log_storage_error)?;
+            return self.reader_settings(session.user_id).await;
+        }
+        let revision: i64 = sqlx::query_scalar(
+            "INSERT INTO reader_settings (space_id, user_id, settings, object_revision, updated_at) VALUES ($1, $2, $3, 1, $4) ON CONFLICT (space_id, user_id) DO UPDATE SET settings = EXCLUDED.settings, object_revision = reader_settings.object_revision + 1, updated_at = EXCLUDED.updated_at RETURNING object_revision",
+        )
+        .bind(space_id)
+        .bind(session.user_id)
+        .bind(&payload)
+        .bind(now)
+        .fetch_one(&mut *tx)
+        .await
+        .map_err(log_storage_error)?;
+        append_reader_change(
+            &mut tx,
+            ReaderChange {
+                space_id,
+                object_type: "reader_settings",
+                object_id: session.user_id,
+                object_revision: revision,
+                device_id: session.device_id,
+                idempotency_key,
+                payload,
+                now,
+            },
+        )
+        .await?;
+        tx.commit().await.map_err(log_storage_error)?;
+        Ok(settings)
+    }
+
+    pub(crate) async fn reading_progress(
+        &self,
+        user_id: Uuid,
+        material_id: MaterialId,
+    ) -> Result<Option<ReadingProgress>, ImportServiceError> {
+        let row = sqlx::query(
+            "SELECT rp.revision_id, rp.locator, rp.progress_fraction, rp.updated_at FROM reading_progress rp JOIN materials m ON m.material_id = rp.material_id AND m.space_id = rp.space_id WHERE rp.material_id = $1 AND m.owner_user_id = $2 AND m.deleted_at IS NULL AND rp.deleted_at IS NULL",
+        )
+        .bind(material_id)
+        .bind(user_id)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(log_storage_error)?;
+        row.map(|row| {
+            let locator = row
+                .try_get::<serde_json::Value, _>("locator")
+                .map_err(log_storage_error)?;
+            Ok(ReadingProgress {
+                material_id,
+                revision_id: row.try_get("revision_id").map_err(log_storage_error)?,
+                locator: serde_json::from_value(locator)
+                    .map_err(|_| ImportServiceError::Unavailable)?,
+                progress_fraction: row
+                    .try_get::<f32, _>("progress_fraction")
+                    .map_err(log_storage_error)?,
+                updated_at: timestamp_ms(row.try_get("updated_at").map_err(log_storage_error)?),
+            })
+        })
+        .transpose()
+    }
+
+    pub(crate) async fn move_reading_position(
+        &self,
+        session: &AuthenticatedSession,
+        command: MoveReadingPositionCommand,
+        idempotency_key: &str,
+    ) -> Result<ReadingProgress, ImportServiceError> {
+        validate_idempotency_key(idempotency_key)?;
+        let progress_fraction = if command.progress_fraction.is_finite() {
+            command.progress_fraction.clamp(0.0, 1.0)
+        } else {
+            0.0
+        };
+        let payload = serde_json::json!({
+            "revision_id": command.revision_id,
+            "locator": command.locator,
+            "progress_fraction": progress_fraction,
+        });
+        let now = OffsetDateTime::now_utc();
+        let mut tx = self.pool.begin().await.map_err(log_storage_error)?;
+        let row = sqlx::query(
+            "SELECT space_id, active_revision_id FROM materials WHERE material_id = $1 AND owner_user_id = $2 AND deleted_at IS NULL FOR UPDATE",
+        )
+        .bind(command.material_id)
+        .bind(session.user_id)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(log_storage_error)?
+        .ok_or(ImportServiceError::NotFound)?;
+        let space_id: Uuid = row.try_get("space_id").map_err(log_storage_error)?;
+        let active_revision_id: Option<Uuid> = row
+            .try_get("active_revision_id")
+            .map_err(log_storage_error)?;
+        if active_revision_id != Some(command.revision_id)
+            || command.locator.revision_id != command.revision_id
+        {
+            return Err(ImportServiceError::Conflict);
+        }
+        if reader_change_exists(
+            &mut tx,
+            space_id,
+            command.material_id,
+            "reading_progress",
+            idempotency_key,
+            &payload,
+        )
+        .await?
+        {
+            tx.commit().await.map_err(log_storage_error)?;
+            return self
+                .reading_progress(session.user_id, command.material_id)
+                .await?
+                .ok_or(ImportServiceError::Unavailable);
+        }
+        let locator =
+            serde_json::to_value(&command.locator).map_err(|_| ImportServiceError::Unavailable)?;
+        let revision: i64 = sqlx::query_scalar(
+            "INSERT INTO reading_progress (space_id, material_id, revision_id, locator, progress_fraction, object_revision, updated_at) VALUES ($1, $2, $3, $4, $5, 1, $6) ON CONFLICT (space_id, material_id) DO UPDATE SET revision_id = EXCLUDED.revision_id, locator = EXCLUDED.locator, progress_fraction = EXCLUDED.progress_fraction, object_revision = reading_progress.object_revision + 1, updated_at = EXCLUDED.updated_at, deleted_at = NULL RETURNING object_revision",
+        )
+        .bind(space_id)
+        .bind(command.material_id)
+        .bind(command.revision_id)
+        .bind(locator)
+        .bind(progress_fraction)
+        .bind(now)
+        .fetch_one(&mut *tx)
+        .await
+        .map_err(log_storage_error)?;
+        append_reader_change(
+            &mut tx,
+            ReaderChange {
+                space_id,
+                object_type: "reading_progress",
+                object_id: command.material_id,
+                object_revision: revision,
+                device_id: session.device_id,
+                idempotency_key,
+                payload,
+                now,
+            },
+        )
+        .await?;
+        tx.commit().await.map_err(log_storage_error)?;
+        Ok(ReadingProgress {
+            material_id: command.material_id,
+            revision_id: command.revision_id,
+            locator: command.locator,
+            progress_fraction,
+            updated_at: timestamp_ms(now),
+        })
+    }
+
+    pub(crate) async fn resource(
+        &self,
+        user_id: Uuid,
+        revision_id: DocumentRevisionId,
+        content_hash: &str,
+    ) -> Result<(String, Vec<u8>), ImportServiceError> {
+        let media_type: String = sqlx::query_scalar(
+            "SELECT b.media_type FROM normalized_packages p JOIN document_revisions r ON r.revision_id = p.revision_id JOIN materials m ON m.material_id = r.material_id JOIN blob_manifest_entries e ON e.manifest_id = p.manifest_id JOIN blobs b ON b.content_hash = e.content_hash WHERE p.revision_id = $1 AND m.owner_user_id = $2 AND e.content_hash = $3 AND e.role = 'resource'",
+        )
+        .bind(revision_id)
+        .bind(user_id)
+        .bind(content_hash)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(log_storage_error)?
+        .ok_or(ImportServiceError::NotFound)?;
+        let bytes = self.blobs.get(content_hash).await.map_err(map_blob_error)?;
+        Ok((media_type, bytes))
     }
 
     pub(crate) async fn manifest(
@@ -942,6 +1301,28 @@ struct ImportChange<'a> {
     now: OffsetDateTime,
 }
 
+struct LibraryChange<'a> {
+    space_id: Uuid,
+    material_id: MaterialId,
+    object_revision: i64,
+    device_id: Uuid,
+    idempotency_key: &'a str,
+    change_kind: &'a str,
+    payload: serde_json::Value,
+    now: OffsetDateTime,
+}
+
+struct ReaderChange<'a> {
+    space_id: Uuid,
+    object_type: &'a str,
+    object_id: Uuid,
+    object_revision: i64,
+    device_id: Uuid,
+    idempotency_key: &'a str,
+    payload: serde_json::Value,
+    now: OffsetDateTime,
+}
+
 async fn append_import_change(
     tx: &mut Transaction<'_, Postgres>,
     change: ImportChange<'_>,
@@ -966,6 +1347,173 @@ async fn append_import_change(
     .await
     .map_err(log_storage_error)?;
     Ok(())
+}
+
+async fn append_library_change(
+    tx: &mut Transaction<'_, Postgres>,
+    change: LibraryChange<'_>,
+) -> Result<(), ImportServiceError> {
+    sqlx::query(
+        "INSERT INTO sync_changes (change_id, space_id, object_type, object_id, object_revision, change_kind, payload, device_id, hlc, schema_version, idempotency_key, created_at) VALUES ($1, $2, 'material', $3, $4, $5, $6, $7, $8, $9, $10, $11)",
+    )
+    .bind(Uuid::now_v7())
+    .bind(change.space_id)
+    .bind(change.material_id)
+    .bind(change.object_revision)
+    .bind(change.change_kind)
+    .bind(change.payload)
+    .bind(change.device_id)
+    .bind(format!("{}-0000-server", change.now.unix_timestamp_nanos()))
+    .bind(lumi_core::DOMAIN_SCHEMA_VERSION)
+    .bind(change.idempotency_key)
+    .bind(change.now)
+    .execute(&mut **tx)
+    .await
+    .map_err(log_storage_error)?;
+    Ok(())
+}
+
+async fn library_change_exists(
+    tx: &mut Transaction<'_, Postgres>,
+    space_id: Uuid,
+    material_id: MaterialId,
+    idempotency_key: &str,
+    payload: &serde_json::Value,
+) -> Result<bool, ImportServiceError> {
+    let existing = sqlx::query(
+        "SELECT object_id, payload FROM sync_changes WHERE space_id = $1 AND idempotency_key = $2",
+    )
+    .bind(space_id)
+    .bind(idempotency_key)
+    .fetch_optional(&mut **tx)
+    .await
+    .map_err(log_storage_error)?;
+    let Some(existing) = existing else {
+        return Ok(false);
+    };
+    let existing_id: Uuid = existing.try_get("object_id").map_err(log_storage_error)?;
+    let existing_payload: serde_json::Value =
+        existing.try_get("payload").map_err(log_storage_error)?;
+    if existing_id == material_id && existing_payload == *payload {
+        Ok(true)
+    } else {
+        Err(ImportServiceError::Conflict)
+    }
+}
+
+async fn append_reader_change(
+    tx: &mut Transaction<'_, Postgres>,
+    change: ReaderChange<'_>,
+) -> Result<(), ImportServiceError> {
+    sqlx::query(
+        "INSERT INTO sync_changes (change_id, space_id, object_type, object_id, object_revision, change_kind, payload, device_id, hlc, schema_version, idempotency_key, created_at) VALUES ($1, $2, $3, $4, $5, 'update', $6, $7, $8, $9, $10, $11)",
+    )
+    .bind(Uuid::now_v7())
+    .bind(change.space_id)
+    .bind(change.object_type)
+    .bind(change.object_id)
+    .bind(change.object_revision)
+    .bind(change.payload)
+    .bind(change.device_id)
+    .bind(format!("{}-0000-server", change.now.unix_timestamp_nanos()))
+    .bind(lumi_core::DOMAIN_SCHEMA_VERSION)
+    .bind(change.idempotency_key)
+    .bind(change.now)
+    .execute(&mut **tx)
+    .await
+    .map_err(log_storage_error)?;
+    Ok(())
+}
+
+async fn reader_change_exists(
+    tx: &mut Transaction<'_, Postgres>,
+    space_id: Uuid,
+    object_id: Uuid,
+    object_type: &str,
+    idempotency_key: &str,
+    payload: &serde_json::Value,
+) -> Result<bool, ImportServiceError> {
+    let existing = sqlx::query(
+        "SELECT object_type, object_id, payload FROM sync_changes WHERE space_id = $1 AND idempotency_key = $2",
+    )
+    .bind(space_id)
+    .bind(idempotency_key)
+    .fetch_optional(&mut **tx)
+    .await
+    .map_err(log_storage_error)?;
+    let Some(existing) = existing else {
+        return Ok(false);
+    };
+    let existing_type: String = existing.try_get("object_type").map_err(log_storage_error)?;
+    let existing_id: Uuid = existing.try_get("object_id").map_err(log_storage_error)?;
+    let existing_payload: serde_json::Value =
+        existing.try_get("payload").map_err(log_storage_error)?;
+    if existing_type == object_type && existing_id == object_id && existing_payload == *payload {
+        Ok(true)
+    } else {
+        Err(ImportServiceError::Conflict)
+    }
+}
+
+fn library_entry_from_row(
+    row: &PgRow,
+    latest_job: Job,
+) -> Result<LibraryEntry, ImportServiceError> {
+    let kind: String = row.try_get("kind").map_err(log_storage_error)?;
+    let library_state: String = row.try_get("library_state").map_err(log_storage_error)?;
+    let import_status: String = row.try_get("import_status").map_err(log_storage_error)?;
+    let source_identity: serde_json::Value =
+        row.try_get("source_identity").map_err(log_storage_error)?;
+    Ok(LibraryEntry {
+        id: row.try_get("material_id").map_err(log_storage_error)?,
+        owner_id: row.try_get("owner_user_id").map_err(log_storage_error)?,
+        kind: match kind.as_str() {
+            "epub" => MaterialKind::Epub,
+            _ => return Err(ImportServiceError::Unavailable),
+        },
+        canonical_title: row.try_get("canonical_title").map_err(log_storage_error)?,
+        title_override: row.try_get("title_override").map_err(log_storage_error)?,
+        active_revision_id: row
+            .try_get("active_revision_id")
+            .map_err(log_storage_error)?,
+        library_state: match library_state.as_str() {
+            "active" => LibraryState::Active,
+            "archived" => LibraryState::Archived,
+            "deleted" => LibraryState::Deleted,
+            _ => return Err(ImportServiceError::Unavailable),
+        },
+        source_identity: serde_json::from_value::<SourceIdentity>(source_identity)
+            .map_err(|_| ImportServiceError::Unavailable)?,
+        import_status: match import_status.as_str() {
+            "queued" => MaterialImportStatus::Queued,
+            "running" => MaterialImportStatus::Importing,
+            "ready" => MaterialImportStatus::Ready,
+            "failed" => MaterialImportStatus::Failed,
+            "cancelled" => MaterialImportStatus::Cancelled,
+            _ => return Err(ImportServiceError::Unavailable),
+        },
+        latest_job,
+        created_at: timestamp_ms(row.try_get("created_at").map_err(log_storage_error)?),
+        updated_at: timestamp_ms(row.try_get("updated_at").map_err(log_storage_error)?),
+    })
+}
+
+fn library_state_name(state: LibraryState) -> &'static str {
+    match state {
+        LibraryState::Active => "active",
+        LibraryState::Archived => "archived",
+        LibraryState::Deleted => "deleted",
+    }
+}
+
+fn validate_idempotency_key(idempotency_key: &str) -> Result<(), ImportServiceError> {
+    if idempotency_key.trim().is_empty() || idempotency_key.len() > 200 {
+        Err(ImportServiceError::BadRequest(
+            "Idempotency-Key must contain 1 to 200 characters",
+        ))
+    } else {
+        Ok(())
+    }
 }
 
 fn job_from_row(
@@ -1073,6 +1621,7 @@ fn reading_document_from_package(
             resource_hash: None,
             content_hash: content_hash(unit.title.as_bytes()),
             source_locator: unit.source_locator.clone(),
+            links: Vec::new(),
             children: unit
                 .block_ids
                 .iter()
@@ -1085,6 +1634,7 @@ fn reading_document_from_package(
                     resource_hash: block.resource_hash.clone(),
                     content_hash: block.content_hash.clone(),
                     source_locator: block.source_locator.clone(),
+                    links: block.links.clone(),
                     children: Vec::new(),
                 })
                 .collect(),

@@ -15,8 +15,10 @@ Status: accepted
 
 1. **S0 Core Architecture Skeleton.** Общие доменные контракты, storage,
    import/job pipeline, reader core and web shell без попытки закрыть весь UX.
-2. **S1 Web EPUB Reader.** Web-версия: аккаунт, библиотека, импорт DRM-free
-   EPUB, чтение, прогресс, базовые хайлайты и заметки.
+2. **S1 Web Reader.** Web-версия: аккаунт, библиотека, полный
+   reference path для DRM-free EPUB, baseline-сохранение публичных web URL и
+   текстов/ссылок через Telegram-бота, чтение, прогресс, базовые
+   хайлайты и заметки.
 3. **S2 macOS Desktop Reader.** Desktop client for macOS на тех же domain/core
    contracts: локальная реплика, offline reading, sync с web account.
 4. **S3 Android Reader.** Android client на той же модели: локальная реплика,
@@ -32,7 +34,10 @@ Status: accepted
 
 ### Входит в early core
 
-- Один source format: DRM-free reflowable EPUB.
+- Три ранних source path: DRM-free reflowable EPUB как полный
+  reference importer, публичный web URL как ограниченный text-first
+  capture и Telegram-бот для direct/forwarded text и обычных web
+  links.
 - Web-first account and cloud-backed personal space.
 - Library: загрузить EPUB, увидеть список материалов, открыть материал,
   удалить/архивировать материал.
@@ -50,7 +55,11 @@ Status: accepted
 
 ### Не входит в early core
 
-- FB2, PDF, web pages, Telegram, X, Markdown import and `lum`.
+- FB2, PDF, X, Markdown import and `lum`.
+- Полный web capture: cloud browser, browser extension, authenticated и
+  JS-only pages, images/resources fidelity, recapture/diff и site-specific adapters.
+- Полный Telegram ingestion: media, captions, files, public `t.me` hydration,
+  batch/grouping, delivery state по устройствам и Telegram Mini App.
 - AI, agents, MCP bridge, voice transcription and generated artifacts.
 - Learning mechanics, challenges, FSRS and explain-back.
 - Social shared folders, shared comments and shared highlights.
@@ -149,12 +158,13 @@ CORE-001, CORE-002, CORE-003, CORE-004, CORE-006, CORE-008, CORE-009,
 CORE-010, API-001, API-002, ACC-001, ACC-003, FMT-EPUB-001, RD-001, RD-006,
 RD-007, RD-010, QUAL-001, QUAL-002, QUAL-003, SPIKE-001.
 
-## Slice S1: Web EPUB Reader
+## Slice S1: Web Reader
 
 S1 is the first user-facing product slice.
 
-Goal: a usable web EPUB reader with basic personal annotations, built on the S0
-architecture.
+Goal: a usable web reader with basic personal annotations, one complete EPUB
+reference path and narrow but real web/Telegram ingestion paths, built on the
+S0 architecture.
 
 ### Required capabilities
 
@@ -162,6 +172,13 @@ architecture.
   if an ADR explicitly marks it replaceable.
 - Upload DRM-free EPUB through web UI.
 - Server-side import job with progress/error states.
+- Save a public HTTP/HTTPS article URL through web UI. The baseline may use a
+  bounded raw fetch wrapped in `RenderedPageSnapshot`; it does not need a cloud
+  browser, authenticated-page capture or JavaScript rendering.
+- Pair one Telegram identity through a short-lived account token and accept
+  direct/forwarded text plus ordinary public web links. One message creates one
+  material; a message containing only a supported web URL uses the same web
+  import path.
 - Library view:
   - list materials;
   - open material;
@@ -183,7 +200,11 @@ architecture.
 - Simple export of annotations with quote, note body, source metadata and
   anchor JSON.
 - Basic diagnostics page/panel for failed imports.
-- Test coverage for EPUB import, reader commands, annotations and persistence.
+- Source provenance for web URL/snapshot metadata and Telegram message/update
+  ids, while the reader and annotations continue to use the shared normalized
+  package and anchor contracts.
+- Test coverage for EPUB import, fixture-backed web/Telegram normalization,
+  duplicate Telegram updates, reader commands, annotations and persistence.
 
 ### Explicitly deferred
 
@@ -193,6 +214,10 @@ architecture.
 - Account deletion/export bundle beyond simple EPUB/download and annotation
   export.
 - Fixed-layout EPUB and DRM.
+- Cloud browser capture, browser extension and authenticated/JS-only web pages.
+- Web recapture/diff, full resource fidelity and site-specific adapters.
+- Telegram media/files/captions, batches, public `t.me` hydration and device
+  delivery tracking.
 - AI, learning, social, KB, Obsidian and plugins UI.
 
 ### Exit criteria
@@ -201,15 +226,22 @@ architecture.
   return and keep progress/notes/highlights.
 - Bad EPUB import returns a clear failed/diagnostic state, not a silent broken
   material.
+- A public server-rendered article can be saved by URL and opened through the
+  same `ReadingDocument` reader with source metadata retained.
+- A user can pair the Telegram bot, send or forward text, and receive one
+  durable material in the web library; redelivery of the same update does not
+  create a duplicate.
+- An ordinary web link sent to the bot enters the same bounded web import path.
 - Data is stored through the same domain entities planned for native sync, not
   through web-only tables.
 - The reader uses `ReadingDocument` and shared anchor/annotation commands.
 
 ### Registry coverage
 
-ACC-001, ACC-002, ACC-003, CORE-011, RD-004, RD-005, RD-009, SYNC-001,
-SYNC-002, FMT-EPUB-001, SEARCH-003 as chunking/index stubs only, QUAL-002,
-QUAL-005, QUAL-006.
+ACC-001, ACC-002, ACC-003, ACC-005, CORE-011, RD-004, RD-005, RD-009,
+SYNC-001, SYNC-002, FMT-EPUB-001, partial baseline coverage of FMT-WEB-001,
+FMT-WEB-004, FMT-TG-001 and FMT-TG-002, SEARCH-003 as chunking/index stubs
+only, QUAL-002, QUAL-005, QUAL-006.
 
 ## Slice S2: macOS Desktop Reader
 

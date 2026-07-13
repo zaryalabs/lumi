@@ -19,9 +19,13 @@ developer scaffold includes:
 - Playwright E2E scaffolding in `tests/e2e`;
 - `make` targets and pre-commit hooks for local quality gates.
 
-The current implementation target is the S1 Web EPUB Reader slice from
-[docs/early-slices.md](docs/early-slices.md). Persistent accounts and durable
-real EPUB import are implemented; the next step is the fully API-backed library.
+The current implementation target is the S1 Web Reader slice from
+[docs/early-slices.md](docs/early-slices.md): EPUB remains the complete reference
+importer, while public web URLs and text/link ingestion through a Telegram bot
+are included as deliberately narrow baseline sources. Persistent accounts,
+durable real EPUB import, the fully API-backed library and the working
+browser-measured paginated reader are implemented; the next step is annotations,
+progress UX and the shared source-ingestion baseline.
 
 ## Local Setup
 
@@ -31,6 +35,7 @@ Prerequisites:
 - `wasm32-unknown-unknown` Rust target for Dioxus Web;
 - Dioxus CLI `dx`;
 - Node.js and npm for Playwright tests;
+- Docker with Compose for the local PostgreSQL service;
 - `pre-commit` for Git hooks.
 
 Bootstrap the local environment:
@@ -47,7 +52,15 @@ make t
 make c
 ```
 
-Run local services from separate terminals:
+Start PostgreSQL through Docker Compose and apply migrations first. This is the
+primary local startup path:
+
+```sh
+docker compose up -d --wait postgres
+make db-migrate
+```
+
+Then run the API and web app from separate terminals:
 
 ```sh
 make server-r

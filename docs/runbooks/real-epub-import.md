@@ -2,7 +2,7 @@
 
 Status: active
 
-Runbook описывает Этап 2 `S1 Web EPUB Reader`: multipart upload, local blob
+Runbook описывает Этап 2 `S1 Web Reader`: multipart upload, local blob
 backend, долговечный worker, безопасную нормализацию EPUB и диагностику ошибок.
 
 ## Запуск
@@ -40,7 +40,8 @@ file=<DRM-free reflowable .epub>
 
 Ответ `202 Accepted` содержит `material_id` и durable `job`. Доступные routes:
 
-- `GET /api/v1/imports` — последние состояния материалов импорта;
+- `GET /api/v1/imports` — совместимый alias списка состояний импорта;
+- `GET /api/v1/materials` — authoritative projection библиотеки;
 - `GET /api/v1/jobs/{job_id}` — status/stage/result ids;
 - `GET /api/v1/jobs/{job_id}/diagnostics` — stable diagnostics;
 - `POST /api/v1/jobs/{job_id}/cancel` — cooperative cancellation;
@@ -95,4 +96,3 @@ Browser flow проверяет registration, supported real EPUB, malformed ZIP
 diagnostic state и browser reload. Для ручной restart-проверки загрузить EPUB,
 остановить `make server-r` во время/после импорта, снова запустить server и
 убедиться, что job/material/source/package сохранились.
-

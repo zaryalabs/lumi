@@ -12,6 +12,7 @@ verification.
 - `wasm32-unknown-unknown` target for Dioxus Web.
 - Dioxus CLI `dx`.
 - Node.js and npm for Playwright.
+- Docker с Compose для локального PostgreSQL.
 - `pre-commit` for Git hooks.
 
 Useful installation commands:
@@ -37,23 +38,30 @@ Playwright dependencies and runs `dx doctor` when Dioxus CLI exists.
 
 ## Local Processes
 
-Persistent account routes требуют PostgreSQL. Перед API нужно запустить базу и
-применить migrations; подробности — в
-[persistent-account.md](persistent-account.md):
+Основной путь локального запуска начинается с Docker Compose. Он поднимает
+PostgreSQL и ждёт его readiness, после чего нужно применить migrations:
 
 ```sh
-make db-up
+docker compose up -d --wait postgres
 make db-migrate
 ```
 
+Подробности — в [persistent-account.md](persistent-account.md).
+
 Настройка real EPUB import, blob root и restart recovery описана в
 [real-epub-import.md](real-epub-import.md).
+
+Проверка API-backed библиотеки, lifecycle-команд и source download описана в
+[api-backed-library.md](api-backed-library.md).
 
 Start the API:
 
 ```sh
 make server-r
 ```
+
+Перед компиляцией `server-r` проверяет только доступность TCP-порта PostgreSQL.
+Схему по-прежнему готовит отдельная команда `make db-migrate`.
 
 Start the web shell:
 
@@ -66,6 +74,7 @@ Defaults:
 - API: `http://127.0.0.1:8080/api/v1`
 - Web: `http://127.0.0.1:5173`
 - API bind override: `LUMI_SERVER_BIND`
+- Web API endpoint at build/serve time: `LUMI_API_BASE`
 - Web host override: `LUMI_WEB_HOST`
 - Web port override: `LUMI_WEB_PORT`
 
@@ -97,6 +106,9 @@ make web-e2e
 
 `make c` does not run Playwright by default. Run `make web-e2e` when a change
 affects browser behavior, accessibility, routing or the reader surface.
+
+Рабочий reader, его API и ручная проверка описаны в
+[`working-reader.md`](working-reader.md).
 
 ## Browser Verification Modes
 

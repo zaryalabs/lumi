@@ -135,6 +135,11 @@ Application service в одной транзакции:
 ## Compatibility
 
 - Stage 1 реализует migrations и repository integration tests на PostgreSQL.
+- Stage 3 использует `materials.library_state`, `object_revision` и
+  `deleted_at` для archive/restore/tombstone, а каждый lifecycle command
+  атомарно добавляет idempotent `sync_changes` record. Миграция
+  `20260713170000_stage3_api_backed_library.sql` закрепляет допустимые состояния
+  и owner-scoped list index без изменения sync envelope.
 - Domain schema markers не равны SQL migration versions; оба значения хранятся
   и тестируются отдельно.
 - Sync fixtures должны проверять duplicate idempotency key, stale revision,
