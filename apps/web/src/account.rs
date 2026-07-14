@@ -5,10 +5,11 @@ use dioxus::prelude::*;
 use gloo_net::http::Request;
 use lumi_core::{
     decode_auth_bytes, encode_auth_bytes, AcceptedImport, AccountSummary, AuthChallenge,
-    ChallengeResponse, CompleteLoginRequest, CreateChallengeRequest, DerivedAuthMaterial,
-    ImportWebUrlRequest, Job, JobStatus, LibraryEntry, LibraryState, MaterialImportStatus,
-    MaterialKind, ReadingProgress, RegisterAccountRequest, ServiceCapabilities, SessionBootstrap,
-    TelegramConnectionStatus, TelegramPairingResponse, UpdateLibraryStateCommand,
+    ChallengeResponse, CompleteLoginRequest, ContinueReadingEntry, CreateChallengeRequest,
+    DerivedAuthMaterial, ImportWebUrlRequest, Job, JobStatus, LibraryEntry, LibraryState,
+    MaterialImportStatus, MaterialKind, ReadingProgress, RegisterAccountRequest,
+    ServiceCapabilities, SessionBootstrap, TelegramConnectionStatus, TelegramPairingResponse,
+    UpdateLibraryStateCommand,
 };
 use uuid::Uuid;
 use wasm_bindgen::closure::Closure;
@@ -217,6 +218,7 @@ fn LibraryApp(csrf_token: String, on_open_reader: EventHandler<Uuid>) -> Element
     let mut telegram_busy = use_signal(|| false);
     let mut capabilities = use_signal(|| Option::<ServiceCapabilities>::None);
     let continue_reading = use_signal(|| Option::<(LibraryEntry, ReadingProgress)>::None);
+    let refresh_generation = use_signal(|| 0_u64);
     use_effect(move || {
         if delete_candidate.read().is_some() {
             defer_account_dialog("delete-material-dialog");
@@ -225,7 +227,9 @@ fn LibraryApp(csrf_token: String, on_open_reader: EventHandler<Uuid>) -> Element
 
     use_effect(move || {
         spawn(async move {
-            if let Err(load_error) = refresh_library(entries, continue_reading).await {
+            if let Err(load_error) =
+                refresh_library(entries, continue_reading, refresh_generation).await
+            {
                 error.set(load_error.to_string());
             }
         });
@@ -304,7 +308,7 @@ fn LibraryApp(csrf_token: String, on_open_reader: EventHandler<Uuid>) -> Element
                     button { r#type: "button", onclick: move |_| {
                         error.set(String::new());
                         spawn(async move {
-                            if let Err(load_error) = refresh_library(entries, continue_reading).await {
+                            if let Err(load_error) = refresh_library(entries, continue_reading, refresh_generation).await {
                                 error.set(load_error.to_string());
                             }
                             match load_capabilities().await {
@@ -376,7 +380,7 @@ fn LibraryApp(csrf_token: String, on_open_reader: EventHandler<Uuid>) -> Element
                                 csrf_token: csrf_token.clone(),
                                 on_changed: move |_| {
                                     spawn(async move {
-                                        match refresh_library(entries, continue_reading).await {
+                                        match refresh_library(entries, continue_reading, refresh_generation).await {
                                             Ok(()) => {}
                                             Err(load_error) => error.set(load_error.to_string()),
                                         }
@@ -517,7 +521,7 @@ fn LibraryApp(csrf_token: String, on_open_reader: EventHandler<Uuid>) -> Element
                                 csrf_token: csrf_token.clone(),
                                 on_changed: move |_| {
                                     spawn(async move {
-                                        let _ = refresh_library(entries, continue_reading).await;
+                                        let _ = refresh_library(entries, continue_reading, refresh_generation).await;
                                     });
                                 },
                                 on_details: move |entry| details.set(Some(entry)),
@@ -542,9 +546,9 @@ fn LibraryApp(csrf_token: String, on_open_reader: EventHandler<Uuid>) -> Element
                 },
                 on_accepted: move |accepted: AcceptedImport| {
                     spawn(async move {
-                        let _ = refresh_library(entries, continue_reading).await;
+                        let _ = refresh_library(entries, continue_reading, refresh_generation).await;
                         let _ = wait_for_job(accepted.job).await;
-                        let _ = refresh_library(entries, continue_reading).await;
+                        let _ = refresh_library(entries, continue_reading, refresh_generation).await;
                     });
                 },
             }
@@ -580,7 +584,7 @@ fn LibraryApp(csrf_token: String, on_open_reader: EventHandler<Uuid>) -> Element
                             match delete_material(material_id, &csrf).await {
                                 Ok(()) => {
                                     delete_candidate.set(None);
-                                    let _ = refresh_library(entries, continue_reading).await;
+                                    let _ = refresh_library(entries, continue_reading, refresh_generation).await;
                                 }
                                 Err(delete_error) => error.set(delete_error.to_string()),
                             }
@@ -740,8 +744,8 @@ fn AddMaterialDialog(
                 button { class: "icon-action", r#type: "button", aria_label: "Закрыть загрузку", disabled: busy(), onclick: move |_| on_close.call(()), "×" }
             }
             div { class: "source-tabs", role: "tablist", aria_label: "Тип источника",
-                button { id: "source-tab-epub", class: "secondary-action", r#type: "button", role: "tab", aria_selected: mode() == AddSourceMode::Epub, aria_controls: "source-panel-epub", tabindex: if mode() == AddSourceMode::Epub { "0" } else { "-1" }, onclick: move |_| mode.set(AddSourceMode::Epub), onkeydown: move |event| if matches!(event.key(), Key::ArrowRight | Key::ArrowLeft) && web_import_enabled { mode.set(AddSourceMode::Web); focus_account_node("source-tab-web"); }, "EPUB" }
-                button { id: "source-tab-web", class: "secondary-action", r#type: "button", role: "tab", aria_selected: mode() == AddSourceMode::Web, aria_controls: "source-panel-web", aria_disabled: !web_import_enabled, disabled: !web_import_enabled, tabindex: if mode() == AddSourceMode::Web { "0" } else { "-1" }, onclick: move |_| mode.set(AddSourceMode::Web), onkeydown: move |event| if matches!(event.key(), Key::ArrowRight | Key::ArrowLeft) { mode.set(AddSourceMode::Epub); focus_account_node("source-tab-epub"); }, "Web-ссылка" }
+                button { id: "source-tab-epub", class: "secondary-action", r#type: "button", role: "tab", aria_selected: mode() == AddSourceMode::Epub, aria_controls: "source-panel-epub", tabindex: if mode() == AddSourceMode::Epub { "0" } else { "-1" }, onclick: move |_| mode.set(AddSourceMode::Epub), onkeydown: move |event| if matches!(event.key(), Key::ArrowRight | Key::ArrowLeft) && web_import_enabled { event.prevent_default(); mode.set(AddSourceMode::Web); focus_account_node("source-tab-web"); }, "EPUB" }
+                button { id: "source-tab-web", class: "secondary-action", r#type: "button", role: "tab", aria_selected: mode() == AddSourceMode::Web, aria_controls: "source-panel-web", aria_disabled: !web_import_enabled, disabled: !web_import_enabled, tabindex: if mode() == AddSourceMode::Web { "0" } else { "-1" }, onclick: move |_| mode.set(AddSourceMode::Web), onkeydown: move |event| if matches!(event.key(), Key::ArrowRight | Key::ArrowLeft) { event.prevent_default(); mode.set(AddSourceMode::Epub); focus_account_node("source-tab-epub"); }, "Web-ссылка" }
             }
             if !capabilities_loaded {
                 p { class: "capability-note", role: "status", "Проверяем поддержку импорта по URL…" }
@@ -882,8 +886,8 @@ fn AccountEntry(on_authenticated: EventHandler<SessionBootstrap>) -> Element {
                 h1 { "Lumi" }
                 p { "Seed phrase остаётся в браузере. Сервер хранит только публичный ключ и отзывную сессию." }
                 div { class: "account-tabs", role: "tablist", aria_label: "Действие с аккаунтом",
-                    button { id: "account-tab-register", r#type: "button", role: "tab", aria_selected: tab() == "register", aria_controls: "account-panel-register", tabindex: if tab() == "register" { "0" } else { "-1" }, onclick: move |_| tab.set("register".to_owned()), onkeydown: move |event| if matches!(event.key(), Key::ArrowRight | Key::ArrowLeft) { tab.set("login".to_owned()); focus_account_node("account-tab-login"); }, "Создать аккаунт" }
-                    button { id: "account-tab-login", r#type: "button", role: "tab", aria_selected: tab() == "login", aria_controls: "account-panel-login", tabindex: if tab() == "login" { "0" } else { "-1" }, onclick: move |_| tab.set("login".to_owned()), onkeydown: move |event| if matches!(event.key(), Key::ArrowRight | Key::ArrowLeft) { tab.set("register".to_owned()); focus_account_node("account-tab-register"); }, "Войти / восстановить" }
+                    button { id: "account-tab-register", r#type: "button", role: "tab", aria_selected: tab() == "register", aria_controls: "account-panel-register", tabindex: if tab() == "register" { "0" } else { "-1" }, onclick: move |_| tab.set("register".to_owned()), onkeydown: move |event| if matches!(event.key(), Key::ArrowRight | Key::ArrowLeft) { event.prevent_default(); tab.set("login".to_owned()); focus_account_node("account-tab-login"); }, "Создать аккаунт" }
+                    button { id: "account-tab-login", r#type: "button", role: "tab", aria_selected: tab() == "login", aria_controls: "account-panel-login", tabindex: if tab() == "login" { "0" } else { "-1" }, onclick: move |_| tab.set("login".to_owned()), onkeydown: move |event| if matches!(event.key(), Key::ArrowRight | Key::ArrowLeft) { event.prevent_default(); tab.set("register".to_owned()); focus_account_node("account-tab-register"); }, "Войти / восстановить" }
                 }
                 if tab() == "register" {
                     div { id: "account-panel-register", role: "tabpanel", aria_labelledby: "account-tab-register",
@@ -982,49 +986,36 @@ async fn load_materials() -> Result<Vec<LibraryEntry>, ApiError> {
 async fn refresh_library(
     mut entries: Signal<Option<Vec<LibraryEntry>>>,
     mut continue_reading: Signal<Option<(LibraryEntry, ReadingProgress)>>,
+    mut generation: Signal<u64>,
 ) -> Result<(), ApiError> {
+    generation += 1;
+    let request_generation = generation();
     let loaded = load_materials().await?;
+    if generation() != request_generation {
+        return Ok(());
+    }
     continue_reading.set(None);
-    entries.set(Some(loaded.clone()));
-    spawn(async move {
-        continue_reading.set(load_continue_reading(&loaded).await);
-    });
+    entries.set(Some(loaded));
+    let projection = load_continue_reading().await.map_err(|error| {
+        ApiError::Message(format!(
+            "Библиотека загружена, но карточка продолжения недоступна: {error}"
+        ))
+    })?;
+    if generation() == request_generation {
+        continue_reading.set(projection);
+    }
     Ok(())
 }
 
-async fn load_continue_reading(
-    entries: &[LibraryEntry],
-) -> Option<(LibraryEntry, ReadingProgress)> {
-    let mut latest = None::<(LibraryEntry, ReadingProgress)>;
-    for entry in entries
-        .iter()
-        .filter(|entry| {
-            entry.library_state == LibraryState::Active
-                && entry.import_status == MaterialImportStatus::Ready
-        })
-        .take(8)
-    {
-        let Ok(response) = Request::get(&format!("{API_BASE}/materials/{}/progress", entry.id))
-            .credentials(RequestCredentials::Include)
-            .send()
-            .await
-        else {
-            continue;
-        };
-        let Ok(progress) = parse_json::<Option<ReadingProgress>>(response).await else {
-            continue;
-        };
-        let Some(progress) = progress.filter(|value| value.progress_fraction > 0.0) else {
-            continue;
-        };
-        if latest
-            .as_ref()
-            .is_none_or(|(_, current)| progress.updated_at > current.updated_at)
-        {
-            latest = Some((entry.clone(), progress));
-        }
-    }
-    latest
+async fn load_continue_reading() -> Result<Option<(LibraryEntry, ReadingProgress)>, ApiError> {
+    let response = Request::get(&format!("{API_BASE}/materials/continue-reading"))
+        .credentials(RequestCredentials::Include)
+        .send()
+        .await
+        .map_err(network_error)?;
+    parse_json::<Option<ContinueReadingEntry>>(response)
+        .await
+        .map(|projection| projection.map(|value| (value.entry, value.progress)))
 }
 
 async fn load_capabilities() -> Result<ServiceCapabilities, ApiError> {

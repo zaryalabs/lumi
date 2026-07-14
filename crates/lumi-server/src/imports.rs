@@ -8,13 +8,14 @@ use std::sync::{Arc, Mutex};
 use lumi_core::{
     content_hash, import_epub, import_telegram_text, import_web_snapshot, AcceptedImport,
     Annotation, AnnotationExport, AnnotationKind, BlobManifest, BlobRef, BlobRole,
-    CreateAnnotationCommand, DeleteAnnotationCommand, DiagnosticSeverity, DocumentRevision,
-    DocumentRevisionId, EpubImportError, EpubImportRequest, EpubLimits, ImportDiagnostic,
-    ImportStatusEntry, ImportedEpub, ImportedPublication, ImportedPublicationResource, Job, JobId,
-    JobKind, JobStage, JobStatus, LibraryEntry, LibraryState, Material, MaterialId,
-    MaterialImportStatus, MaterialKind, MoveReadingPositionCommand, NormalizedContentPackage,
-    ReaderSettings, ReadingDocument, ReadingNode, ReadingNodeKind, ReadingProgress, RenderPlan,
-    SourceIdentity, TelegramMessageSnapshot, UpdateAnnotationCommand,
+    ContinueReadingEntry, CreateAnnotationCommand, DeleteAnnotationCommand, DiagnosticSeverity,
+    DocumentRevision, DocumentRevisionId, EpubImportError, EpubImportRequest, EpubLimits,
+    ImportDiagnostic, ImportStatusEntry, ImportedEpub, ImportedPublication,
+    ImportedPublicationResource, Job, JobId, JobKind, JobStage, JobStatus, LibraryEntry,
+    LibraryState, Material, MaterialId, MaterialImportStatus, MaterialKind,
+    MoveReadingPositionCommand, NormalizedContentPackage, ReaderSettings, ReadingDocument,
+    ReadingNode, ReadingNodeKind, ReadingProgress, RenderPlan, SourceIdentity,
+    TelegramMessageSnapshot, UpdateAnnotationCommand,
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -41,6 +42,7 @@ const MAX_PENDING_IMPORTS_PER_ACCOUNT: i64 = 16;
 const MAX_CONCURRENT_EPUB_UPLOADS: usize = 2;
 const WORKER_LEASE_SQL: &str = "30 minutes";
 const SOURCE_RESERVATION_LEASE_SQL: &str = "1 minute";
+const REQUIRED_MIGRATION_COUNT: i64 = 7;
 #[cfg(not(test))]
 const HEARTBEAT_INTERVAL: std::time::Duration = std::time::Duration::from_secs(30);
 #[cfg(test)]
@@ -93,6 +95,21 @@ impl ImportService {
             upload_slots: Arc::new(Semaphore::new(MAX_CONCURRENT_EPUB_UPLOADS)),
             account_upload_slots: Arc::new(Mutex::new(HashMap::new())),
         }
+    }
+
+    pub(crate) async fn ready(&self) -> Result<(), ImportServiceError> {
+        let applied: i64 =
+            sqlx::query_scalar("SELECT count(*) FROM _sqlx_migrations WHERE success = TRUE")
+                .fetch_one(&self.pool)
+                .await
+                .map_err(log_storage_error)?;
+        if applied < REQUIRED_MIGRATION_COUNT {
+            return Err(ImportServiceError::Unavailable);
+        }
+        tokio::time::timeout(std::time::Duration::from_secs(2), self.blobs.ready())
+            .await
+            .map_err(|_| ImportServiceError::Unavailable)?
+            .map_err(map_blob_error)
     }
 
     #[cfg(test)]
@@ -696,15 +713,101 @@ impl ImportService {
         .fetch_all(&self.pool)
         .await
         .map_err(log_storage_error)?;
+        let job_ids = rows
+            .iter()
+            .map(|row| row.try_get("job_id").map_err(log_storage_error))
+            .collect::<Result<Vec<Uuid>, _>>()?;
+        let mut jobs = self.jobs_by_id(user_id, &job_ids).await?;
         let mut entries = Vec::with_capacity(rows.len());
         for row in rows {
             let job_id: Uuid = row.try_get("job_id").map_err(log_storage_error)?;
-            entries.push(library_entry_from_row(
-                &row,
-                self.job(user_id, job_id).await?,
-            )?);
+            let latest_job = jobs
+                .remove(&job_id)
+                .ok_or(ImportServiceError::Unavailable)?;
+            entries.push(library_entry_from_row(&row, latest_job)?);
         }
         Ok(entries)
+    }
+
+    async fn jobs_by_id(
+        &self,
+        user_id: Uuid,
+        job_ids: &[Uuid],
+    ) -> Result<HashMap<Uuid, Job>, ImportServiceError> {
+        if job_ids.is_empty() {
+            return Ok(HashMap::new());
+        }
+        let diagnostic_rows = sqlx::query(
+            "SELECT d.job_id, d.severity, d.code, d.message, d.source_path FROM import_diagnostics d JOIN import_jobs j ON j.job_id = d.job_id WHERE j.user_id = $1 AND d.job_id = ANY($2) ORDER BY d.job_id, d.diagnostic_id",
+        )
+        .bind(user_id)
+        .bind(job_ids)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(log_storage_error)?;
+        let mut diagnostics = HashMap::<Uuid, Vec<ImportDiagnostic>>::new();
+        for row in diagnostic_rows {
+            let job_id = row.try_get("job_id").map_err(log_storage_error)?;
+            diagnostics
+                .entry(job_id)
+                .or_default()
+                .push(diagnostic_from_row(row)?);
+        }
+        let rows = sqlx::query(
+            "SELECT job_id, user_id, status, stage, result_material_id, revision_id, created_at, updated_at FROM import_jobs WHERE user_id = $1 AND job_id = ANY($2)",
+        )
+        .bind(user_id)
+        .bind(job_ids)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(log_storage_error)?;
+        rows.into_iter()
+            .map(|row| {
+                let job_id = row.try_get("job_id").map_err(log_storage_error)?;
+                let job = job_from_row(&row, diagnostics.remove(&job_id).unwrap_or_default())?;
+                Ok((job_id, job))
+            })
+            .collect()
+    }
+
+    pub(crate) async fn continue_reading(
+        &self,
+        user_id: Uuid,
+    ) -> Result<Option<ContinueReadingEntry>, ImportServiceError> {
+        let row = sqlx::query(
+            "SELECT m.material_id, m.owner_user_id, m.kind, m.canonical_title, m.title_override, m.active_revision_id, m.library_state, m.source_identity, m.import_status, m.created_at, m.updated_at, j.job_id, j.user_id AS job_user_id, j.status AS job_status, j.stage AS job_stage, j.result_material_id AS job_result_material_id, j.revision_id AS job_revision_id, j.created_at AS job_created_at, j.updated_at AS job_updated_at, rp.revision_id AS progress_revision_id, rp.locator AS progress_locator, rp.progress_fraction, rp.updated_at AS progress_updated_at, COALESCE((SELECT jsonb_agg(jsonb_build_object('severity', d.severity, 'code', d.code, 'message', d.message, 'source_path', d.source_path) ORDER BY d.diagnostic_id) FROM import_diagnostics d WHERE d.job_id = j.job_id), '[]'::jsonb) AS job_diagnostics FROM reading_progress rp JOIN materials m ON m.material_id = rp.material_id AND m.space_id = rp.space_id JOIN import_jobs j ON j.job_id = m.latest_import_job_id WHERE m.owner_user_id = $1 AND m.deleted_at IS NULL AND m.library_state = 'active' AND m.import_status = 'ready' AND rp.deleted_at IS NULL AND rp.progress_fraction > 0 AND rp.revision_id = m.active_revision_id ORDER BY rp.updated_at DESC, m.material_id DESC LIMIT 1",
+        )
+        .bind(user_id)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(log_storage_error)?;
+        let Some(row) = row else {
+            return Ok(None);
+        };
+        let diagnostics = serde_json::from_value::<Vec<ImportDiagnostic>>(
+            row.try_get("job_diagnostics").map_err(log_storage_error)?,
+        )
+        .map_err(|_| ImportServiceError::Unavailable)?;
+        let latest_job = projected_job_from_row(&row, diagnostics)?;
+        let entry = library_entry_from_row(&row, latest_job)?;
+        let progress = ReadingProgress {
+            material_id: entry.id,
+            revision_id: row
+                .try_get("progress_revision_id")
+                .map_err(log_storage_error)?,
+            locator: serde_json::from_value(
+                row.try_get("progress_locator").map_err(log_storage_error)?,
+            )
+            .map_err(|_| ImportServiceError::Unavailable)?,
+            progress_fraction: row
+                .try_get("progress_fraction")
+                .map_err(log_storage_error)?,
+            updated_at: timestamp_ms(
+                row.try_get("progress_updated_at")
+                    .map_err(log_storage_error)?,
+            ),
+        };
+        Ok(Some(ContinueReadingEntry { entry, progress }))
     }
 
     pub(crate) async fn material(
@@ -3285,6 +3388,28 @@ fn job_from_row(
     })
 }
 
+fn projected_job_from_row(
+    row: &PgRow,
+    diagnostics: Vec<ImportDiagnostic>,
+) -> Result<Job, ImportServiceError> {
+    let status: String = row.try_get("job_status").map_err(log_storage_error)?;
+    let stage: String = row.try_get("job_stage").map_err(log_storage_error)?;
+    Ok(Job {
+        id: row.try_get("job_id").map_err(log_storage_error)?,
+        account_id: row.try_get("job_user_id").map_err(log_storage_error)?,
+        kind: JobKind::Import,
+        status: parse_status(&status)?,
+        stage: parse_stage(&stage)?,
+        material_id: row
+            .try_get("job_result_material_id")
+            .map_err(log_storage_error)?,
+        revision_id: row.try_get("job_revision_id").map_err(log_storage_error)?,
+        diagnostics,
+        created_at: timestamp_ms(row.try_get("job_created_at").map_err(log_storage_error)?),
+        updated_at: timestamp_ms(row.try_get("job_updated_at").map_err(log_storage_error)?),
+    })
+}
+
 fn diagnostic_from_row(row: PgRow) -> Result<ImportDiagnostic, ImportServiceError> {
     let severity: String = row.try_get("severity").map_err(log_storage_error)?;
     Ok(ImportDiagnostic {
@@ -3444,7 +3569,10 @@ fn log_storage_error(error: impl std::fmt::Display) -> ImportServiceError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use lumi_core::{import_epub_fixture, rich_epub_fixture, AnnotationKind, HighlightStyle};
+    use lumi_core::{
+        import_epub_fixture, rich_epub_fixture, sample_fixture_highlight, AnnotationKind,
+        HighlightStyle,
+    };
 
     #[test]
     fn safe_file_name_should_strip_client_path() {
@@ -3460,6 +3588,109 @@ mod tests {
         };
 
         assert!(matches!(error, ImportServiceError::BadRequest(_)));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn performance_large_library_continuation_is_one_bounded_projection(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        if std::env::var("LUMI_PERFORMANCE").as_deref() != Ok("1") {
+            return Ok(());
+        }
+        let database_url = std::env::var("LUMI_TEST_DATABASE_URL")?;
+        crate::run_migrations(&database_url).await?;
+        let pool = sqlx_postgres::PgPoolOptions::new()
+            .max_connections(4)
+            .connect(&database_url)
+            .await?;
+        let user_id = Uuid::now_v7();
+        let space_id = Uuid::now_v7();
+        sqlx::query("INSERT INTO accounts (user_id, status) VALUES ($1, 'active')")
+            .bind(user_id)
+            .execute(&pool)
+            .await?;
+        sqlx::query(
+            "INSERT INTO sync_spaces (space_id, owner_user_id, kind) VALUES ($1, $2, 'personal')",
+        )
+        .bind(space_id)
+        .bind(user_id)
+        .execute(&pool)
+        .await?;
+        let imported = import_epub_fixture(user_id, &rich_epub_fixture())?;
+        let anchor_template = sample_fixture_highlight(&imported)
+            .ok_or_else(|| std::io::Error::other("fixture anchor missing"))?
+            .anchor;
+        let mut expected_material_id = Uuid::nil();
+        let base_time = OffsetDateTime::now_utc();
+        let mut tx = pool.begin().await?;
+        for index in 0..1_000_i64 {
+            let material_id = Uuid::now_v7();
+            let revision_id = Uuid::now_v7();
+            let job_id = Uuid::now_v7();
+            let updated_at = base_time + time::Duration::milliseconds(index);
+            let source_identity = serde_json::json!({
+                "format": "epub",
+                "source_name": format!("performance-{index}.epub"),
+                "source_hash": "a".repeat(64),
+            });
+            sqlx::query("INSERT INTO materials (material_id, space_id, owner_user_id, kind, canonical_title, library_state, source_identity, import_status, created_at, updated_at) VALUES ($1, $2, $3, 'epub', $4, 'active', $5, 'ready', $6, $6)")
+                .bind(material_id)
+                .bind(space_id)
+                .bind(user_id)
+                .bind(format!("Performance material {index}"))
+                .bind(source_identity)
+                .bind(updated_at)
+                .execute(&mut *tx)
+                .await?;
+            sqlx::query("INSERT INTO document_revisions (revision_id, material_id, space_id, source_format, source_hash, importer_id, importer_version, created_at) VALUES ($1, $2, $3, 'epub', $4, 'lumi.epub', 's1.2', $5)")
+                .bind(revision_id)
+                .bind(material_id)
+                .bind(space_id)
+                .bind("a".repeat(64))
+                .bind(updated_at)
+                .execute(&mut *tx)
+                .await?;
+            sqlx::query("INSERT INTO import_jobs (job_id, user_id, space_id, status, stage, result_material_id, revision_id, created_at, updated_at) VALUES ($1, $2, $3, 'succeeded', 'committed', $4, $5, $6, $6)")
+                .bind(job_id)
+                .bind(user_id)
+                .bind(space_id)
+                .bind(material_id)
+                .bind(revision_id)
+                .bind(updated_at)
+                .execute(&mut *tx)
+                .await?;
+            sqlx::query("UPDATE materials SET active_revision_id = $2, latest_import_job_id = $3 WHERE material_id = $1")
+                .bind(material_id)
+                .bind(revision_id)
+                .bind(job_id)
+                .execute(&mut *tx)
+                .await?;
+            let mut locator = anchor_template.clone();
+            locator.revision_id = revision_id;
+            sqlx::query("INSERT INTO reading_progress (space_id, material_id, revision_id, locator, progress_fraction, updated_at) VALUES ($1, $2, $3, $4, 0.5, $5)")
+                .bind(space_id)
+                .bind(material_id)
+                .bind(revision_id)
+                .bind(serde_json::to_value(locator)?)
+                .bind(updated_at)
+                .execute(&mut *tx)
+                .await?;
+            expected_material_id = material_id;
+        }
+        tx.commit().await?;
+        let root = std::env::temp_dir().join(format!("lumi-performance-{}", Uuid::now_v7()));
+        tokio::fs::create_dir_all(&root).await?;
+        let service = ImportService::local(pool, root.clone());
+        let started = std::time::Instant::now();
+        let projection = service
+            .continue_reading(user_id)
+            .await?
+            .ok_or_else(|| std::io::Error::other("continuation projection missing"))?;
+        let elapsed = started.elapsed();
+        let _ = tokio::fs::remove_dir_all(root).await;
+
+        assert_eq!(projection.entry.id, expected_material_id);
+        assert!(elapsed < std::time::Duration::from_millis(300));
         Ok(())
     }
 

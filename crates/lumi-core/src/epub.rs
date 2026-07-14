@@ -1459,23 +1459,37 @@ mod tests {
 
     use super::*;
 
+    #[derive(serde::Deserialize)]
+    struct GoldenProjection {
+        title: String,
+        reading_node_count: usize,
+        resource_path: String,
+        diagnostic_code: String,
+    }
+
     #[test]
     fn import_should_build_typed_document_for_supported_epub(
     ) -> Result<(), Box<dyn std::error::Error>> {
         let source = fixture_epub(FixtureVariant::Supported)?;
         let imported = import(&source, || false)?;
+        let expected: GoldenProjection = serde_json::from_str(include_str!(
+            "../../../tests/fixtures/epub/supported.expected.json"
+        ))?;
 
-        assert_eq!(imported.title, "Real EPUB Fixture");
-        assert_eq!(imported.reading_document.nodes.len(), 1);
+        assert_eq!(imported.title, expected.title);
+        assert_eq!(
+            imported.reading_document.nodes.len(),
+            expected.reading_node_count
+        );
         assert!(imported
             .resources
             .iter()
-            .any(|resource| resource.path == "EPUB/images/pixel.png"));
+            .any(|resource| resource.path == expected.resource_path));
         assert!(imported
             .revision
             .diagnostics
             .iter()
-            .any(|diagnostic| diagnostic.code == "epub_active_content_removed"));
+            .any(|diagnostic| diagnostic.code == expected.diagnostic_code));
         Ok(())
     }
 
@@ -1513,6 +1527,18 @@ mod tests {
     }
 
     #[test]
+    fn import_should_reject_excessive_compression_ratio() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let source = fixture_epub(FixtureVariant::CompressionRatio)?;
+        let Err(error) = import(&source, || false) else {
+            return Err(std::io::Error::other("high-compression EPUB was accepted").into());
+        };
+
+        assert_eq!(error.code(), "epub_compression_ratio_exceeded");
+        Ok(())
+    }
+
+    #[test]
     fn import_should_stop_when_cancelled() -> Result<(), Box<dyn std::error::Error>> {
         let source = fixture_epub(FixtureVariant::Supported)?;
         let Err(error) = import(&source, || true) else {
@@ -1520,6 +1546,21 @@ mod tests {
         };
 
         assert_eq!(error.code(), "epub_import_cancelled");
+        Ok(())
+    }
+
+    #[test]
+    fn performance_large_epub_import_stays_within_release_budget(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        if std::env::var("LUMI_PERFORMANCE").as_deref() != Ok("1") {
+            return Ok(());
+        }
+        let source = fixture_epub(FixtureVariant::Large)?;
+        let started = std::time::Instant::now();
+        let imported = import(&source, || false)?;
+
+        assert!(imported.package.blocks.len() >= 2);
+        assert!(started.elapsed() < std::time::Duration::from_secs(5));
         Ok(())
     }
 
@@ -1546,17 +1587,23 @@ mod tests {
         Traversal,
         Doctype,
         Locked,
+        CompressionRatio,
+        Large,
     }
 
     fn fixture_epub(variant: FixtureVariant) -> Result<Vec<u8>, std::io::Error> {
         let mut writer = ZipWriter::new(Cursor::new(Vec::new()));
         let stored = SimpleFileOptions::default().compression_method(CompressionMethod::Stored);
         let deflated = SimpleFileOptions::default().compression_method(CompressionMethod::Deflated);
-        write(&mut writer, "mimetype", EPUB_MIMETYPE, stored)?;
+        let mimetype_fixture = include_bytes!("../../../tests/fixtures/epub/supported/mimetype");
+        let mimetype_fixture = mimetype_fixture
+            .strip_suffix(b"\n")
+            .unwrap_or(mimetype_fixture);
+        write(&mut writer, "mimetype", mimetype_fixture, stored)?;
         write(
             &mut writer,
             "META-INF/container.xml",
-            br#"<?xml version="1.0"?><container><rootfiles><rootfile full-path="EPUB/package.opf"/></rootfiles></container>"#,
+            include_bytes!("../../../tests/fixtures/epub/supported/META-INF/container.xml"),
             deflated,
         )?;
         if matches!(variant, FixtureVariant::Locked) {
@@ -1570,22 +1617,48 @@ mod tests {
         let package = if matches!(variant, FixtureVariant::Doctype) {
             br#"<!DOCTYPE package><package/>"#.as_slice()
         } else {
-            br#"<?xml version="1.0"?><package version="3.0"><metadata><title>Real EPUB Fixture</title><creator>Lumi</creator><language>en</language></metadata><manifest><item id="nav" href="nav.xhtml" media-type="application/xhtml+xml" properties="nav"/><item id="chapter" href="text/chapter.xhtml" media-type="application/xhtml+xml"/><item id="image" href="images/pixel.png" media-type="image/png"/></manifest><spine><itemref idref="chapter"/></spine></package>"#.as_slice()
+            include_bytes!("../../../tests/fixtures/epub/supported/EPUB/package.opf").as_slice()
         };
         write(&mut writer, "EPUB/package.opf", package, deflated)?;
         write(
             &mut writer,
             "EPUB/nav.xhtml",
-            br#"<html><body><nav><a href="text/chapter.xhtml">Chapter One</a></nav></body></html>"#,
+            include_bytes!("../../../tests/fixtures/epub/supported/EPUB/nav.xhtml"),
             deflated,
         )?;
+        let chapter = if matches!(variant, FixtureVariant::Large) {
+            let text = (0..45_000_u32)
+                .map(|index| {
+                    format!(
+                        "Paragraph {index:08x} has deterministic content checksum {:08x}. ",
+                        index.wrapping_mul(2_654_435_761)
+                    )
+                })
+                .collect::<String>();
+            format!(
+                "<html><body><h1>Large chapter</h1><p>{}</p></body></html>",
+                text
+            )
+            .into_bytes()
+        } else {
+            include_bytes!("../../../tests/fixtures/epub/supported/EPUB/text/chapter.xhtml")
+                .to_vec()
+        };
+        write(&mut writer, "EPUB/text/chapter.xhtml", &chapter, deflated)?;
         write(
             &mut writer,
-            "EPUB/text/chapter.xhtml",
-            br#"<html><body><h1>Chapter One</h1><p onclick="bad()">Typed content</p><script>steal()</script><img src="../images/pixel.png" alt="Pixel"/></body></html>"#,
+            "EPUB/images/pixel.png",
+            include_bytes!("../../../tests/fixtures/epub/supported/EPUB/images/pixel.png"),
             deflated,
         )?;
-        write(&mut writer, "EPUB/images/pixel.png", b"pixel", deflated)?;
+        if matches!(variant, FixtureVariant::CompressionRatio) {
+            write(
+                &mut writer,
+                "EPUB/images/compression-bomb.bin",
+                &vec![b'0'; 128 * 1024],
+                deflated,
+            )?;
+        }
         if matches!(variant, FixtureVariant::Traversal) {
             writer.start_file("../escape.xhtml", deflated)?;
             writer.write_all(b"escape")?;

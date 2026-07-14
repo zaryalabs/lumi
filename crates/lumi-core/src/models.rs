@@ -935,6 +935,15 @@ pub struct ReadingProgress {
     pub updated_at: TimestampMs,
 }
 
+/// Server-selected continuation card combining a library item and its latest progress.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ContinueReadingEntry {
+    /// Active ready library entry selected for continuation.
+    pub entry: LibraryEntry,
+    /// Most recently updated non-zero reading position for the entry.
+    pub progress: ReadingProgress,
+}
+
 /// Portable export for annotations attached to one material.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct AnnotationExport {

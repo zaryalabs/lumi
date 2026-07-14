@@ -42,7 +42,9 @@ make telegram-r
 Не запускайте два runner с одним scope: PostgreSQL advisory lock отклонит
 второй. Не переиспользуйте scope для другого bot. Token нельзя передавать в
 аргументах, URL приложения, logs или fixtures. Long polling — только local
-transport; production beta требует отдельный webhook/secret boundary.
+transport. Опциональный production-safe webhook/secret boundary теперь описан
+в [`beta-staging.md`](beta-staging.md): route отсутствует без runtime secret, а
+факт внешней регистрации подтверждает operator, не repository.
 
 В UI plaintext pairing token показывается один раз, исчезает после connection
 или expiry и не кэшируется response. `/start <token>`, `/help`, `/unlink`,

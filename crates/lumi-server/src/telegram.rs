@@ -759,6 +759,14 @@ impl BotApiUpdate {
     }
 }
 
+pub(crate) fn parse_webhook_update(
+    payload: &[u8],
+) -> Result<Option<TelegramUpdate>, TelegramServiceError> {
+    serde_json::from_slice::<BotApiUpdate>(payload)
+        .map(BotApiUpdate::into_domain)
+        .map_err(|_| TelegramServiceError::InvalidUpdate)
+}
+
 fn redacted_forward_origin(value: &serde_json::Value) -> Option<String> {
     value
         .get("chat")

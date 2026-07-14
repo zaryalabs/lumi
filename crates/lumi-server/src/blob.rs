@@ -32,6 +32,7 @@ pub(crate) enum BlobStoreError {
 pub(crate) trait BlobStore: Send + Sync {
     async fn put(&self, expected_hash: &str, bytes: &[u8]) -> Result<StoredBlob, BlobStoreError>;
     async fn get(&self, content_hash: &str) -> Result<Vec<u8>, BlobStoreError>;
+    async fn ready(&self) -> Result<(), BlobStoreError>;
 }
 
 /// Atomic local filesystem backend for development and tests.
@@ -113,6 +114,47 @@ impl BlobStore for LocalBlobStore {
         }
         Ok(bytes)
     }
+
+    async fn ready(&self) -> Result<(), BlobStoreError> {
+        let health_root = self.root.join(".health");
+        tokio::fs::create_dir_all(&health_root)
+            .await
+            .map_err(|_| BlobStoreError::Unavailable)?;
+        let nonce = Uuid::now_v7();
+        let temporary = health_root.join(format!("{nonce}.tmp"));
+        let final_path = health_root.join(format!("{nonce}.ok"));
+        let result = async {
+            let mut file = tokio::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&temporary)
+                .await
+                .map_err(|_| BlobStoreError::Unavailable)?;
+            file.write_all(b"lumi-blob-health-v1")
+                .await
+                .map_err(|_| BlobStoreError::Unavailable)?;
+            file.sync_all()
+                .await
+                .map_err(|_| BlobStoreError::Unavailable)?;
+            drop(file);
+            tokio::fs::rename(&temporary, &final_path)
+                .await
+                .map_err(|_| BlobStoreError::Unavailable)?;
+            let bytes = tokio::fs::read(&final_path)
+                .await
+                .map_err(|_| BlobStoreError::Unavailable)?;
+            if bytes != b"lumi-blob-health-v1" {
+                return Err(BlobStoreError::Unavailable);
+            }
+            tokio::fs::remove_file(&final_path)
+                .await
+                .map_err(|_| BlobStoreError::Unavailable)
+        }
+        .await;
+        let _ = tokio::fs::remove_file(&temporary).await;
+        let _ = tokio::fs::remove_file(&final_path).await;
+        result
+    }
 }
 
 fn stored_blob(
@@ -178,6 +220,20 @@ mod tests {
         };
 
         assert!(matches!(error, BlobStoreError::HashMismatch));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn blob_health_fails_when_root_is_not_a_directory(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let root = std::env::temp_dir().join(format!("lumi-blob-file-{}", Uuid::now_v7()));
+        tokio::fs::write(&root, b"not a directory").await?;
+        let store = LocalBlobStore::new(&root);
+
+        let result = store.ready().await;
+        let _ = tokio::fs::remove_file(root).await;
+
+        assert!(matches!(result, Err(BlobStoreError::Unavailable)));
         Ok(())
     }
 }

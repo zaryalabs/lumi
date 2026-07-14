@@ -1,6 +1,6 @@
 # S1 Web Reader: EPUB, Web и Telegram baseline
 
-Status: `active`
+Status: `implemented`; внешний beta acceptance ожидает operator environment
 
 ## Scope
 
@@ -483,9 +483,9 @@ Telegram text/link --> source adapter --/   -> DocumentRevision
 - web shell, library и reader сведены на единой paper/sage системе tokens,
   typography, spacing, cards, dialogs и reader chrome; накопившийся legacy CSS
   удалён, а stylesheet подключён через Dioxus asset pipeline;
-- source-backed continue card строится best-effort по progress не более восьми
-  активных ready-материалов и не блокирует выдачу library; archive/delete сразу
-  очищают и пересчитывают эту ограниченную S1 client projection;
+- source-backed continue card использует owner-scoped server projection по
+  текущей revision без N+1 progress reads; archive/delete защищены generation
+  fence от устаревшего ответа;
 - реальные settings/progress/annotation save states имеют отдельные saving,
   saved и failed состояния, а ошибки export и импорта доступны через live
   status/diagnostics с повтором;
@@ -519,6 +519,36 @@ Telegram text/link --> source adapter --/   -> DocumentRevision
 
 Критерий завершения: выполнены общие completion criteria ниже, а `make c` и
 обязательные web E2E проходят в поддерживаемом окружении.
+
+Результат:
+
+- continuation перенесён в атомарную owner-scoped PostgreSQL projection с
+  детерминированным ordering; list jobs/diagnostics также загружаются batch,
+  а release budget проверен на библиотеке из 1000 материалов;
+- Telegram получил optional webhook route с проверкой secret до body parsing,
+  bounded payload/timeout, idempotent durable handler и retry semantics;
+  non-local configuration и capabilities fail-closed, long polling ограничен
+  local mode;
+- request/body/concurrency/time budgets, account/session/CSRF isolation,
+  SSRF re-resolution/redirect corpus, download privacy headers и blob-backed
+  readiness закреплены в коде и security gates;
+- EPUB golden sources и ожидаемая projection, committed Web/Telegram fixtures,
+  malicious corpus и release performance suites входят в отдельные
+  compatibility/security/performance targets;
+- staging reference topology собирает Rust 1.88 server image, применяет
+  migrations one-shot до non-root/read-only server, публикует JSON logs,
+  readiness и vendor-neutral alert contract;
+- backup связывает PostgreSQL dump и blob archive checksums/manifest; локальный
+  seeded disposable drill восстановил 1 account, material и revision, сверил
+  row counts и SHA-256/размер реального blob и удалил drill database; это
+  `drill_only` evidence доказывает механику, но не внешний acceptance;
+- `beta-local` агрегирует repository gates, а `beta` дополнительно принимает
+  только структурированную attestation, связанную hashes с encrypted backup
+  manifest, checksum set и успешным restore output;
+- repository baseline не выдаётся за внешний deployment: TLS/DNS, secret
+  delivery, Telegram provider registration, scheduled encrypted backup,
+  managed restore и тестовый alert остаются обязательным operator acceptance
+  по `docs/runbooks/beta-staging.md`.
 
 ## Критический путь
 
@@ -563,8 +593,8 @@ Auth и persistence
 - account isolation, import security и persistence покрыты tests;
 - golden EPUB compatibility tests, committed web/Telegram fixtures и основные
   Playwright journeys проходят;
-- staging deployment имеет migrations, readiness, logs, backups и проверяемое
-  восстановление;
+- staging reference deployment имеет migrations, readiness, logs, backups и
+  проверяемое восстановление; внешний deployment принят operator evidence;
 - выполнены `make c` и `make web-e2e` в локально поддерживаемом окружении.
 
 После выполнения расширенного S1 дальнейшая функциональность выбирается из

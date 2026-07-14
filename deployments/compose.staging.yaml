@@ -1,0 +1,114 @@
+services:
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_DB: lumi
+      POSTGRES_USER: lumi
+      POSTGRES_PASSWORD: ${LUMI_POSTGRES_PASSWORD:?set LUMI_POSTGRES_PASSWORD}
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U lumi -d lumi"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    volumes:
+      - staging-postgres:/var/lib/postgresql/data
+    restart: unless-stopped
+
+  migrate:
+    build:
+      context: ..
+      dockerfile: deployments/Dockerfile.server
+    entrypoint: ["lumi-migrate"]
+    environment:
+      DATABASE_URL: ${LUMI_DATABASE_URL:?set LUMI_DATABASE_URL with URL-encoded credentials}
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: "no"
+
+  blob-init:
+    image: busybox:1.37
+    command: ["sh", "-c", "chown -R 65532:65532 /var/lib/lumi/blobs"]
+    volumes:
+      - staging-blobs:/var/lib/lumi/blobs
+    restart: "no"
+
+  server:
+    build:
+      context: ..
+      dockerfile: deployments/Dockerfile.server
+    environment:
+      DATABASE_URL: ${LUMI_DATABASE_URL:?set LUMI_DATABASE_URL with URL-encoded credentials}
+      LUMI_SERVER_BIND: 0.0.0.0:8080
+      LUMI_WEB_ORIGIN: ${LUMI_WEB_ORIGIN:?set LUMI_WEB_ORIGIN}
+      LUMI_AUTH_AUDIENCE: ${LUMI_WEB_ORIGIN}
+      LUMI_SECURE_COOKIE: "1"
+      LUMI_DEPLOYMENT_MODE: staging
+      LUMI_BLOB_ROOT: /var/lib/lumi/blobs
+      LUMI_TELEGRAM_BOT_SCOPE: ${LUMI_TELEGRAM_BOT_SCOPE:-lumi-staging}
+      LUMI_TELEGRAM_BOT_USERNAME: ${LUMI_TELEGRAM_BOT_USERNAME:-}
+      LUMI_TELEGRAM_WEBHOOK_SECRET: ${LUMI_TELEGRAM_WEBHOOK_SECRET:-}
+      RUST_LOG: ${RUST_LOG:-info,tower_http=info}
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      blob-init:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "--silent", "http://127.0.0.1:8080/api/v1/ready"]
+      interval: 10s
+      timeout: 3s
+      retries: 12
+    ports:
+      - "127.0.0.1:${LUMI_STAGING_PORT:-8080}:8080"
+    volumes:
+      - staging-blobs:/var/lib/lumi/blobs
+    read_only: true
+    tmpfs:
+      - /tmp
+    restart: unless-stopped
+
+  backup:
+    image: postgres:17-alpine
+    profiles: ["ops"]
+    entrypoint: ["/bin/sh", "/opt/lumi/scripts/backup.sh", "/var/lib/lumi/backups"]
+    environment:
+      PGHOST: postgres
+      PGDATABASE: lumi
+      PGUSER: lumi
+      PGPASSWORD: ${LUMI_POSTGRES_PASSWORD}
+      LUMI_BLOB_ROOT: /var/lib/lumi/blobs
+      LUMI_BACKUP_WRITES_QUIESCED: ${LUMI_BACKUP_WRITES_QUIESCED:-0}
+      LUMI_BACKUP_DESTINATION_ENCRYPTED: ${LUMI_BACKUP_DESTINATION_ENCRYPTED:-0}
+      LUMI_BACKUP_REQUIRE_SEEDED: ${LUMI_BACKUP_REQUIRE_SEEDED:-1}
+    depends_on:
+      postgres:
+        condition: service_healthy
+    volumes:
+      - staging-blobs:/var/lib/lumi/blobs:ro
+      - staging-backups:/var/lib/lumi/backups
+      - ../scripts:/opt/lumi/scripts:ro
+    restart: "no"
+
+  restore-drill:
+    image: postgres:17-alpine
+    profiles: ["ops"]
+    entrypoint: ["/bin/sh", "/opt/lumi/scripts/restore-drill.sh", "/var/lib/lumi/backups/${LUMI_RESTORE_BACKUP_ID:-missing}"]
+    environment:
+      PGHOST: postgres
+      PGDATABASE: lumi
+      PGUSER: lumi
+      PGPASSWORD: ${LUMI_POSTGRES_PASSWORD}
+      RESTORE_DATABASE_NAME: lumi_restore_drill
+    depends_on:
+      postgres:
+        condition: service_healthy
+    volumes:
+      - staging-backups:/var/lib/lumi/backups:ro
+      - ../scripts:/opt/lumi/scripts:ro
+    restart: "no"
+
+volumes:
+  staging-postgres:
+  staging-blobs:
+  staging-backups:

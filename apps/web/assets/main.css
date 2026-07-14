@@ -952,6 +952,10 @@ p {
   box-shadow: var(--shadow);
   pointer-events: none;
 }
+
+.reader-global-status button {
+  margin-inline-start: auto;
+}
 .reader-layout {
   position: relative;
   display: grid;
@@ -998,6 +1002,7 @@ p {
   width: 44px;
   padding: 0;
   place-items: center;
+  scroll-margin-top: 90px;
 }
 .reader-page-surface {
   width: min(100%, 680px);

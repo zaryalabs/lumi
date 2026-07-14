@@ -9,14 +9,13 @@ lives in [docs/systems](docs/systems).
 
 ## Current State
 
-The repository is moving from system design into implementation. The initial
-developer scaffold includes:
+The repository contains the implemented S1 Web Reader baseline, including:
 
 - a Rust workspace;
 - shared domain contracts in `crates/lumi-core`;
-- an Axum API skeleton in `crates/lumi-server`;
-- a Dioxus web shell in `apps/web`;
-- Playwright E2E scaffolding in `tests/e2e`;
+- an Axum API in `crates/lumi-server`;
+- a Dioxus web application in `apps/web`;
+- Playwright E2E coverage in `tests/e2e`;
 - `make` targets and pre-commit hooks for local quality gates.
 
 The current implementation target is the S1 Web Reader slice from
@@ -28,14 +27,19 @@ browser-measured paginated reader, durable annotations, progress UX and the
 shared Web/Telegram source-ingestion baseline are implemented. The web library
 and reader now follow the reader-first paper/sage visual system across desktop
 and touch layouts, including real save states, modal and panel keyboard flows,
-capability-aware source UI and expired-session recovery; the next step is beta
-hardening.
+capability-aware source UI and expired-session recovery. The repository-side
+beta hardening baseline is implemented: server-side continuation projection,
+Telegram webhook boundary, security and compatibility corpora, performance
+budgets, reproducible staging image, readiness/alerts and checked PostgreSQL +
+blob backup/restore tooling. External staging deployment, TLS/DNS, provider
+registration and operator acceptance remain environment-specific work; see
+[docs/runbooks/beta-staging.md](docs/runbooks/beta-staging.md).
 
 ## Local Setup
 
 Prerequisites:
 
-- Rust stable with `cargo`, `rustfmt` and `clippy`;
+- Rust 1.88 or newer with `cargo`, `rustfmt` and `clippy`;
 - `wasm32-unknown-unknown` Rust target for Dioxus Web;
 - Dioxus CLI `dx`;
 - Node.js and npm for Playwright tests;

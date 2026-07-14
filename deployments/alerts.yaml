@@ -1,0 +1,14 @@
+version: 1
+alerts:
+  - name: lumi-readiness-failing
+    signal: http_probe_success{path="/api/v1/ready"} == 0
+    for: 5m
+  - name: lumi-server-error-rate
+    signal: rate(log_events_total{level="ERROR"}[5m]) > 0.05
+    for: 10m
+  - name: lumi-import-failures
+    signal: rate(log_events_total{message="durable import worker failed"}[15m]) > 0.01
+    for: 15m
+  - name: lumi-backup-stale
+    signal: time() - backup_manifest_created_timestamp_seconds > 90000
+    for: 15m

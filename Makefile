@@ -20,11 +20,14 @@ DATABASE_URL ?= postgres://lumi:lumi-local@$(LUMI_POSTGRES_HOST):$(LUMI_POSTGRES
 LUMI_WEB_HOST ?= 127.0.0.1
 LUMI_WEB_PORT ?= 5173
 LUMI_API_BASE ?= http://127.0.0.1:8080/api/v1
+LUMI_BLOB_ROOT ?= .local/blob-store
 LUMI_PROTOTYPE_PORT ?= 4173
 RUSTUP_TOOLCHAIN_BIN ?= $(shell if command -v rustup >/dev/null 2>&1; then dirname "$$(rustup which rustc 2>/dev/null)"; fi)
 RUSTUP_PATH_ENV := $(if $(RUSTUP_TOOLCHAIN_BIN),PATH=$(RUSTUP_TOOLCHAIN_BIN):$$PATH,)
 
 .DEFAULT_GOAL := help
+
+.PHONY: help init fmt l dl t c pc docs-fmt docs-l rust-fmt rust-l rust-web-check rust-web-l rust-dl rust-t server-r telegram-r db-up db-down db-migrate web-r prototype-r prototype-e2e pagination-spike-r pagination-spike-e2e stage0-spikes web-build e2e-fmt e2e-l e2e-dl web-e2e pg-t compatibility security performance staging-config staging-smoke backup restore-drill restore-attestation-test restore-attestation beta-local beta agent-inspect
 
 help: ## Show available make targets
 	@awk 'BEGIN {FS = ":.*## "}; /^[a-zA-Z0-9_.-]+:.*## / {printf "  %-16s %s\n", $$1, $$2}' $(MAKEFILE_LIST)
@@ -89,7 +92,7 @@ rust-fmt: ## Format Rust code when Cargo workspace exists
 	fi
 
 rust-l: ## Run Rust format check and clippy for implemented crates
-	@if [ -f "$(RUST_MANIFEST)" ]; then \
+	@set -e; if [ -f "$(RUST_MANIFEST)" ]; then \
 		$(CARGO) fmt --all -- --check; \
 		$(CARGO) clippy -p lumi-core -p lumi-server -p $(STAGE0_SPIKE_PACKAGE) --all-targets -- -D warnings; \
 		$(MAKE) rust-web-check; \
@@ -118,7 +121,7 @@ rust-web-l: ## Run Dioxus web lint when wasm target is installed
 	fi
 
 rust-dl: ## Run deeper Rust dependency/config checks when tools are available
-	@if [ -f "$(RUST_MANIFEST)" ]; then \
+	@set -e; if [ -f "$(RUST_MANIFEST)" ]; then \
 		if command -v cargo-audit >/dev/null 2>&1; then cargo audit; else echo "cargo-audit not installed; skipping audit"; fi; \
 		if command -v cargo-deny >/dev/null 2>&1; then cargo deny check; else echo "cargo-deny not installed; skipping deny"; fi; \
 		if command -v taplo >/dev/null 2>&1; then \
@@ -251,6 +254,52 @@ web-e2e: ## Run Playwright browser E2E tests
 		echo "No $(E2E_PACKAGE) found; cannot run E2E tests"; \
 		exit 1; \
 	fi
+
+pg-t: db-up db-migrate ## Run mandatory PostgreSQL-backed integration suites
+	LUMI_TEST_DATABASE_URL=$(DATABASE_URL) $(CARGO) test -p lumi-server
+
+compatibility: ## Run committed EPUB, Web and Telegram compatibility suites
+	$(CARGO) test -p lumi-core epub::tests::import_should_build_typed_document_for_supported_epub
+	$(CARGO) test -p lumi-core epub::tests::import_should_reject_path_traversal
+	$(CARGO) test -p lumi-core epub::tests::import_should_reject_package_doctype
+	$(CARGO) test -p lumi-core epub::tests::import_should_reject_locked_publication
+	$(CARGO) test -p lumi-core epub::tests::import_should_reject_excessive_compression_ratio
+	$(CARGO) test -p lumi-core fixtures
+	$(CARGO) test -p lumi-core sources
+	LUMI_TEST_DATABASE_URL=$(DATABASE_URL) $(CARGO) test -p lumi-server telegram
+
+security: ## Run import, session, ownership and transport security suites
+	$(CARGO) test -p lumi-server web::tests
+	LUMI_TEST_DATABASE_URL=$(DATABASE_URL) $(CARGO) test -p lumi-server postgres_
+	LUMI_TEST_DATABASE_URL=$(DATABASE_URL) $(CARGO) test -p lumi-server telegram_
+
+performance: db-up db-migrate ## Run release-mode beta performance budgets
+	LUMI_TEST_DATABASE_URL=$(DATABASE_URL) LUMI_PERFORMANCE=1 $(CARGO) test --release -p lumi-core -p lumi-server performance_
+
+staging-config: ## Validate the executable staging Compose model
+	docker compose --env-file deployments/staging.env.example -f deployments/compose.staging.yaml config --quiet
+
+staging-smoke: ## Build, start and probe the isolated staging API image topology
+	./scripts/staging-smoke.sh
+
+backup: ## Create an operator-attested PostgreSQL plus blob backup manifest
+	./scripts/backup.sh
+
+restore-drill: ## Restore a backup into an explicitly disposable database
+	./scripts/restore-drill.sh $(BACKUP_DIR)
+
+restore-attestation-test: ## Test strict restore evidence validation
+	python3 -m unittest scripts/test_restore_attestation.py
+
+restore-attestation: ## Validate operator-provided encrypted restore drill evidence
+	@test -n "$(RESTORE_ATTESTATION)" -a -f "$(RESTORE_ATTESTATION)" || { echo "RESTORE_ATTESTATION must point to structured external drill evidence"; exit 1; }
+	python3 scripts/validate_restore_attestation.py "$(RESTORE_ATTESTATION)"
+
+beta-local: ## Run repository-local beta mechanics without external acceptance
+	./scripts/beta-local-gate.sh
+
+beta: ## Run the aggregate closed-beta handoff gate
+	./scripts/beta-gate.sh
 
 agent-inspect: ## Print the local agent/operator browser inspection flow
 	@echo "1. Start services: make server-r and make web-r"
