@@ -4,13 +4,14 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "format": "prettier --write .",
-    "lint": "tsc --noEmit",
-    "typecheck": "tsc --noEmit",
-    "test": "playwright test",
-    "test:pagination-spike": "playwright test --config pagination-spike.playwright.config.ts",
-    "test:prototype": "playwright test --config prototype.playwright.config.ts",
-    "install-browsers": "playwright install chromium"
+    "format": "node ./node_modules/prettier/bin/prettier.cjs --write .",
+    "format:check": "node ./node_modules/prettier/bin/prettier.cjs --check .",
+    "lint": "node ./node_modules/typescript/bin/tsc --noEmit",
+    "typecheck": "node ./node_modules/typescript/bin/tsc --noEmit",
+    "test": "node ./node_modules/@playwright/test/cli.js test",
+    "test:pagination-spike": "node ./node_modules/@playwright/test/cli.js test --config pagination-spike.playwright.config.ts",
+    "test:prototype": "node ./node_modules/@playwright/test/cli.js test --config prototype.playwright.config.ts",
+    "install-browsers": "node ./node_modules/@playwright/test/cli.js install chromium"
   },
   "devDependencies": {
     "@playwright/test": "^1.57.0",

@@ -1,0 +1,33 @@
+#!/bin/sh
+set -eu
+
+PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+export PATH
+
+install_dir=/opt/apps/lumi
+runner_release_root=/opt/infra/github-runner/zarya-main/_work/lumi/lumi/builds/releases
+manifest=${1:?release manifest path is required}
+release=${2:?release id is required}
+
+case "$release" in
+  ''|[!A-Za-z0-9]*|*[!A-Za-z0-9._-]*) echo "unsafe release id" >&2; exit 2 ;;
+esac
+case "$manifest" in
+  "$runner_release_root"/*.env.images) ;;
+  *) echo "release manifest must come from the Lumi runner release directory" >&2; exit 2 ;;
+esac
+
+test -f "$manifest" || { echo "missing release manifest: $manifest" >&2; exit 2; }
+test ! -L "$manifest" || { echo "release manifest must not be a symlink" >&2; exit 2; }
+test -d "$install_dir/builds/releases" || { echo "Lumi installation is not bootstrapped" >&2; exit 2; }
+
+destination="$install_dir/builds/releases/$release.env.images"
+temporary="$destination.tmp.$$"
+trap 'rm -f "$temporary"' EXIT INT TERM
+install -m 0644 "$manifest" "$temporary"
+"$install_dir/scripts/validate-release-manifest.sh" "$temporary" "$release"
+mv "$temporary" "$destination"
+trap - EXIT INT TERM
+cd "$install_dir"
+make activate RELEASE="$release"
+make deploy
