@@ -14,6 +14,7 @@ E2E_PACKAGE := $(E2E_DIR)/package.json
 E2E_NODE_MODULES := $(E2E_DIR)/node_modules
 
 LUMI_SERVER_BIND ?= 127.0.0.1:8080
+LUMI_SERVER_PORT ?= 8080
 LUMI_POSTGRES_HOST ?= 127.0.0.1
 LUMI_POSTGRES_PORT ?= 5432
 DATABASE_URL ?= postgres://lumi:lumi-local@$(LUMI_POSTGRES_HOST):$(LUMI_POSTGRES_PORT)/lumi
@@ -27,7 +28,7 @@ RUSTUP_PATH_ENV := $(if $(RUSTUP_TOOLCHAIN_BIN),PATH=$(RUSTUP_TOOLCHAIN_BIN):$$P
 
 .DEFAULT_GOAL := help
 
-.PHONY: help init fmt l dl t c pc docs-fmt docs-l rust-fmt rust-l rust-web-check rust-web-l rust-dl rust-t server-r telegram-r db-up db-down db-migrate web-r prototype-r prototype-e2e pagination-spike-r pagination-spike-e2e stage0-spikes web-build e2e-fmt e2e-l e2e-dl web-e2e pg-t compatibility security performance staging-config staging-smoke backup restore-drill restore-attestation-test restore-attestation beta-local beta agent-inspect
+.PHONY: help init fmt l dl t c pc docs-fmt docs-l rust-fmt rust-l rust-web-check rust-web-l rust-dl rust-t up logs down reset server-r telegram-r db-up db-down db-migrate web-r prototype-r prototype-e2e pagination-spike-r pagination-spike-e2e stage0-spikes web-build e2e-fmt e2e-l e2e-dl web-e2e pg-t compatibility security performance staging-config staging-smoke backup restore-drill restore-attestation-test restore-attestation beta-local beta agent-inspect
 
 help: ## Show available make targets
 	@awk 'BEGIN {FS = ":.*## "}; /^[a-zA-Z0-9_.-]+:.*## / {printf "  %-16s %s\n", $$1, $$2}' $(MAKEFILE_LIST)
@@ -145,6 +146,20 @@ rust-t: ## Run Rust tests for implemented crates
 		echo "No Cargo.toml found; skipping Rust tests"; \
 	fi
 
+up: ## Build and start the complete local stack
+	LUMI_SERVER_PORT=$(LUMI_SERVER_PORT) LUMI_WEB_PORT=$(LUMI_WEB_PORT) LUMI_POSTGRES_PORT=$(LUMI_POSTGRES_PORT) docker compose up -d --build --wait
+	@echo "Lumi is ready: http://127.0.0.1:$(LUMI_WEB_PORT)"
+	@echo "Logs: make logs | Stop: make down | Delete local data: make reset"
+
+logs: ## Follow logs from the local stack
+	docker compose logs --follow
+
+down: ## Stop the local stack without deleting data
+	docker compose down
+
+reset: ## Stop the local stack and explicitly delete local data
+	docker compose down --volumes --remove-orphans
+
 server-r: ## Run the local Axum server
 	@if [ -f "$(RUST_MANIFEST)" ]; then \
 		if ! nc -z "$(LUMI_POSTGRES_HOST)" "$(LUMI_POSTGRES_PORT)" >/dev/null 2>&1; then \
@@ -171,7 +186,7 @@ db-up: ## Start the local PostgreSQL service
 	LUMI_POSTGRES_PORT=$(LUMI_POSTGRES_PORT) docker compose up -d --wait postgres
 
 db-down: ## Stop the local PostgreSQL service
-	docker compose down
+	docker compose stop postgres
 
 db-migrate: ## Apply forward-only SQLx migrations
 	DATABASE_URL=$(DATABASE_URL) $(CARGO) run -p lumi-server --bin lumi-migrate
@@ -302,7 +317,7 @@ beta: ## Run the aggregate closed-beta handoff gate
 	./scripts/beta-gate.sh
 
 agent-inspect: ## Print the local agent/operator browser inspection flow
-	@echo "1. Start services: make server-r and make web-r"
+	@echo "1. Start services: make up"
 	@echo "2. Open browser session: playwright-cli -s=lumi-local open about:blank"
 	@echo "3. Navigate: playwright-cli -s=lumi-local goto http://127.0.0.1:5173"
 	@echo "4. Record observations in docs/tmp-plans/playwright-agent-inspection.md"
@@ -312,4 +327,4 @@ clean: ## Remove common local build and cache artifacts
 	rm -rf $(WEB_DIR)/dist $(WEB_DIR)/target
 	rm -rf $(E2E_DIR)/test-results $(E2E_DIR)/playwright-report
 
-.PHONY: help init fmt l dl t c pc docs-fmt docs-l rust-fmt rust-l rust-web-check rust-web-l rust-dl rust-t db-up db-down db-migrate server-r web-r telegram-r prototype-r prototype-e2e pagination-spike-r pagination-spike-e2e stage0-spikes web-build e2e-fmt e2e-l e2e-dl web-e2e agent-inspect clean
+.PHONY: help init fmt l dl t c pc docs-fmt docs-l rust-fmt rust-l rust-web-check rust-web-l rust-dl rust-t up logs down reset db-up db-down db-migrate server-r web-r telegram-r prototype-r prototype-e2e pagination-spike-r pagination-spike-e2e stage0-spikes web-build e2e-fmt e2e-l e2e-dl web-e2e agent-inspect clean

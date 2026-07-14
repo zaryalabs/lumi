@@ -512,11 +512,11 @@ fn validate_telegram_webhook_secret(secret: Option<&str>) -> anyhow::Result<()> 
 fn validate_deployment_security(config: &AppConfig) -> anyhow::Result<()> {
     if !matches!(
         config.deployment_mode.as_str(),
-        "local" | "staging" | "production"
+        "local" | "local-container" | "staging" | "production"
     ) {
-        anyhow::bail!("LUMI_DEPLOYMENT_MODE must be local, staging or production");
+        anyhow::bail!("LUMI_DEPLOYMENT_MODE must be local, local-container, staging or production");
     }
-    if config.deployment_mode != "local"
+    if matches!(config.deployment_mode.as_str(), "staging" | "production")
         && (!config.secure_cookie
             || !config.web_origin.starts_with("https://")
             || config.auth_audience != config.web_origin)
@@ -531,6 +531,28 @@ fn validate_deployment_security(config: &AppConfig) -> anyhow::Result<()> {
         .map_err(|_| anyhow::anyhow!("LUMI_SERVER_BIND must be a socket address"))?;
     if config.deployment_mode == "local" && !bind_address.ip().is_loopback() {
         anyhow::bail!("local deployment mode may bind loopback addresses only");
+    }
+    if config.deployment_mode == "local-container" {
+        let origin = url::Url::parse(&config.web_origin)
+            .map_err(|_| anyhow::anyhow!("local-container web origin must be a valid URL"))?;
+        let canonical_origin = origin.port().map(|port| format!("http://127.0.0.1:{port}"));
+        let canonical_loopback_origin = origin.scheme() == "http"
+            && origin.host_str() == Some("127.0.0.1")
+            && canonical_origin.as_deref() == Some(config.web_origin.as_str())
+            && origin.path() == "/"
+            && origin.query().is_none()
+            && origin.fragment().is_none()
+            && origin.username().is_empty()
+            && origin.password().is_none();
+        if !bind_address.ip().is_unspecified()
+            || !canonical_loopback_origin
+            || config.auth_audience != config.web_origin
+            || config.secure_cookie
+        {
+            anyhow::bail!(
+                "local-container requires a wildcard container bind, canonical http://127.0.0.1:<port> origin/audience and insecure local cookies"
+            );
+        }
     }
     Ok(())
 }
@@ -1901,19 +1923,84 @@ mod tests {
     }
 
     #[test]
-    fn deployment_security_rejects_public_local_bind_and_insecure_staging() {
+    fn deployment_security_rejects_public_host_local_bind() {
         let mut local = AppConfig::from_env();
         local.deployment_mode = "local".to_owned();
         local.bind_address = "0.0.0.0:8080".to_owned();
-        assert!(validate_deployment_security(&local).is_err());
 
-        let mut staging = local;
+        assert!(validate_deployment_security(&local).is_err());
+    }
+
+    #[test]
+    fn deployment_security_accepts_canonical_local_container_boundary() {
+        let mut local_container = AppConfig::from_env();
+        local_container.deployment_mode = "local-container".to_owned();
+        local_container.bind_address = "0.0.0.0:8080".to_owned();
+        local_container.web_origin = "http://127.0.0.1:5173".to_owned();
+        local_container.auth_audience = local_container.web_origin.clone();
+        local_container.secure_cookie = false;
+
+        assert!(validate_deployment_security(&local_container).is_ok());
+    }
+
+    #[test]
+    fn deployment_security_rejects_noncanonical_local_container_origin() {
+        let mut local_container = AppConfig::from_env();
+        local_container.deployment_mode = "local-container".to_owned();
+        local_container.bind_address = "0.0.0.0:8080".to_owned();
+        local_container.web_origin = "http://localhost:5173".to_owned();
+        local_container.auth_audience = local_container.web_origin.clone();
+        local_container.secure_cookie = false;
+
+        assert!(validate_deployment_security(&local_container).is_err());
+    }
+
+    #[test]
+    fn deployment_security_rejects_mismatched_local_container_audience() {
+        let mut local_container = AppConfig::from_env();
+        local_container.deployment_mode = "local-container".to_owned();
+        local_container.bind_address = "0.0.0.0:8080".to_owned();
+        local_container.web_origin = "http://127.0.0.1:5173".to_owned();
+        local_container.auth_audience = "http://127.0.0.1:5174".to_owned();
+        local_container.secure_cookie = false;
+
+        assert!(validate_deployment_security(&local_container).is_err());
+    }
+
+    #[test]
+    fn deployment_security_rejects_loopback_local_container_bind() {
+        let mut local_container = AppConfig::from_env();
+        local_container.deployment_mode = "local-container".to_owned();
+        local_container.bind_address = "127.0.0.1:8080".to_owned();
+        local_container.web_origin = "http://127.0.0.1:5173".to_owned();
+        local_container.auth_audience = local_container.web_origin.clone();
+        local_container.secure_cookie = false;
+
+        assert!(validate_deployment_security(&local_container).is_err());
+    }
+
+    #[test]
+    fn deployment_security_rejects_secure_local_container_cookie() {
+        let mut local_container = AppConfig::from_env();
+        local_container.deployment_mode = "local-container".to_owned();
+        local_container.bind_address = "0.0.0.0:8080".to_owned();
+        local_container.web_origin = "http://127.0.0.1:5173".to_owned();
+        local_container.auth_audience = local_container.web_origin.clone();
+        local_container.secure_cookie = true;
+
+        assert!(validate_deployment_security(&local_container).is_err());
+    }
+
+    #[test]
+    fn deployment_security_requires_secure_https_staging() {
+        let mut staging = AppConfig::from_env();
         staging.deployment_mode = "staging".to_owned();
         staging.bind_address = "0.0.0.0:8080".to_owned();
         staging.web_origin = "https://reader.staging.example".to_owned();
         staging.auth_audience = staging.web_origin.clone();
         staging.secure_cookie = false;
         assert!(validate_deployment_security(&staging).is_err());
+
         staging.secure_cookie = true;
         assert!(validate_deployment_security(&staging).is_ok());
     }

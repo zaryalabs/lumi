@@ -1,48 +1,85 @@
-# Local Development Runbook
+# Локальная разработка
 
-Status: draft
+Статус: исполняемый
 
-This runbook describes the local scaffold for the first implementation slice:
-Rust workspace, Axum API skeleton, Dioxus Web shell and Playwright browser
-verification.
+Этот runbook описывает основной Docker-first запуск полного локального стека и
+расширенный host-native workflow для разработки Rust, Dioxus и Playwright.
 
-## Prerequisites
+## Основной Docker-first запуск
 
-- Rust stable with `cargo`, `rustfmt` and `clippy`.
-- `wasm32-unknown-unknown` target for Dioxus Web.
-- Dioxus CLI `dx`.
-- Node.js and npm for Playwright.
-- Docker с Compose для локального PostgreSQL.
-- `pre-commit` for Git hooks.
+Для обычного запуска нужен только Docker с Compose:
 
-Useful installation commands:
+```sh
+make up
+```
+
+Команда собирает образы и ждёт readiness полного стека: PostgreSQL, одноразовой
+migration, blob volume, Axum server и nginx с Dioxus Web. Эквивалентная команда
+без Make:
+
+```sh
+docker compose up -d --build --wait
+```
+
+Локальные адреса публикуются только на loopback:
+
+- Web: `http://127.0.0.1:5173`
+- API health: `http://127.0.0.1:8080/api/v1/health`
+- PostgreSQL: `127.0.0.1:5432`
+
+Браузер использует relative `/api/v1` через nginx, поэтому web и API работают
+в одном origin. Порты можно переопределить переменными `LUMI_WEB_PORT`,
+`LUMI_SERVER_PORT` и `LUMI_POSTGRES_PORT`.
+
+Логи, остановка и очистка:
+
+```sh
+make logs
+make down
+make reset
+```
+
+`make down` сохраняет named volumes. `make reset` намеренно удаляет PostgreSQL и
+blob-данные; используйте его только когда нужен чистый локальный старт.
+
+## Расширенный host-native workflow
+
+Host-native запуск удобен при активной разработке. Для него нужны:
+
+- Rust 1.88+ с `cargo`, `rustfmt` и `clippy`;
+- target `wasm32-unknown-unknown`;
+- Dioxus CLI `dx` версии, совместимой с Dioxus 0.7;
+- Node.js и npm для Playwright;
+- Docker с Compose для PostgreSQL;
+- `pre-commit` для Git hooks.
+
+Полезные команды установки:
 
 ```sh
 rustup target add wasm32-unknown-unknown
-cargo install dioxus-cli
+cargo install dioxus-cli --version 0.7.9 --locked
 python -m pip install pre-commit
 ```
 
-Dioxus can also be installed with the official prebuilt installer or
-`cargo-binstall`; see the Dioxus 0.7 setup docs.
+Dioxus также можно установить официальным prebuilt installer или через
+`cargo-binstall`.
 
-## Bootstrap
+### Bootstrap
 
 ```sh
 make init
 ```
 
-`make init` installs pre-commit hooks when available, fetches Cargo
-dependencies, installs the wasm target through `rustup` when available, installs
-Playwright dependencies and runs `dx doctor` when Dioxus CLI exists.
+`make init` устанавливает pre-commit hooks, загружает Cargo dependencies,
+добавляет wasm target через `rustup`, устанавливает Playwright dependencies и
+запускает `dx doctor`, когда соответствующие инструменты доступны.
 
-## Local Processes
+### Локальные процессы
 
-Основной путь локального запуска начинается с Docker Compose. Он поднимает
-PostgreSQL и ждёт его readiness, после чего нужно применить migrations:
+Для host-native процессов поднимите только PostgreSQL и примените migrations:
 
 ```sh
-docker compose up -d --wait postgres
+make db-up
 make db-migrate
 ```
 
@@ -54,7 +91,7 @@ make db-migrate
 Проверка API-backed библиотеки, lifecycle-команд и source download описана в
 [api-backed-library.md](api-backed-library.md).
 
-Start the API:
+Запустите API:
 
 ```sh
 make server-r
@@ -63,62 +100,62 @@ make server-r
 Перед компиляцией `server-r` проверяет только доступность TCP-порта PostgreSQL.
 Схему по-прежнему готовит отдельная команда `make db-migrate`.
 
-Start the web shell:
+В другом терминале запустите web shell:
 
 ```sh
 make web-r
 ```
 
-Defaults:
+Значения по умолчанию:
 
 - API: `http://127.0.0.1:8080/api/v1`
 - Web: `http://127.0.0.1:5173`
-- API bind override: `LUMI_SERVER_BIND`
-- Web API endpoint at build/serve time: `LUMI_API_BASE`
-- Web host override: `LUMI_WEB_HOST`
-- Web port override: `LUMI_WEB_PORT`
+- bind API: `LUMI_SERVER_BIND`
+- endpoint API при build/serve web: `LUMI_API_BASE`
+- host web: `LUMI_WEB_HOST`
+- port web: `LUMI_WEB_PORT`
 
-## Quality Gates
+## Проверки качества
 
-Light local check:
+Быстрая проверка:
 
 ```sh
 make l
 ```
 
-Rust tests:
+Rust-тесты:
 
 ```sh
 make t
 ```
 
-Full local handoff gate:
+Полная проверка перед handoff:
 
 ```sh
 make c
 ```
 
-Optional browser test:
+Browser-тест для web-изменений:
 
 ```sh
 make web-e2e
 ```
 
-`make c` does not run Playwright by default. Run `make web-e2e` when a change
-affects browser behavior, accessibility, routing or the reader surface.
+`make c` по умолчанию не запускает Playwright. Выполняйте `make web-e2e`, если
+изменение затрагивает browser behavior, accessibility, routing или reader.
 
 Рабочий reader, его API и ручная проверка описаны в
 [`working-reader.md`](working-reader.md).
 
-## Browser Verification Modes
+## Режимы browser-проверки
 
-Automated Playwright:
+Автоматический Playwright:
 
 ```sh
 make web-e2e
 ```
 
-Real local profile:
+Реальный локальный профиль для host-native процессов:
 
 ```sh
 make server-r
@@ -132,14 +169,16 @@ Agent/operator inspection:
 make agent-inspect
 ```
 
-Record durable observations in
+Сохраняйте важные наблюдения в
 [docs/tmp-plans/playwright-agent-inspection.md](../tmp-plans/playwright-agent-inspection.md).
 
-## Troubleshooting
+## Диагностика
 
-- If Dioxus web lint is skipped, install `wasm32-unknown-unknown`.
-- If `make web-r` fails with missing `dx`, install Dioxus CLI.
-- If Playwright says browsers are missing, run
+- Если Dioxus web lint пропущен, установите `wasm32-unknown-unknown`.
+- Если `make web-r` не находит `dx`, установите Dioxus CLI.
+- Если Playwright не находит браузеры, выполните
   `npm --prefix tests/e2e run install-browsers`.
-- If `make init` cannot install tools inside a restricted sandbox, run the
-  printed commands in a normal developer shell.
+- Если `make init` не может установить инструменты внутри restricted sandbox,
+  выполните напечатанные команды в обычном developer shell.
+- Состояние контейнеров видно через `docker compose ps`; подробности запуска —
+  через `make logs`.
