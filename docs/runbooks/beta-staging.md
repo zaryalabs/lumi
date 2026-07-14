@@ -2,6 +2,10 @@
 
 Status: executable repository baseline
 
+Production installation и main-only self-hosted CI/CD вынесены в
+[production-deploy.md](production-deploy.md). Этот staging runbook остаётся
+локально воспроизводимым beta gate и не заменяет production operations contract.
+
 ## Границы доказательства
 
 Этот runbook проверяет локально воспроизводимую staging topology. Он не

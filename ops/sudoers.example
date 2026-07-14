@@ -1,0 +1,3 @@
+# Install as /etc/sudoers.d/lumi-ci after validating with visudo -cf.
+Cmnd_Alias LUMI_CI_DEPLOY = /usr/local/sbin/lumi-ci-root-deploy
+runner ALL=(root) NOPASSWD: LUMI_CI_DEPLOY

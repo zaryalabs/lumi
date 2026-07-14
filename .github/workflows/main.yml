@@ -1,0 +1,77 @@
+name: Lumi main release
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: lumi-main
+  cancel-in-progress: false
+
+jobs:
+  prepare:
+    runs-on: [self-hosted, zarya-main, geo-eu, ci]
+    timeout-minutes: 60
+    steps:
+      - name: Checkout accepted main commit
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+
+      - name: Prepare toolchain
+        shell: bash
+        run: |
+          set -euo pipefail
+          rustup target add wasm32-unknown-unknown
+          if ! command -v dx >/dev/null 2>&1 || ! dx --version | grep -q '0.7.9'; then
+            cargo install dioxus-cli --version 0.7.9 --locked
+          fi
+          npm --prefix tests/e2e ci
+
+      - name: Prepare release
+        run: make prepare
+
+  build-and-push:
+    needs: prepare
+    runs-on: [self-hosted, zarya-main, geo-eu, ci]
+    timeout-minutes: 90
+    permissions:
+      contents: read
+      packages: write
+    env:
+      DOCKER_CONFIG: ${{ runner.temp }}/docker-config
+    steps:
+      - name: Checkout accepted main commit
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+
+      - name: Login to GHCR
+        shell: bash
+        run: |
+          mkdir -p "${DOCKER_CONFIG}"
+          echo "${GITHUB_TOKEN}" | docker --config "${DOCKER_CONFIG}" login ghcr.io -u "${GITHUB_ACTOR}" --password-stdin
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and publish immutable release
+        run: make build push DOCKER="docker --config ${DOCKER_CONFIG}" GIT_SHA="${GITHUB_SHA}"
+
+      - name: Preserve release manifest as workflow evidence
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: lumi-release-${{ github.sha }}
+          path: builds/releases/*.env.images
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Clean this run's images
+        if: always()
+        run: make ci-clean-images DOCKER="docker --config ${DOCKER_CONFIG}" GIT_SHA="${GITHUB_SHA}"
+
+      - name: Logout from GHCR
+        if: always()
+        run: docker --config "${DOCKER_CONFIG}" logout ghcr.io || true

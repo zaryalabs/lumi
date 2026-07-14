@@ -34,6 +34,10 @@ image, readiness/alerts и проверенные инструменты backup/
 и blob-данных. Внешний staging deployment, TLS/DNS, регистрация provider и
 operator acceptance зависят от окружения; см.
 [docs/runbooks/beta-staging.md](docs/runbooks/beta-staging.md).
+Repository-side production contract и main-only self-hosted CI/CD описаны в
+[docs/runbooks/production-deploy.md](docs/runbooks/production-deploy.md). Его
+наличие не означает, что server bootstrap, DNS или первый production deploy уже
+выполнены.
 
 ## Локальный запуск
 

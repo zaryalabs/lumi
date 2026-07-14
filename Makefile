@@ -4,6 +4,7 @@ CARGO ?= cargo
 DX ?= dx
 NPM ?= npm
 PRE_COMMIT ?= pre-commit
+DOCKER ?= docker
 
 RUST_MANIFEST := Cargo.toml
 STAGE0_SPIKE_PACKAGE := lumi-stage0-spikes
@@ -12,6 +13,21 @@ WEB_PACKAGE := $(WEB_DIR)/Cargo.toml
 E2E_DIR := tests/e2e
 E2E_PACKAGE := $(E2E_DIR)/package.json
 E2E_NODE_MODULES := $(E2E_DIR)/node_modules
+OPS_DIR := ops
+
+GIT_SHA ?= $(shell git rev-parse HEAD)
+SHORT_SHA ?= $(shell printf '%.7s' "$(GIT_SHA)")
+IMAGE_REGISTRY ?= ghcr.io
+IMAGE_OWNER ?= zaryalabs
+IMAGE_NAMESPACE ?= $(IMAGE_REGISTRY)/$(IMAGE_OWNER)
+IMAGE_TAG ?= sha-$(GIT_SHA)
+LUMI_SERVER_IMAGE ?= $(IMAGE_NAMESPACE)/lumi-server:$(IMAGE_TAG)
+LUMI_WEB_IMAGE ?= $(IMAGE_NAMESPACE)/lumi-web:$(IMAGE_TAG)
+RELEASE_ID ?= $(shell date -u "+%Y%m%d-%H%M%S")-$(SHORT_SHA)
+RELEASE_MANIFEST ?= builds/releases/$(RELEASE_ID).env.images
+BUILD_TIMESTAMP ?= $(shell date -u "+%Y-%m-%dT%H:%M:%SZ")
+INSTALL_DIR ?= /opt/apps/lumi
+DEPLOY_WRAPPER ?= /usr/local/sbin/lumi-ci-root-deploy
 
 LUMI_SERVER_BIND ?= 127.0.0.1:8080
 LUMI_SERVER_PORT ?= 8080
@@ -28,10 +44,52 @@ RUSTUP_PATH_ENV := $(if $(RUSTUP_TOOLCHAIN_BIN),PATH=$(RUSTUP_TOOLCHAIN_BIN):$$P
 
 .DEFAULT_GOAL := help
 
-.PHONY: help init fmt l dl t c pc docs-fmt docs-l rust-fmt rust-l rust-web-check rust-web-l rust-dl rust-t up logs down reset server-r telegram-r db-up db-down db-migrate web-r prototype-r prototype-e2e pagination-spike-r pagination-spike-e2e stage0-spikes web-build e2e-fmt e2e-l e2e-dl web-e2e pg-t compatibility security performance staging-config staging-smoke backup restore-drill restore-attestation-test restore-attestation beta-local beta agent-inspect
+.PHONY: help prepare build push release-manifest deploy ci-clean-images ops-config cicd-contract-test production-compose-smoke init fmt l dl t c pc docs-fmt docs-l rust-fmt rust-l rust-web-check rust-web-l rust-dl rust-t up logs down reset server-r telegram-r db-up db-down db-migrate web-r prototype-r prototype-e2e pagination-spike-r pagination-spike-e2e stage0-spikes web-build e2e-fmt e2e-fmt-check e2e-l e2e-dl web-e2e pg-t compatibility security performance staging-config staging-smoke backup restore-drill restore-attestation-test restore-attestation beta-local beta agent-inspect
 
 help: ## Show available make targets
 	@awk 'BEGIN {FS = ":.*## "}; /^[a-zA-Z0-9_.-]+:.*## / {printf "  %-16s %s\n", $$1, $$2}' $(MAKEFILE_LIST)
+
+# CI/CD contract
+
+prepare: docs-l rust-l rust-t e2e-fmt-check e2e-l e2e-dl ops-config restore-attestation-test cicd-contract-test ## Run non-mutating release checks
+
+build: ## Build commit-tagged server and web images
+	$(DOCKER) build --pull --file deployments/Dockerfile.server --tag "$(LUMI_SERVER_IMAGE)" .
+	$(DOCKER) build --pull --file deployments/Dockerfile.web --tag "$(LUMI_WEB_IMAGE)" .
+
+push: ## Push commit-tagged images and write their digest-pinned manifest
+	$(DOCKER) push "$(LUMI_SERVER_IMAGE)"
+	$(DOCKER) push "$(LUMI_WEB_IMAGE)"
+	$(MAKE) --no-print-directory release-manifest
+
+release-manifest: ## Resolve image digests into builds/releases/<release-id>.env.images
+	DOCKER="$(DOCKER)" \
+	RELEASE_MANIFEST="$(RELEASE_MANIFEST)" \
+	RELEASE_ID="$(RELEASE_ID)" \
+	GIT_SHA="$(GIT_SHA)" \
+	BUILD_TIMESTAMP="$(BUILD_TIMESTAMP)" \
+	LUMI_SERVER_IMAGE="$(LUMI_SERVER_IMAGE)" \
+	LUMI_WEB_IMAGE="$(LUMI_WEB_IMAGE)" \
+	./scripts/write-release-manifest.sh
+
+deploy: ## Install and deploy a CI-produced release manifest through /opt/apps/lumi
+	@test -d "$(INSTALL_DIR)/builds/releases" || { echo "Missing bootstrapped $(INSTALL_DIR)" >&2; exit 1; }
+	@test -x "$(DEPLOY_WRAPPER)" || { echo "Missing installed deploy wrapper $(DEPLOY_WRAPPER)" >&2; exit 1; }
+	@test -f "$(RELEASE_MANIFEST)" || { echo "Missing CI release manifest $(RELEASE_MANIFEST)" >&2; exit 1; }
+	./ops/validate-release-manifest.sh "$(RELEASE_MANIFEST)" "$(RELEASE_ID)"
+	sudo "$(DEPLOY_WRAPPER)" "$(abspath $(RELEASE_MANIFEST))" "$(RELEASE_ID)"
+
+ci-clean-images: ## Remove only Lumi images produced by this CI run
+	-$(DOCKER) image rm "$(LUMI_SERVER_IMAGE)" "$(LUMI_WEB_IMAGE)"
+
+ops-config: ## Validate the production installation Compose model
+	cd $(OPS_DIR) && $(DOCKER) compose --env-file .env.example --env-file images.env.example -f compose.yaml config --quiet
+
+cicd-contract-test: ## Test workflow, Make and release-manifest invariants
+	python3 -m unittest scripts/test_cicd_contract.py
+
+production-compose-smoke: ## Run the production topology with isolated disposable state
+	DOCKER="$(DOCKER)" GIT_SHA="$(GIT_SHA)" ./scripts/production-compose-smoke.sh
 
 init: ## Install hooks and local dependencies when tools are available
 	@if command -v $(PRE_COMMIT) >/dev/null 2>&1; then \
@@ -82,7 +140,7 @@ docs-fmt: ## Format/check docs when a formatter is available
 	@echo "No docs formatter configured yet; skipping docs format"
 
 docs-l: ## Run lightweight docs checks
-	@find README.md AGENTS.md CONTRIBUTING.md docs -type f \( -name '*.md' -o -name '*.toml' -o -name '*.yaml' -o -name '*.yml' -o -name '*.json' \) -print >/dev/null
+	@find README.md AGENTS.md CONTRIBUTING.md docs ops -type f \( -name '*.md' -o -name '*.toml' -o -name '*.yaml' -o -name '*.yml' -o -name '*.json' \) -print >/dev/null
 	@echo "Docs files are present"
 
 rust-fmt: ## Format Rust code when Cargo workspace exists
@@ -246,6 +304,14 @@ e2e-fmt: ## Format/check Playwright files when Node dependencies exist
 		if [ -d "$(E2E_NODE_MODULES)" ]; then $(NPM) --prefix $(E2E_DIR) run format; else echo "E2E dependencies are not installed; skipping E2E format"; fi; \
 	else \
 		echo "No $(E2E_PACKAGE) found; skipping E2E format"; \
+	fi
+
+e2e-fmt-check: ## Check Playwright formatting without modifying files
+	@if [ -f "$(E2E_PACKAGE)" ]; then \
+		if [ -d "$(E2E_NODE_MODULES)" ]; then $(NPM) --prefix $(E2E_DIR) run format:check; else echo "E2E dependencies are not installed; run make init"; exit 1; fi; \
+	else \
+		echo "No $(E2E_PACKAGE) found; cannot check E2E formatting"; \
+		exit 1; \
 	fi
 
 e2e-l: ## Typecheck Playwright tests when Node dependencies exist

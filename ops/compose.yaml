@@ -1,0 +1,209 @@
+name: lumi
+
+services:
+  postgres:
+    image: ${LUMI_POSTGRES_IMAGE:?set LUMI_POSTGRES_IMAGE}
+    container_name: lumi-postgres
+    environment:
+      POSTGRES_DB: lumi
+      POSTGRES_USER: lumi
+      POSTGRES_PASSWORD: ${LUMI_POSTGRES_PASSWORD:?set LUMI_POSTGRES_PASSWORD}
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U lumi -d lumi"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+      start_period: 5s
+    volumes:
+      - ./volumes/postgres-data:/var/lib/postgresql/data
+    restart: unless-stopped
+    networks:
+      - lumi
+    labels:
+      - com.zaryalabs.product=lumi
+      - com.zaryalabs.component=postgres
+
+  migrate:
+    image: ${LUMI_SERVER_IMAGE:?set LUMI_SERVER_IMAGE through .env.images}
+    container_name: lumi-migrate
+    profiles: ["ops"]
+    entrypoint: ["lumi-migrate"]
+    environment:
+      DATABASE_URL: ${LUMI_DATABASE_URL:?set LUMI_DATABASE_URL}
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: "no"
+    networks:
+      - lumi
+    labels:
+      - com.zaryalabs.product=lumi
+      - com.zaryalabs.component=migrate
+
+  blob-init:
+    image: ${LUMI_BLOB_INIT_IMAGE:?set LUMI_BLOB_INIT_IMAGE}
+    container_name: lumi-blob-init
+    command: ["sh", "-c", "chown -R 65532:65532 /var/lib/lumi/blobs"]
+    volumes:
+      - ./volumes/blobs:/var/lib/lumi/blobs
+    restart: "no"
+    networks:
+      - lumi
+    labels:
+      - com.zaryalabs.product=lumi
+      - com.zaryalabs.component=blob-init
+
+  server:
+    image: ${LUMI_SERVER_IMAGE:?set LUMI_SERVER_IMAGE through .env.images}
+    container_name: lumi-server
+    environment:
+      DATABASE_URL: ${LUMI_DATABASE_URL:?set LUMI_DATABASE_URL}
+      LUMI_SERVER_BIND: 0.0.0.0:8080
+      LUMI_WEB_ORIGIN: ${LUMI_WEB_ORIGIN:?set LUMI_WEB_ORIGIN}
+      LUMI_AUTH_AUDIENCE: ${LUMI_WEB_ORIGIN}
+      LUMI_SECURE_COOKIE: "1"
+      LUMI_DEPLOYMENT_MODE: production
+      LUMI_BLOB_ROOT: /var/lib/lumi/blobs
+      LUMI_TELEGRAM_BOT_SCOPE: ${LUMI_TELEGRAM_BOT_SCOPE:-lumi-production}
+      LUMI_TELEGRAM_BOT_USERNAME: ${LUMI_TELEGRAM_BOT_USERNAME:-}
+      LUMI_TELEGRAM_WEBHOOK_SECRET: ${LUMI_TELEGRAM_WEBHOOK_SECRET:-}
+      RUST_LOG: ${RUST_LOG:-info,tower_http=info}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      blob-init:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "--silent", "http://127.0.0.1:8080/api/v1/ready"]
+      interval: 10s
+      timeout: 3s
+      retries: 20
+      start_period: 5s
+    volumes:
+      - ./volumes/blobs:/var/lib/lumi/blobs
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=64m
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
+    init: true
+    restart: unless-stopped
+    networks:
+      - lumi
+    labels:
+      - com.zaryalabs.product=lumi
+      - com.zaryalabs.component=server
+
+  web:
+    image: ${LUMI_WEB_IMAGE:?set LUMI_WEB_IMAGE through .env.images}
+    container_name: lumi-web
+    depends_on:
+      server:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "--quiet", "--spider", "http://127.0.0.1:8080/api/v1/ready"]
+      interval: 10s
+      timeout: 3s
+      retries: 12
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=16m
+      - /var/cache/nginx:rw,noexec,nosuid,nodev,size=16m
+      - /var/run:rw,noexec,nosuid,nodev,size=1m
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
+    init: true
+    restart: unless-stopped
+    networks:
+      - lumi
+      - platform
+    labels:
+      - com.zaryalabs.product=lumi
+      - com.zaryalabs.component=web
+      - traefik.enable=true
+      - traefik.docker.network=platform
+      - traefik.http.services.lumi-web.loadbalancer.server.port=8080
+      - traefik.http.middlewares.lumi-https-redirect.redirectscheme.scheme=https
+      - traefik.http.routers.lumi-web-http.rule=Host(`${LUMI_DOMAIN:-lumi.zrya.io}`)
+      - traefik.http.routers.lumi-web-http.entrypoints=web
+      - traefik.http.routers.lumi-web-http.middlewares=lumi-https-redirect@docker
+      - traefik.http.routers.lumi-web-http.priority=10
+      - traefik.http.routers.lumi-web-http.service=lumi-web
+      - traefik.http.routers.lumi-web.rule=Host(`${LUMI_DOMAIN:-lumi.zrya.io}`)
+      - traefik.http.routers.lumi-web.entrypoints=websecure
+      - traefik.http.routers.lumi-web.middlewares=platform-auth-chain@file
+      - traefik.http.routers.lumi-web.priority=10
+      - traefik.http.routers.lumi-web.tls.certresolver=${TRAEFIK_CERT_RESOLVER:-letsencrypt}
+      - traefik.http.routers.lumi-web.service=lumi-web
+      - traefik.http.routers.lumi-telegram-http.rule=Host(`${LUMI_DOMAIN:-lumi.zrya.io}`) && Path(`/api/v1/webhooks/telegram`)
+      - traefik.http.routers.lumi-telegram-http.entrypoints=web
+      - traefik.http.routers.lumi-telegram-http.middlewares=lumi-https-redirect@docker
+      - traefik.http.routers.lumi-telegram-http.priority=200
+      - traefik.http.routers.lumi-telegram-http.service=lumi-web
+      - traefik.http.routers.lumi-telegram.rule=Host(`${LUMI_DOMAIN:-lumi.zrya.io}`) && Path(`/api/v1/webhooks/telegram`)
+      - traefik.http.routers.lumi-telegram.entrypoints=websecure
+      - traefik.http.routers.lumi-telegram.middlewares=platform-headers@file
+      - traefik.http.routers.lumi-telegram.priority=200
+      - traefik.http.routers.lumi-telegram.tls.certresolver=${TRAEFIK_CERT_RESOLVER:-letsencrypt}
+      - traefik.http.routers.lumi-telegram.service=lumi-web
+
+  backup:
+    image: ${LUMI_POSTGRES_IMAGE:?set LUMI_POSTGRES_IMAGE}
+    container_name: lumi-backup
+    profiles: ["ops"]
+    entrypoint: ["/bin/sh", "/opt/lumi/scripts/backup.sh", "/var/lib/lumi/backups"]
+    environment:
+      PGHOST: postgres
+      PGDATABASE: lumi
+      PGUSER: lumi
+      PGPASSWORD: ${LUMI_POSTGRES_PASSWORD:?set LUMI_POSTGRES_PASSWORD}
+      LUMI_BLOB_ROOT: /var/lib/lumi/blobs
+      LUMI_BACKUP_WRITES_QUIESCED: ${LUMI_BACKUP_WRITES_QUIESCED:-0}
+      LUMI_BACKUP_DESTINATION_ENCRYPTED: ${LUMI_BACKUP_DESTINATION_ENCRYPTED:-0}
+      LUMI_BACKUP_REQUIRE_SEEDED: ${LUMI_BACKUP_REQUIRE_SEEDED:-1}
+    depends_on:
+      postgres:
+        condition: service_healthy
+    volumes:
+      - ./volumes/blobs:/var/lib/lumi/blobs:ro
+      - ./backups:/var/lib/lumi/backups
+      - ./scripts:/opt/lumi/scripts:ro
+    restart: "no"
+    networks:
+      - lumi
+    labels:
+      - com.zaryalabs.product=lumi
+      - com.zaryalabs.component=backup
+
+  restore-drill:
+    image: ${LUMI_POSTGRES_IMAGE:?set LUMI_POSTGRES_IMAGE}
+    container_name: lumi-restore-drill
+    profiles: ["ops"]
+    entrypoint: ["/bin/sh", "/opt/lumi/scripts/restore-drill.sh"]
+    command: ["/var/lib/lumi/backups/${LUMI_RESTORE_BACKUP_ID:-missing}"]
+    environment:
+      PGHOST: postgres
+      PGDATABASE: lumi
+      PGUSER: lumi
+      PGPASSWORD: ${LUMI_POSTGRES_PASSWORD:?set LUMI_POSTGRES_PASSWORD}
+      RESTORE_DATABASE_NAME: lumi_restore_drill
+    depends_on:
+      postgres:
+        condition: service_healthy
+    volumes:
+      - ./backups:/var/lib/lumi/backups:ro
+      - ./scripts:/opt/lumi/scripts:ro
+    restart: "no"
+    networks:
+      - lumi
+    labels:
+      - com.zaryalabs.product=lumi
+      - com.zaryalabs.component=restore-drill
+
+networks:
+  lumi:
+    driver: bridge
+  platform:
+    external: true
