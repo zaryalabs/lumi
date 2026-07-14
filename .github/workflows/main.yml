@@ -21,11 +21,17 @@ jobs:
         with:
           persist-credentials: false
 
+      - name: Install pinned Rust toolchain
+        uses: dtolnay/rust-toolchain@fa04a1451ff1842e2626ccb99004d0195b455a88
+        with:
+          toolchain: stable
+          targets: wasm32-unknown-unknown
+          components: clippy, rustfmt
+
       - name: Prepare toolchain
         shell: bash
         run: |
           set -euo pipefail
-          rustup target add wasm32-unknown-unknown
           if ! command -v dx >/dev/null 2>&1 || ! dx --version | grep -q '0.7.9'; then
             cargo install dioxus-cli --version 0.7.9 --locked
           fi
