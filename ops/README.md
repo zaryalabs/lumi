@@ -47,9 +47,10 @@ Bootstrap меняет production state и выполняется операто
    login не нужен.
 6. Установить release manifest, активировать его и выполнить `make deploy`.
 
-Приложение использует `https://lumi.zrya.io`. Основной Web/API router закрыт
-`platform-auth-chain@file`. Точный Telegram webhook path
-`/api/v1/webhooks/telegram` обходит Basic Auth и защищён проверкой Lumi header
+Приложение использует `https://lumi.zrya.io`. Основной Web/API router применяет
+только общие security headers через `platform-headers@file`: внешний Basic Auth
+не используется, а пользовательскую аутентификацию выполняет Lumi. Точный
+Telegram webhook path `/api/v1/webhooks/telegram` защищён проверкой Lumi header
 `X-Telegram-Bot-Api-Secret-Token`.
 
 ## Releases

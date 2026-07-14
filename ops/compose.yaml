@@ -133,7 +133,7 @@ services:
       - traefik.http.routers.lumi-web-http.service=lumi-web
       - traefik.http.routers.lumi-web.rule=Host(`${LUMI_DOMAIN:-lumi.zrya.io}`)
       - traefik.http.routers.lumi-web.entrypoints=websecure
-      - traefik.http.routers.lumi-web.middlewares=platform-auth-chain@file
+      - traefik.http.routers.lumi-web.middlewares=platform-headers@file
       - traefik.http.routers.lumi-web.priority=10
       - traefik.http.routers.lumi-web.tls.certresolver=${TRAEFIK_CERT_RESOLVER:-letsencrypt}
       - traefik.http.routers.lumi-web.service=lumi-web
