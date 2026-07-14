@@ -82,7 +82,7 @@ smoke: require-files ## Check internal readiness and external Traefik routing
 		done; \
 		test "$$attempt" -le 20 || { $(COMPOSE_CMD) logs --tail=100 server web; exit 1; }; \
 		status="$$(curl --silent --show-error --output /dev/null --write-out '%{http_code}' "$$external_url")"; \
-		case "$$status" in 200|401) ;; *) echo "External smoke returned HTTP $$status" >&2; exit 1 ;; esac; \
+		test "$$status" = 200 || { echo "External smoke returned HTTP $$status" >&2; exit 1; }; \
 		printf 'Lumi smoke passed (external HTTP %s)\n' "$$status"
 
 deploy: require-files ## Pull, migrate, start and smoke the active release

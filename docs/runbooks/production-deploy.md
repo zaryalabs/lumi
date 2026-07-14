@@ -87,7 +87,7 @@ Manifest проверяется как данные со строгим набо
 
 - `make status` показывает healthy `postgres`, `server` и `web`;
 - internal `/api/v1/ready` отвечает успешно;
-- external `https://lumi.zrya.io` отвечает `200` или ожидаемым Basic Auth `401`;
+- external `https://lumi.zrya.io` отвечает `200` без внешнего Basic Auth;
 - registration/login, EPUB import, reader, progress и annotations проходят;
 - restart `server` не теряет PostgreSQL или blob state;
 - logs `lumi-server`, `lumi-web` и `lumi-postgres` видны в Loki/Grafana;

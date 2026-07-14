@@ -78,7 +78,17 @@ class OperationsContractTests(unittest.TestCase):
         text = (ROOT / "ops" / "Makefile").read_text(encoding="utf-8")
         self.assertIn("s/^LUMI_WEB_ORIGIN=//p", text)
         self.assertIn("*[!A-Za-z0-9.-]*", text)
+        self.assertIn('test "$$status" = 200', text)
+        self.assertNotIn("200|401", text)
         self.assertNotRegex(text, r"(?m)^\s*\.\s+.*ENV_FILE")
+
+    def test_public_router_uses_security_headers_without_basic_auth(self) -> None:
+        text = (ROOT / "ops" / "compose.yaml").read_text(encoding="utf-8")
+        self.assertIn(
+            "traefik.http.routers.lumi-web.middlewares=platform-headers@file",
+            text,
+        )
+        self.assertNotIn("platform-auth-chain@file", text)
 
     def test_root_wrapper_limits_manifest_source(self) -> None:
         text = (ROOT / "ops" / "lumi-ci-root").read_text(encoding="utf-8")
