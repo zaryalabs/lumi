@@ -10,7 +10,7 @@ resolver = "2"
 [workspace.package]
 edition = "2021"
 license = "MIT"
-rust-version = "1.85"
+rust-version = "1.88"
 version = "0.1.0"
 
 [workspace.dependencies]
@@ -60,10 +60,19 @@ tokio = { version = "1.52.3", features = [
   "sync",
   "time",
 ] }
-tower = { version = "0.5.3", features = ["util"] }
-tower-http = { version = "0.6.11", features = ["cors", "request-id", "trace"] }
+tower = { version = "0.5.3", features = ["limit", "util"] }
+tower-http = { version = "0.6.11", features = [
+  "cors",
+  "request-id",
+  "timeout",
+  "trace",
+] }
 tracing = "0.1.44"
-tracing-subscriber = { version = "0.3.23", features = ["env-filter", "fmt"] }
+tracing-subscriber = { version = "0.3.23", features = [
+  "env-filter",
+  "fmt",
+  "json",
+] }
 quick-xml = "0.41.0"
 scraper = "0.27.0"
 url = "2.5.8"

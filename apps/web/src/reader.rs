@@ -274,7 +274,10 @@ pub(crate) fn ReaderApp(
                         div { class: "reader-chapter-progress", aria_hidden: "true", span {} }
                     }
                     if let Some(message) = view.annotation_message.clone() {
-                        p { class: "reader-global-status", role: "alert", aria_live: "assertive", "{message}" }
+                        div { class: "reader-global-status", role: if message == "Экспорт подготовлен" { "status" } else { "alert" }, aria_live: if message == "Экспорт подготовлен" { "polite" } else { "assertive" },
+                            span { "{message}" }
+                            button { r#type: "button", aria_label: "Закрыть сообщение", onclick: move |_| if let ReaderState::Ready(current) = &mut *state.write() { current.annotation_message = None; }, "×" }
+                        }
                     }
 
                     div { class: "reader-layout {layout_class}",
@@ -299,7 +302,7 @@ pub(crate) fn ReaderApp(
                             }
                         }
 
-                        section { class: "reader-stage {width_class}", aria_label: "Страница книги",
+                        section { class: "reader-stage {width_class}", aria_label: "Страница книги", aria_hidden: view.toc_open || view.settings_open || view.notes_open, inert: view.toc_open || view.settings_open || view.notes_open,
                             div { class: "reader-history", role: "toolbar", aria_label: "История переходов",
                                 button { r#type: "button", aria_label: "Назад по истории", disabled: !view.navigation.can_go_back(), onclick: move |_| {
                                     if let ReaderState::Ready(current) = &mut *state.write() { current.navigation.go_back(); persist_current(current, csrf, progress_generation, progress_in_flight, save_state); }
@@ -452,7 +455,7 @@ fn RenderedFragment(
             let src = block
                 .resource_hash
                 .map(|hash| format!("{API_BASE}/revisions/{revision_id}/resources/{hash}"));
-            rsx! { figure { id: "{block.node_id}", if let Some(src) = src { img { src, alt: "{alt}", loading: "lazy" } } else { div { class: "image-placeholder", "{alt}" } } } }
+            rsx! { figure { id: "{block.node_id}", if let Some(src) = src { img { src, alt: "{alt}", loading: "lazy", width: "1200", height: "800" } } else { div { class: "image-placeholder", "{alt}" } } } }
         }
         lumi_core::ReadingNodeKind::Caption => {
             rsx! { p { id: "{block.node_id}", class: "reading-caption", {content} } }
@@ -1269,9 +1272,10 @@ fn panel_trigger(panel: ReaderPanel) -> &'static str {
 }
 
 fn close_reader_overlay(mut state: Signal<ReaderState>) {
+    close_native_reader_dialog("reader-footnote-dialog");
     let target = if let ReaderState::Ready(view) = &mut *state.write() {
         if view.footnote.take().is_some() {
-            Some("reader-page-surface")
+            None
         } else if view.toc_open {
             view.toc_open = false;
             Some("reader-toc-button")
@@ -1306,18 +1310,50 @@ fn dismiss_selection(mut state: Signal<ReaderState>) {
 }
 
 fn close_footnote(mut state: Signal<ReaderState>) {
+    close_native_reader_dialog("reader-footnote-dialog");
     if let ReaderState::Ready(view) = &mut *state.write() {
         view.footnote = None;
     }
-    defer_reader_focus("reader-page-surface");
+}
+
+fn close_native_reader_dialog(id: &str) {
+    let Some(document) = web_sys::window().and_then(|window| window.document()) else {
+        return;
+    };
+    let Some(element) = document.get_element_by_id(id) else {
+        return;
+    };
+    let Ok(dialog) = element.dyn_into::<web_sys::HtmlDialogElement>() else {
+        return;
+    };
+    if dialog.open() {
+        dialog.close();
+    }
 }
 
 fn defer_reader_focus(id: &str) {
     let id = id.to_owned();
     spawn_forever(async move {
-        browser_delay(20).await;
-        focus_reader_node(&id);
+        let mut focused_last_tick = false;
+        for _ in 0..10 {
+            browser_delay(20).await;
+            let focused = reader_node_is_focused(&id);
+            if focused && focused_last_tick {
+                break;
+            }
+            if !focused {
+                focus_reader_node(&id);
+            }
+            focused_last_tick = reader_node_is_focused(&id);
+        }
     });
+}
+
+fn reader_node_is_focused(id: &str) -> bool {
+    web_sys::window()
+        .and_then(|window| window.document())
+        .and_then(|document| document.active_element())
+        .is_some_and(|element| element.id() == id)
 }
 
 fn defer_reader_dialog(id: &str) {
@@ -1538,13 +1574,22 @@ fn jump_to_path(
     in_flight: Signal<bool>,
     save_state: Signal<SaveState>,
 ) {
-    if let ReaderState::Ready(current) = &mut *state.write() {
+    let navigated = if let ReaderState::Ready(current) = &mut *state.write() {
         if let Some(page) = current.page_map.page_for_path(path) {
             current
                 .navigation
                 .jump_to(page, current.page_map.pages.len());
+            current.toc_open = false;
             persist_current(current, csrf, generation, in_flight, save_state);
+            true
+        } else {
+            false
         }
+    } else {
+        false
+    };
+    if navigated {
+        defer_reader_focus("reader-page-surface");
     }
 }
 

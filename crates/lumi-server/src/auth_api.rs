@@ -1,7 +1,7 @@
 //! Axum account/auth routes and session security middleware.
 
 use axum::{
-    extract::{Path, Request, State},
+    extract::{DefaultBodyLimit, Path, Request, State},
     http::{header, HeaderMap, HeaderValue, Method, StatusCode},
     middleware::Next,
     response::{IntoResponse, Response},
@@ -26,6 +26,7 @@ pub(crate) fn public_routes() -> Router<AppState> {
         .route("/auth/login", post(login))
         .route("/auth/recovery/challenges", post(create_challenge))
         .route("/auth/recovery", post(login))
+        .layer(DefaultBodyLimit::max(64 * 1024))
 }
 
 pub(crate) fn protected_account_routes() -> Router<AppState> {
@@ -36,6 +37,7 @@ pub(crate) fn protected_account_routes() -> Router<AppState> {
         .route("/auth/sessions/revoke-all", post(revoke_all_sessions))
         .route("/devices", get(list_devices))
         .route("/devices/{device_id}", delete(revoke_device))
+        .layer(DefaultBodyLimit::max(64 * 1024))
 }
 
 pub(crate) async fn require_session(

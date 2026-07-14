@@ -1,0 +1,12 @@
+FROM rust:1.88-bookworm AS builder
+WORKDIR /src
+COPY . .
+RUN cargo build --locked --release -p lumi-server --bins
+
+FROM debian:bookworm-slim
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates curl && rm -rf /var/lib/apt/lists/*
+COPY --from=builder /src/target/release/lumi-server /usr/local/bin/lumi-server
+COPY --from=builder /src/target/release/lumi-migrate /usr/local/bin/lumi-migrate
+COPY --from=builder /src/crates/lumi-server/migrations /src/crates/lumi-server/migrations
+USER 65532:65532
+ENTRYPOINT ["lumi-server"]

@@ -647,4 +647,62 @@ mod tests {
         );
         Ok(())
     }
+
+    #[tokio::test]
+    async fn dns_rebinding_is_rejected_on_second_resolution() -> Result<(), WebFetchError> {
+        let resolver = FakeResolver {
+            answers: Mutex::new(vec![
+                vec![IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1))],
+                vec![IpAddr::V4(Ipv4Addr::new(93, 184, 216, 34))],
+            ]),
+        };
+        let url = Url::parse("https://rebind.example/").map_err(|_| WebFetchError::InvalidUrl)?;
+
+        assert!(resolve_and_validate(&url, &resolver).await.is_ok());
+        assert_eq!(
+            resolve_and_validate(&url, &resolver).await,
+            Err(WebFetchError::NonPublicAddress)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn header_budget_rejects_count_and_byte_amplification() {
+        let mut count = reqwest::header::HeaderMap::new();
+        for index in 0..=MAX_HEADERS {
+            let name =
+                reqwest::header::HeaderName::from_bytes(format!("x-budget-{index}").as_bytes())
+                    .unwrap_or_else(|_| reqwest::header::HeaderName::from_static("x-invalid"));
+            count.insert(name, reqwest::header::HeaderValue::from_static("x"));
+        }
+        let mut bytes = reqwest::header::HeaderMap::new();
+        let oversized = "x".repeat(MAX_HEADER_BYTES);
+        if let Ok(value) = reqwest::header::HeaderValue::from_str(&oversized) {
+            bytes.insert("x-large", value);
+        }
+
+        assert_eq!(
+            validate_headers(&count),
+            Err(WebFetchError::HeadersTooLarge)
+        );
+        assert_eq!(
+            validate_headers(&bytes),
+            Err(WebFetchError::HeadersTooLarge)
+        );
+    }
+
+    #[test]
+    fn ssrf_url_corpus_rejects_metadata_aliases_and_ambiguous_hosts() {
+        let blocked = [
+            "http://metadata/",
+            "http://metadata.google.internal/computeMetadata/v1/",
+            "http://localhost./",
+            "http://user:password@example.com/",
+            "http://127.0.0.1%00.example.com/",
+        ];
+
+        assert!(blocked
+            .iter()
+            .all(|value| validate_public_url_input(value).is_err()));
+    }
 }

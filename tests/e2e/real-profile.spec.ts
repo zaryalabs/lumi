@@ -9,7 +9,7 @@ test.describe("real local profile", () => {
     "set LUMI_E2E_REAL_PROFILE=1 to run against a live Lumi API and Web profile",
   );
 
-  test("checks live API health and renders the web shell", async ({
+  test("checks live API health and renders the current account shell", async ({
     page,
     request,
   }) => {
@@ -29,10 +29,11 @@ test.describe("real local profile", () => {
 
     await page.goto("/");
     await expect(
-      page.getByRole("heading", { name: "Web EPUB reader" }),
+      page.getByRole("main", { name: "Lumi — регистрация и вход" }),
     ).toBeVisible();
+    await expect(page.getByRole("heading", { name: "Lumi" })).toBeVisible();
     await expect(
-      page.getByRole("complementary", { name: "Reader side panels" }),
+      page.getByRole("button", { name: "Сгенерировать recovery phrase" }),
     ).toBeVisible();
   });
 });

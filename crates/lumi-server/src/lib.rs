@@ -12,11 +12,12 @@ mod telegram;
 mod web;
 
 use std::collections::HashMap;
+use std::fmt;
 use std::sync::{Arc, RwLock, RwLockReadGuard, RwLockWriteGuard};
 use std::time::Duration;
 
 use axum::{
-    body::Body,
+    body::{to_bytes, Body},
     extract::{DefaultBodyLimit, Multipart, Path, State},
     http::{header, HeaderMap, HeaderValue, Method, StatusCode},
     middleware,
@@ -27,18 +28,20 @@ use axum::{
 use lumi_core::{
     import_epub_fixture, rich_epub_fixture, s1_schema_migrations, simple_epub_fixture,
     AcceptedImport, Annotation, AnnotationExport, AnnotationId, BlobManifest, BlobManifestId,
-    CreateAnnotationCommand, DeleteAnnotationCommand, DiagnosticSeverity, DocumentRevision,
-    DocumentRevisionId, EpubFixture, EpubLimits, HealthResponse, ImportDiagnostic,
-    ImportStatusEntry, ImportWebUrlRequest, ImportedFixture, Job, JobId, JobKind, JobStage,
-    JobStatus, LibraryEntry, LibraryState, Material, MaterialId, MaterialImportStatus,
+    ContinueReadingEntry, CreateAnnotationCommand, DeleteAnnotationCommand, DiagnosticSeverity,
+    DocumentRevision, DocumentRevisionId, EpubFixture, EpubLimits, HealthResponse,
+    ImportDiagnostic, ImportStatusEntry, ImportWebUrlRequest, ImportedFixture, Job, JobId, JobKind,
+    JobStage, JobStatus, LibraryEntry, LibraryState, Material, MaterialId, MaterialImportStatus,
     MoveReadingPositionCommand, NormalizedContentPackage, ReaderSettings, ReadingDocument,
     ReadingProgress, SchemaMigration, ServiceCapabilities, TelegramConnectionStatus,
     UpdateAnnotationCommand, UpdateLibraryStateCommand, UpdateReaderSettingsCommand, UserId,
 };
 use serde::{Deserialize, Serialize};
+use sha2::Digest;
 use tower_http::{
     cors::{AllowOrigin, CorsLayer},
     request_id::{MakeRequestUuid, PropagateRequestIdLayer, SetRequestIdLayer},
+    timeout::TimeoutLayer,
     trace::TraceLayer,
 };
 
@@ -55,6 +58,21 @@ pub const DEFAULT_WEB_ORIGIN: &str = "http://127.0.0.1:5173";
 /// Default content-addressed blob root for local development.
 pub const DEFAULT_BLOB_ROOT: &str = ".local/blob-store";
 
+const TELEGRAM_WEBHOOK_SECRET_HEADER: &str = "x-telegram-bot-api-secret-token";
+const MAX_TELEGRAM_WEBHOOK_BODY_BYTES: usize = 256 * 1024;
+const MAX_TELEGRAM_WEBHOOK_HEADERS: usize = 48;
+const MAX_TELEGRAM_WEBHOOK_HEADER_BYTES: usize = 16 * 1024;
+const TELEGRAM_WEBHOOK_TIMEOUT: Duration = Duration::from_secs(8);
+
+#[derive(Clone, Eq, PartialEq)]
+struct SecretString(String);
+
+impl fmt::Debug for SecretString {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("SecretString([redacted])")
+    }
+}
+
 /// Runtime configuration for the Lumi server process.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct AppConfig {
@@ -64,6 +82,8 @@ pub struct AppConfig {
     auth_audience: String,
     secure_cookie: bool,
     blob_root: std::path::PathBuf,
+    telegram_webhook_secret: Option<SecretString>,
+    deployment_mode: String,
 }
 
 impl AppConfig {
@@ -84,6 +104,12 @@ impl AppConfig {
         let blob_root = std::env::var_os("LUMI_BLOB_ROOT")
             .map(std::path::PathBuf::from)
             .unwrap_or_else(|| std::path::PathBuf::from(DEFAULT_BLOB_ROOT));
+        let telegram_webhook_secret = std::env::var("LUMI_TELEGRAM_WEBHOOK_SECRET")
+            .ok()
+            .filter(|value| !value.is_empty())
+            .map(SecretString);
+        let deployment_mode =
+            std::env::var("LUMI_DEPLOYMENT_MODE").unwrap_or_else(|_| "local".to_owned());
 
         Self {
             bind_address,
@@ -92,6 +118,8 @@ impl AppConfig {
             auth_audience,
             secure_cookie,
             blob_root,
+            telegram_webhook_secret,
+            deployment_mode,
         }
     }
 
@@ -117,6 +145,12 @@ impl AppConfig {
     #[must_use]
     pub fn blob_root(&self) -> &std::path::Path {
         &self.blob_root
+    }
+
+    fn telegram_webhook_secret(&self) -> Option<&str> {
+        self.telegram_webhook_secret
+            .as_ref()
+            .map(|secret| secret.0.as_str())
     }
 }
 
@@ -195,6 +229,7 @@ pub struct AppState {
     security: SecurityConfig,
     imports: Option<Arc<ImportService>>,
     telegram: Option<Arc<TelegramService>>,
+    telegram_webhook_secret: Option<SecretString>,
 }
 
 impl AppState {
@@ -224,6 +259,7 @@ impl AppState {
             security: SecurityConfig::local(),
             imports: None,
             telegram: None,
+            telegram_webhook_secret: None,
         }
     }
 
@@ -240,6 +276,11 @@ impl AppState {
         config: &AppConfig,
         recover_imports: bool,
     ) -> anyhow::Result<Self> {
+        validate_telegram_webhook_secret(config.telegram_webhook_secret())?;
+        validate_deployment_security(config)?;
+        tokio::fs::create_dir_all(config.blob_root())
+            .await
+            .map_err(|error| anyhow::anyhow!("failed to prepare blob root: {error}"))?;
         let accounts = PgAccountStore::connect(config.database_url())
             .await
             .map_err(|error| anyhow::anyhow!(error))?;
@@ -253,16 +294,21 @@ impl AppState {
                 .await
                 .map_err(|error| anyhow::anyhow!(error))?;
         }
-        let telegram = Arc::new(TelegramService::from_env(
-            accounts.pool().clone(),
-            Arc::clone(&imports),
-        ));
+        let telegram = (config.deployment_mode == "local"
+            || config.telegram_webhook_secret.is_some())
+        .then(|| {
+            Arc::new(TelegramService::from_env(
+                accounts.pool().clone(),
+                Arc::clone(&imports),
+            ))
+        });
         Ok(Self {
             repository: Arc::new(RwLock::new(Repository::default())),
             accounts: Arc::new(accounts),
             security: SecurityConfig::from_app(config),
             imports: Some(imports),
-            telegram: Some(telegram),
+            telegram,
+            telegram_webhook_secret: config.telegram_webhook_secret.clone(),
         })
     }
 
@@ -280,6 +326,7 @@ impl AppState {
             security: SecurityConfig::local(),
             imports: None,
             telegram: None,
+            telegram_webhook_secret: None,
         }
     }
 
@@ -317,16 +364,17 @@ pub fn build_router_with_state(state: AppState) -> Router {
         .route("/capabilities", get(capabilities))
         .route("/schema/migrations", get(schema_migrations))
         .merge(auth_api::public_routes());
-    let protected = Router::new()
+    let mut protected = Router::new()
         .merge(auth_api::protected_account_routes())
         .route("/materials", get(list_materials))
+        .route("/materials/continue-reading", get(continue_reading))
         .route(
             "/materials/{material_id}",
             get(get_material).delete(delete_material),
         )
         .route(
             "/materials/{material_id}/library-state",
-            patch(update_library_state),
+            patch(update_library_state).layer(DefaultBodyLimit::max(64 * 1024)),
         )
         .route("/materials/{material_id}/source", get(download_source_epub))
         .route(
@@ -347,11 +395,15 @@ pub fn build_router_with_state(state: AppState) -> Router {
         )
         .route(
             "/materials/{material_id}/progress",
-            get(get_progress).put(move_reading_position),
+            get(get_progress)
+                .put(move_reading_position)
+                .layer(DefaultBodyLimit::max(256 * 1024)),
         )
         .route(
             "/reader/settings",
-            get(get_reader_settings).put(update_reader_settings),
+            get(get_reader_settings)
+                .put(update_reader_settings)
+                .layer(DefaultBodyLimit::max(64 * 1024)),
         )
         .route("/revisions/{revision_id}", get(get_revision))
         .route(
@@ -376,18 +428,22 @@ pub fn build_router_with_state(state: AppState) -> Router {
             "/imports/url",
             post(import_web_url).layer(DefaultBodyLimit::max(16 * 1024)),
         )
-        .route(
-            "/providers/telegram/pairing",
-            post(create_telegram_pairing).layer(DefaultBodyLimit::max(1024)),
-        )
-        .route(
-            "/providers/telegram/connection",
-            get(get_telegram_connection).delete(unlink_telegram),
-        )
         .route("/jobs/{job_id}", get(get_job))
         .route("/jobs/{job_id}/diagnostics", get(get_job_diagnostics))
         .route("/jobs/{job_id}/cancel", post(cancel_job))
-        .route("/jobs/{job_id}/retry", post(retry_job))
+        .route("/jobs/{job_id}/retry", post(retry_job));
+    if state.telegram.is_some() {
+        protected = protected
+            .route(
+                "/providers/telegram/pairing",
+                post(create_telegram_pairing).layer(DefaultBodyLimit::max(1024)),
+            )
+            .route(
+                "/providers/telegram/connection",
+                get(get_telegram_connection).delete(unlink_telegram),
+            );
+    }
+    let protected = protected
         .layer(DefaultBodyLimit::max(101 * 1024 * 1024))
         .route_layer(middleware::from_fn_with_state(
             state.clone(),
@@ -400,8 +456,19 @@ pub fn build_router_with_state(state: AppState) -> Router {
         .parse::<HeaderValue>()
         .unwrap_or_else(|_| HeaderValue::from_static(DEFAULT_WEB_ORIGIN));
 
-    Router::new()
-        .nest("/api/v1", api)
+    let mut router = Router::new().nest("/api/v1", api);
+    if state.telegram_webhook_secret.is_some() {
+        router = router.merge(
+            Router::new()
+                .route(
+                    "/webhooks/telegram",
+                    post(telegram_webhook)
+                        .layer(DefaultBodyLimit::max(MAX_TELEGRAM_WEBHOOK_BODY_BYTES)),
+                )
+                .with_state(state.clone()),
+        );
+    }
+    router
         .layer(
             CorsLayer::new()
                 .allow_origin(AllowOrigin::exact(allowed_origin))
@@ -422,7 +489,137 @@ pub fn build_router_with_state(state: AppState) -> Router {
         )
         .layer(PropagateRequestIdLayer::x_request_id())
         .layer(SetRequestIdLayer::x_request_id(MakeRequestUuid))
+        .layer(TimeoutLayer::with_status_code(
+            StatusCode::SERVICE_UNAVAILABLE,
+            Duration::from_secs(45),
+        ))
+        .layer(tower::limit::ConcurrencyLimitLayer::new(256))
         .layer(TraceLayer::new_for_http())
+}
+
+fn validate_telegram_webhook_secret(secret: Option<&str>) -> anyhow::Result<()> {
+    if secret.is_some_and(|value| {
+        !(32..=256).contains(&value.len())
+            || value.bytes().any(|byte| !(0x21..=0x7e).contains(&byte))
+    }) {
+        anyhow::bail!(
+            "LUMI_TELEGRAM_WEBHOOK_SECRET must contain 32 to 256 visible ASCII characters"
+        );
+    }
+    Ok(())
+}
+
+fn validate_deployment_security(config: &AppConfig) -> anyhow::Result<()> {
+    if !matches!(
+        config.deployment_mode.as_str(),
+        "local" | "staging" | "production"
+    ) {
+        anyhow::bail!("LUMI_DEPLOYMENT_MODE must be local, staging or production");
+    }
+    if config.deployment_mode != "local"
+        && (!config.secure_cookie
+            || !config.web_origin.starts_with("https://")
+            || config.auth_audience != config.web_origin)
+    {
+        anyhow::bail!(
+            "staging/production require HTTPS origin, matching auth audience and secure cookies"
+        );
+    }
+    let bind_address = config
+        .bind_address
+        .parse::<std::net::SocketAddr>()
+        .map_err(|_| anyhow::anyhow!("LUMI_SERVER_BIND must be a socket address"))?;
+    if config.deployment_mode == "local" && !bind_address.ip().is_loopback() {
+        anyhow::bail!("local deployment mode may bind loopback addresses only");
+    }
+    Ok(())
+}
+
+fn webhook_secret_matches(expected: &str, supplied: &str) -> bool {
+    let expected_hash = sha2::Sha256::digest(expected.as_bytes());
+    let supplied_hash = sha2::Sha256::digest(supplied.as_bytes());
+    expected_hash
+        .iter()
+        .zip(supplied_hash.iter())
+        .fold(0_u8, |difference, (left, right)| {
+            difference | (left ^ right)
+        })
+        == 0
+}
+
+async fn telegram_webhook(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    body: Body,
+) -> Result<Response, AppError> {
+    let header_bytes = headers
+        .iter()
+        .map(|(name, value)| name.as_str().len().saturating_add(value.as_bytes().len()))
+        .sum::<usize>();
+    if headers.len() > MAX_TELEGRAM_WEBHOOK_HEADERS
+        || header_bytes > MAX_TELEGRAM_WEBHOOK_HEADER_BYTES
+    {
+        return Err(AppError::PayloadTooLarge);
+    }
+    let expected = state
+        .telegram_webhook_secret
+        .as_ref()
+        .ok_or(AppError::NotFound("Telegram webhook"))?;
+    let supplied = headers
+        .get(TELEGRAM_WEBHOOK_SECRET_HEADER)
+        .and_then(|value| value.to_str().ok())
+        .ok_or(AppError::Forbidden("Telegram webhook secret is required"))?;
+    if !webhook_secret_matches(&expected.0, supplied) {
+        return Err(AppError::Forbidden("Telegram webhook secret is invalid"));
+    }
+    if headers
+        .get(header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .is_none_or(|value| {
+            value
+                .split(';')
+                .next()
+                .is_none_or(|media_type| media_type.trim() != "application/json")
+        })
+    {
+        return Ok(StatusCode::NO_CONTENT.into_response());
+    }
+
+    let service = state.telegram.clone();
+    let outcome = tokio::time::timeout(TELEGRAM_WEBHOOK_TIMEOUT, async move {
+        let Ok(payload) = to_bytes(body, MAX_TELEGRAM_WEBHOOK_BODY_BYTES).await else {
+            return Ok(None);
+        };
+        let update = match telegram::parse_webhook_update(&payload) {
+            Ok(Some(update)) => update,
+            Ok(None) | Err(TelegramServiceError::InvalidUpdate) => return Ok(None),
+            Err(error) => return Err(map_telegram_webhook_error(error)),
+        };
+        let service = service.ok_or(AppError::Unavailable("Telegram provider service"))?;
+        match service.handle_update(&update).await {
+            Ok(reply) => Ok(Some(reply)),
+            Err(
+                TelegramServiceError::InvalidUpdate
+                | TelegramServiceError::UpdateConflict
+                | TelegramServiceError::PairingConflict,
+            ) => Ok(None),
+            Err(error) => Err(map_telegram_webhook_error(error)),
+        }
+    })
+    .await
+    .map_err(|_| AppError::Unavailable("Telegram webhook processing"))??;
+
+    Ok(outcome.map_or_else(
+        || StatusCode::NO_CONTENT.into_response(),
+        |reply| {
+            Json(serde_json::json!({
+                "method": "sendMessage",
+                "chat_id": reply.chat_id,
+                "text": reply.text,
+            }))
+            .into_response()
+        },
+    ))
 }
 
 /// Apply the forward-only SQLx migration set to a PostgreSQL database.
@@ -455,6 +652,9 @@ pub async fn run_migrations(database_url: &str) -> anyhow::Result<()> {
 /// Returns an error when configuration, PostgreSQL, Telegram transport or the
 /// durable update handler is unavailable.
 pub async fn run_telegram_long_poll(config: &AppConfig) -> anyhow::Result<()> {
+    if config.deployment_mode != "local" {
+        anyhow::bail!("Telegram long polling is restricted to local deployment mode");
+    }
     let token = std::env::var("LUMI_TELEGRAM_BOT_TOKEN")
         .map_err(|_| anyhow::anyhow!("LUMI_TELEGRAM_BOT_TOKEN is required"))?;
     std::env::var("LUMI_TELEGRAM_BOT_SCOPE")
@@ -482,11 +682,32 @@ async fn readiness(State(state): State<AppState>) -> Result<Json<HealthResponse>
         .ready()
         .await
         .map_err(|_| AppError::Unavailable("account repository"))?;
+    if let Some(imports) = state.imports.as_ref() {
+        imports
+            .ready()
+            .await
+            .map_err(|_| AppError::Unavailable("migration or blob dependency"))?;
+    }
     Ok(Json(HealthResponse::ok("lumi-server")))
 }
 
-async fn capabilities() -> Json<ServiceCapabilities> {
-    Json(ServiceCapabilities::s1())
+async fn capabilities(State(state): State<AppState>) -> Json<ServiceCapabilities> {
+    let mut capabilities = ServiceCapabilities::s1();
+    if state.telegram.is_none() {
+        capabilities.features.retain(|feature| {
+            !matches!(
+                feature.as_str(),
+                "telegram-text-import" | "telegram-one-time-pairing"
+            )
+        });
+    }
+    if state.telegram_webhook_secret.is_some() {
+        capabilities
+            .route_groups
+            .push("webhooks/telegram".to_owned());
+        capabilities.features.push("telegram-webhook".to_owned());
+    }
+    Json(capabilities)
 }
 
 async fn schema_migrations() -> Json<Vec<SchemaMigration>> {
@@ -516,6 +737,42 @@ async fn list_materials(
     materials.sort_by(|left, right| left.canonical_title.cmp(&right.canonical_title));
 
     Ok(Json(materials))
+}
+
+async fn continue_reading(
+    State(state): State<AppState>,
+    Extension(session): Extension<AuthenticatedSession>,
+) -> Result<Json<Option<ContinueReadingEntry>>, AppError> {
+    if let Some(imports) = state.imports.as_ref() {
+        return imports
+            .continue_reading(session.user_id)
+            .await
+            .map(Json)
+            .map_err(map_import_error);
+    }
+    let repository = read_repository(&state)?;
+    let projection = repository
+        .progress_by_material
+        .values()
+        .filter(|progress| progress.progress_fraction > 0.0)
+        .filter_map(|progress| {
+            let material = repository.materials.get(&progress.material_id)?;
+            let entry = fixture_library_entry(&repository, material).ok()?;
+            (material.owner_id == session.user_id
+                && material.library_state == LibraryState::Active
+                && progress.revision_id == material.active_revision_id
+                && entry.import_status == MaterialImportStatus::Ready)
+                .then_some((entry, progress))
+        })
+        .max_by_key(|(entry, progress)| (progress.updated_at, entry.id))
+        .map(|(entry, progress)| {
+            Ok(ContinueReadingEntry {
+                entry,
+                progress: progress.clone(),
+            })
+        })
+        .transpose()?;
+    Ok(Json(projection))
 }
 
 async fn get_material(
@@ -1142,6 +1399,14 @@ fn annotation_export_response(export: AnnotationExport) -> Result<Response, AppE
         HeaderValue::from_str(&format!("attachment; filename=\"{file_name}\""))
             .map_err(|_| AppError::Internal("invalid annotation export filename"))?,
     );
+    response.headers_mut().insert(
+        header::CACHE_CONTROL,
+        HeaderValue::from_static("private, no-store"),
+    );
+    response.headers_mut().insert(
+        header::HeaderName::from_static("x-content-type-options"),
+        HeaderValue::from_static("nosniff"),
+    );
     Ok(response)
 }
 
@@ -1359,6 +1624,18 @@ fn map_telegram_error(error: TelegramServiceError) -> AppError {
         | TelegramServiceError::UpdateInProgress
         | TelegramServiceError::PairingConflict => AppError::Conflict(error.to_string()),
         TelegramServiceError::Unavailable => AppError::Unavailable("Telegram provider service"),
+    }
+}
+
+fn map_telegram_webhook_error(error: TelegramServiceError) -> AppError {
+    match error {
+        TelegramServiceError::InvalidUpdate => AppError::BadRequest(error.to_string()),
+        TelegramServiceError::UpdateConflict | TelegramServiceError::PairingConflict => {
+            AppError::Conflict(error.to_string())
+        }
+        TelegramServiceError::UpdateInProgress | TelegramServiceError::Unavailable => {
+            AppError::Unavailable("Telegram webhook processing")
+        }
     }
 }
 
@@ -1623,6 +1900,45 @@ mod tests {
         assert!(!config.bind_address().is_empty());
     }
 
+    #[test]
+    fn deployment_security_rejects_public_local_bind_and_insecure_staging() {
+        let mut local = AppConfig::from_env();
+        local.deployment_mode = "local".to_owned();
+        local.bind_address = "0.0.0.0:8080".to_owned();
+        assert!(validate_deployment_security(&local).is_err());
+
+        let mut staging = local;
+        staging.deployment_mode = "staging".to_owned();
+        staging.bind_address = "0.0.0.0:8080".to_owned();
+        staging.web_origin = "https://reader.staging.example".to_owned();
+        staging.auth_audience = staging.web_origin.clone();
+        staging.secure_cookie = false;
+        assert!(validate_deployment_security(&staging).is_err());
+        staging.secure_cookie = true;
+        assert!(validate_deployment_security(&staging).is_ok());
+    }
+
+    #[tokio::test]
+    async fn disabled_telegram_omits_capability_and_provider_routes(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let app = build_router_with_state(AppState::empty());
+        let capabilities: ServiceCapabilities =
+            json_get(app.clone(), "/api/v1/capabilities").await?;
+        assert!(!capabilities
+            .features
+            .iter()
+            .any(|feature| feature.starts_with("telegram-")));
+        let response = app
+            .oneshot(authenticated_request(
+                Request::builder()
+                    .uri("/api/v1/providers/telegram/connection")
+                    .body(Body::empty())?,
+            ))
+            .await?;
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        Ok(())
+    }
+
     #[tokio::test]
     async fn capabilities_route_reports_s1_contracts() -> Result<(), Box<dyn std::error::Error>> {
         let capabilities: ServiceCapabilities =
@@ -1632,7 +1948,81 @@ mod tests {
             .features
             .iter()
             .any(|feature| feature == "annotation-export"));
+        assert!(!capabilities
+            .features
+            .iter()
+            .any(|feature| feature == "telegram-webhook"));
         Ok(())
+    }
+
+    #[tokio::test]
+    async fn telegram_webhook_is_absent_without_secret() -> Result<(), Box<dyn std::error::Error>> {
+        let response = build_router()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/webhooks/telegram")
+                    .body(Body::empty())?,
+            )
+            .await?;
+
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn telegram_webhook_rejects_secret_before_parsing_body(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let mut state = AppState::empty();
+        state.telegram_webhook_secret = Some(SecretString("a".repeat(32)));
+        let response = build_router_with_state(state)
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/webhooks/telegram")
+                    .header(TELEGRAM_WEBHOOK_SECRET_HEADER, "wrong-secret")
+                    .body(Body::from("this is intentionally not JSON"))?,
+            )
+            .await?;
+
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn authenticated_malformed_webhook_is_acknowledged_without_retry(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let secret = "a".repeat(32);
+        let mut state = AppState::empty();
+        state.telegram_webhook_secret = Some(SecretString(secret.clone()));
+        let response = build_router_with_state(state)
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/webhooks/telegram")
+                    .header(TELEGRAM_WEBHOOK_SECRET_HEADER, secret)
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from("not-json"))?,
+            )
+            .await?;
+
+        assert_eq!(response.status(), StatusCode::NO_CONTENT);
+        Ok(())
+    }
+
+    #[test]
+    fn telegram_webhook_secret_is_redacted_and_validated() {
+        let value = "sensitive-webhook-secret-value-123";
+        let secret = SecretString(value.to_owned());
+
+        assert!(!format!("{secret:?}").contains(value));
+        assert!(validate_telegram_webhook_secret(Some(value)).is_ok());
+        assert!(validate_telegram_webhook_secret(Some("short")).is_err());
+        assert!(webhook_secret_matches(value, value));
+        assert!(!webhook_secret_matches(
+            value,
+            "different-webhook-secret-value-12"
+        ));
     }
 
     #[tokio::test]
@@ -1997,17 +2387,161 @@ mod tests {
         .await?;
         let material_id = imported
             .material
-            .ok_or_else(|| std::io::Error::other("imported material missing"))?
+            .ok_or_else(|| std::io::Error::other("imported material missing"))?;
+        let revision_id = imported
+            .revision
+            .ok_or_else(|| std::io::Error::other("imported revision missing"))?
             .id;
-        let response = app
-            .oneshot(authenticated_request(
-                Request::builder()
-                    .uri(format!("/api/v1/materials/{material_id}"))
-                    .body(Body::empty())?,
-            ))
-            .await?;
+        let protected = [
+            format!("/api/v1/materials/{}", material_id.id),
+            format!("/api/v1/materials/{}/source", material_id.id),
+            format!("/api/v1/materials/{}/progress", material_id.id),
+            format!("/api/v1/materials/{}/annotations", material_id.id),
+            format!("/api/v1/materials/{}/annotations/export", material_id.id),
+            format!("/api/v1/revisions/{revision_id}"),
+            format!("/api/v1/revisions/{revision_id}/package"),
+            format!("/api/v1/revisions/{revision_id}/reading-document"),
+        ];
+        for uri in protected {
+            let response = app
+                .clone()
+                .oneshot(authenticated_request(
+                    Request::builder().uri(uri).body(Body::empty())?,
+                ))
+                .await?;
+            assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        }
+        Ok(())
+    }
 
-        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    #[tokio::test]
+    async fn postgres_account_session_csrf_route_matrix() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let Ok(database_url) = std::env::var("LUMI_TEST_DATABASE_URL") else {
+            return Ok(());
+        };
+        run_migrations(&database_url).await?;
+        let blob_root =
+            std::env::temp_dir().join(format!("lumi-route-matrix-{}", uuid::Uuid::now_v7()));
+        let mut config = AppConfig::from_env();
+        config.database_url = database_url;
+        config.blob_root = blob_root.clone();
+        config.bind_address = DEFAULT_BIND_ADDRESS.to_owned();
+        config.deployment_mode = "local".to_owned();
+        let app = build_router_with_state(AppState::persistent(&config).await?);
+        let owner = register_test_session(app.clone(), 0x81).await?;
+        let foreign = register_test_session(app.clone(), 0x82).await?;
+        let imported: ImportFixtureResponse = request_json_with_session(
+            app.clone(),
+            Request::builder()
+                .method("POST")
+                .uri("/api/v1/imports/fixtures/simple")
+                .body(Body::empty())?,
+            &owner,
+        )
+        .await?;
+        let material_id = imported
+            .material
+            .ok_or_else(|| std::io::Error::other("matrix material missing"))?
+            .id;
+        let foreign_read = app
+            .clone()
+            .oneshot(
+                foreign.apply(
+                    Request::builder()
+                        .uri(format!("/api/v1/materials/{material_id}"))
+                        .body(Body::empty())?,
+                ),
+            )
+            .await?;
+        assert_eq!(foreign_read.status(), StatusCode::NOT_FOUND);
+        let command = UpdateLibraryStateCommand {
+            material_id,
+            library_state: LibraryState::Archived,
+        };
+        let missing_csrf = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("PATCH")
+                    .uri(format!("/api/v1/materials/{material_id}/library-state"))
+                    .header(header::COOKIE, &owner.cookie)
+                    .header(header::ORIGIN, DEFAULT_WEB_ORIGIN)
+                    .header("idempotency-key", "matrix-missing-csrf")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(json_body(&command)?)?,
+            )
+            .await?;
+        assert_eq!(missing_csrf.status(), StatusCode::FORBIDDEN);
+        let foreign_write = app
+            .clone()
+            .oneshot(
+                foreign.apply(
+                    Request::builder()
+                        .method("PATCH")
+                        .uri(format!("/api/v1/materials/{material_id}/library-state"))
+                        .header("idempotency-key", "matrix-foreign-write")
+                        .header(header::CONTENT_TYPE, "application/json")
+                        .body(json_body(&command)?)?,
+                ),
+            )
+            .await?;
+        assert_eq!(foreign_write.status(), StatusCode::NOT_FOUND);
+        let logout = app
+            .clone()
+            .oneshot(
+                owner.apply(
+                    Request::builder()
+                        .method("POST")
+                        .uri("/api/v1/auth/logout")
+                        .body(Body::empty())?,
+                ),
+            )
+            .await?;
+        assert_eq!(logout.status(), StatusCode::NO_CONTENT);
+        let replay = app
+            .oneshot(
+                owner.apply(
+                    Request::builder()
+                        .uri("/api/v1/account/me")
+                        .body(Body::empty())?,
+                ),
+            )
+            .await?;
+        let _ = tokio::fs::remove_dir_all(blob_root).await;
+        assert_eq!(replay.status(), StatusCode::UNAUTHORIZED);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn downloads_are_private_attachments_with_nosniff(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let app = build_router();
+        let imported = import_fixture(app.clone(), "simple").await?;
+        for uri in [
+            format!("/api/v1/materials/{}/source", imported.material.id),
+            format!(
+                "/api/v1/materials/{}/annotations/export",
+                imported.material.id
+            ),
+        ] {
+            let response = app
+                .clone()
+                .oneshot(authenticated_request(
+                    Request::builder().uri(uri).body(Body::empty())?,
+                ))
+                .await?;
+            assert_eq!(response.status(), StatusCode::OK);
+            assert_eq!(
+                response.headers().get(header::CACHE_CONTROL),
+                Some(&HeaderValue::from_static("private, no-store"))
+            );
+            assert_eq!(
+                response.headers().get("x-content-type-options"),
+                Some(&HeaderValue::from_static("nosniff"))
+            );
+            assert!(response.headers().contains_key(header::CONTENT_DISPOSITION));
+        }
         Ok(())
     }
 

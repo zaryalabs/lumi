@@ -65,6 +65,17 @@ Initial budgets are design targets for spikes, not final SLA:
 - import jobs never block UI and expose stages/progress;
 - restart recovers jobs/outbox without manual cleanup.
 
+Для закрытой S1 beta executable release budgets конкретизированы:
+
+- deterministic EPUB с примерно 2 MiB normalized text импортируется менее чем
+  за 5 секунд в `--release` на поддерживаемой developer machine;
+- owner-scoped continuation projection для 1 000 материалов выполняется одним
+  SQL statement и менее чем за 300 ms;
+- budgets запускаются `make performance`; setup fixtures не входит в измерение.
+
+Это regression budgets, а не публичный SLA. Изменение dataset/threshold требует
+обновления fixture, причины и ADR/runbook evidence.
+
 ## Test strategy
 
 - Domain/unit tests: invariants, anchor resolver, merge policies, scheduler,

@@ -1,0 +1,10 @@
+{
+  "schema": "lumi.epub.security-corpus.v1",
+  "variants": [
+    { "name": "path-traversal", "expected_code": "epub_unsafe_path" },
+    { "name": "package-doctype", "expected_code": "epub_invalid_xml" },
+    { "name": "encrypted-publication", "expected_code": "epub_unsupported_publication" },
+    { "name": "active-content", "expected_code": "epub_active_content_removed" },
+    { "name": "compression-ratio", "expected_code": "epub_compression_ratio_exceeded" }
+  ]
+}

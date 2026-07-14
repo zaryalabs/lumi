@@ -74,6 +74,14 @@ Native clients can disable cloud replica for private vault:
 - Public sharing uses preview, quote/source limits and revocation where
   possible.
 - Destructive migrations require backup/snapshot strategy.
+- Non-local web deployment fail-closed требует HTTPS origin, matching auth
+  audience и Secure cookies; Telegram long polling остаётся local-only.
+- Production Telegram webhook существует только с runtime secret, проверяемым
+  до body parsing; permanent authenticated payload failures не создают retry
+  storm, transient failures остаются retryable.
+- Readiness проверяет migration compatibility и bounded blob
+  write/rename/read/delete sentinel; backup связывает quiesced PostgreSQL и blob
+  artifacts manifest/checksums и проверяется disposable restore drill.
 
 ## Privacy UX
 

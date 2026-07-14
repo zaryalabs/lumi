@@ -17,7 +17,7 @@ export default defineConfig({
     ? undefined
     : [
         {
-          command: `LUMI_WEB_FIXTURE_ROOT=tests/fixtures/web make -C ../.. db-up db-migrate server-r LUMI_POSTGRES_PORT=${postgresPort} LUMI_SERVER_BIND=127.0.0.1:${apiPort}`,
+          command: `LUMI_WEB_FIXTURE_ROOT=tests/fixtures/web LUMI_TELEGRAM_BOT_SCOPE=lumi-e2e LUMI_TELEGRAM_WEBHOOK_SECRET=lumi-e2e-webhook-secret-123456789 make -C ../.. db-up db-migrate server-r LUMI_POSTGRES_PORT=${postgresPort} LUMI_SERVER_BIND=127.0.0.1:${apiPort}`,
           reuseExistingServer: true,
           timeout: 120_000,
           url: `${apiBase}/ready`,
