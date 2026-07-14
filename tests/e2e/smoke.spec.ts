@@ -1,4 +1,4 @@
-import { expect, test } from "@playwright/test";
+import { devices, expect, test } from "@playwright/test";
 
 const supportedEpub = Buffer.from(
   "UEsDBBQAAAAAAAAAIQBvYassFAAAABQAAAAIAAAAbWltZXR5cGVhcHBsaWNhdGlvbi9lcHViK3ppcFBLAwQUAAAACAD9eO1cHBxuKlQAAABrAAAAFgAAAE1FVEEtSU5GL2NvbnRhaW5lci54bWyzsa/IzVEoSy0qzszPs1Uy1DNQsrezSc7PK0nMzEstsrMpys8vScvMSS1GMBXSSnNydAsSSzJslVwDQp30CxKTsxPTU/XyC9KU9O1s9JH06COMAgBQSwMEFAAAAAgA/XjtXFlgKDfMAAAAbQEAABAAAABFUFVCL3BhY2thZ2Uub3BmjdA9bsMwDAXgqwhag0RxstIKEMBbhy49ACEzCVFJFiQmdW9f2c7f2E16JD48EA5j8OpGufAQW91stvpgIaH7xjO98n3NLQQS7FHQgrB4ssc8/BTKqvv8OoJZMnCZUIZsP66BVbfrwDwS8BjP1+paimCeHzAvN2DkExWxwEJBcd/qiDetLplO83MzXiR4rQL1jGv5TdRqTMmzQ6lNzTxejdNKykOiLExlQcwb6pqHKTSKcc3/XTMVftYsiSMtcOWqPaOVn9buQ3M/p/0DUEsDBBQAAAAIAP147Vxvj8P2PgAAAEgAAAAOAAAARVBVQi9uYXYueGh0bWyzySjJzbGzScpPqbSzyUsss7NJVMgoSk2zVSpJrSjRTzbUqwCpULJzzkgsKEktstFPtLPRByvUh2jSB5sAAFBLAwQUAAAACAD9eO1cT/i+nUcAAABNAAAAEgAAAEVQVUIvdGV4dC9jMS54aHRtbLPJKMnNsbNJyk+ptLPJMLRzzkgsKEktstEHsm0K7AJSi4ozi0tS80oUilITcxRcA0KdFDJzC/KLSvRs9AvsbPQhOvXBxgAAUEsBAhQDFAAAAAAAAAAhAG9hqywUAAAAFAAAAAgAAAAAAAAAAAAAAIABAAAAAG1pbWV0eXBlUEsBAhQDFAAAAAgA/XjtXBwcbipUAAAAawAAABYAAAAAAAAAAAAAAIABOgAAAE1FVEEtSU5GL2NvbnRhaW5lci54bWxQSwECFAMUAAAACAD9eO1cWWAoN8wAAABtAQAAEAAAAAAAAAAAAAAAgAHCAAAARVBVQi9wYWNrYWdlLm9wZlBLAQIUAxQAAAAIAP147Vxvj8P2PgAAAEgAAAAOAAAAAAAAAAAAAACAAbwBAABFUFVCL25hdi54aHRtbFBLAQIUAxQAAAAIAP147VxP+L6dRwAAAE0AAAASAAAAAAAAAAAAAACAASYCAABFUFVCL3RleHQvYzEueGh0bWxQSwUGAAAAAAUABQA0AQAAnQIAAAAA",
@@ -114,6 +114,29 @@ async function selectReaderText(page: import("@playwright/test").Page) {
   });
 }
 
+test("retries a failed account bootstrap before offering sign-in", async ({
+  page,
+}) => {
+  let attempts = 0;
+  await page.route("**/api/v1/account/me", async (route) => {
+    attempts += 1;
+    if (attempts === 1) {
+      await route.fulfill({ status: 503, body: "temporary bootstrap outage" });
+    } else {
+      await route.continue();
+    }
+  });
+  await page.goto("/");
+  await expect(
+    page.getByRole("main", { name: "Ошибка аккаунта" }),
+  ).toBeVisible();
+  await page.getByRole("button", { name: "Повторить подключение" }).click();
+  await expect.poll(() => attempts).toBeGreaterThan(1);
+  await expect(
+    page.getByRole("main", { name: "Lumi — регистрация и вход" }),
+  ).toBeVisible();
+});
+
 test("persists an API-backed EPUB library lifecycle", async ({ page }) => {
   await page.goto("/");
 
@@ -139,6 +162,23 @@ test("persists an API-backed EPUB library lifecycle", async ({ page }) => {
     .getByRole("button", { name: "＋ Добавить материал", exact: true })
     .click();
   let uploadDialog = page.getByRole("dialog", { name: "Добавить материал" });
+  await expect(uploadDialog).toBeFocused();
+  await page.keyboard.press("Escape");
+  await expect(
+    page.getByRole("button", { name: "＋ Добавить материал", exact: true }),
+  ).toBeFocused();
+  await page
+    .getByRole("button", { name: "＋ Добавить материал", exact: true })
+    .click();
+  uploadDialog = page.getByRole("dialog", { name: "Добавить материал" });
+  const epubTab = uploadDialog.getByRole("tab", { name: "EPUB" });
+  await epubTab.focus();
+  await page.keyboard.press("ArrowRight");
+  await expect(
+    uploadDialog.getByRole("tab", { name: "Web-ссылка" }),
+  ).toHaveAttribute("aria-selected", "true");
+  await page.keyboard.press("ArrowLeft");
+  await expect(epubTab).toHaveAttribute("aria-selected", "true");
   await uploadDialog.getByLabel("Файл EPUB").setInputFiles({
     name: "browser.epub",
     mimeType: "application/epub+zip",
@@ -208,6 +248,7 @@ test("persists an API-backed EPUB library lifecycle", async ({ page }) => {
   await expect(page.locator(".annotation-highlight").first()).toBeVisible();
 
   await selectReaderText(page);
+  await page.getByRole("button", { name: "Заметка" }).click();
   await page.getByLabel("Текст заметки").fill("Заметка Stage 5");
   const noteSaved = page.waitForResponse(
     (response) =>
@@ -264,7 +305,7 @@ test("persists an API-backed EPUB library lifecycle", async ({ page }) => {
   ).toBeVisible();
 
   await page.getByRole("button", { name: "Оглавление" }).click();
-  const toc = page.getByRole("navigation", { name: "Оглавление книги" });
+  const toc = page.getByRole("navigation", { name: "Оглавление материала" });
   await expect(toc.getByRole("button", { name: "Вторая глава" })).toBeVisible();
   await toc.getByRole("button", { name: "Вторая глава" }).click();
   await expect(
@@ -283,8 +324,11 @@ test("persists an API-backed EPUB library lifecycle", async ({ page }) => {
   }
   await footnoteLink.click();
   const footnote = page.getByRole("dialog", { name: "Сноска" });
+  await expect(footnote).toBeFocused();
   await expect(footnote).toContainText("Сноска из нормализованного документа");
-  await footnote.getByRole("button", { name: "Вернуться к тексту" }).click();
+  await page.keyboard.press("Escape");
+  await expect(footnote).toHaveCount(0);
+  await expect(page.getByRole("article", { name: /Страница/ })).toBeFocused();
   await page.getByRole("button", { name: "Перейти: вторую главу" }).click();
   await expect(
     page.getByRole("button", { name: "Назад по истории" }),
@@ -319,6 +363,9 @@ test("persists an API-backed EPUB library lifecycle", async ({ page }) => {
   await page.setViewportSize({ width: 390, height: 844 });
   await expect(page.getByRole("article", { name: /Страница/ })).toBeVisible();
   await page.getByRole("button", { name: "Библиотека", exact: false }).click();
+  await expect(
+    page.getByRole("region", { name: "Продолжить чтение" }),
+  ).toContainText("Stage Four Reader");
 
   await page
     .getByRole("button", { name: "＋ Добавить материал", exact: true })
@@ -359,8 +406,28 @@ test("persists an API-backed EPUB library lifecycle", async ({ page }) => {
     .getByRole("region", { name: "Архив" })
     .getByRole("article", { name: "Материал Stage Four Reader" });
   await expect(archivedCard).toBeVisible();
+  await expect
+    .poll(async () => {
+      const continuation = page.getByRole("region", {
+        name: "Продолжить чтение",
+      });
+      return (await continuation.count()) > 0
+        ? ((await continuation.textContent()) ?? "")
+        : "";
+    })
+    .not.toContain("Stage Four Reader");
   await archivedCard.getByRole("button", { name: "Вернуть" }).click();
   await expect(supportedCard).toBeVisible();
+  await expect
+    .poll(async () => {
+      const continuation = page.getByRole("region", {
+        name: "Продолжить чтение",
+      });
+      return (await continuation.count()) > 0
+        ? ((await continuation.textContent()) ?? "")
+        : "";
+    })
+    .toContain("Stage Four Reader");
 
   await failedCard.getByRole("button", { name: "Удалить" }).click();
   const deleteDialog = page.getByRole("dialog", {
@@ -376,6 +443,11 @@ test("persists an API-backed EPUB library lifecycle", async ({ page }) => {
       .getByRole("article", { name: "Материал Stage Four Reader" })
       .getByText("Готово", { exact: true }),
   ).toBeVisible();
+  await expect(
+    page.getByRole("navigation", { name: "Основная навигация" }),
+  ).toBeHidden();
+
+  await page.setViewportSize({ width: 1280, height: 900 });
   await expect(
     page.getByRole("navigation", { name: "Основная навигация" }),
   ).toBeVisible();
@@ -402,4 +474,187 @@ test("persists an API-backed EPUB library lifecycle", async ({ page }) => {
   await expect(
     page.getByRole("article", { name: "Материал Stage Four Reader" }),
   ).toBeVisible();
+
+  let materialListAttempts = 0;
+  await page.route("**/api/v1/materials", async (route) => {
+    if (route.request().method() === "GET") {
+      materialListAttempts += 1;
+      if (materialListAttempts === 1) {
+        await route.fulfill({ status: 503, body: "temporary library outage" });
+        return;
+      }
+    }
+    await route.continue();
+  });
+  await page.reload();
+  await expect(
+    page.getByRole("region", { name: "Библиотека временно недоступна" }),
+  ).toBeVisible();
+  await expect(
+    page.getByRole("region", { name: "Пустая библиотека" }),
+  ).toHaveCount(0);
+  await page.getByRole("button", { name: "Повторить" }).click();
+  await expect.poll(() => materialListAttempts).toBeGreaterThan(1);
+  await expect(
+    page.getByRole("article", { name: "Материал Stage Four Reader" }),
+  ).toBeVisible();
+
+  await page.context().clearCookies();
+  await page
+    .getByRole("article", { name: "Материал Stage Four Reader" })
+    .getByRole("button", { name: "В архив" })
+    .click();
+  await expect(
+    page.getByRole("main", { name: "Сессия истекла" }),
+  ).toBeVisible();
+  await page.getByRole("button", { name: "Перейти ко входу" }).click();
+  await expect(
+    page.getByRole("main", { name: "Lumi — регистрация и вход" }),
+  ).toBeVisible();
+});
+
+test.describe("mobile touch reader", () => {
+  const pixel = devices["Pixel 7"];
+  test.use({
+    viewport: pixel.viewport,
+    userAgent: pixel.userAgent,
+    deviceScaleFactor: pixel.deviceScaleFactor,
+    isMobile: pixel.isMobile,
+    hasTouch: pixel.hasTouch,
+  });
+
+  test("uses a safe-area bottom sheet with keyboard dismissal", async ({
+    page,
+  }) => {
+    let capabilityAttempts = 0;
+    await page.route("**/api/v1/capabilities", async (route) => {
+      capabilityAttempts += 1;
+      if (capabilityAttempts === 1) {
+        await route.fulfill({
+          status: 503,
+          body: "temporary capability outage",
+        });
+      } else {
+        await route.continue();
+      }
+    });
+    await page.emulateMedia({ reducedMotion: "reduce" });
+    await page.goto("/");
+    expect(await page.evaluate(() => innerWidth)).toBeLessThanOrEqual(760);
+    await expect(
+      page.getByRole("main", { name: "Lumi — регистрация и вход" }),
+    ).toBeVisible();
+    expect(await page.evaluate(() => navigator.maxTouchPoints)).toBeGreaterThan(
+      0,
+    );
+    expect(
+      await page.evaluate(
+        () => matchMedia("(prefers-reduced-motion: reduce)").matches,
+      ),
+    ).toBe(true);
+
+    await page
+      .getByRole("button", { name: "Сгенерировать recovery phrase" })
+      .click();
+    await page
+      .getByText("Я сохранил(а) все 24 слова", { exact: false })
+      .click();
+    await page.getByRole("button", { name: "Создать аккаунт" }).click();
+    const capabilityError = page.getByRole("alert").filter({
+      hasText: "Не удалось проверить возможности сервера",
+    });
+    await expect(capabilityError).toBeVisible();
+    await expect(page.getByText("Проверяем поддержку Telegram…")).toBeVisible();
+    await capabilityError.getByRole("button", { name: "Повторить" }).click();
+    await expect.poll(() => capabilityAttempts).toBeGreaterThan(1);
+    await expect(capabilityError).toHaveCount(0);
+    await page
+      .getByRole("button", { name: "Добавить материал" })
+      .first()
+      .click();
+    const dialog = page.getByRole("dialog", { name: "Добавить материал" });
+    await expect(dialog.getByRole("tab", { name: "Web-ссылка" })).toBeEnabled();
+    await dialog.getByLabel("Файл EPUB").setInputFiles({
+      name: "mobile-reader.epub",
+      mimeType: "application/epub+zip",
+      buffer: createReaderEpub(),
+    });
+    await dialog.getByRole("button", { name: "Добавить в библиотеку" }).click();
+    const card = page.getByRole("article", {
+      name: "Материал Stage Four Reader",
+    });
+    await expect(card.getByText("Готово", { exact: true })).toBeVisible();
+    await card.getByRole("button", { name: "Читать" }).click();
+
+    const reader = page.getByRole("main", { name: "Чтение Stage Four Reader" });
+    await expect(reader).toBeVisible();
+    for (const name of ["Оглавление", "Настройки", "Экспорт"]) {
+      await expect(reader.getByRole("button", { name })).toBeVisible();
+    }
+
+    await reader.getByRole("button", { name: "Оглавление" }).click();
+    const toc = page.getByRole("navigation", { name: "Оглавление материала" });
+    await expect(toc).toHaveCSS("position", "fixed");
+    await expect(toc).toHaveCSS("bottom", "0px");
+    await expect(
+      toc.getByRole("button", { name: "Закрыть оглавление" }),
+    ).toBeFocused();
+    await page.keyboard.press("Shift+Tab");
+    expect(
+      await toc.evaluate((panel) => panel.contains(document.activeElement)),
+    ).toBe(true);
+    await page.keyboard.press("Escape");
+    await expect(toc).toHaveCount(0);
+    await expect(
+      reader.getByRole("button", { name: "Оглавление" }),
+    ).toBeFocused();
+
+    await page.route("**/api/v1/reader/settings", async (route) => {
+      if (route.request().method() === "PUT") {
+        await new Promise((resolve) => setTimeout(resolve, 450));
+      }
+      await route.continue();
+    });
+    await reader.getByRole("button", { name: "Настройки" }).click();
+    const settings = page.getByRole("complementary", {
+      name: "Настройки чтения",
+    });
+    await expect(settings).toHaveCSS("position", "fixed");
+    const settingsSaved = page.waitForResponse(
+      (response) =>
+        response.url().endsWith("/api/v1/reader/settings") &&
+        response.request().method() === "PUT" &&
+        response.ok(),
+    );
+    await settings.getByLabel("Размер текста").fill("24");
+    await expect(reader.locator(".reader-save-state")).toContainText(
+      "Сохраняем настройки…",
+    );
+    await expect(reader.locator(".reader-save-state")).toBeVisible();
+    await settingsSaved;
+    await page.keyboard.press("Escape");
+    await expect(settings).toHaveCount(0);
+    await expect(
+      reader.getByRole("button", { name: "Настройки" }),
+    ).toBeFocused();
+
+    const annotationExport = page.waitForEvent("download");
+    await reader.getByRole("button", { name: "Экспорт" }).click();
+    await annotationExport;
+
+    await reader.getByRole("button", { name: /Заметки \(0\)/ }).click();
+    const notes = page.getByRole("complementary", {
+      name: "Личные заметки и выделения",
+    });
+    await expect(
+      notes.getByRole("button", { name: "Закрыть заметки" }),
+    ).toBeFocused();
+    await expect(notes).toHaveCSS("position", "fixed");
+    await expect(notes).toHaveCSS("bottom", "0px");
+    await page.keyboard.press("Escape");
+    await expect(notes).toHaveCount(0);
+    await expect(
+      reader.getByRole("button", { name: /Заметки \(0\)/ }),
+    ).toBeFocused();
+  });
 });

@@ -26,11 +26,16 @@ web-sys = { version = "0.3.91", features = [
   "DocumentFragment",
   "FormData",
   "HtmlDocument",
+  "HtmlDialogElement",
   "HtmlElement",
   "Location",
   "CssStyleDeclaration",
   "Element",
+  "Event",
+  "EventTarget",
+  "CustomEvent",
   "Node",
+  "NodeList",
   "Range",
   "Selection",
   "Text",
@@ -41,7 +46,7 @@ web-sys = { version = "0.3.91", features = [
 [features]
 default = ["web"]
 check = ["dioxus/minimal"]
-web = ["dioxus/minimal", "dioxus/web"]
+web = ["dioxus/minimal", "dioxus/web", "dioxus/document", "dioxus/asset"]
 server = ["dioxus/server"]
 desktop = ["dioxus/desktop"]
 mobile = ["dioxus/mobile"]
