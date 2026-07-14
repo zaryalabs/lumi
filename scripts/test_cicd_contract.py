@@ -23,6 +23,7 @@ class WorkflowContractTests(unittest.TestCase):
         self.assertIn("branches: [main]", text)
         self.assertNotIn("workflow_dispatch:", text)
         self.assertIn("runs-on: [self-hosted, zarya-main, geo-eu, ci]", text)
+        self.assertRegex(text, r"uses: dtolnay/rust-toolchain@[0-9a-f]{40}")
 
     def test_deploy_is_manual_and_uses_deploy_labels(self) -> None:
         text = (WORKFLOWS / "deploy.yml").read_text(encoding="utf-8")
