@@ -10,9 +10,6 @@ title = "Lumi"
 watch_path = ["src", "assets", "../../crates/lumi-core/src"]
 index_on_404 = true
 
-[web.resource]
-style = ["./assets/main.css"]
-
 [web.resource.dev]
 style = []
 script = []

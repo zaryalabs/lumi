@@ -464,7 +464,7 @@ Telegram text/link --> source adapter --/   -> DocumentRevision
   [`../adr/0010-web-telegram-source-baseline.md`](../adr/0010-web-telegram-source-baseline.md)
   и [`../runbooks/web-telegram-baseline.md`](../runbooks/web-telegram-baseline.md).
 
-### Этап 7. Сведение с UI/UX-прототипом
+### Этап 7. Сведение с UI/UX-прототипом — выполнен
 
 - Перенести visual tokens, typography, spacing, cards, dialogs и reader chrome.
 - Подключить реальные save/sync indicators.
@@ -478,6 +478,29 @@ Telegram text/link --> source adapter --/   -> DocumentRevision
 Критерий завершения: основные desktop и mobile user journeys визуально и
 поведенчески соответствуют reader-first прототипу.
 
+Результат:
+
+- web shell, library и reader сведены на единой paper/sage системе tokens,
+  typography, spacing, cards, dialogs и reader chrome; накопившийся legacy CSS
+  удалён, а stylesheet подключён через Dioxus asset pipeline;
+- source-backed continue card строится best-effort по progress не более восьми
+  активных ready-материалов и не блокирует выдачу library; archive/delete сразу
+  очищают и пересчитывают эту ограниченную S1 client projection;
+- реальные settings/progress/annotation save states имеют отдельные saving,
+  saved и failed состояния, а ошибки export и импорта доступны через live
+  status/diagnostics с повтором;
+- contextual reader panels взаимоисключающие: на широком desktop они соседние,
+  на среднем viewport становятся drawers, а на touch viewport — safe-area
+  bottom sheets с scrim, overscroll containment, Escape и возвратом focus;
+- EPUB и public URL объединены в доступный tabbed add flow, Telegram и URL UI
+  проверяют server capabilities, а library покрывает loading, empty, error,
+  retry и централизованное expired-session состояние;
+- native modal dialogs, skip link, bounded heading hierarchy, global
+  focus-visible, 44 px touch targets и reduced-motion правила проверены вместе
+  с keyboard-only сценариями;
+- Playwright покрывает полный desktop lifecycle и отдельный Pixel 7 touch flow
+  с reduced motion, modal/panel focus, mobile sheet и истечением сессии.
+
 ### Этап 8. Hardening и закрытая beta
 
 - Закрыть golden fixture, security и compatibility suites.
@@ -489,6 +512,8 @@ Telegram text/link --> source adapter --/   -> DocumentRevision
 - Проверить SSRF corpus, duplicate Telegram delivery, pairing expiry/unlink и
   provider-secret redaction.
 - Проверить performance budgets на больших EPUB и библиотеках.
+- Заменить ограниченную client-side continue projection на server-side library
+  projection без N+1 progress reads и проверить её на большой библиотеке.
 - Настроить staging, migrations, monitoring, backups и restore drill.
 - Проверить export/download и privacy UX.
 

@@ -25,8 +25,11 @@ importer, while public web URLs and text/link ingestion through a Telegram bot
 are included as deliberately narrow baseline sources. Persistent accounts,
 durable real EPUB import, the fully API-backed library and the working
 browser-measured paginated reader, durable annotations, progress UX and the
-shared Web/Telegram source-ingestion baseline are implemented; the next step is
-UI/UX convergence.
+shared Web/Telegram source-ingestion baseline are implemented. The web library
+and reader now follow the reader-first paper/sage visual system across desktop
+and touch layouts, including real save states, modal and panel keyboard flows,
+capability-aware source UI and expired-session recovery; the next step is beta
+hardening.
 
 ## Local Setup
 

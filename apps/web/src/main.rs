@@ -15,7 +15,19 @@ fn main() {
 fn App() -> Element {
     #[cfg(target_arch = "wasm32")]
     {
-        rsx! { account::AccountGate {} }
+        use_effect(|| {
+            if let Some(root) = web_sys::window()
+                .and_then(|window| window.document())
+                .and_then(|document| document.document_element())
+            {
+                let _ = root.set_attribute("lang", "ru");
+            }
+        });
+        rsx! {
+            document::Stylesheet { href: asset!("/assets/main.css") }
+            document::Meta { name: "theme-color", content: "#f4f0e8" }
+            account::AccountGate {}
+        }
     }
     #[cfg(not(target_arch = "wasm32"))]
     {
