@@ -365,7 +365,13 @@ fn RenderedFragment(
             }
         }
         for link in block.links.iter().filter(|link| ranges_intersect(link.text_range, range)).cloned() {
-            button { class: "inline-link", r#type: "button", onclick: move |_| on_link.call(link.clone()), "Перейти: {link.label}" }
+            if link.kind == ReadingLinkKind::External {
+                if let Some(url) = safe_external_url(&link) {
+                    a { class: "inline-link", href: "{url}", target: "_blank", rel: "noopener noreferrer", "Открыть: {link.label}" }
+                }
+            } else {
+                button { class: "inline-link", r#type: "button", onclick: move |_| on_link.call(link.clone()), "Перейти: {link.label}" }
+            }
         }
     };
     match block.kind {
@@ -1274,6 +1280,12 @@ fn move_page(
     }
 }
 
+fn safe_external_url(link: &ReadingLink) -> Option<String> {
+    let value = link.external_url.as_deref()?;
+    let lowered = value.to_ascii_lowercase();
+    (lowered.starts_with("https://") || lowered.starts_with("http://")).then(|| value.to_owned())
+}
+
 fn jump_to_path(
     mut state: Signal<ReaderState>,
     path: &[String],
@@ -1300,6 +1312,18 @@ fn activate_link(
     in_flight: Signal<bool>,
     save_state: Signal<SaveState>,
 ) {
+    if link.kind == ReadingLinkKind::External {
+        if let Some(url) = safe_external_url(&link) {
+            if let Some(window) = web_sys::window() {
+                let _ = window.open_with_url_and_target_and_features(
+                    &url,
+                    "_blank",
+                    "noopener,noreferrer",
+                );
+            }
+        }
+        return;
+    }
     if let ReaderState::Ready(current) = &mut *state.write() {
         if link.kind == ReadingLinkKind::Footnote {
             current.footnote = Some(link);

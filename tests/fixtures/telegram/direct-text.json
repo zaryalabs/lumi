@@ -1,0 +1,12 @@
+{
+  "update_id": 61001,
+  "telegram_user_id": 9001001,
+  "chat_id": 9001001,
+  "is_private_chat": true,
+  "message_id": 41,
+  "message_date": 1783890000,
+  "text": "Первый абзац из Telegram.\n\nВторой абзац сохраняет source locator.",
+  "forwarded": false,
+  "forward_origin": null,
+  "has_unsupported_payload": false
+}

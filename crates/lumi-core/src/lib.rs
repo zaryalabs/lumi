@@ -10,6 +10,7 @@ mod epub;
 mod fixtures;
 mod models;
 mod reader;
+mod sources;
 
 pub use auth::*;
 pub use epub::*;
@@ -19,6 +20,7 @@ pub use fixtures::{
 };
 pub use models::*;
 pub use reader::*;
+pub use sources::*;
 
 use serde::{Deserialize, Serialize};
 
@@ -26,7 +28,7 @@ use serde::{Deserialize, Serialize};
 pub const API_VERSION: &str = "v1";
 
 /// Current domain schema marker for the S1 contracts.
-pub const DOMAIN_SCHEMA_VERSION: &str = "s1.2026-07-13.anchors-v2";
+pub const DOMAIN_SCHEMA_VERSION: &str = "s1.2026-07-13.sources-v2";
 
 /// Current normalized content package marker for reflowable S1 documents.
 pub const NORMALIZED_PACKAGE_VERSION: &str = "normalized.reflowable.s1";
@@ -45,6 +47,18 @@ pub const EPUB_IMPORTER_ID: &str = "lumi.epub";
 
 /// Version of the deterministic real EPUB importer.
 pub const EPUB_IMPORTER_VERSION: &str = "s1.2";
+
+/// Importer id used by the baseline raw web snapshot pipeline.
+pub const WEB_IMPORTER_ID: &str = "lumi.web.raw-snapshot";
+
+/// Version of the deterministic baseline web extractor.
+pub const WEB_IMPORTER_VERSION: &str = "s1.0";
+
+/// Importer id used by the Telegram text normalizer.
+pub const TELEGRAM_IMPORTER_ID: &str = "lumi.telegram.text";
+
+/// Version of the deterministic Telegram text normalizer.
+pub const TELEGRAM_IMPORTER_VERSION: &str = "s1.0";
 
 /// Health state for Lumi services.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -165,6 +179,9 @@ impl ServiceCapabilities {
                 "library-archive-delete".to_owned(),
                 "source-epub-download".to_owned(),
                 "import-diagnostics".to_owned(),
+                "public-web-url-import".to_owned(),
+                "telegram-text-import".to_owned(),
+                "telegram-one-time-pairing".to_owned(),
             ],
         }
     }

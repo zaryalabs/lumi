@@ -8,6 +8,8 @@ mod account;
 mod auth_api;
 mod blob;
 mod imports;
+mod telegram;
+mod web;
 
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock, RwLockReadGuard, RwLockWriteGuard};
@@ -27,11 +29,11 @@ use lumi_core::{
     AcceptedImport, Annotation, AnnotationExport, AnnotationId, BlobManifest, BlobManifestId,
     CreateAnnotationCommand, DeleteAnnotationCommand, DiagnosticSeverity, DocumentRevision,
     DocumentRevisionId, EpubFixture, EpubLimits, HealthResponse, ImportDiagnostic,
-    ImportStatusEntry, ImportedFixture, Job, JobId, JobKind, JobStage, JobStatus, LibraryEntry,
-    LibraryState, Material, MaterialId, MaterialImportStatus, MoveReadingPositionCommand,
-    NormalizedContentPackage, ReaderSettings, ReadingDocument, ReadingProgress, SchemaMigration,
-    ServiceCapabilities, UpdateAnnotationCommand, UpdateLibraryStateCommand,
-    UpdateReaderSettingsCommand, UserId,
+    ImportStatusEntry, ImportWebUrlRequest, ImportedFixture, Job, JobId, JobKind, JobStage,
+    JobStatus, LibraryEntry, LibraryState, Material, MaterialId, MaterialImportStatus,
+    MoveReadingPositionCommand, NormalizedContentPackage, ReaderSettings, ReadingDocument,
+    ReadingProgress, SchemaMigration, ServiceCapabilities, TelegramConnectionStatus,
+    UpdateAnnotationCommand, UpdateLibraryStateCommand, UpdateReaderSettingsCommand, UserId,
 };
 use serde::{Deserialize, Serialize};
 use tower_http::{
@@ -42,6 +44,7 @@ use tower_http::{
 
 use account::{AccountStore, AuthenticatedSession, MemoryAccountStore, PgAccountStore};
 use imports::{ImportService, ImportServiceError};
+use telegram::{TelegramService, TelegramServiceError};
 
 /// Default bind address for local development.
 pub const DEFAULT_BIND_ADDRESS: &str = "127.0.0.1:8080";
@@ -191,6 +194,7 @@ pub struct AppState {
     accounts: Arc<dyn AccountStore>,
     security: SecurityConfig,
     imports: Option<Arc<ImportService>>,
+    telegram: Option<Arc<TelegramService>>,
 }
 
 impl AppState {
@@ -219,6 +223,7 @@ impl AppState {
             accounts: Arc::new(MemoryAccountStore::empty()),
             security: SecurityConfig::local(),
             imports: None,
+            telegram: None,
         }
     }
 
@@ -228,6 +233,13 @@ impl AppState {
     ///
     /// Returns an error when PostgreSQL is unavailable.
     pub async fn persistent(config: &AppConfig) -> anyhow::Result<Self> {
+        Self::persistent_with_recovery(config, true).await
+    }
+
+    async fn persistent_with_recovery(
+        config: &AppConfig,
+        recover_imports: bool,
+    ) -> anyhow::Result<Self> {
         let accounts = PgAccountStore::connect(config.database_url())
             .await
             .map_err(|error| anyhow::anyhow!(error))?;
@@ -235,15 +247,22 @@ impl AppState {
             accounts.pool().clone(),
             config.blob_root().to_path_buf(),
         ));
-        imports
-            .recover()
-            .await
-            .map_err(|error| anyhow::anyhow!(error))?;
+        if recover_imports {
+            imports
+                .recover()
+                .await
+                .map_err(|error| anyhow::anyhow!(error))?;
+        }
+        let telegram = Arc::new(TelegramService::from_env(
+            accounts.pool().clone(),
+            Arc::clone(&imports),
+        ));
         Ok(Self {
             repository: Arc::new(RwLock::new(Repository::default())),
             accounts: Arc::new(accounts),
             security: SecurityConfig::from_app(config),
             imports: Some(imports),
+            telegram: Some(telegram),
         })
     }
 
@@ -260,6 +279,7 @@ impl AppState {
             accounts,
             security: SecurityConfig::local(),
             imports: None,
+            telegram: None,
         }
     }
 
@@ -275,6 +295,12 @@ impl AppState {
         self.imports
             .as_ref()
             .ok_or(AppError::Unavailable("durable import service"))
+    }
+
+    fn telegram(&self) -> Result<&Arc<TelegramService>, AppError> {
+        self.telegram
+            .as_ref()
+            .ok_or(AppError::Unavailable("Telegram provider service"))
     }
 }
 
@@ -346,6 +372,18 @@ pub fn build_router_with_state(state: AppState) -> Router {
             post(import_fixture_material),
         )
         .route("/imports", get(list_imports).post(upload_epub))
+        .route(
+            "/imports/url",
+            post(import_web_url).layer(DefaultBodyLimit::max(16 * 1024)),
+        )
+        .route(
+            "/providers/telegram/pairing",
+            post(create_telegram_pairing).layer(DefaultBodyLimit::max(1024)),
+        )
+        .route(
+            "/providers/telegram/connection",
+            get(get_telegram_connection).delete(unlink_telegram),
+        )
         .route("/jobs/{job_id}", get(get_job))
         .route("/jobs/{job_id}/diagnostics", get(get_job_diagnostics))
         .route("/jobs/{job_id}/cancel", post(cancel_job))
@@ -408,6 +446,30 @@ pub async fn run_migrations(database_url: &str) -> anyhow::Result<()> {
         .await
         .map_err(|error| anyhow::anyhow!(error))?;
     Ok(())
+}
+
+/// Run the local-development Telegram long-polling transport.
+///
+/// # Errors
+///
+/// Returns an error when configuration, PostgreSQL, Telegram transport or the
+/// durable update handler is unavailable.
+pub async fn run_telegram_long_poll(config: &AppConfig) -> anyhow::Result<()> {
+    let token = std::env::var("LUMI_TELEGRAM_BOT_TOKEN")
+        .map_err(|_| anyhow::anyhow!("LUMI_TELEGRAM_BOT_TOKEN is required"))?;
+    std::env::var("LUMI_TELEGRAM_BOT_SCOPE")
+        .map_err(|_| anyhow::anyhow!("LUMI_TELEGRAM_BOT_SCOPE is required for the runner"))?;
+    // Claim/lease fencing makes concurrent startup recovery safe: active jobs
+    // keep their lease and queued/expired jobs are claimed by exactly one worker.
+    let state = AppState::persistent_with_recovery(config, true).await?;
+    let service = Arc::clone(
+        state
+            .telegram()
+            .map_err(|_| anyhow::anyhow!("Telegram provider service is unavailable"))?,
+    );
+    telegram::run_long_poll(service, &token)
+        .await
+        .map_err(|error| anyhow::anyhow!(error))
 }
 
 async fn health() -> Json<HealthResponse> {
@@ -730,6 +792,10 @@ async fn upload_epub(
     headers: HeaderMap,
     mut multipart: Multipart,
 ) -> Result<Response, AppError> {
+    let imports = state.imports()?;
+    let _upload_admission = imports
+        .try_begin_upload(session.user_id)
+        .map_err(map_import_error)?;
     let idempotency_key = headers
         .get("idempotency-key")
         .and_then(|value| value.to_str().ok())
@@ -762,12 +828,70 @@ async fn upload_epub(
     }
     let (file_name, bytes) = upload
         .ok_or_else(|| AppError::BadRequest("multipart field `file` is required".to_owned()))?;
-    let accepted: AcceptedImport = state
-        .imports()?
+    let accepted: AcceptedImport = imports
         .accept(&session, &file_name, idempotency_key, bytes)
         .await
         .map_err(map_import_error)?;
     Ok((StatusCode::ACCEPTED, Json(accepted)).into_response())
+}
+
+async fn import_web_url(
+    State(state): State<AppState>,
+    Extension(session): Extension<AuthenticatedSession>,
+    headers: HeaderMap,
+    Json(command): Json<ImportWebUrlRequest>,
+) -> Result<Response, AppError> {
+    let idempotency_key = required_idempotency_key(&headers)?;
+    let accepted = state
+        .imports()?
+        .accept_web(&session, &command.url, idempotency_key)
+        .await
+        .map_err(map_import_error)?;
+    Ok((StatusCode::ACCEPTED, Json(accepted)).into_response())
+}
+
+async fn create_telegram_pairing(
+    State(state): State<AppState>,
+    Extension(session): Extension<AuthenticatedSession>,
+) -> Result<Response, AppError> {
+    let response = state
+        .telegram()?
+        .create_pairing(&session)
+        .await
+        .map_err(map_telegram_error)?;
+    Ok((
+        StatusCode::CREATED,
+        [
+            (header::CACHE_CONTROL, "no-store"),
+            (header::PRAGMA, "no-cache"),
+        ],
+        Json(response),
+    )
+        .into_response())
+}
+
+async fn get_telegram_connection(
+    State(state): State<AppState>,
+    Extension(session): Extension<AuthenticatedSession>,
+) -> Result<Json<TelegramConnectionStatus>, AppError> {
+    state
+        .telegram()?
+        .status(session.user_id)
+        .await
+        .map(Json)
+        .map_err(map_telegram_error)
+}
+
+async fn unlink_telegram(
+    State(state): State<AppState>,
+    Extension(session): Extension<AuthenticatedSession>,
+) -> Result<StatusCode, AppError> {
+    state
+        .telegram()?
+        .unlink_account(session.user_id)
+        .await
+        .map_err(map_telegram_error)?;
+    Ok(StatusCode::NO_CONTENT)
 }
 
 async fn get_job(
@@ -1165,6 +1289,8 @@ fn source_download_response(
     Response::builder()
         .status(StatusCode::OK)
         .header(header::CONTENT_TYPE, media_type)
+        .header(header::CACHE_CONTROL, "private, no-store")
+        .header("x-content-type-options", "nosniff")
         .header(
             header::CONTENT_DISPOSITION,
             format!("attachment; filename=\"{safe_name}\""),
@@ -1219,7 +1345,20 @@ fn map_import_error(error: ImportServiceError) -> AppError {
         ImportServiceError::NotFound => AppError::NotFound("import object"),
         ImportServiceError::Conflict => AppError::Conflict("import command conflicts".to_owned()),
         ImportServiceError::BadRequest(detail) => AppError::BadRequest(detail.to_owned()),
+        ImportServiceError::RateLimited => AppError::TooManyRequests(
+            "Too many queued imports for this account; wait for current imports to finish.",
+        ),
         ImportServiceError::Unavailable => AppError::Unavailable("durable import service"),
+    }
+}
+
+fn map_telegram_error(error: TelegramServiceError) -> AppError {
+    match error {
+        TelegramServiceError::InvalidUpdate => AppError::BadRequest(error.to_string()),
+        TelegramServiceError::UpdateConflict
+        | TelegramServiceError::UpdateInProgress
+        | TelegramServiceError::PairingConflict => AppError::Conflict(error.to_string()),
+        TelegramServiceError::Unavailable => AppError::Unavailable("Telegram provider service"),
     }
 }
 
@@ -1379,6 +1518,7 @@ enum AppError {
     Unauthorized,
     Forbidden(&'static str),
     Conflict(String),
+    TooManyRequests(&'static str),
     PayloadTooLarge,
     Unavailable(&'static str),
     Internal(&'static str),
@@ -1400,6 +1540,11 @@ impl IntoResponse for AppError {
             ),
             AppError::Forbidden(detail) => (StatusCode::FORBIDDEN, "forbidden", detail.to_owned()),
             AppError::Conflict(detail) => (StatusCode::CONFLICT, "conflict", detail),
+            AppError::TooManyRequests(detail) => (
+                StatusCode::TOO_MANY_REQUESTS,
+                "too_many_requests",
+                detail.to_owned(),
+            ),
             AppError::PayloadTooLarge => (
                 StatusCode::PAYLOAD_TOO_LARGE,
                 "payload_too_large",
@@ -1496,7 +1641,7 @@ mod tests {
         let migrations: Vec<SchemaMigration> =
             json_get(build_router(), "/api/v1/schema/migrations").await?;
 
-        assert_eq!(migrations.len(), 9);
+        assert_eq!(migrations.len(), 10);
         Ok(())
     }
 

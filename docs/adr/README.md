@@ -5,6 +5,11 @@ listed in [`../systems/quality.md`](../systems/quality.md),
 including schema, anchor, sync,
 plugin, AI, search and account/auth boundaries.
 
+Текущие source/reader decisions:
+
+- [`0009`](0009-source-backed-anchor-v2.md) — source-backed anchors;
+- [`0010`](0010-web-telegram-source-baseline.md) — общий Web/Telegram baseline.
+
 ## Template
 
 ```markdown

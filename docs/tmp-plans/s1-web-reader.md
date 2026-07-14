@@ -417,7 +417,7 @@ reader model без рендера исходного EPUB XHTML/CSS как prod
 - локальная проверка описана в
   [`../runbooks/durable-annotations.md`](../runbooks/durable-annotations.md).
 
-### Этап 6. Baseline-источники Web и Telegram
+### Этап 6. Baseline-источники Web и Telegram — выполнен
 
 Обобщить уже работающий EPUB import path и добавить два узких входа,
 не создавая отдельных library или reader models:
@@ -448,6 +448,21 @@ Telegram text/link --> source adapter --/   -> DocumentRevision
 и читается в общем reader; привязанный Telegram user отправляет или
 пересылает текст и получает один durable material; повтор того же update не
 создает дубль. Оба source path поддерживают те же progress и annotations.
+
+Результат:
+
+- EPUB, Web и Telegram проходят общий durable publication path с typed source
+  refs, stages, locators, worker claim/lease и immutable raw source/snapshot;
+- bounded Web fetch повторно проверяет DNS и redirects, pin-ит соединение,
+  ограничивает response/extraction/package и покрыт committed fixtures;
+- one-time Telegram pairing, unlink и update outcome атомарны; direct/forwarded
+  text и одиночная URL используют общий inbox без duplicate material;
+- API-backed library различает форматы, unified add flow принимает EPUB/URL,
+  Telegram UI показывает loading/pairing/connected/expired states, а общий
+  reader безопасно открывает external links;
+- migration, compatibility и local workflow закреплены в
+  [`../adr/0010-web-telegram-source-baseline.md`](../adr/0010-web-telegram-source-baseline.md)
+  и [`../runbooks/web-telegram-baseline.md`](../runbooks/web-telegram-baseline.md).
 
 ### Этап 7. Сведение с UI/UX-прототипом
 

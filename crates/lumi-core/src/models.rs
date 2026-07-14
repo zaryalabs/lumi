@@ -152,6 +152,13 @@ pub fn s1_schema_migrations() -> Vec<SchemaMigration> {
             description: "Selection anchors, durable annotation conflicts and portable export."
                 .to_owned(),
         },
+        SchemaMigration {
+            id: "s1-0006-web-telegram-sources".to_owned(),
+            schema_version: DOMAIN_SCHEMA_VERSION.to_owned(),
+            description:
+                "Source-neutral web and Telegram imports, pairing and durable update claims."
+                    .to_owned(),
+        },
     ]);
     migrations
 }
@@ -262,6 +269,10 @@ pub struct UpdateLibraryStateCommand {
 pub enum MaterialKind {
     /// DRM-free reflowable EPUB imported through the S0 fixture path.
     Epub,
+    /// Public web page captured into an immutable text-first snapshot.
+    WebPage,
+    /// Direct or forwarded Telegram text normalized into the common reader.
+    Telegram,
 }
 
 /// User-visible library state.
@@ -293,6 +304,10 @@ pub struct SourceIdentity {
 pub enum SourceFormat {
     /// EPUB source.
     Epub,
+    /// Immutable web page snapshot.
+    WebPage,
+    /// Telegram Bot API message snapshot.
+    Telegram,
 }
 
 /// Immutable result of one successful import.
@@ -466,6 +481,9 @@ pub struct ReadingLink {
     pub target_path: Vec<String>,
     /// Link behavior supplied to reader navigation.
     pub kind: ReadingLinkKind,
+    /// Sanitized absolute external URL for external links.
+    #[serde(default)]
+    pub external_url: Option<String>,
 }
 
 /// Reader-native internal link behavior.
@@ -476,6 +494,8 @@ pub enum ReadingLinkKind {
     Internal,
     /// Footnote marker that opens or navigates to a note body.
     Footnote,
+    /// External HTTP(S) link that leaves the reader after explicit activation.
+    External,
 }
 
 impl ReadingNode {
@@ -608,11 +628,61 @@ pub enum BlobRole {
 pub enum SourceLocator {
     /// EPUB-specific source locator.
     Epub(EpubSourceLocator),
+    /// Web snapshot DOM provenance.
+    Web(WebSourceLocator),
+    /// Telegram message provenance.
+    Telegram(TelegramSourceLocator),
     /// Normalized package path when no source-specific locator exists.
     Normalized {
         /// Normalized node path.
         node_path: Vec<String>,
     },
+}
+
+/// Web-specific source locator retained alongside the shared anchor.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct WebSourceLocator {
+    /// Normalized original URL submitted by the user.
+    pub original_url: String,
+    /// Canonical URL extracted from the captured document.
+    pub canonical_url: Option<String>,
+    /// Immutable snapshot checksum.
+    pub snapshot_checksum: String,
+    /// Capture mode used to create the immutable snapshot.
+    pub capture_mode: String,
+    /// Extractor adapter identifier.
+    pub adapter_id: String,
+    /// Best-effort DOM path inside the extracted article candidate.
+    pub dom_path: String,
+    /// Best-effort selector hint for diagnostics and future recovery.
+    pub selector_hint: Option<String>,
+    /// Heading labels above this block when known.
+    pub heading_path: Vec<String>,
+    /// Text start offset inside the source element.
+    pub text_offset_start: Option<usize>,
+    /// Text end offset inside the source element.
+    pub text_offset_end: Option<usize>,
+}
+
+/// Telegram-specific source locator retained alongside the shared anchor.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct TelegramSourceLocator {
+    /// Telegram sender identity.
+    pub telegram_user_id: i64,
+    /// Private chat that delivered the message.
+    pub chat_id: i64,
+    /// Message identifier inside the chat.
+    pub message_id: i64,
+    /// Bot API update identifier used for idempotency.
+    pub update_id: i64,
+    /// Whether the message was forwarded.
+    pub forwarded: bool,
+    /// Paragraph index within the normalized message.
+    pub paragraph_index: usize,
+    /// Text start offset inside the paragraph.
+    pub text_offset_start: Option<usize>,
+    /// Text end offset inside the paragraph.
+    pub text_offset_end: Option<usize>,
 }
 
 /// EPUB-specific source locator retained alongside the shared anchor.
@@ -1004,6 +1074,12 @@ pub enum JobStatus {
 pub enum JobStage {
     /// Source was accepted.
     SourceAccepted,
+    /// A bounded remote source fetch is in progress.
+    FetchingSource,
+    /// An immutable source snapshot is being assembled.
+    CapturingSnapshot,
+    /// Semantic content is being extracted from the source snapshot.
+    ExtractingContent,
     /// EPUB container and package metadata are being validated.
     ValidatingContainer,
     /// Normalization is in progress.
@@ -1023,6 +1099,37 @@ pub struct AcceptedImport {
     pub material_id: MaterialId,
     /// Durable import job created for the source.
     pub job: Job,
+}
+
+/// Command for importing one public HTTP(S) URL.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct ImportWebUrlRequest {
+    /// Public URL to capture through the bounded server-side source adapter.
+    pub url: String,
+}
+
+/// One-time Telegram pairing token shown exactly once to an authenticated user.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct TelegramPairingResponse {
+    /// Plaintext token used in `/start <token>`; it is never persisted.
+    pub token: String,
+    /// Telegram deep link when a bot username is configured.
+    pub deep_link: Option<String>,
+    /// Expiry timestamp in milliseconds.
+    pub expires_at: TimestampMs,
+}
+
+/// Account-scoped Telegram connection projection.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct TelegramConnectionStatus {
+    /// Whether one active Telegram identity is linked.
+    pub connected: bool,
+    /// Linked Telegram user id, if connected.
+    pub telegram_user_id: Option<i64>,
+    /// Link creation timestamp in milliseconds.
+    pub linked_at: Option<TimestampMs>,
+    /// Expiry of the most recently issued unconsumed token.
+    pub pairing_expires_at: Option<TimestampMs>,
 }
 
 /// Import state projected onto a material card in the web library.
@@ -1125,6 +1232,6 @@ mod tests {
     fn migrations_cover_s1_contract_groups() {
         let migrations = s1_schema_migrations();
 
-        assert_eq!(migrations.len(), 9);
+        assert_eq!(migrations.len(), 10);
     }
 }

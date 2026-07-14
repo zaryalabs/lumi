@@ -6,24 +6,27 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use lumi_core::{
-    content_hash, import_epub, AcceptedImport, Annotation, AnnotationExport, AnnotationKind,
-    BlobManifest, BlobRef, BlobRole, CreateAnnotationCommand, DeleteAnnotationCommand,
-    DiagnosticSeverity, DocumentRevision, DocumentRevisionId, EpubImportError, EpubImportRequest,
-    EpubLimits, ImportDiagnostic, ImportStatusEntry, ImportedEpub, Job, JobId, JobKind, JobStage,
-    JobStatus, LibraryEntry, LibraryState, Material, MaterialId, MaterialImportStatus,
-    MaterialKind, MoveReadingPositionCommand, NormalizedContentPackage, ReaderSettings,
-    ReadingDocument, ReadingNode, ReadingNodeKind, ReadingProgress, RenderPlan, SourceIdentity,
-    UpdateAnnotationCommand,
+    content_hash, import_epub, import_telegram_text, import_web_snapshot, AcceptedImport,
+    Annotation, AnnotationExport, AnnotationKind, BlobManifest, BlobRef, BlobRole,
+    CreateAnnotationCommand, DeleteAnnotationCommand, DiagnosticSeverity, DocumentRevision,
+    DocumentRevisionId, EpubImportError, EpubImportRequest, EpubLimits, ImportDiagnostic,
+    ImportStatusEntry, ImportedEpub, ImportedPublication, ImportedPublicationResource, Job, JobId,
+    JobKind, JobStage, JobStatus, LibraryEntry, LibraryState, Material, MaterialId,
+    MaterialImportStatus, MaterialKind, MoveReadingPositionCommand, NormalizedContentPackage,
+    ReaderSettings, ReadingDocument, ReadingNode, ReadingNodeKind, ReadingProgress, RenderPlan,
+    SourceIdentity, TelegramMessageSnapshot, UpdateAnnotationCommand,
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use sqlx_core::{row::Row, transaction::Transaction};
 use sqlx_postgres::{PgPool, PgRow, Postgres};
 use time::OffsetDateTime;
+use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use uuid::Uuid;
 
 use crate::account::AuthenticatedSession;
 use crate::blob::{BlobStore, BlobStoreError, LocalBlobStore, StoredBlob};
+use crate::web::{BoundedWebFetcher, WebCapture};
 
 mod sqlx {
     pub(crate) use sqlx_core::query::query;
@@ -33,6 +36,21 @@ mod sqlx {
 }
 
 const SOURCE_MEDIA_TYPE: &str = "application/epub+zip";
+const MAX_ACTIVE_IMPORT_WORKERS: usize = 8;
+const MAX_PENDING_IMPORTS_PER_ACCOUNT: i64 = 16;
+const MAX_CONCURRENT_EPUB_UPLOADS: usize = 2;
+const WORKER_LEASE_SQL: &str = "30 minutes";
+const SOURCE_RESERVATION_LEASE_SQL: &str = "1 minute";
+#[cfg(not(test))]
+const HEARTBEAT_INTERVAL: std::time::Duration = std::time::Duration::from_secs(30);
+#[cfg(test)]
+const HEARTBEAT_INTERVAL: std::time::Duration = std::time::Duration::from_millis(100);
+#[cfg(not(test))]
+const SOURCE_RESERVATION_HEARTBEAT_INTERVAL: std::time::Duration =
+    std::time::Duration::from_secs(10);
+#[cfg(test)]
+const SOURCE_RESERVATION_HEARTBEAT_INTERVAL: std::time::Duration =
+    std::time::Duration::from_millis(50);
 
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum ImportServiceError {
@@ -42,6 +60,8 @@ pub(crate) enum ImportServiceError {
     Conflict,
     #[error("invalid import request: {0}")]
     BadRequest(&'static str),
+    #[error("too many pending imports")]
+    RateLimited,
     #[error("import service is unavailable")]
     Unavailable,
 }
@@ -50,7 +70,16 @@ pub(crate) enum ImportServiceError {
 pub(crate) struct ImportService {
     pool: PgPool,
     blobs: Arc<dyn BlobStore>,
+    web_capture: Arc<dyn WebCapture>,
     cancellations: Arc<Mutex<HashMap<JobId, Arc<AtomicBool>>>>,
+    worker_slots: Arc<Semaphore>,
+    upload_slots: Arc<Semaphore>,
+    account_upload_slots: Arc<Mutex<HashMap<Uuid, Arc<Semaphore>>>>,
+}
+
+pub(crate) struct UploadAdmission {
+    _global: OwnedSemaphorePermit,
+    _account: OwnedSemaphorePermit,
 }
 
 impl ImportService {
@@ -58,15 +87,65 @@ impl ImportService {
         Self {
             pool,
             blobs: Arc::new(LocalBlobStore::new(blob_root)),
+            web_capture: Arc::new(BoundedWebFetcher::from_env()),
             cancellations: Arc::new(Mutex::new(HashMap::new())),
+            worker_slots: Arc::new(Semaphore::new(MAX_ACTIVE_IMPORT_WORKERS)),
+            upload_slots: Arc::new(Semaphore::new(MAX_CONCURRENT_EPUB_UPLOADS)),
+            account_upload_slots: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
+    #[cfg(test)]
+    pub(crate) fn local_with_web_fixtures(
+        pool: PgPool,
+        blob_root: PathBuf,
+        fixture_root: PathBuf,
+    ) -> Self {
+        Self {
+            pool,
+            blobs: Arc::new(LocalBlobStore::new(blob_root)),
+            web_capture: Arc::new(BoundedWebFetcher::fixtures(fixture_root)),
+            cancellations: Arc::new(Mutex::new(HashMap::new())),
+            worker_slots: Arc::new(Semaphore::new(MAX_ACTIVE_IMPORT_WORKERS)),
+            upload_slots: Arc::new(Semaphore::new(MAX_CONCURRENT_EPUB_UPLOADS)),
+            account_upload_slots: Arc::new(Mutex::new(HashMap::new())),
+        }
+    }
+
+    pub(crate) fn try_begin_upload(
+        &self,
+        user_id: Uuid,
+    ) -> Result<UploadAdmission, ImportServiceError> {
+        let global = Arc::clone(&self.upload_slots)
+            .try_acquire_owned()
+            .map_err(|_| ImportServiceError::RateLimited)?;
+        let account_slot = {
+            let mut slots = self
+                .account_upload_slots
+                .lock()
+                .map_err(|_| ImportServiceError::Unavailable)?;
+            Arc::clone(
+                slots
+                    .entry(user_id)
+                    .or_insert_with(|| Arc::new(Semaphore::new(1))),
+            )
+        };
+        let account = account_slot
+            .try_acquire_owned()
+            .map_err(|_| ImportServiceError::RateLimited)?;
+        Ok(UploadAdmission {
+            _global: global,
+            _account: account,
+        })
+    }
+
     pub(crate) async fn recover(self: &Arc<Self>) -> Result<(), ImportServiceError> {
+        self.recover_source_reservations().await?;
+        let mut tx = self.pool.begin().await.map_err(log_storage_error)?;
         let cancelled = sqlx::query(
-            "UPDATE import_jobs SET status = 'cancelled', finished_at = now(), updated_at = now(), object_revision = object_revision + 1 WHERE status IN ('queued', 'running') AND cancellation_requested = true RETURNING result_material_id",
+            "UPDATE import_jobs SET status = 'cancelled', worker_claim_id = NULL, lease_expires_at = NULL, finished_at = now(), updated_at = now(), object_revision = object_revision + 1 WHERE status IN ('reserving_source', 'queued', 'running') AND cancellation_requested = true RETURNING result_material_id",
         )
-        .fetch_all(&self.pool)
+        .fetch_all(&mut *tx)
         .await
         .map_err(log_storage_error)?;
         for row in cancelled {
@@ -76,28 +155,28 @@ impl ImportService {
             if let Some(material_id) = material_id {
                 sqlx::query("UPDATE materials SET import_status = 'cancelled', updated_at = now() WHERE material_id = $1")
                     .bind(material_id)
-                    .execute(&self.pool)
+                    .execute(&mut *tx)
                     .await
                     .map_err(log_storage_error)?;
             }
         }
 
         let exhausted = sqlx::query(
-            "UPDATE import_jobs SET status = 'failed', error_code = 'epub_retry_exhausted', finished_at = now(), updated_at = now(), object_revision = object_revision + 1 WHERE status IN ('queued', 'running') AND attempt >= max_attempts RETURNING job_id, result_material_id, attempt",
+            "UPDATE import_jobs SET status = 'failed', error_code = 'import_retry_exhausted', worker_claim_id = NULL, lease_expires_at = NULL, finished_at = now(), updated_at = now(), object_revision = object_revision + 1 WHERE attempt >= max_attempts AND (status = 'queued' OR (status = 'running' AND (lease_expires_at IS NULL OR lease_expires_at < now()))) RETURNING job_id, result_material_id, attempt",
         )
-        .fetch_all(&self.pool)
+        .fetch_all(&mut *tx)
         .await
         .map_err(log_storage_error)?;
         for row in exhausted {
             let job_id: Uuid = row.try_get("job_id").map_err(log_storage_error)?;
             let attempt: i32 = row.try_get("attempt").map_err(log_storage_error)?;
-            insert_diagnostic_pool(
-                &self.pool,
+            insert_diagnostic(
+                &mut tx,
                 job_id,
                 attempt.max(1),
                 &ImportDiagnostic {
                     severity: DiagnosticSeverity::Error,
-                    code: "epub_retry_exhausted".to_owned(),
+                    code: "import_retry_exhausted".to_owned(),
                     message: "Import recovery exhausted the configured retry budget.".to_owned(),
                     source_path: None,
                 },
@@ -109,18 +188,34 @@ impl ImportService {
             if let Some(material_id) = material_id {
                 sqlx::query("UPDATE materials SET import_status = 'failed', updated_at = now() WHERE material_id = $1")
                     .bind(material_id)
-                    .execute(&self.pool)
+                    .execute(&mut *tx)
                     .await
                     .map_err(log_storage_error)?;
             }
         }
 
+        // Idempotent reconciliation makes startup recovery crash-safe even if a
+        // previous process stopped between the terminal job and material writes.
         sqlx::query(
-            "UPDATE import_jobs SET status = 'queued', stage = 'source_accepted', started_at = NULL, updated_at = now(), object_revision = object_revision + 1 WHERE status = 'running' AND attempt < max_attempts AND cancellation_requested = false",
+            "UPDATE materials m SET import_status = j.status, updated_at = now() FROM import_jobs j WHERE j.result_material_id = m.material_id AND j.status IN ('failed', 'cancelled') AND m.import_status IS DISTINCT FROM j.status",
         )
-        .execute(&self.pool)
+        .execute(&mut *tx)
         .await
         .map_err(log_storage_error)?;
+        sqlx::query(
+            "INSERT INTO import_diagnostics (job_id, severity, code, message, source_path, attempt) SELECT j.job_id, 'error', 'import_retry_exhausted', 'Import recovery exhausted the configured retry budget.', NULL, GREATEST(j.attempt, 1) FROM import_jobs j WHERE j.status = 'failed' AND j.error_code = 'import_retry_exhausted' AND NOT EXISTS (SELECT 1 FROM import_diagnostics d WHERE d.job_id = j.job_id AND d.code = 'import_retry_exhausted' AND d.attempt = GREATEST(j.attempt, 1))",
+        )
+        .execute(&mut *tx)
+        .await
+        .map_err(log_storage_error)?;
+
+        sqlx::query(
+            "UPDATE import_jobs SET status = 'queued', stage = 'source_accepted', started_at = NULL, worker_claim_id = NULL, lease_expires_at = NULL, updated_at = now(), object_revision = object_revision + 1 WHERE status = 'running' AND attempt < max_attempts AND cancellation_requested = false AND (lease_expires_at IS NULL OR lease_expires_at < now())",
+        )
+        .execute(&mut *tx)
+        .await
+        .map_err(log_storage_error)?;
+        tx.commit().await.map_err(log_storage_error)?;
         let pending: Vec<Uuid> = sqlx::query_scalar(
             "SELECT job_id FROM import_jobs WHERE status = 'queued' AND cancellation_requested = false ORDER BY created_at",
         )
@@ -129,6 +224,58 @@ impl ImportService {
         .map_err(log_storage_error)?;
         for job_id in pending {
             self.spawn(job_id);
+        }
+        Ok(())
+    }
+
+    async fn recover_source_reservations(&self) -> Result<(), ImportServiceError> {
+        loop {
+            let claim_id = Uuid::now_v7();
+            let row = sqlx::query(
+                "WITH candidate AS (SELECT job_id FROM import_jobs WHERE status = 'reserving_source' AND cancellation_requested = false AND (lease_expires_at IS NULL OR lease_expires_at < now()) ORDER BY created_at FOR UPDATE SKIP LOCKED LIMIT 1) UPDATE import_jobs j SET worker_claim_id = $1, lease_expires_at = now() + $2::interval, updated_at = now(), object_revision = object_revision + 1 FROM candidate WHERE j.job_id = candidate.job_id RETURNING j.job_id, j.result_material_id, j.source_kind, j.source_ref",
+            )
+            .bind(claim_id)
+            .bind(SOURCE_RESERVATION_LEASE_SQL)
+            .fetch_optional(&self.pool)
+            .await
+            .map_err(log_storage_error)?;
+            let Some(row) = row else {
+                break;
+            };
+            let job_id: Uuid = row.try_get("job_id").map_err(log_storage_error)?;
+            let material_id: Uuid = row
+                .try_get("result_material_id")
+                .map_err(log_storage_error)?;
+            let source_kind: String = row.try_get("source_kind").map_err(log_storage_error)?;
+            let source_ref =
+                decode_source_ref(row.try_get("source_ref").map_err(log_storage_error)?)?;
+            let Some(hash) = source_ref.source_blob_hash() else {
+                self.fail_reserved_source(
+                    job_id,
+                    claim_id,
+                    material_id,
+                    source_unavailable_diagnostic(&source_kind),
+                )
+                .await?;
+                continue;
+            };
+            match self.blobs.get(hash).await {
+                Ok(bytes) => {
+                    let media_type = source_ref.source_media_type();
+                    self.persist_blob_parts(hash, media_type, &bytes).await?;
+                    self.activate_reserved_source(job_id, claim_id).await?;
+                }
+                Err(BlobStoreError::NotFound | BlobStoreError::HashMismatch) => {
+                    self.fail_reserved_source(
+                        job_id,
+                        claim_id,
+                        material_id,
+                        source_unavailable_diagnostic(&source_kind),
+                    )
+                    .await?;
+                }
+                Err(error) => return Err(map_blob_error(error)),
+            }
         }
         Ok(())
     }
@@ -156,11 +303,6 @@ impl ImportService {
             ));
         }
         let source_hash = content_hash(&source);
-        let stored = self
-            .blobs
-            .put(&source_hash, &source)
-            .await
-            .map_err(map_blob_error)?;
         let request_hash = Sha256::digest(&source);
         let now = OffsetDateTime::now_utc();
         let mut tx = self.pool.begin().await.map_err(log_storage_error)?;
@@ -171,8 +313,9 @@ impl ImportService {
         .fetch_one(&mut *tx)
         .await
         .map_err(log_storage_error)?;
+        lock_idempotency_key(&mut tx, space_id, idempotency_key).await?;
         if let Some(row) = sqlx::query(
-            "SELECT request_hash, response_body FROM idempotency_keys WHERE scope_id = $1 AND idempotency_key = $2",
+            "SELECT operation, request_hash, response_body FROM idempotency_keys WHERE scope_id = $1 AND idempotency_key = $2",
         )
         .bind(space_id)
         .bind(idempotency_key)
@@ -180,6 +323,10 @@ impl ImportService {
         .await
         .map_err(log_storage_error)?
         {
+            let stored_operation: String = row.try_get("operation").map_err(log_storage_error)?;
+            if stored_operation != "import.upload" {
+                return Err(ImportServiceError::Conflict);
+            }
             let stored_hash: Vec<u8> = row.try_get("request_hash").map_err(log_storage_error)?;
             if stored_hash.as_slice() != request_hash.as_slice() {
                 return Err(ImportServiceError::Conflict);
@@ -187,10 +334,11 @@ impl ImportService {
             let response: serde_json::Value = row.try_get("response_body").map_err(log_storage_error)?;
             return serde_json::from_value(response).map_err(|_| ImportServiceError::Unavailable);
         }
+        enforce_account_backpressure(&mut tx, session.user_id).await?;
 
-        insert_blob_record(&mut tx, &source_hash, SOURCE_MEDIA_TYPE, &stored).await?;
         let material_id = Uuid::now_v7();
         let job_id = Uuid::now_v7();
+        let reservation_claim_id = Uuid::now_v7();
         let title = upload_title(&file_name);
         let source_identity = serde_json::json!({
             "format": "epub",
@@ -209,14 +357,14 @@ impl ImportService {
         .execute(&mut *tx)
         .await
         .map_err(log_storage_error)?;
-        let source_ref = SourceRef {
+        let source_ref = SourceRef::Epub {
             blob_hash: source_hash.clone(),
             file_name: file_name.clone(),
             media_type: SOURCE_MEDIA_TYPE.to_owned(),
             device_id: session.device_id,
         };
         sqlx::query(
-            "INSERT INTO import_jobs (job_id, user_id, space_id, status, stage, source_ref, result_material_id, idempotency_key, created_at, updated_at) VALUES ($1, $2, $3, 'queued', 'source_accepted', $4, $5, $6, $7, $7)",
+            "INSERT INTO import_jobs (job_id, user_id, space_id, status, stage, source_ref, result_material_id, idempotency_key, source_kind, worker_claim_id, lease_expires_at, created_at, updated_at) VALUES ($1, $2, $3, 'reserving_source', 'source_accepted', $4, $5, $6, 'epub', $7, $8 + $9::interval, $8, $8)",
         )
         .bind(job_id)
         .bind(session.user_id)
@@ -224,7 +372,9 @@ impl ImportService {
         .bind(serde_json::to_value(&source_ref).map_err(|_| ImportServiceError::Unavailable)?)
         .bind(material_id)
         .bind(idempotency_key)
+        .bind(reservation_claim_id)
         .bind(now)
+        .bind(SOURCE_RESERVATION_LEASE_SQL)
         .execute(&mut *tx)
         .await
         .map_err(log_storage_error)?;
@@ -272,7 +422,266 @@ impl ImportService {
         .await
         .map_err(log_storage_error)?;
         tx.commit().await.map_err(log_storage_error)?;
-        self.spawn(job_id);
+        let reservation_heartbeat = self.spawn_reservation_heartbeat(job_id, reservation_claim_id);
+        let pending_blob = PendingBlob {
+            hash: source_hash,
+            media_type: SOURCE_MEDIA_TYPE,
+            bytes: source,
+        };
+        match self.persist_reserved_blob(&pending_blob).await {
+            Ok(()) => {
+                reservation_heartbeat.abort();
+                self.activate_reserved_source(job_id, reservation_claim_id)
+                    .await?;
+                self.spawn(job_id);
+            }
+            Err(error) => {
+                reservation_heartbeat.abort();
+                tracing::error!(%job_id, %error, "reserved EPUB source could not be stored");
+                self.fail_reserved_source(
+                    job_id,
+                    reservation_claim_id,
+                    material_id,
+                    source_unavailable_diagnostic("epub"),
+                )
+                .await?;
+            }
+        }
+        Ok(accepted)
+    }
+
+    pub(crate) async fn accept_web(
+        self: &Arc<Self>,
+        session: &AuthenticatedSession,
+        raw_url: &str,
+        idempotency_key: &str,
+    ) -> Result<AcceptedImport, ImportServiceError> {
+        validate_idempotency_key(idempotency_key)?;
+        let url = crate::web::validate_public_url_input(raw_url)
+            .map_err(|_| ImportServiceError::BadRequest("URL must be a public HTTP(S) address"))?;
+        let parsed = url::Url::parse(&url).map_err(|_| ImportServiceError::Unavailable)?;
+        let title = parsed.host_str().unwrap_or("Web article").to_owned();
+        let request_hash = Sha256::digest(url.as_bytes());
+        self.accept_pending_source(
+            session,
+            idempotency_key,
+            "web_page",
+            title,
+            SourceIdentity {
+                format: lumi_core::SourceFormat::WebPage,
+                source_name: url.clone(),
+                source_hash: content_hash(url.as_bytes()),
+            },
+            SourceRef::WebPage {
+                url,
+                snapshot_blob_hash: None,
+                device_id: session.device_id,
+            },
+            request_hash.as_slice(),
+            "import.web_url",
+            None,
+        )
+        .await
+    }
+
+    pub(crate) async fn accept_telegram(
+        self: &Arc<Self>,
+        session: &AuthenticatedSession,
+        snapshot: &TelegramMessageSnapshot,
+        idempotency_key: &str,
+    ) -> Result<AcceptedImport, ImportServiceError> {
+        validate_idempotency_key(idempotency_key)?;
+        let bytes = serde_json::to_vec(snapshot).map_err(|_| ImportServiceError::Unavailable)?;
+        let source_hash = content_hash(&bytes);
+        let title = snapshot
+            .forward_origin
+            .clone()
+            .unwrap_or_else(|| snapshot.text.chars().take(80).collect());
+        let request_hash = Sha256::digest(&bytes);
+        self.accept_pending_source(
+            session,
+            idempotency_key,
+            "telegram",
+            title,
+            SourceIdentity {
+                format: lumi_core::SourceFormat::Telegram,
+                source_name: format!("telegram:{}/{}", snapshot.chat_id, snapshot.message_id),
+                source_hash: source_hash.clone(),
+            },
+            SourceRef::TelegramText {
+                snapshot_blob_hash: source_hash.clone(),
+                device_id: session.device_id,
+            },
+            request_hash.as_slice(),
+            "import.telegram_text",
+            Some(PendingBlob {
+                hash: source_hash,
+                media_type: "application/vnd.lumi.telegram-message+json",
+                bytes,
+            }),
+        )
+        .await
+    }
+
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "the pending import command explicitly carries its durable source provenance"
+    )]
+    async fn accept_pending_source(
+        self: &Arc<Self>,
+        session: &AuthenticatedSession,
+        idempotency_key: &str,
+        material_kind: &str,
+        title: String,
+        source_identity: SourceIdentity,
+        source_ref: SourceRef,
+        request_hash: &[u8],
+        operation: &str,
+        pending_blob: Option<PendingBlob>,
+    ) -> Result<AcceptedImport, ImportServiceError> {
+        let now = OffsetDateTime::now_utc();
+        let mut tx = self.pool.begin().await.map_err(log_storage_error)?;
+        let space_id: Uuid = sqlx::query_scalar(
+            "SELECT space_id FROM sync_spaces WHERE owner_user_id = $1 AND kind = 'personal' AND deleted_at IS NULL",
+        )
+        .bind(session.user_id)
+        .fetch_one(&mut *tx)
+        .await
+        .map_err(log_storage_error)?;
+        lock_idempotency_key(&mut tx, space_id, idempotency_key).await?;
+        if let Some(row) = sqlx::query(
+            "SELECT operation, request_hash, response_body FROM idempotency_keys WHERE scope_id = $1 AND idempotency_key = $2",
+        )
+        .bind(space_id)
+        .bind(idempotency_key)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(log_storage_error)?
+        {
+            let stored_operation: String = row.try_get("operation").map_err(log_storage_error)?;
+            if stored_operation != operation {
+                return Err(ImportServiceError::Conflict);
+            }
+            let stored_hash: Vec<u8> = row.try_get("request_hash").map_err(log_storage_error)?;
+            if stored_hash != request_hash {
+                return Err(ImportServiceError::Conflict);
+            }
+            let response: serde_json::Value = row.try_get("response_body").map_err(log_storage_error)?;
+            return serde_json::from_value(response).map_err(|_| ImportServiceError::Unavailable);
+        }
+        enforce_account_backpressure(&mut tx, session.user_id).await?;
+        let material_id = Uuid::now_v7();
+        let job_id = Uuid::now_v7();
+        let reservation_claim_id = pending_blob.as_ref().map(|_| Uuid::now_v7());
+        sqlx::query(
+            "INSERT INTO materials (material_id, space_id, owner_user_id, kind, canonical_title, library_state, source_identity, import_status, created_at, updated_at) VALUES ($1, $2, $3, $4, $5, 'active', $6, 'queued', $7, $7)",
+        )
+        .bind(material_id)
+        .bind(space_id)
+        .bind(session.user_id)
+        .bind(material_kind)
+        .bind(&title)
+        .bind(serde_json::to_value(&source_identity).map_err(|_| ImportServiceError::Unavailable)?)
+        .bind(now)
+        .execute(&mut *tx)
+        .await
+        .map_err(log_storage_error)?;
+        let job_status = if pending_blob.is_some() {
+            "reserving_source"
+        } else {
+            "queued"
+        };
+        sqlx::query(
+            "INSERT INTO import_jobs (job_id, user_id, space_id, status, stage, source_ref, result_material_id, idempotency_key, source_kind, worker_claim_id, lease_expires_at, created_at, updated_at) VALUES ($1, $2, $3, $4, 'source_accepted', $5, $6, $7, $8, $9, CASE WHEN $4 = 'reserving_source' THEN $10 + $11::interval ELSE NULL END, $10, $10)",
+        )
+        .bind(job_id)
+        .bind(session.user_id)
+        .bind(space_id)
+        .bind(job_status)
+        .bind(serde_json::to_value(&source_ref).map_err(|_| ImportServiceError::Unavailable)?)
+        .bind(material_id)
+        .bind(idempotency_key)
+        .bind(material_kind)
+        .bind(reservation_claim_id)
+        .bind(now)
+        .bind(SOURCE_RESERVATION_LEASE_SQL)
+        .execute(&mut *tx)
+        .await
+        .map_err(log_storage_error)?;
+        sqlx::query("UPDATE materials SET latest_import_job_id = $2 WHERE material_id = $1")
+            .bind(material_id)
+            .bind(job_id)
+            .execute(&mut *tx)
+            .await
+            .map_err(log_storage_error)?;
+        append_import_change(
+            &mut tx,
+            ImportChange {
+                space_id,
+                object_id: material_id,
+                device_id: session.device_id,
+                idempotency_key: &format!("{idempotency_key}:material"),
+                change_kind: "create",
+                payload: serde_json::json!({ "kind": material_kind, "import_status": "queued" }),
+                now,
+            },
+        )
+        .await?;
+        let accepted = AcceptedImport {
+            material_id,
+            job: Job {
+                id: job_id,
+                account_id: session.user_id,
+                kind: JobKind::Import,
+                status: JobStatus::Queued,
+                stage: JobStage::SourceAccepted,
+                material_id: Some(material_id),
+                revision_id: None,
+                diagnostics: Vec::new(),
+                created_at: timestamp_ms(now),
+                updated_at: timestamp_ms(now),
+            },
+        };
+        sqlx::query(
+            "INSERT INTO idempotency_keys (scope_id, idempotency_key, operation, request_hash, response_status, response_body, created_at) VALUES ($1, $2, $3, $4, 202, $5, $6)",
+        )
+        .bind(space_id)
+        .bind(idempotency_key)
+        .bind(operation)
+        .bind(request_hash)
+        .bind(serde_json::to_value(&accepted).map_err(|_| ImportServiceError::Unavailable)?)
+        .bind(now)
+        .execute(&mut *tx)
+        .await
+        .map_err(log_storage_error)?;
+        tx.commit().await.map_err(log_storage_error)?;
+        if let Some(blob) = pending_blob {
+            let reservation_claim_id =
+                reservation_claim_id.ok_or(ImportServiceError::Unavailable)?;
+            let reservation_heartbeat =
+                self.spawn_reservation_heartbeat(job_id, reservation_claim_id);
+            match self.persist_reserved_blob(&blob).await {
+                Ok(()) => {
+                    reservation_heartbeat.abort();
+                    self.activate_reserved_source(job_id, reservation_claim_id)
+                        .await?;
+                    self.spawn(job_id);
+                }
+                Err(error) => {
+                    reservation_heartbeat.abort();
+                    tracing::error!(%job_id, %error, "reserved source could not be stored");
+                    self.fail_reserved_source(
+                        job_id,
+                        reservation_claim_id,
+                        material_id,
+                        source_unavailable_diagnostic(material_kind),
+                    )
+                    .await?;
+                }
+            }
+        } else {
+            self.spawn(job_id);
+        }
         Ok(accepted)
     }
 
@@ -474,20 +883,16 @@ impl ImportService {
         user_id: Uuid,
         job_id: JobId,
     ) -> Result<Job, ImportServiceError> {
+        let mut tx = self.pool.begin().await.map_err(log_storage_error)?;
         let row = sqlx::query(
-            "UPDATE import_jobs SET cancellation_requested = true, status = CASE WHEN status = 'queued' THEN 'cancelled' ELSE status END, finished_at = CASE WHEN status = 'queued' THEN now() ELSE finished_at END, updated_at = now(), object_revision = object_revision + 1 WHERE job_id = $1 AND user_id = $2 AND status IN ('queued', 'running') RETURNING result_material_id, status",
+            "UPDATE import_jobs SET cancellation_requested = true, status = CASE WHEN status IN ('reserving_source', 'queued') THEN 'cancelled' ELSE status END, worker_claim_id = CASE WHEN status IN ('reserving_source', 'queued') THEN NULL ELSE worker_claim_id END, lease_expires_at = CASE WHEN status IN ('reserving_source', 'queued') THEN NULL ELSE lease_expires_at END, finished_at = CASE WHEN status IN ('reserving_source', 'queued') THEN now() ELSE finished_at END, updated_at = now(), object_revision = object_revision + 1 WHERE job_id = $1 AND user_id = $2 AND status IN ('reserving_source', 'queued', 'running') RETURNING result_material_id, status",
         )
         .bind(job_id)
         .bind(user_id)
-        .fetch_optional(&self.pool)
+        .fetch_optional(&mut *tx)
         .await
         .map_err(log_storage_error)?
         .ok_or(ImportServiceError::Conflict)?;
-        if let Ok(flags) = self.cancellations.lock() {
-            if let Some(flag) = flags.get(&job_id) {
-                flag.store(true, Ordering::Release);
-            }
-        }
         let status: String = row.try_get("status").map_err(log_storage_error)?;
         if status == "cancelled" {
             let material_id: Option<Uuid> = row
@@ -496,9 +901,15 @@ impl ImportService {
             if let Some(material_id) = material_id {
                 sqlx::query("UPDATE materials SET import_status = 'cancelled', updated_at = now() WHERE material_id = $1")
                     .bind(material_id)
-                    .execute(&self.pool)
+                    .execute(&mut *tx)
                     .await
                     .map_err(log_storage_error)?;
+            }
+        }
+        tx.commit().await.map_err(log_storage_error)?;
+        if let Ok(flags) = self.cancellations.lock() {
+            if let Some(flag) = flags.get(&job_id) {
+                flag.store(true, Ordering::Release);
             }
         }
         self.job(user_id, job_id).await
@@ -509,12 +920,13 @@ impl ImportService {
         user_id: Uuid,
         job_id: JobId,
     ) -> Result<Job, ImportServiceError> {
+        let mut tx = self.pool.begin().await.map_err(log_storage_error)?;
         let updated = sqlx::query(
             "UPDATE import_jobs SET status = 'queued', stage = 'source_accepted', cancellation_requested = false, error_code = NULL, started_at = NULL, finished_at = NULL, updated_at = now(), object_revision = object_revision + 1 WHERE job_id = $1 AND user_id = $2 AND status IN ('failed', 'cancelled') AND attempt < max_attempts RETURNING result_material_id",
         )
         .bind(job_id)
         .bind(user_id)
-        .fetch_optional(&self.pool)
+        .fetch_optional(&mut *tx)
         .await
         .map_err(log_storage_error)?
         .ok_or(ImportServiceError::Conflict)?;
@@ -524,10 +936,11 @@ impl ImportService {
         if let Some(material_id) = material_id {
             sqlx::query("UPDATE materials SET import_status = 'queued', updated_at = now() WHERE material_id = $1")
                 .bind(material_id)
-                .execute(&self.pool)
+                .execute(&mut *tx)
                 .await
                 .map_err(log_storage_error)?;
         }
+        tx.commit().await.map_err(log_storage_error)?;
         self.spawn(job_id);
         self.job(user_id, job_id).await
     }
@@ -546,14 +959,27 @@ impl ImportService {
         .await
         .map_err(log_storage_error)?
         .ok_or(ImportServiceError::NotFound)?;
-        let source_ref: SourceRef =
-            serde_json::from_value(value).map_err(|_| ImportServiceError::Unavailable)?;
-        let bytes = self
-            .blobs
-            .get(&source_ref.blob_hash)
-            .await
-            .map_err(map_blob_error)?;
-        Ok((source_ref.file_name, source_ref.media_type, bytes))
+        let source_ref = decode_source_ref(value)?;
+        let blob_hash = source_ref
+            .source_blob_hash()
+            .ok_or(ImportServiceError::Conflict)?;
+        let bytes = self.blobs.get(blob_hash).await.map_err(map_blob_error)?;
+        let (name, media_type) = match &source_ref {
+            SourceRef::Epub {
+                file_name,
+                media_type,
+                ..
+            } => (file_name.clone(), media_type.clone()),
+            SourceRef::WebPage { .. } => (
+                "snapshot.json".to_owned(),
+                "application/vnd.lumi.web-snapshot+json".to_owned(),
+            ),
+            SourceRef::TelegramText { .. } => (
+                "message.json".to_owned(),
+                "application/vnd.lumi.telegram-message+json".to_owned(),
+            ),
+        };
+        Ok((name, media_type, bytes))
     }
 
     pub(crate) async fn revision(
@@ -1175,6 +1601,8 @@ impl ImportService {
             owner_id: row.try_get("owner_user_id").map_err(log_storage_error)?,
             kind: match kind.as_str() {
                 "epub" => MaterialKind::Epub,
+                "web_page" => MaterialKind::WebPage,
+                "telegram" => MaterialKind::Telegram,
                 _ => return Err(ImportServiceError::Unavailable),
             },
             canonical_title: row.try_get("canonical_title").map_err(log_storage_error)?,
@@ -1275,16 +1703,87 @@ impl ImportService {
         let service = Arc::clone(self);
         tokio::spawn(async move {
             if let Err(error) = service.run(job_id).await {
-                tracing::error!(%job_id, error = %error, "durable EPUB worker failed");
+                tracing::error!(%job_id, error = %error, "durable import worker failed");
             }
         });
     }
 
+    fn spawn_heartbeat(
+        self: &Arc<Self>,
+        job_id: JobId,
+        claim_id: Uuid,
+        cancellation: Arc<AtomicBool>,
+    ) -> tokio::task::JoinHandle<()> {
+        let service = Arc::clone(self);
+        tokio::spawn(async move {
+            loop {
+                let row: Result<Option<bool>, _> = sqlx::query_scalar(
+                    "UPDATE import_jobs SET lease_expires_at = now() + $3::interval, updated_at = now() WHERE job_id = $1 AND worker_claim_id = $2 AND status = 'running' RETURNING cancellation_requested",
+                )
+                .bind(job_id)
+                .bind(claim_id)
+                .bind(WORKER_LEASE_SQL)
+                .fetch_optional(&service.pool)
+                .await;
+                match row {
+                    Ok(Some(cancelled)) => {
+                        if cancelled {
+                            cancellation.store(true, Ordering::Release);
+                        }
+                    }
+                    Ok(None) => {
+                        cancellation.store(true, Ordering::Release);
+                        break;
+                    }
+                    Err(error) => {
+                        tracing::warn!(%job_id, %claim_id, %error, "import heartbeat failed");
+                    }
+                }
+                tokio::time::sleep(HEARTBEAT_INTERVAL).await;
+            }
+        })
+    }
+
+    fn spawn_reservation_heartbeat(
+        self: &Arc<Self>,
+        job_id: JobId,
+        claim_id: Uuid,
+    ) -> tokio::task::JoinHandle<()> {
+        let service = Arc::clone(self);
+        tokio::spawn(async move {
+            loop {
+                let renewed = sqlx::query(
+                    "UPDATE import_jobs SET lease_expires_at = now() + $3::interval, updated_at = now() WHERE job_id = $1 AND worker_claim_id = $2 AND status = 'reserving_source' AND cancellation_requested = false",
+                )
+                .bind(job_id)
+                .bind(claim_id)
+                .bind(SOURCE_RESERVATION_LEASE_SQL)
+                .execute(&service.pool)
+                .await;
+                match renewed {
+                    Ok(result) if result.rows_affected() == 1 => {}
+                    Ok(_) => break,
+                    Err(error) => {
+                        tracing::warn!(%job_id, %claim_id, %error, "source reservation heartbeat failed");
+                    }
+                }
+                tokio::time::sleep(SOURCE_RESERVATION_HEARTBEAT_INTERVAL).await;
+            }
+        })
+    }
+
     async fn run(self: Arc<Self>, job_id: JobId) -> Result<(), ImportServiceError> {
+        let _worker_slot = Arc::clone(&self.worker_slots)
+            .acquire_owned()
+            .await
+            .map_err(|_| ImportServiceError::Unavailable)?;
+        let claim_id = Uuid::now_v7();
         let row = sqlx::query(
-            "UPDATE import_jobs SET status = 'running', stage = 'validating_container', attempt = import_jobs.attempt + 1, started_at = now(), updated_at = now(), object_revision = import_jobs.object_revision + 1 FROM materials m WHERE import_jobs.job_id = $1 AND import_jobs.status = 'queued' AND import_jobs.cancellation_requested = false AND import_jobs.attempt < import_jobs.max_attempts AND m.material_id = import_jobs.result_material_id RETURNING import_jobs.user_id, import_jobs.space_id, import_jobs.result_material_id, import_jobs.source_ref, import_jobs.attempt",
+            "UPDATE import_jobs SET status = 'running', stage = 'source_accepted', attempt = import_jobs.attempt + 1, worker_claim_id = $2, lease_expires_at = now() + $3::interval, started_at = now(), updated_at = now(), object_revision = import_jobs.object_revision + 1 FROM materials m WHERE import_jobs.job_id = $1 AND import_jobs.status = 'queued' AND import_jobs.cancellation_requested = false AND import_jobs.attempt < import_jobs.max_attempts AND m.material_id = import_jobs.result_material_id RETURNING import_jobs.user_id, import_jobs.space_id, import_jobs.result_material_id, import_jobs.source_ref, import_jobs.attempt",
         )
         .bind(job_id)
+        .bind(claim_id)
+        .bind(WORKER_LEASE_SQL)
         .fetch_optional(&self.pool)
         .await
         .map_err(log_storage_error)?;
@@ -1297,9 +1796,7 @@ impl ImportService {
             .try_get("result_material_id")
             .map_err(log_storage_error)?;
         let attempt: i32 = row.try_get("attempt").map_err(log_storage_error)?;
-        let source_ref: SourceRef =
-            serde_json::from_value(row.try_get("source_ref").map_err(log_storage_error)?)
-                .map_err(|_| ImportServiceError::Unavailable)?;
+        let source_ref = decode_source_ref(row.try_get("source_ref").map_err(log_storage_error)?)?;
         sqlx::query("UPDATE materials SET import_status = 'running', updated_at = now() WHERE material_id = $1")
             .bind(material_id)
             .execute(&self.pool)
@@ -1310,36 +1807,99 @@ impl ImportService {
             .lock()
             .map_err(|_| ImportServiceError::Unavailable)?
             .insert(job_id, Arc::clone(&cancellation));
+        let heartbeat = self.spawn_heartbeat(job_id, claim_id, Arc::clone(&cancellation));
 
-        let source = match self.blobs.get(&source_ref.blob_hash).await {
-            Ok(source) => source,
-            Err(_) => {
-                self.fail(
+        let result = match source_ref {
+            source_ref @ SourceRef::Epub { .. } => {
+                self.run_epub(
                     job_id,
+                    claim_id,
+                    user_id,
+                    space_id,
                     material_id,
                     attempt,
-                    ImportDiagnostic {
-                        severity: DiagnosticSeverity::Error,
-                        code: "epub_source_blob_unavailable".to_owned(),
-                        message: "The uploaded EPUB source blob is unavailable.".to_owned(),
-                        source_path: None,
-                    },
-                    false,
+                    source_ref,
+                    Arc::clone(&cancellation),
                 )
-                .await?;
-                self.remove_cancellation(job_id);
-                return Ok(());
+                .await
+            }
+            source_ref @ SourceRef::WebPage { .. } => {
+                self.run_web(
+                    job_id,
+                    claim_id,
+                    user_id,
+                    space_id,
+                    material_id,
+                    attempt,
+                    source_ref,
+                    Arc::clone(&cancellation),
+                )
+                .await
+            }
+            source_ref @ SourceRef::TelegramText { .. } => {
+                self.run_telegram(
+                    job_id,
+                    claim_id,
+                    user_id,
+                    space_id,
+                    material_id,
+                    attempt,
+                    source_ref,
+                    Arc::clone(&cancellation),
+                )
+                .await
             }
         };
-        sqlx::query(
-            "UPDATE import_jobs SET stage = 'normalizing', updated_at = now() WHERE job_id = $1",
-        )
-        .bind(job_id)
-        .execute(&self.pool)
-        .await
-        .map_err(log_storage_error)?;
+        heartbeat.abort();
+        self.remove_cancellation(job_id);
+        result
+    }
+
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "worker context is explicit across the source adapter boundary"
+    )]
+    async fn run_epub(
+        &self,
+        job_id: JobId,
+        claim_id: Uuid,
+        user_id: Uuid,
+        space_id: Uuid,
+        material_id: Uuid,
+        attempt: i32,
+        source_ref: SourceRef,
+        cancellation: Arc<AtomicBool>,
+    ) -> Result<(), ImportServiceError> {
+        let SourceRef::Epub {
+            blob_hash,
+            file_name,
+            ..
+        } = &source_ref
+        else {
+            return Err(ImportServiceError::Unavailable);
+        };
+        self.set_stage(job_id, claim_id, "validating_container")
+            .await?;
+        let source = match self.blobs.get(blob_hash).await {
+            Ok(source) => source,
+            Err(_) => {
+                return self
+                    .fail(
+                        job_id,
+                        claim_id,
+                        material_id,
+                        attempt,
+                        source_unavailable_diagnostic("epub"),
+                        false,
+                    )
+                    .await;
+            }
+        };
+        self.persist_blob_parts(blob_hash, SOURCE_MEDIA_TYPE, &source)
+            .await?;
+        self.set_stage(job_id, claim_id, "normalizing").await?;
         let revision_id = Uuid::now_v7();
-        let source_name = source_ref.file_name.clone();
+        let source_name = file_name.clone();
         let worker_cancellation = Arc::clone(&cancellation);
         let imported = tokio::task::spawn_blocking(move || {
             import_epub(
@@ -1357,46 +1917,429 @@ impl ImportService {
         .await
         .map_err(|_| ImportServiceError::Unavailable)?;
         match imported {
-            Ok(imported) => {
-                if cancellation.load(Ordering::Acquire) {
-                    self.fail(
-                        job_id,
-                        material_id,
-                        attempt,
-                        EpubImportError::Cancelled.diagnostic(),
-                        true,
-                    )
-                    .await?;
-                } else {
-                    self.persist_success(job_id, space_id, &source_ref, attempt, imported)
-                        .await?;
-                }
+            Ok(imported) if !cancellation.load(Ordering::Acquire) => {
+                self.persist_success(
+                    job_id,
+                    claim_id,
+                    space_id,
+                    &source_ref,
+                    attempt,
+                    publication_from_epub(imported),
+                )
+                .await
+            }
+            Ok(_) => {
+                self.fail(
+                    job_id,
+                    claim_id,
+                    material_id,
+                    attempt,
+                    EpubImportError::Cancelled.diagnostic(),
+                    true,
+                )
+                .await
             }
             Err(error) => {
                 let cancelled = matches!(error, EpubImportError::Cancelled);
-                self.fail(job_id, material_id, attempt, error.diagnostic(), cancelled)
-                    .await?;
+                self.fail(
+                    job_id,
+                    claim_id,
+                    material_id,
+                    attempt,
+                    error.diagnostic(),
+                    cancelled,
+                )
+                .await
             }
         }
-        self.remove_cancellation(job_id);
-        Ok(())
+    }
+
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "worker context is explicit across the source adapter boundary"
+    )]
+    async fn run_web(
+        &self,
+        job_id: JobId,
+        claim_id: Uuid,
+        user_id: Uuid,
+        space_id: Uuid,
+        material_id: Uuid,
+        attempt: i32,
+        mut source_ref: SourceRef,
+        cancellation: Arc<AtomicBool>,
+    ) -> Result<(), ImportServiceError> {
+        let snapshot = if let SourceRef::WebPage {
+            snapshot_blob_hash: Some(hash),
+            ..
+        } = &source_ref
+        {
+            let bytes = match self.blobs.get(hash).await {
+                Ok(bytes) => bytes,
+                Err(_) => {
+                    return self
+                        .fail(
+                            job_id,
+                            claim_id,
+                            material_id,
+                            attempt,
+                            source_unavailable_diagnostic("web"),
+                            false,
+                        )
+                        .await;
+                }
+            };
+            self.persist_blob_parts(hash, "application/vnd.lumi.web-snapshot+json", &bytes)
+                .await?;
+            match serde_json::from_slice(&bytes) {
+                Ok(snapshot) => snapshot,
+                Err(_) => {
+                    return self
+                        .fail(
+                            job_id,
+                            claim_id,
+                            material_id,
+                            attempt,
+                            source_import_diagnostic("web", "stored snapshot is invalid"),
+                            false,
+                        )
+                        .await;
+                }
+            }
+        } else {
+            let SourceRef::WebPage { url, .. } = &source_ref else {
+                return Err(ImportServiceError::Unavailable);
+            };
+            self.set_stage(job_id, claim_id, "fetching_source").await?;
+            let snapshot = match self.web_capture.capture(url).await {
+                Ok(snapshot) => snapshot,
+                Err(error) => {
+                    return self
+                        .fail(
+                            job_id,
+                            claim_id,
+                            material_id,
+                            attempt,
+                            error.diagnostic(),
+                            false,
+                        )
+                        .await;
+                }
+            };
+            self.set_stage(job_id, claim_id, "capturing_snapshot")
+                .await?;
+            let bytes =
+                serde_json::to_vec(&snapshot).map_err(|_| ImportServiceError::Unavailable)?;
+            let hash = content_hash(&bytes);
+            let stored = self
+                .blobs
+                .put(&hash, &bytes)
+                .await
+                .map_err(map_blob_error)?;
+            let mut tx = self.pool.begin().await.map_err(log_storage_error)?;
+            insert_blob_record(
+                &mut tx,
+                &hash,
+                "application/vnd.lumi.web-snapshot+json",
+                &stored,
+            )
+            .await?;
+            if let SourceRef::WebPage {
+                snapshot_blob_hash, ..
+            } = &mut source_ref
+            {
+                *snapshot_blob_hash = Some(hash);
+            }
+            let updated = sqlx::query(
+                "UPDATE import_jobs SET source_ref = $3, lease_expires_at = now() + $4::interval, updated_at = now() WHERE job_id = $1 AND worker_claim_id = $2 AND status = 'running'",
+            )
+            .bind(job_id)
+            .bind(claim_id)
+            .bind(serde_json::to_value(&source_ref).map_err(|_| ImportServiceError::Unavailable)?)
+            .bind(WORKER_LEASE_SQL)
+            .execute(&mut *tx)
+            .await
+            .map_err(log_storage_error)?;
+            if updated.rows_affected() != 1 {
+                tx.rollback().await.map_err(log_storage_error)?;
+                return Err(ImportServiceError::Conflict);
+            }
+            tx.commit().await.map_err(log_storage_error)?;
+            snapshot
+        };
+        if cancellation.load(Ordering::Acquire) {
+            return self
+                .fail(
+                    job_id,
+                    claim_id,
+                    material_id,
+                    attempt,
+                    cancelled_diagnostic(),
+                    true,
+                )
+                .await;
+        }
+        self.set_stage(job_id, claim_id, "extracting_content")
+            .await?;
+        let imported = tokio::task::spawn_blocking(move || {
+            import_web_snapshot(user_id, material_id, Uuid::now_v7(), &snapshot)
+        })
+        .await
+        .map_err(|_| ImportServiceError::Unavailable)?;
+        match imported {
+            Ok(publication) if !cancellation.load(Ordering::Acquire) => {
+                self.persist_success(
+                    job_id,
+                    claim_id,
+                    space_id,
+                    &source_ref,
+                    attempt,
+                    publication,
+                )
+                .await
+            }
+            Ok(_) => {
+                self.fail(
+                    job_id,
+                    claim_id,
+                    material_id,
+                    attempt,
+                    cancelled_diagnostic(),
+                    true,
+                )
+                .await
+            }
+            Err(error) => {
+                self.fail(
+                    job_id,
+                    claim_id,
+                    material_id,
+                    attempt,
+                    source_import_diagnostic("web", &error.to_string()),
+                    false,
+                )
+                .await
+            }
+        }
+    }
+
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "worker context is explicit across the source adapter boundary"
+    )]
+    async fn run_telegram(
+        &self,
+        job_id: JobId,
+        claim_id: Uuid,
+        user_id: Uuid,
+        space_id: Uuid,
+        material_id: Uuid,
+        attempt: i32,
+        source_ref: SourceRef,
+        cancellation: Arc<AtomicBool>,
+    ) -> Result<(), ImportServiceError> {
+        let Some(hash) = source_ref.source_blob_hash() else {
+            return Err(ImportServiceError::Unavailable);
+        };
+        let bytes = match self.blobs.get(hash).await {
+            Ok(bytes) => bytes,
+            Err(_) => {
+                return self
+                    .fail(
+                        job_id,
+                        claim_id,
+                        material_id,
+                        attempt,
+                        source_unavailable_diagnostic("telegram"),
+                        false,
+                    )
+                    .await;
+            }
+        };
+        self.persist_blob_parts(hash, "application/vnd.lumi.telegram-message+json", &bytes)
+            .await?;
+        let snapshot: TelegramMessageSnapshot = match serde_json::from_slice(&bytes) {
+            Ok(snapshot) => snapshot,
+            Err(_) => {
+                return self
+                    .fail(
+                        job_id,
+                        claim_id,
+                        material_id,
+                        attempt,
+                        source_import_diagnostic("telegram", "stored message snapshot is invalid"),
+                        false,
+                    )
+                    .await;
+            }
+        };
+        if cancellation.load(Ordering::Acquire) {
+            return self
+                .fail(
+                    job_id,
+                    claim_id,
+                    material_id,
+                    attempt,
+                    cancelled_diagnostic(),
+                    true,
+                )
+                .await;
+        }
+        self.set_stage(job_id, claim_id, "normalizing").await?;
+        let imported = tokio::task::spawn_blocking(move || {
+            import_telegram_text(user_id, material_id, Uuid::now_v7(), &snapshot)
+        })
+        .await
+        .map_err(|_| ImportServiceError::Unavailable)?;
+        match imported {
+            Ok(publication) if !cancellation.load(Ordering::Acquire) => {
+                self.persist_success(
+                    job_id,
+                    claim_id,
+                    space_id,
+                    &source_ref,
+                    attempt,
+                    publication,
+                )
+                .await
+            }
+            Ok(_) => {
+                self.fail(
+                    job_id,
+                    claim_id,
+                    material_id,
+                    attempt,
+                    cancelled_diagnostic(),
+                    true,
+                )
+                .await
+            }
+            Err(error) => {
+                self.fail(
+                    job_id,
+                    claim_id,
+                    material_id,
+                    attempt,
+                    source_import_diagnostic("telegram", &error.to_string()),
+                    false,
+                )
+                .await
+            }
+        }
+    }
+
+    async fn set_stage(
+        &self,
+        job_id: JobId,
+        claim_id: Uuid,
+        stage: &str,
+    ) -> Result<(), ImportServiceError> {
+        let result = sqlx::query("UPDATE import_jobs SET stage = $3, lease_expires_at = now() + $4::interval, updated_at = now() WHERE job_id = $1 AND worker_claim_id = $2 AND status = 'running'")
+            .bind(job_id)
+            .bind(claim_id)
+            .bind(stage)
+            .bind(WORKER_LEASE_SQL)
+            .execute(&self.pool)
+            .await
+            .map_err(log_storage_error)?;
+        (result.rows_affected() == 1)
+            .then_some(())
+            .ok_or(ImportServiceError::Conflict)
+    }
+
+    async fn persist_reserved_blob(&self, blob: &PendingBlob) -> Result<(), ImportServiceError> {
+        self.persist_blob_parts(&blob.hash, blob.media_type, &blob.bytes)
+            .await
+    }
+
+    async fn persist_blob_parts(
+        &self,
+        hash: &str,
+        media_type: &str,
+        bytes: &[u8],
+    ) -> Result<(), ImportServiceError> {
+        let stored = self.blobs.put(hash, bytes).await.map_err(map_blob_error)?;
+        let mut tx = self.pool.begin().await.map_err(log_storage_error)?;
+        insert_blob_record(&mut tx, hash, media_type, &stored).await?;
+        tx.commit().await.map_err(log_storage_error)
+    }
+
+    async fn activate_reserved_source(
+        &self,
+        job_id: JobId,
+        claim_id: Uuid,
+    ) -> Result<(), ImportServiceError> {
+        let changed = sqlx::query(
+            "UPDATE import_jobs SET status = 'queued', worker_claim_id = NULL, lease_expires_at = NULL, updated_at = now(), object_revision = object_revision + 1 WHERE job_id = $1 AND worker_claim_id = $2 AND status = 'reserving_source' AND cancellation_requested = false",
+        )
+        .bind(job_id)
+        .bind(claim_id)
+        .execute(&self.pool)
+        .await
+        .map_err(log_storage_error)?;
+        if changed.rows_affected() == 1 {
+            return Ok(());
+        }
+        self.reservation_terminal_or_activated(job_id).await
+    }
+
+    async fn reservation_terminal_or_activated(
+        &self,
+        job_id: JobId,
+    ) -> Result<(), ImportServiceError> {
+        let status: Option<String> =
+            sqlx::query_scalar("SELECT status FROM import_jobs WHERE job_id = $1")
+                .bind(job_id)
+                .fetch_optional(&self.pool)
+                .await
+                .map_err(log_storage_error)?;
+        match status.as_deref() {
+            Some("queued" | "running" | "succeeded" | "failed" | "cancelled") => Ok(()),
+            Some("reserving_source") => Err(ImportServiceError::Conflict),
+            _ => Err(ImportServiceError::NotFound),
+        }
+    }
+
+    async fn fail_reserved_source(
+        &self,
+        job_id: JobId,
+        claim_id: Uuid,
+        material_id: MaterialId,
+        diagnostic: ImportDiagnostic,
+    ) -> Result<(), ImportServiceError> {
+        let mut tx = self.pool.begin().await.map_err(log_storage_error)?;
+        let changed = sqlx::query(
+            "UPDATE import_jobs SET status = 'failed', error_code = $3, worker_claim_id = NULL, lease_expires_at = NULL, finished_at = now(), updated_at = now(), object_revision = object_revision + 1 WHERE job_id = $1 AND worker_claim_id = $2 AND status = 'reserving_source'",
+        )
+        .bind(job_id)
+        .bind(claim_id)
+        .bind(&diagnostic.code)
+        .execute(&mut *tx)
+        .await
+        .map_err(log_storage_error)?;
+        if changed.rows_affected() == 1 {
+            insert_diagnostic(&mut tx, job_id, 1, &diagnostic).await?;
+            sqlx::query(
+                "UPDATE materials SET import_status = 'failed', updated_at = now() WHERE material_id = $1",
+            )
+            .bind(material_id)
+            .execute(&mut *tx)
+            .await
+            .map_err(log_storage_error)?;
+        }
+        tx.commit().await.map_err(log_storage_error)
     }
 
     async fn persist_success(
         &self,
         job_id: JobId,
+        claim_id: Uuid,
         space_id: Uuid,
         source_ref: &SourceRef,
         attempt: i32,
-        mut imported: ImportedEpub,
+        mut imported: ImportedPublication,
     ) -> Result<(), ImportServiceError> {
-        sqlx::query(
-            "UPDATE import_jobs SET stage = 'persisting', updated_at = now() WHERE job_id = $1",
-        )
-        .bind(job_id)
-        .execute(&self.pool)
-        .await
-        .map_err(log_storage_error)?;
+        self.set_stage(job_id, claim_id, "persisting").await?;
         let mut stored_resources = Vec::with_capacity(imported.resources.len());
         for resource in &imported.resources {
             let stored = self
@@ -1418,6 +2361,28 @@ impl ImportService {
         let source_map = source_map(&imported.package)?;
         let now = OffsetDateTime::now_utc();
         let mut tx = self.pool.begin().await.map_err(log_storage_error)?;
+        let may_publish: bool = sqlx::query_scalar(
+            "SELECT status = 'running' AND cancellation_requested = false AND worker_claim_id = $2 AND lease_expires_at > now() FROM import_jobs WHERE job_id = $1 FOR UPDATE",
+        )
+        .bind(job_id)
+        .bind(claim_id)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(log_storage_error)?
+        .unwrap_or(false);
+        if !may_publish {
+            tx.rollback().await.map_err(log_storage_error)?;
+            return self
+                .fail(
+                    job_id,
+                    claim_id,
+                    imported.revision.material_id,
+                    attempt,
+                    cancelled_diagnostic(),
+                    true,
+                )
+                .await;
+        }
         for (resource, stored) in &stored_resources {
             insert_blob_record(
                 &mut tx,
@@ -1434,19 +2399,23 @@ impl ImportService {
             &stored_package,
         )
         .await?;
+        let source_blob_hash = source_ref
+            .source_blob_hash()
+            .ok_or(ImportServiceError::Unavailable)?;
         sqlx::query(
-            "INSERT INTO document_revisions (revision_id, material_id, space_id, source_format, source_hash, importer_id, importer_version, created_at, normalized_hash, package_format_version, source_blob_hash, supersedes_revision_id) VALUES ($1, $2, $3, 'epub', $4, $5, $6, $7, $8, $9, $10, $11)",
+            "INSERT INTO document_revisions (revision_id, material_id, space_id, source_format, source_hash, importer_id, importer_version, created_at, normalized_hash, package_format_version, source_blob_hash, supersedes_revision_id) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)",
         )
         .bind(imported.revision.id)
         .bind(imported.revision.material_id)
         .bind(space_id)
+        .bind(source_ref.source_format())
         .bind(&imported.revision.source_hash)
         .bind(&imported.revision.importer_id)
         .bind(&imported.revision.importer_version)
         .bind(now)
         .bind(&imported.revision.normalized_hash)
         .bind(&imported.revision.package_format_version)
-        .bind(&source_ref.blob_hash)
+        .bind(source_blob_hash)
         .bind(imported.revision.supersedes_revision_id)
         .execute(&mut *tx)
         .await
@@ -1465,8 +2434,8 @@ impl ImportService {
         insert_manifest_entry(
             &mut tx,
             manifest_id,
-            &source_ref.blob_hash,
-            &format!("source/{}", source_ref.file_name),
+            source_blob_hash,
+            &format!("source/{}", source_ref.logical_source_name()),
             "source",
         )
         .await?;
@@ -1503,11 +2472,12 @@ impl ImportService {
         .await
         .map_err(log_storage_error)?;
         sqlx::query(
-            "UPDATE materials SET canonical_title = $2, active_revision_id = $3, import_status = 'ready', object_revision = object_revision + 1, updated_at = $4 WHERE material_id = $1",
+            "UPDATE materials SET canonical_title = $2, active_revision_id = $3, source_identity = $4, import_status = 'ready', object_revision = object_revision + 1, updated_at = $5 WHERE material_id = $1",
         )
         .bind(imported.revision.material_id)
         .bind(&imported.title)
         .bind(imported.revision.id)
+        .bind(serde_json::to_value(&imported.package.manifest.source).map_err(|_| ImportServiceError::Unavailable)?)
         .bind(now)
         .execute(&mut *tx)
         .await
@@ -1516,9 +2486,10 @@ impl ImportService {
             insert_diagnostic(&mut tx, job_id, attempt, diagnostic).await?;
         }
         sqlx::query(
-            "UPDATE import_jobs SET status = 'succeeded', stage = 'committed', revision_id = $2, error_code = NULL, finished_at = $3, updated_at = $3, object_revision = object_revision + 1 WHERE job_id = $1",
+            "UPDATE import_jobs SET status = 'succeeded', stage = 'committed', revision_id = $3, error_code = NULL, worker_claim_id = NULL, lease_expires_at = NULL, finished_at = $4, updated_at = $4, object_revision = object_revision + 1 WHERE job_id = $1 AND worker_claim_id = $2 AND status = 'running' AND cancellation_requested = false",
         )
         .bind(job_id)
+        .bind(claim_id)
         .bind(imported.revision.id)
         .bind(now)
         .execute(&mut *tx)
@@ -1529,7 +2500,7 @@ impl ImportService {
             ImportChange {
                 space_id,
                 object_id: imported.revision.material_id,
-                device_id: source_ref.device_id,
+                device_id: source_ref.device_id(),
                 idempotency_key: &format!("{job_id}:complete"),
                 change_kind: "blob_ref",
                 payload: serde_json::json!({
@@ -1547,25 +2518,41 @@ impl ImportService {
     async fn fail(
         &self,
         job_id: JobId,
+        claim_id: Uuid,
         material_id: MaterialId,
         attempt: i32,
         diagnostic: ImportDiagnostic,
         cancelled: bool,
     ) -> Result<(), ImportServiceError> {
         let now = OffsetDateTime::now_utc();
-        let status = if cancelled { "cancelled" } else { "failed" };
         let mut tx = self.pool.begin().await.map_err(log_storage_error)?;
-        insert_diagnostic(&mut tx, job_id, attempt, &diagnostic).await?;
-        sqlx::query(
-            "UPDATE import_jobs SET status = $2, error_code = $3, finished_at = $4, updated_at = $4, object_revision = object_revision + 1 WHERE job_id = $1",
+        let cancellation_requested: bool = sqlx::query_scalar(
+            "SELECT cancellation_requested FROM import_jobs WHERE job_id = $1 AND worker_claim_id = $2 AND status = 'running' FOR UPDATE",
         )
         .bind(job_id)
+        .bind(claim_id)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(log_storage_error)?
+        .ok_or(ImportServiceError::Conflict)?;
+        let cancelled = cancelled || cancellation_requested;
+        let status = if cancelled { "cancelled" } else { "failed" };
+        let result = sqlx::query(
+            "UPDATE import_jobs SET status = $3, error_code = $4, worker_claim_id = NULL, lease_expires_at = NULL, finished_at = $5, updated_at = $5, object_revision = object_revision + 1 WHERE job_id = $1 AND worker_claim_id = $2 AND status = 'running'",
+        )
+        .bind(job_id)
+        .bind(claim_id)
         .bind(status)
         .bind(&diagnostic.code)
         .bind(now)
         .execute(&mut *tx)
         .await
         .map_err(log_storage_error)?;
+        if result.rows_affected() != 1 {
+            tx.rollback().await.map_err(log_storage_error)?;
+            return Err(ImportServiceError::Conflict);
+        }
+        insert_diagnostic(&mut tx, job_id, attempt, &diagnostic).await?;
         sqlx::query(
             "UPDATE materials SET import_status = $2, updated_at = $3 WHERE material_id = $1",
         )
@@ -1585,12 +2572,143 @@ impl ImportService {
     }
 }
 
+fn publication_from_epub(imported: ImportedEpub) -> ImportedPublication {
+    ImportedPublication {
+        title: imported.title,
+        revision: imported.revision,
+        package: imported.package,
+        resources: imported
+            .resources
+            .into_iter()
+            .map(|resource| ImportedPublicationResource {
+                path: resource.path,
+                media_type: resource.media_type,
+                content_hash: resource.content_hash,
+                bytes: resource.bytes,
+            })
+            .collect(),
+    }
+}
+
+fn source_unavailable_diagnostic(kind: &str) -> ImportDiagnostic {
+    ImportDiagnostic {
+        severity: DiagnosticSeverity::Error,
+        code: format!("{kind}_source_blob_unavailable"),
+        message: "The accepted immutable source blob is unavailable.".to_owned(),
+        source_path: None,
+    }
+}
+
+fn source_import_diagnostic(kind: &str, message: &str) -> ImportDiagnostic {
+    ImportDiagnostic {
+        severity: DiagnosticSeverity::Error,
+        code: format!("{kind}_normalization_failed"),
+        message: message.to_owned(),
+        source_path: None,
+    }
+}
+
+fn cancelled_diagnostic() -> ImportDiagnostic {
+    ImportDiagnostic {
+        severity: DiagnosticSeverity::Info,
+        code: "import_cancelled".to_owned(),
+        message: "Import was cancelled before publication.".to_owned(),
+        source_path: None,
+    }
+}
+
+struct PendingBlob {
+    hash: String,
+    media_type: &'static str,
+    bytes: Vec<u8>,
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize)]
-struct SourceRef {
+#[serde(tag = "kind", rename_all = "snake_case")]
+enum SourceRef {
+    Epub {
+        blob_hash: String,
+        file_name: String,
+        media_type: String,
+        device_id: Uuid,
+    },
+    WebPage {
+        url: String,
+        snapshot_blob_hash: Option<String>,
+        device_id: Uuid,
+    },
+    TelegramText {
+        snapshot_blob_hash: String,
+        device_id: Uuid,
+    },
+}
+
+#[derive(Clone, Debug, Deserialize)]
+struct LegacyEpubSourceRef {
     blob_hash: String,
     file_name: String,
     media_type: String,
     device_id: Uuid,
+}
+
+impl SourceRef {
+    fn device_id(&self) -> Uuid {
+        match self {
+            Self::Epub { device_id, .. }
+            | Self::WebPage { device_id, .. }
+            | Self::TelegramText { device_id, .. } => *device_id,
+        }
+    }
+
+    fn source_blob_hash(&self) -> Option<&str> {
+        match self {
+            Self::Epub { blob_hash, .. } => Some(blob_hash),
+            Self::WebPage {
+                snapshot_blob_hash, ..
+            } => snapshot_blob_hash.as_deref(),
+            Self::TelegramText {
+                snapshot_blob_hash, ..
+            } => Some(snapshot_blob_hash),
+        }
+    }
+
+    fn source_media_type(&self) -> &'static str {
+        match self {
+            Self::Epub { .. } => SOURCE_MEDIA_TYPE,
+            Self::WebPage { .. } => "application/vnd.lumi.web-snapshot+json",
+            Self::TelegramText { .. } => "application/vnd.lumi.telegram-message+json",
+        }
+    }
+
+    fn source_format(&self) -> &'static str {
+        match self {
+            Self::Epub { .. } => "epub",
+            Self::WebPage { .. } => "web_page",
+            Self::TelegramText { .. } => "telegram",
+        }
+    }
+
+    fn logical_source_name(&self) -> String {
+        match self {
+            Self::Epub { file_name, .. } => file_name.clone(),
+            Self::WebPage { .. } => "snapshot.json".to_owned(),
+            Self::TelegramText { .. } => "message.json".to_owned(),
+        }
+    }
+}
+
+fn decode_source_ref(value: serde_json::Value) -> Result<SourceRef, ImportServiceError> {
+    if let Ok(source_ref) = serde_json::from_value::<SourceRef>(value.clone()) {
+        return Ok(source_ref);
+    }
+    serde_json::from_value::<LegacyEpubSourceRef>(value)
+        .map(|legacy| SourceRef::Epub {
+            blob_hash: legacy.blob_hash,
+            file_name: legacy.file_name,
+            media_type: legacy.media_type,
+            device_id: legacy.device_id,
+        })
+        .map_err(|_| ImportServiceError::Unavailable)
 }
 
 async fn insert_blob_record(
@@ -1649,27 +2767,6 @@ async fn insert_diagnostic(
     .bind(&diagnostic.source_path)
     .bind(attempt.max(1))
     .execute(&mut **tx)
-    .await
-    .map_err(log_storage_error)?;
-    Ok(())
-}
-
-async fn insert_diagnostic_pool(
-    pool: &PgPool,
-    job_id: JobId,
-    attempt: i32,
-    diagnostic: &ImportDiagnostic,
-) -> Result<(), ImportServiceError> {
-    sqlx::query(
-        "INSERT INTO import_diagnostics (job_id, severity, code, message, source_path, attempt) VALUES ($1, $2, $3, $4, $5, $6)",
-    )
-    .bind(job_id)
-    .bind(severity_name(diagnostic.severity))
-    .bind(&diagnostic.code)
-    .bind(&diagnostic.message)
-    .bind(&diagnostic.source_path)
-    .bind(attempt.max(1))
-    .execute(pool)
     .await
     .map_err(log_storage_error)?;
     Ok(())
@@ -1916,11 +3013,42 @@ async fn lock_idempotency_key(
     space_id: Uuid,
     idempotency_key: &str,
 ) -> Result<(), ImportServiceError> {
-    sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
-        .bind(format!("{space_id}:{idempotency_key}"))
-        .execute(&mut **tx)
-        .await
-        .map_err(log_storage_error)?;
+    let acquired: bool =
+        sqlx::query_scalar("SELECT pg_try_advisory_xact_lock(hashtextextended($1, 0))")
+            .bind(format!("{space_id}:{idempotency_key}"))
+            .fetch_one(&mut **tx)
+            .await
+            .map_err(log_storage_error)?;
+    acquired
+        .then_some(())
+        .ok_or(ImportServiceError::RateLimited)
+}
+
+async fn enforce_account_backpressure(
+    tx: &mut Transaction<'_, Postgres>,
+    user_id: Uuid,
+) -> Result<(), ImportServiceError> {
+    // Serialize admission decisions per account so concurrent distinct keys cannot all
+    // observe the same pending count and overrun the configured queue bound.
+    let acquired: bool =
+        sqlx::query_scalar("SELECT pg_try_advisory_xact_lock(hashtextextended($1, 1))")
+            .bind(user_id.to_string())
+            .fetch_one(&mut **tx)
+            .await
+            .map_err(log_storage_error)?;
+    if !acquired {
+        return Err(ImportServiceError::RateLimited);
+    }
+    let pending: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM import_jobs WHERE user_id = $1 AND status IN ('reserving_source', 'queued', 'running')",
+    )
+    .bind(user_id)
+    .fetch_one(&mut **tx)
+    .await
+    .map_err(log_storage_error)?;
+    if pending >= MAX_PENDING_IMPORTS_PER_ACCOUNT {
+        return Err(ImportServiceError::RateLimited);
+    }
     Ok(())
 }
 
@@ -2086,6 +3214,8 @@ fn library_entry_from_row(
         owner_id: row.try_get("owner_user_id").map_err(log_storage_error)?,
         kind: match kind.as_str() {
             "epub" => MaterialKind::Epub,
+            "web_page" => MaterialKind::WebPage,
+            "telegram" => MaterialKind::Telegram,
             _ => return Err(ImportServiceError::Unavailable),
         },
         canonical_title: row.try_get("canonical_title").map_err(log_storage_error)?,
@@ -2172,7 +3302,7 @@ fn diagnostic_from_row(row: PgRow) -> Result<ImportDiagnostic, ImportServiceErro
 
 fn parse_status(value: &str) -> Result<JobStatus, ImportServiceError> {
     match value {
-        "queued" => Ok(JobStatus::Queued),
+        "reserving_source" | "queued" => Ok(JobStatus::Queued),
         "running" => Ok(JobStatus::Running),
         "succeeded" => Ok(JobStatus::Succeeded),
         "failed" => Ok(JobStatus::Failed),
@@ -2184,6 +3314,9 @@ fn parse_status(value: &str) -> Result<JobStatus, ImportServiceError> {
 fn parse_stage(value: &str) -> Result<JobStage, ImportServiceError> {
     match value {
         "source_accepted" => Ok(JobStage::SourceAccepted),
+        "fetching_source" => Ok(JobStage::FetchingSource),
+        "capturing_snapshot" => Ok(JobStage::CapturingSnapshot),
+        "extracting_content" => Ok(JobStage::ExtractingContent),
         "validating_container" => Ok(JobStage::ValidatingContainer),
         "normalizing" => Ok(JobStage::Normalizing),
         "persisting" => Ok(JobStage::Persisting),
@@ -2304,7 +3437,7 @@ fn map_blob_error(error: BlobStoreError) -> ImportServiceError {
 }
 
 fn log_storage_error(error: impl std::fmt::Display) -> ImportServiceError {
-    tracing::error!(%error, "EPUB import repository operation failed");
+    tracing::error!(%error, "import repository operation failed");
     ImportServiceError::Unavailable
 }
 
@@ -2482,6 +3615,7 @@ mod tests {
         let left_service = service.clone();
         let left_session = session.clone();
         let left_command = concurrent_command.clone();
+        let retry_command = concurrent_command.clone();
         let right_service = service.clone();
         let right_session = session.clone();
         let (left, right) = tokio::join!(
@@ -2492,7 +3626,24 @@ mod tests {
                 "stage5-concurrent"
             )
         );
-        assert_eq!(left?.id, right?.id);
+        let concurrent_id = match (left, right) {
+            (Ok(left), Ok(right)) => {
+                assert_eq!(left.id, right.id);
+                left.id
+            }
+            (Ok(created), Err(ImportServiceError::RateLimited))
+            | (Err(ImportServiceError::RateLimited), Ok(created)) => created.id,
+            (left, right) => {
+                return Err(std::io::Error::other(format!(
+                    "unexpected concurrent idempotency results: {left:?}, {right:?}"
+                ))
+                .into());
+            }
+        };
+        let replayed = service
+            .create_annotation(&session, retry_command, "stage5-concurrent")
+            .await?;
+        assert_eq!(replayed.id, concurrent_id);
 
         let deleted = service
             .delete_annotation(
@@ -2544,6 +3695,436 @@ mod tests {
                 ("delete".to_owned(), Some(2), 3),
             ]
         );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn postgres_worker_lease_cancel_and_admission_are_fenced(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let Ok(database_url) = std::env::var("LUMI_TEST_DATABASE_URL") else {
+            return Ok(());
+        };
+        crate::run_migrations(&database_url).await?;
+        let pool = sqlx_postgres::PgPoolOptions::new()
+            .max_connections(8)
+            .connect(&database_url)
+            .await?;
+        let user_id = Uuid::now_v7();
+        let device_id = Uuid::now_v7();
+        let space_id = Uuid::now_v7();
+        sqlx::query("INSERT INTO accounts (user_id, status) VALUES ($1, 'active')")
+            .bind(user_id)
+            .execute(&pool)
+            .await?;
+        sqlx::query("INSERT INTO sync_devices (device_id, user_id, name, kind) VALUES ($1, $2, 'Lease test', 'web')")
+            .bind(device_id)
+            .bind(user_id)
+            .execute(&pool)
+            .await?;
+        sqlx::query(
+            "INSERT INTO sync_spaces (space_id, owner_user_id, kind) VALUES ($1, $2, 'personal')",
+        )
+        .bind(space_id)
+        .bind(user_id)
+        .execute(&pool)
+        .await?;
+        let service = Arc::new(ImportService::local(
+            pool.clone(),
+            std::env::temp_dir().join(format!("lumi-lease-{}", Uuid::now_v7())),
+        ));
+
+        let active_material = Uuid::now_v7();
+        let active_job = Uuid::now_v7();
+        let active_claim = Uuid::now_v7();
+        sqlx::query("INSERT INTO materials (material_id, space_id, owner_user_id, kind, canonical_title, library_state, source_identity, import_status) VALUES ($1, $2, $3, 'epub', 'active lease', 'active', $4, 'running')")
+            .bind(active_material)
+            .bind(space_id)
+            .bind(user_id)
+            .bind(serde_json::json!({"format":"epub","source_name":"lease.epub","source_hash":"lease"}))
+            .execute(&pool)
+            .await?;
+        sqlx::query("INSERT INTO import_jobs (job_id, user_id, space_id, status, stage, source_ref, result_material_id, idempotency_key, source_kind, attempt, max_attempts, worker_claim_id, lease_expires_at) VALUES ($1, $2, $3, 'running', 'normalizing', $4, $5, 'lease-active', 'epub', 3, 3, $6, now() + interval '20 minutes')")
+            .bind(active_job)
+            .bind(user_id)
+            .bind(space_id)
+            .bind(serde_json::json!({"kind":"epub","blob_hash":"missing","file_name":"lease.epub","media_type":"application/epub+zip","device_id":device_id}))
+            .bind(active_material)
+            .bind(active_claim)
+            .execute(&pool)
+            .await?;
+        service.recover().await?;
+        let active_status: String =
+            sqlx::query_scalar("SELECT status FROM import_jobs WHERE job_id = $1")
+                .bind(active_job)
+                .fetch_one(&pool)
+                .await?;
+        assert_eq!(active_status, "running");
+
+        let cancel_material = Uuid::now_v7();
+        let cancel_job = Uuid::now_v7();
+        let cancel_claim = Uuid::now_v7();
+        sqlx::query("INSERT INTO materials (material_id, space_id, owner_user_id, kind, canonical_title, library_state, source_identity, import_status) VALUES ($1, $2, $3, 'epub', 'cancel race', 'active', $4, 'running')")
+            .bind(cancel_material).bind(space_id).bind(user_id)
+            .bind(serde_json::json!({"format":"epub","source_name":"cancel.epub","source_hash":"cancel"}))
+            .execute(&pool).await?;
+        sqlx::query("INSERT INTO import_jobs (job_id, user_id, space_id, status, stage, source_ref, result_material_id, idempotency_key, source_kind, worker_claim_id, lease_expires_at, cancellation_requested) VALUES ($1, $2, $3, 'running', 'normalizing', $4, $5, 'lease-cancel', 'epub', $6, now() + interval '20 minutes', true)")
+            .bind(cancel_job).bind(user_id).bind(space_id)
+            .bind(serde_json::json!({"kind":"epub","blob_hash":"missing","file_name":"cancel.epub","media_type":"application/epub+zip","device_id":device_id}))
+            .bind(cancel_material).bind(cancel_claim).execute(&pool).await?;
+        service
+            .fail(
+                cancel_job,
+                cancel_claim,
+                cancel_material,
+                1,
+                source_unavailable_diagnostic("epub"),
+                false,
+            )
+            .await?;
+        let cancelled: (String, String) = sqlx::query_as(
+            "SELECT j.status, m.import_status FROM import_jobs j JOIN materials m ON m.material_id = j.result_material_id WHERE j.job_id = $1",
+        )
+        .bind(cancel_job)
+        .fetch_one(&pool)
+        .await?;
+        assert_eq!(cancelled, ("cancelled".to_owned(), "cancelled".to_owned()));
+
+        for index in 0..MAX_PENDING_IMPORTS_PER_ACCOUNT {
+            let material_id = Uuid::now_v7();
+            let job_id = Uuid::now_v7();
+            sqlx::query("INSERT INTO materials (material_id, space_id, owner_user_id, kind, canonical_title, library_state, source_identity, import_status) VALUES ($1, $2, $3, 'web_page', $4, 'active', $5, 'queued')")
+                .bind(material_id).bind(space_id).bind(user_id).bind(format!("pending {index}"))
+                .bind(serde_json::json!({"format":"web_page","source_name":"https://example.com","source_hash":format!("pending-{index}")}))
+                .execute(&pool).await?;
+            sqlx::query("INSERT INTO import_jobs (job_id, user_id, space_id, status, stage, source_ref, result_material_id, idempotency_key, source_kind) VALUES ($1, $2, $3, 'queued', 'source_accepted', $4, $5, $6, 'web_page')")
+                .bind(job_id).bind(user_id).bind(space_id)
+                .bind(serde_json::json!({"kind":"web_page","url":"https://example.com","snapshot_blob_hash":null,"device_id":device_id}))
+                .bind(material_id).bind(format!("pending-{index}")).execute(&pool).await?;
+        }
+        let session = AuthenticatedSession {
+            user_id,
+            session_id: Uuid::now_v7(),
+            device_id,
+            csrf_hash: [0; 32],
+        };
+        assert!(matches!(
+            service
+                .accept_web(&session, "https://example.com/new", "over-limit")
+                .await,
+            Err(ImportServiceError::RateLimited)
+        ));
+        assert!(service.try_begin_upload(user_id).is_ok());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn postgres_source_reservation_atomic_mutations_and_heartbeat_recover_safely(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let Ok(database_url) = std::env::var("LUMI_TEST_DATABASE_URL") else {
+            return Ok(());
+        };
+        crate::run_migrations(&database_url).await?;
+        let pool = sqlx_postgres::PgPoolOptions::new()
+            .max_connections(8)
+            .connect(&database_url)
+            .await?;
+        let user_id = Uuid::now_v7();
+        let device_id = Uuid::now_v7();
+        let space_id = Uuid::now_v7();
+        sqlx::query("INSERT INTO accounts (user_id, status) VALUES ($1, 'active')")
+            .bind(user_id)
+            .execute(&pool)
+            .await?;
+        sqlx::query("INSERT INTO sync_devices (device_id, user_id, name, kind) VALUES ($1, $2, 'Reservation test', 'web')")
+            .bind(device_id)
+            .bind(user_id)
+            .execute(&pool)
+            .await?;
+        sqlx::query(
+            "INSERT INTO sync_spaces (space_id, owner_user_id, kind) VALUES ($1, $2, 'personal')",
+        )
+        .bind(space_id)
+        .bind(user_id)
+        .execute(&pool)
+        .await?;
+        let blob_root = std::env::temp_dir().join(format!("lumi-reservation-{}", Uuid::now_v7()));
+        let base = ImportService::local(pool.clone(), blob_root.clone());
+        let service = Arc::new(ImportService {
+            worker_slots: Arc::new(Semaphore::new(0)),
+            ..base
+        });
+        let second_base = ImportService::local(pool.clone(), blob_root.clone());
+        let second_recoverer = Arc::new(ImportService {
+            worker_slots: Arc::new(Semaphore::new(0)),
+            ..second_base
+        });
+
+        let source = b"durable-but-invalid-epub";
+        let source_hash = content_hash(source);
+        service.blobs.put(&source_hash, source).await?;
+        let reserved_material = Uuid::now_v7();
+        let reserved_job = Uuid::now_v7();
+        sqlx::query("INSERT INTO materials (material_id, space_id, owner_user_id, kind, canonical_title, library_state, source_identity, import_status) VALUES ($1, $2, $3, 'epub', 'reserved source', 'active', $4, 'queued')")
+            .bind(reserved_material).bind(space_id).bind(user_id)
+            .bind(serde_json::json!({"format":"epub","source_name":"reserved.epub","source_hash":source_hash}))
+            .execute(&pool).await?;
+        sqlx::query("INSERT INTO import_jobs (job_id, user_id, space_id, status, stage, source_ref, result_material_id, idempotency_key, source_kind, lease_expires_at) VALUES ($1, $2, $3, 'reserving_source', 'source_accepted', $4, $5, 'reservation-present', 'epub', now() - interval '1 second')")
+            .bind(reserved_job).bind(user_id).bind(space_id)
+            .bind(serde_json::json!({"kind":"epub","blob_hash":source_hash,"file_name":"reserved.epub","media_type":SOURCE_MEDIA_TYPE,"device_id":device_id}))
+            .bind(reserved_material).execute(&pool).await?;
+
+        let missing_hash = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        let missing_material = Uuid::now_v7();
+        let missing_job = Uuid::now_v7();
+        sqlx::query("INSERT INTO materials (material_id, space_id, owner_user_id, kind, canonical_title, library_state, source_identity, import_status) VALUES ($1, $2, $3, 'telegram', 'missing source', 'active', $4, 'queued')")
+            .bind(missing_material).bind(space_id).bind(user_id)
+            .bind(serde_json::json!({"format":"telegram","source_name":"telegram:1/1","source_hash":missing_hash}))
+            .execute(&pool).await?;
+        sqlx::query("INSERT INTO import_jobs (job_id, user_id, space_id, status, stage, source_ref, result_material_id, idempotency_key, source_kind, lease_expires_at) VALUES ($1, $2, $3, 'reserving_source', 'source_accepted', $4, $5, 'reservation-missing', 'telegram', now() - interval '1 second')")
+            .bind(missing_job).bind(user_id).bind(space_id)
+            .bind(serde_json::json!({"kind":"telegram_text","snapshot_blob_hash":missing_hash,"device_id":device_id}))
+            .bind(missing_material).execute(&pool).await?;
+
+        let (first_recovery, second_recovery) =
+            tokio::join!(service.recover(), second_recoverer.recover());
+        first_recovery?;
+        second_recovery?;
+        let reserved_status: String =
+            sqlx::query_scalar("SELECT status FROM import_jobs WHERE job_id = $1")
+                .bind(reserved_job)
+                .fetch_one(&pool)
+                .await?;
+        assert_eq!(reserved_status, "queued");
+        let blob_recorded: bool =
+            sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM blobs WHERE content_hash = $1)")
+                .bind(&source_hash)
+                .fetch_one(&pool)
+                .await?;
+        assert!(blob_recorded);
+        let missing: (String, String) = sqlx::query_as(
+            "SELECT j.status, m.import_status FROM import_jobs j JOIN materials m ON m.material_id = j.result_material_id WHERE j.job_id = $1",
+        )
+        .bind(missing_job)
+        .fetch_one(&pool)
+        .await?;
+        assert_eq!(missing, ("failed".to_owned(), "failed".to_owned()));
+
+        let writer_source = b"writer-is-still-producing-source";
+        let writer_hash = content_hash(writer_source);
+        let writer_material = Uuid::now_v7();
+        let writer_job = Uuid::now_v7();
+        let writer_claim = Uuid::now_v7();
+        sqlx::query("INSERT INTO materials (material_id, space_id, owner_user_id, kind, canonical_title, library_state, source_identity, import_status) VALUES ($1, $2, $3, 'telegram', 'active reservation writer', 'active', $4, 'queued')")
+            .bind(writer_material).bind(space_id).bind(user_id)
+            .bind(serde_json::json!({"format":"telegram","source_name":"telegram:2/2","source_hash":writer_hash}))
+            .execute(&pool).await?;
+        sqlx::query("INSERT INTO import_jobs (job_id, user_id, space_id, status, stage, source_ref, result_material_id, idempotency_key, source_kind, worker_claim_id, lease_expires_at) VALUES ($1, $2, $3, 'reserving_source', 'source_accepted', $4, $5, 'reservation-active-writer', 'telegram', $6, now() + interval '100 milliseconds')")
+            .bind(writer_job).bind(user_id).bind(space_id)
+            .bind(serde_json::json!({"kind":"telegram_text","snapshot_blob_hash":writer_hash,"device_id":device_id}))
+            .bind(writer_material).bind(writer_claim).execute(&pool).await?;
+        let writer_heartbeat = service.spawn_reservation_heartbeat(writer_job, writer_claim);
+        tokio::time::sleep(std::time::Duration::from_millis(175)).await;
+        let (first_during_writer, second_during_writer) =
+            tokio::join!(service.recover(), second_recoverer.recover());
+        first_during_writer?;
+        second_during_writer?;
+        let writer_still_reserved: (String, Option<Uuid>) =
+            sqlx::query_as("SELECT status, worker_claim_id FROM import_jobs WHERE job_id = $1")
+                .bind(writer_job)
+                .fetch_one(&pool)
+                .await?;
+        assert_eq!(
+            writer_still_reserved,
+            ("reserving_source".to_owned(), Some(writer_claim))
+        );
+        service
+            .persist_reserved_blob(&PendingBlob {
+                hash: writer_hash,
+                media_type: "application/vnd.lumi.telegram-message+json",
+                bytes: writer_source.to_vec(),
+            })
+            .await?;
+        writer_heartbeat.abort();
+        service
+            .activate_reserved_source(writer_job, writer_claim)
+            .await?;
+        let writer_activated: String =
+            sqlx::query_scalar("SELECT status FROM import_jobs WHERE job_id = $1")
+                .bind(writer_job)
+                .fetch_one(&pool)
+                .await?;
+        assert_eq!(writer_activated, "queued");
+
+        let mutation_material = Uuid::now_v7();
+        let mutation_job = Uuid::now_v7();
+        sqlx::query("INSERT INTO materials (material_id, space_id, owner_user_id, kind, canonical_title, library_state, source_identity, import_status) VALUES ($1, $2, $3, 'web_page', 'atomic mutation', 'active', $4, 'queued')")
+            .bind(mutation_material).bind(space_id).bind(user_id)
+            .bind(serde_json::json!({"format":"web_page","source_name":"https://example.com","source_hash":"atomic"}))
+            .execute(&pool).await?;
+        sqlx::query("INSERT INTO import_jobs (job_id, user_id, space_id, status, stage, source_ref, result_material_id, idempotency_key, source_kind) VALUES ($1, $2, $3, 'queued', 'source_accepted', $4, $5, 'atomic-mutation', 'web_page')")
+            .bind(mutation_job).bind(user_id).bind(space_id)
+            .bind(serde_json::json!({"kind":"web_page","url":"https://example.com","snapshot_blob_hash":null,"device_id":device_id}))
+            .bind(mutation_material).execute(&pool).await?;
+        let suffix = Uuid::now_v7().simple().to_string();
+        let function_name = format!("lumi_test_fail_material_{suffix}");
+        let trigger_name = format!("lumi_test_fail_material_trigger_{suffix}");
+        let create_function = format!(
+            "CREATE FUNCTION {function_name}() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'forced material projection failure'; END $$"
+        );
+        sqlx::query(&create_function).execute(&pool).await?;
+        let create_trigger = format!(
+            "CREATE TRIGGER {trigger_name} BEFORE UPDATE ON materials FOR EACH ROW WHEN (OLD.material_id = '{mutation_material}'::uuid) EXECUTE FUNCTION {function_name}()"
+        );
+        sqlx::query(&create_trigger).execute(&pool).await?;
+        assert!(matches!(
+            service.cancel(user_id, mutation_job).await,
+            Err(ImportServiceError::Unavailable)
+        ));
+        let after_cancel: (String, String) = sqlx::query_as(
+            "SELECT j.status, m.import_status FROM import_jobs j JOIN materials m ON m.material_id = j.result_material_id WHERE j.job_id = $1",
+        )
+        .bind(mutation_job)
+        .fetch_one(&pool)
+        .await?;
+        assert_eq!(after_cancel, ("queued".to_owned(), "queued".to_owned()));
+        sqlx::query(&format!("DROP TRIGGER {trigger_name} ON materials"))
+            .execute(&pool)
+            .await?;
+        sqlx::query("UPDATE import_jobs SET status = 'failed' WHERE job_id = $1")
+            .bind(mutation_job)
+            .execute(&pool)
+            .await?;
+        sqlx::query("UPDATE materials SET import_status = 'failed' WHERE material_id = $1")
+            .bind(mutation_material)
+            .execute(&pool)
+            .await?;
+        sqlx::query(&create_trigger).execute(&pool).await?;
+        assert!(matches!(
+            service.retry(user_id, mutation_job).await,
+            Err(ImportServiceError::Unavailable)
+        ));
+        let after_retry: (String, String) = sqlx::query_as(
+            "SELECT j.status, m.import_status FROM import_jobs j JOIN materials m ON m.material_id = j.result_material_id WHERE j.job_id = $1",
+        )
+        .bind(mutation_job)
+        .fetch_one(&pool)
+        .await?;
+        assert_eq!(after_retry, ("failed".to_owned(), "failed".to_owned()));
+        sqlx::query(&format!("DROP TRIGGER {trigger_name} ON materials"))
+            .execute(&pool)
+            .await?;
+        sqlx::query(&format!("DROP FUNCTION {function_name}()"))
+            .execute(&pool)
+            .await?;
+
+        let session = AuthenticatedSession {
+            user_id,
+            session_id: Uuid::now_v7(),
+            device_id,
+            csrf_hash: [0; 32],
+        };
+        let lock_key = "nonblocking-idempotency";
+        let mut lock_tx = pool.begin().await?;
+        sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
+            .bind(format!("{space_id}:{lock_key}"))
+            .execute(&mut *lock_tx)
+            .await?;
+        assert!(matches!(
+            service
+                .accept_web(&session, "https://example.com/idempotent", lock_key)
+                .await,
+            Err(ImportServiceError::RateLimited)
+        ));
+        lock_tx.rollback().await?;
+
+        let heartbeat_service = Arc::new(ImportService::local(
+            pool.clone(),
+            blob_root.join("heartbeat"),
+        ));
+        let heartbeat_material = Uuid::now_v7();
+        let heartbeat_job = Uuid::now_v7();
+        sqlx::query("INSERT INTO materials (material_id, space_id, owner_user_id, kind, canonical_title, library_state, source_identity, import_status) VALUES ($1, $2, $3, 'epub', 'heartbeat cleanup', 'active', $4, 'queued')")
+            .bind(heartbeat_material).bind(space_id).bind(user_id)
+            .bind(serde_json::json!({"format":"epub","source_name":"heartbeat.epub","source_hash":missing_hash}))
+            .execute(&pool).await?;
+        sqlx::query("INSERT INTO import_jobs (job_id, user_id, space_id, status, stage, source_ref, result_material_id, idempotency_key, source_kind) VALUES ($1, $2, $3, 'queued', 'source_accepted', $4, $5, 'heartbeat-cleanup', 'epub')")
+            .bind(heartbeat_job).bind(user_id).bind(space_id)
+            .bind(serde_json::json!({"kind":"epub","blob_hash":missing_hash,"file_name":"heartbeat.epub","media_type":SOURCE_MEDIA_TYPE,"device_id":device_id}))
+            .bind(heartbeat_material).execute(&pool).await?;
+        let heartbeat_suffix = Uuid::now_v7().simple().to_string();
+        let heartbeat_function = format!("lumi_test_fail_stage_{heartbeat_suffix}");
+        let heartbeat_trigger = format!("lumi_test_fail_stage_trigger_{heartbeat_suffix}");
+        sqlx::query(&format!("CREATE FUNCTION {heartbeat_function}() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'forced worker infrastructure failure'; END $$"))
+            .execute(&pool).await?;
+        sqlx::query(&format!("CREATE TRIGGER {heartbeat_trigger} BEFORE UPDATE ON import_jobs FOR EACH ROW WHEN (OLD.job_id = '{heartbeat_job}'::uuid AND NEW.stage = 'validating_container') EXECUTE FUNCTION {heartbeat_function}()"))
+            .execute(&pool).await?;
+        assert!(matches!(
+            Arc::clone(&heartbeat_service).run(heartbeat_job).await,
+            Err(ImportServiceError::Unavailable)
+        ));
+        let old_claim: Uuid =
+            sqlx::query_scalar("SELECT worker_claim_id FROM import_jobs WHERE job_id = $1")
+                .bind(heartbeat_job)
+                .fetch_one(&pool)
+                .await?;
+        let lease_after_exit: OffsetDateTime =
+            sqlx::query_scalar("SELECT lease_expires_at FROM import_jobs WHERE job_id = $1")
+                .bind(heartbeat_job)
+                .fetch_one(&pool)
+                .await?;
+        tokio::time::sleep(std::time::Duration::from_millis(350)).await;
+        let lease_later: OffsetDateTime =
+            sqlx::query_scalar("SELECT lease_expires_at FROM import_jobs WHERE job_id = $1")
+                .bind(heartbeat_job)
+                .fetch_one(&pool)
+                .await?;
+        assert_eq!(lease_later, lease_after_exit);
+        sqlx::query(&format!("DROP TRIGGER {heartbeat_trigger} ON import_jobs"))
+            .execute(&pool)
+            .await?;
+        sqlx::query(&format!("DROP FUNCTION {heartbeat_function}()"))
+            .execute(&pool)
+            .await?;
+        sqlx::query("UPDATE import_jobs SET lease_expires_at = now() - interval '1 second' WHERE job_id = $1")
+            .bind(heartbeat_job).execute(&pool).await?;
+        heartbeat_service.recover().await?;
+        for _ in 0..100 {
+            let status: String =
+                sqlx::query_scalar("SELECT status FROM import_jobs WHERE job_id = $1")
+                    .bind(heartbeat_job)
+                    .fetch_one(&pool)
+                    .await?;
+            if status == "failed" {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        let recovered: (String, Option<Uuid>) =
+            sqlx::query_as("SELECT status, worker_claim_id FROM import_jobs WHERE job_id = $1")
+                .bind(heartbeat_job)
+                .fetch_one(&pool)
+                .await?;
+        assert_eq!(recovered, ("failed".to_owned(), None));
+        assert!(matches!(
+            heartbeat_service
+                .set_stage(heartbeat_job, old_claim, "persisting")
+                .await,
+            Err(ImportServiceError::Conflict)
+        ));
+        assert!(matches!(
+            heartbeat_service
+                .fail(
+                    heartbeat_job,
+                    old_claim,
+                    heartbeat_material,
+                    1,
+                    source_unavailable_diagnostic("epub"),
+                    false,
+                )
+                .await,
+            Err(ImportServiceError::Conflict)
+        ));
+        let _ = tokio::fs::remove_dir_all(blob_root).await;
         Ok(())
     }
 }
