@@ -6,6 +6,7 @@ export PATH
 
 install_dir=/opt/apps/lumi
 runner_release_root=/opt/infra/github-runner/zarya-main/_work/lumi/lumi/builds/releases
+runner_docker_config=/opt/infra/github-runner/zarya-main/_work/_temp/docker-config/config.json
 manifest=${1:?release manifest path is required}
 release=${2:?release id is required}
 
@@ -20,14 +21,40 @@ esac
 test -f "$manifest" || { echo "missing release manifest: $manifest" >&2; exit 2; }
 test ! -L "$manifest" || { echo "release manifest must not be a symlink" >&2; exit 2; }
 test -d "$install_dir/builds/releases" || { echo "Lumi installation is not bootstrapped" >&2; exit 2; }
+test -f "$runner_docker_config" || { echo "missing job-scoped GHCR login" >&2; exit 2; }
+
+# Never execute a runner-controlled credential helper as root. Copy only the
+# opaque ghcr.io auth value into a root-owned, job-scoped Docker config.
+jq -e '
+  type == "object" and
+  ((keys - ["auths"]) | length == 0) and
+  (.auths | type == "object") and
+  ((.auths | keys) == ["ghcr.io"]) and
+  (.auths["ghcr.io"] | type == "object") and
+  ((.auths["ghcr.io"] | keys) == ["auth"]) and
+  (.auths["ghcr.io"].auth | type == "string" and length > 0)
+' "$runner_docker_config" >/dev/null || { echo "unsafe job-scoped Docker config" >&2; exit 2; }
+
+root_docker_config=$(mktemp -d /run/lumi-docker-config.XXXXXX)
+cleanup() {
+  if [ -n "${temporary:-}" ]; then rm -f "$temporary"; fi
+  rm -f "$root_docker_config/config.json"
+  rmdir "$root_docker_config"
+}
+trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+umask 077
+jq -c '{auths: {"ghcr.io": {auth: .auths["ghcr.io"].auth}}}' \
+  "$runner_docker_config" > "$root_docker_config/config.json"
+DOCKER_CONFIG=$root_docker_config
+export DOCKER_CONFIG
 
 destination="$install_dir/builds/releases/$release.env.images"
 temporary="$destination.tmp.$$"
-trap 'rm -f "$temporary"' EXIT INT TERM
 install -m 0644 "$manifest" "$temporary"
 "$install_dir/scripts/validate-release-manifest.sh" "$temporary" "$release"
 mv "$temporary" "$destination"
-trap - EXIT INT TERM
 cd "$install_dir"
 make activate RELEASE="$release"
 make deploy
