@@ -43,6 +43,12 @@ class WorkflowContractTests(unittest.TestCase):
             for reference in references:
                 self.assertRegex(reference, r"^[0-9a-f]{40}$", path)
 
+    def test_runner_context_is_not_used_before_runner_start(self) -> None:
+        for path in sorted(WORKFLOWS.glob("*.yml")):
+            text = path.read_text(encoding="utf-8")
+            self.assertNotIn("DOCKER_CONFIG: ${{ runner.temp }}", text, path)
+            self.assertIn("${RUNNER_TEMP}/docker-config", text, path)
+
 
 class OperationsContractTests(unittest.TestCase):
     def test_required_make_targets_exist(self) -> None:
