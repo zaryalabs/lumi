@@ -42,8 +42,9 @@ Bootstrap меняет production state и выполняется операто
    и BusyBox images по digest. Установить mode `0600`.
 4. Убедиться, что external Docker network `platform` существует.
 5. Добавить узкое sudoers-правило для `runner`, разрешающее только
-   `/usr/local/sbin/lumi-ci-root-deploy`, и проверить production read login в
-   GHCR для root Docker config.
+   `/usr/local/sbin/lumi-ci-root-deploy`, и проверить наличие `jq`. Workflow
+   передаёт root wrapper только job-scoped GHCR auth; постоянный root Docker
+   login не нужен.
 6. Установить release manifest, активировать его и выполнить `make deploy`.
 
 Приложение использует `https://lumi.zrya.io`. Основной Web/API router закрыт

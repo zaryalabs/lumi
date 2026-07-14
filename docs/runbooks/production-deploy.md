@@ -64,9 +64,12 @@ ops/sudoers.example      -> /etc/sudoers.d/lumi-ci
 Создать server-owned `.env` по `ops/.env.example`, не копируя secrets в Git.
 Production third-party images должны быть digest-pinned. Проверить сеть
 `platform`, DNS `lumi.zrya.io` и возможность Traefik получить TLS certificate.
-Root Docker config должен иметь production read-доступ к GHCR. Sudoers template
-проверяется `visudo -cf ops/sudoers.example` до установки и содержит точное
-правило для `runner`:
+Deploy workflow создаёт job-scoped GHCR login. Root wrapper проверяет его
+строгую JSON-форму, копирует только opaque `ghcr.io` auth в root-owned runtime
+directory и удаляет после deploy; долгоживущий root PAT не требуется.
+`jq` должен быть установлен на target. Sudoers template проверяется
+`visudo -cf ops/sudoers.example` до установки и содержит точное правило для
+`runner`:
 
 ```sudoers
 runner ALL=(root) NOPASSWD: /usr/local/sbin/lumi-ci-root-deploy

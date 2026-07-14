@@ -89,6 +89,10 @@ class OperationsContractTests(unittest.TestCase):
         self.assertNotIn("docker system prune", text)
         self.assertNotRegex(text, r"(?m)^\s*\.\s+.*manifest")
         self.assertIn("validate-release-manifest.sh", text)
+        self.assertIn('keys - ["auths"]', text)
+        self.assertIn('keys) == ["ghcr.io"]', text)
+        self.assertNotIn("credsStore", text)
+        self.assertNotIn("credHelpers", text)
 
     def test_deploy_uses_ci_manifest_without_resolving_tags_again(self) -> None:
         text = (ROOT / "Makefile").read_text(encoding="utf-8")
