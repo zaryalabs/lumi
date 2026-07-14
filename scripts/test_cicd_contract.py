@@ -74,6 +74,12 @@ class OperationsContractTests(unittest.TestCase):
         }
         self.assertEqual(set(), required - targets)
 
+    def test_external_smoke_uses_server_owned_origin_without_sourcing_env(self) -> None:
+        text = (ROOT / "ops" / "Makefile").read_text(encoding="utf-8")
+        self.assertIn("s/^LUMI_WEB_ORIGIN=//p", text)
+        self.assertIn("*[!A-Za-z0-9.-]*", text)
+        self.assertNotRegex(text, r"(?m)^\s*\.\s+.*ENV_FILE")
+
     def test_root_wrapper_limits_manifest_source(self) -> None:
         text = (ROOT / "ops" / "lumi-ci-root").read_text(encoding="utf-8")
         self.assertIn(

@@ -9,7 +9,7 @@ RELEASES_DIR ?= builds/releases
 RELEASE ?=
 S ?=
 TAIL ?= 200
-LUMI_EXTERNAL_SMOKE_URL ?= https://lumi.zrya.io
+LUMI_EXTERNAL_SMOKE_URL ?=
 LUMI_BACKUP_DESTINATION_ENCRYPTED ?= 0
 
 COMPOSE_CMD = $(COMPOSE) --env-file $(ENV_FILE) --env-file $(IMAGE_ENV) -f $(COMPOSE_FILE)
@@ -70,6 +70,10 @@ down: require-files ## Stop Lumi without deleting product data
 
 smoke: require-files ## Check internal readiness and external Traefik routing
 	@set -eu; \
+		external_url="$(LUMI_EXTERNAL_SMOKE_URL)"; \
+		if [ -z "$$external_url" ]; then external_url="$$(sed -n 's/^LUMI_WEB_ORIGIN=//p' "$(ENV_FILE)")"; fi; \
+		case "$$external_url" in https://*) external_host="$${external_url#https://}" ;; *) echo "LUMI_WEB_ORIGIN must be HTTPS" >&2; exit 1 ;; esac; \
+		case "$$external_host" in ''|*[!A-Za-z0-9.-]*) echo "LUMI_WEB_ORIGIN must not contain a path, port or shell syntax" >&2; exit 1 ;; esac; \
 		attempt=1; \
 		while [ "$$attempt" -le 20 ]; do \
 			if $(COMPOSE_CMD) exec -T web wget --quiet --spider http://127.0.0.1:8080/api/v1/ready; then break; fi; \
@@ -77,7 +81,7 @@ smoke: require-files ## Check internal readiness and external Traefik routing
 			sleep 3; \
 		done; \
 		test "$$attempt" -le 20 || { $(COMPOSE_CMD) logs --tail=100 server web; exit 1; }; \
-		status="$$(curl --silent --show-error --output /dev/null --write-out '%{http_code}' "$(LUMI_EXTERNAL_SMOKE_URL)")"; \
+		status="$$(curl --silent --show-error --output /dev/null --write-out '%{http_code}' "$$external_url")"; \
 		case "$$status" in 200|401) ;; *) echo "External smoke returned HTTP $$status" >&2; exit 1 ;; esac; \
 		printf 'Lumi smoke passed (external HTTP %s)\n' "$$status"
 
