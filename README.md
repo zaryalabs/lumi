@@ -24,8 +24,9 @@ The current implementation target is the S1 Web Reader slice from
 importer, while public web URLs and text/link ingestion through a Telegram bot
 are included as deliberately narrow baseline sources. Persistent accounts,
 durable real EPUB import, the fully API-backed library and the working
-browser-measured paginated reader are implemented; the next step is annotations,
-progress UX and the shared source-ingestion baseline.
+browser-measured paginated reader, durable annotations, progress UX and the
+shared Web/Telegram source-ingestion baseline are implemented; the next step is
+UI/UX convergence.
 
 ## Local Setup
 

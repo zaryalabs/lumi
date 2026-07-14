@@ -1,0 +1,12 @@
+{
+  "update_id": 61012,
+  "telegram_user_id": 9001001,
+  "chat_id": 9001001,
+  "is_private_chat": true,
+  "message_id": 52,
+  "message_date": 1783890120,
+  "text": "Duplicate delivery creates exactly one material.",
+  "forwarded": false,
+  "forward_origin": null,
+  "has_unsupported_payload": false
+}

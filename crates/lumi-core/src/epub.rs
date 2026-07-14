@@ -1250,6 +1250,7 @@ fn internal_link(
         } else {
             ReadingLinkKind::Internal
         },
+        external_url: None,
     })
 }
 

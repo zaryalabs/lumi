@@ -135,8 +135,10 @@ test("persists an API-backed EPUB library lifecycle", async ({ page }) => {
   await expect(
     page.getByRole("region", { name: "Пустая библиотека" }),
   ).toBeVisible();
-  await page.getByRole("button", { name: "Добавить EPUB" }).click();
-  let uploadDialog = page.getByRole("dialog", { name: "Добавить EPUB" });
+  await page
+    .getByRole("button", { name: "＋ Добавить материал", exact: true })
+    .click();
+  let uploadDialog = page.getByRole("dialog", { name: "Добавить материал" });
   await uploadDialog.getByLabel("Файл EPUB").setInputFiles({
     name: "browser.epub",
     mimeType: "application/epub+zip",
@@ -154,6 +156,38 @@ test("persists an API-backed EPUB library lifecycle", async ({ page }) => {
   await expect(
     supportedCard.getByText("Готово", { exact: true }),
   ).toBeVisible();
+
+  await page
+    .getByRole("button", { name: "＋ Добавить материал", exact: true })
+    .click();
+  const webDialog = page.getByRole("dialog", { name: "Добавить материал" });
+  await webDialog.getByRole("tab", { name: "Web-ссылка" }).click();
+  await webDialog
+    .getByLabel("URL статьи")
+    .fill("https://fixtures.lumi.test/article");
+  await webDialog
+    .getByRole("button", { name: "Добавить в библиотеку" })
+    .click();
+  const webCard = page.getByRole("article", {
+    name: "Материал Фикстура web-статьи",
+  });
+  await expect(
+    webCard.getByText("Web · статья", { exact: true }),
+  ).toBeVisible();
+  await expect(webCard.getByText("Готово", { exact: true })).toBeVisible();
+  await webCard.getByRole("button", { name: "Читать" }).click();
+  const webReader = page.getByRole("main", {
+    name: "Чтение Фикстура web-статьи",
+  });
+  await expect(
+    webReader.getByText(/Первый абзац подтверждает импорт/),
+  ).toBeVisible();
+  const external = webReader.getByRole("link", {
+    name: "Открыть: безопасный источник",
+  });
+  await expect(external).toHaveAttribute("target", "_blank");
+  await expect(external).toHaveAttribute("rel", /noopener/);
+  await page.getByRole("button", { name: "Библиотека", exact: false }).click();
 
   await supportedCard.getByRole("button", { name: "Читать" }).click();
   const reader = page.getByRole("main", { name: "Чтение Stage Four Reader" });
@@ -286,8 +320,10 @@ test("persists an API-backed EPUB library lifecycle", async ({ page }) => {
   await expect(page.getByRole("article", { name: /Страница/ })).toBeVisible();
   await page.getByRole("button", { name: "Библиотека", exact: false }).click();
 
-  await page.getByRole("button", { name: "Добавить EPUB" }).click();
-  uploadDialog = page.getByRole("dialog", { name: "Добавить EPUB" });
+  await page
+    .getByRole("button", { name: "＋ Добавить материал", exact: true })
+    .click();
+  uploadDialog = page.getByRole("dialog", { name: "Добавить материал" });
   await uploadDialog.getByLabel("Файл EPUB").setInputFiles({
     name: "broken.epub",
     mimeType: "application/epub+zip",

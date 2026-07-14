@@ -5,9 +5,10 @@ use dioxus::prelude::*;
 use gloo_net::http::Request;
 use lumi_core::{
     decode_auth_bytes, encode_auth_bytes, AcceptedImport, AccountSummary, AuthChallenge,
-    ChallengeResponse, CompleteLoginRequest, CreateChallengeRequest, DerivedAuthMaterial, Job,
-    JobStatus, LibraryEntry, LibraryState, MaterialImportStatus, RegisterAccountRequest,
-    SessionBootstrap, UpdateLibraryStateCommand,
+    ChallengeResponse, CompleteLoginRequest, CreateChallengeRequest, DerivedAuthMaterial,
+    ImportWebUrlRequest, Job, JobStatus, LibraryEntry, LibraryState, MaterialImportStatus,
+    MaterialKind, RegisterAccountRequest, SessionBootstrap, TelegramConnectionStatus,
+    TelegramPairingResponse, UpdateLibraryStateCommand,
 };
 use uuid::Uuid;
 use wasm_bindgen::JsCast;
@@ -156,15 +157,27 @@ pub(crate) fn AccountGate() -> Element {
 fn LibraryApp(csrf_token: String, on_open_reader: EventHandler<Uuid>) -> Element {
     let mut entries = use_signal(|| Option::<Vec<LibraryEntry>>::None);
     let mut error = use_signal(String::new);
-    let mut upload_open = use_signal(|| false);
+    let mut add_open = use_signal(|| false);
     let mut details = use_signal(|| Option::<LibraryEntry>::None);
     let mut delete_candidate = use_signal(|| Option::<LibraryEntry>::None);
+    let mut telegram_status = use_signal(|| Option::<TelegramConnectionStatus>::None);
+    let mut telegram_pairing = use_signal(|| Option::<TelegramPairingResponse>::None);
+    let mut telegram_error = use_signal(String::new);
+    let mut telegram_busy = use_signal(|| false);
 
     use_effect(move || {
         spawn(async move {
             match load_materials().await {
                 Ok(loaded) => entries.set(Some(loaded)),
                 Err(load_error) => error.set(load_error.to_string()),
+            }
+        });
+    });
+    use_effect(move || {
+        spawn(async move {
+            match load_telegram_status().await {
+                Ok(status) => telegram_status.set(Some(status)),
+                Err(api_error) => telegram_error.set(api_error.to_string()),
             }
         });
     });
@@ -181,6 +194,8 @@ fn LibraryApp(csrf_token: String, on_open_reader: EventHandler<Uuid>) -> Element
         .filter(|entry| entry.library_state == LibraryState::Archived)
         .cloned()
         .collect::<Vec<_>>();
+    let telegram_unlink_csrf = csrf_token.clone();
+    let telegram_pairing_csrf = csrf_token.clone();
 
     rsx! {
         main { id: "library", class: "library-view", aria_label: "Библиотека Lumi",
@@ -188,13 +203,13 @@ fn LibraryApp(csrf_token: String, on_open_reader: EventHandler<Uuid>) -> Element
                 div {
                     p { class: "eyebrow", "Личное пространство" }
                     h1 { "Ваша библиотека" }
-                    p { class: "library-lead", "EPUB-материалы, сохранённые в вашей облачной реплике." }
+                    p { class: "library-lead", "EPUB, web-статьи и Telegram-тексты в вашей облачной библиотеке." }
                 }
                 button {
                     class: "primary-action add-material",
                     r#type: "button",
-                    onclick: move |_| upload_open.set(true),
-                    "＋ Добавить EPUB"
+                    onclick: move |_| add_open.set(true),
+                    "＋ Добавить материал"
                 }
             }
 
@@ -223,8 +238,8 @@ fn LibraryApp(csrf_token: String, on_open_reader: EventHandler<Uuid>) -> Element
                     div { class: "empty-glyph", aria_hidden: "true", "L" }
                     p { class: "eyebrow", "Первый материал" }
                     h2 { "Здесь пока тихо" }
-                    p { "Добавьте DRM-free reflowable EPUB — Lumi сохранит исходник и покажет честное состояние импорта." }
-                    button { class: "primary-action", r#type: "button", onclick: move |_| upload_open.set(true), "Выбрать EPUB" }
+                    p { "Добавьте DRM-free EPUB или публичную web-статью — Lumi сохранит исходник и покажет честное состояние импорта." }
+                    button { class: "primary-action", r#type: "button", onclick: move |_| add_open.set(true), "Добавить материал" }
                 }
             } else {
                 section { class: "library-section", aria_label: "Активные материалы",
@@ -255,6 +270,108 @@ fn LibraryApp(csrf_token: String, on_open_reader: EventHandler<Uuid>) -> Element
                                 on_error: move |message| error.set(message),
                             }
                         }
+                    }
+                }
+            }
+
+            section { class: "library-section telegram-connection", aria_label: "Подключение Telegram",
+                div { class: "section-heading",
+                    div {
+                        p { class: "eyebrow", "Источник" }
+                        h2 { "Telegram" }
+                    }
+                    span {
+                        if telegram_status.read().as_ref().is_some_and(|status| status.connected) {
+                            "Подключён"
+                        } else if telegram_status.read().is_none() && telegram_error().is_empty() {
+                            "Проверяем…"
+                        } else {
+                            "Не подключён"
+                        }
+                    }
+                }
+                p { "Привяжите личный чат, чтобы отправлять в Lumi текст, пересланные сообщения и одиночные web-ссылки. Текст и ограниченная атрибуция пересылки будут сохранены в вашем облачном аккаунте Lumi." }
+                if !telegram_error().is_empty() {
+                    p { class: "account-error", role: "status", "{telegram_error}" }
+                }
+                if let Some(pairing) = telegram_pairing.read().as_ref() {
+                    div { class: "library-alert", role: "status",
+                        p { "Одноразовый токен действует 10 минут:" }
+                        code { "{pairing.token}" }
+                        if let Some(link) = pairing.deep_link.as_ref() {
+                            a { class: "secondary-action", href: "{link}", target: "_blank", rel: "noopener noreferrer", "Открыть Telegram" }
+                        }
+                    }
+                }
+                div { class: "material-actions",
+                    if telegram_status.read().as_ref().is_some_and(|status| status.connected) {
+                        button { class: "secondary-action", r#type: "button", disabled: telegram_busy(), onclick: move |_| {
+                            let csrf = telegram_unlink_csrf.clone();
+                            telegram_busy.set(true);
+                            telegram_error.set(String::new());
+                            spawn(async move {
+                                match unlink_telegram(&csrf).await {
+                                    Ok(()) => {
+                                        telegram_pairing.set(None);
+                                        telegram_status.set(Some(TelegramConnectionStatus {
+                                            connected: false,
+                                            telegram_user_id: None,
+                                            linked_at: None,
+                                            pairing_expires_at: None,
+                                        }));
+                                        match load_telegram_status().await {
+                                            Ok(status) => telegram_status.set(Some(status)),
+                                            Err(api_error) => telegram_error.set(api_error.to_string()),
+                                        }
+                                    }
+                                    Err(api_error) => telegram_error.set(api_error.to_string()),
+                                }
+                                telegram_busy.set(false);
+                            });
+                        }, if telegram_busy() { "Отключаем…" } else { "Отключить Telegram" } }
+                    } else {
+                        button { class: "secondary-action", r#type: "button", disabled: telegram_busy() || telegram_pairing.read().is_some(), onclick: move |_| {
+                            let csrf = telegram_pairing_csrf.clone();
+                            telegram_busy.set(true);
+                            telegram_error.set(String::new());
+                            telegram_pairing.set(None);
+                            spawn(async move {
+                                match create_telegram_pairing(&csrf).await {
+                                    Ok(pairing) => {
+                                        let expires_at = pairing.expires_at;
+                                        telegram_pairing.set(Some(pairing));
+                                        telegram_busy.set(false);
+                                        loop {
+                                            browser_delay(2_000).await;
+                                            if js_sys::Date::now() as u64 >= expires_at {
+                                                telegram_pairing.set(None);
+                                                telegram_error.set("Одноразовый токен истёк. Создайте новый.".to_owned());
+                                                break;
+                                            }
+                                            match load_telegram_status().await {
+                                                Ok(status) if status.connected => {
+                                                    telegram_status.set(Some(status));
+                                                    telegram_pairing.set(None);
+                                                    telegram_error.set(String::new());
+                                                    break;
+                                                }
+                                                Ok(status) => {
+                                                    telegram_status.set(Some(status));
+                                                    telegram_error.set(String::new());
+                                                }
+                                                Err(api_error) => {
+                                                    telegram_error.set(format!("{} Повторяем проверку…", api_error));
+                                                }
+                                            }
+                                        }
+                                    }
+                                    Err(api_error) => {
+                                        telegram_error.set(api_error.to_string());
+                                        telegram_busy.set(false);
+                                    }
+                                }
+                            });
+                        }, if telegram_busy() { "Создаём токен…" } else if telegram_pairing.read().is_some() { "Ожидаем Telegram…" } else { "Подключить Telegram" } }
                     }
                 }
             }
@@ -292,10 +409,10 @@ fn LibraryApp(csrf_token: String, on_open_reader: EventHandler<Uuid>) -> Element
             }
         }
 
-        if upload_open() {
-            UploadDialog {
+        if add_open() {
+            AddMaterialDialog {
                 csrf_token: csrf_token.clone(),
-                on_close: move |_| upload_open.set(false),
+                on_close: move |_| add_open.set(false),
                 on_accepted: move |accepted: AcceptedImport| {
                     spawn(async move {
                         if let Ok(loaded) = load_materials().await {
@@ -355,6 +472,9 @@ fn MaterialCard(
     let status_label = material_status_label(entry.import_status);
     let status_class = material_status_class(entry.import_status);
     let title = entry.display_title().to_owned();
+    let format_short = material_format_short(&entry.kind);
+    let format_label = material_format_label(&entry.kind);
+    let source_download_label = material_source_download_label(&entry.kind);
     let material_id = entry.id;
     let job_id = entry.latest_job.id;
     let archived = entry.library_state == LibraryState::Archived;
@@ -371,13 +491,13 @@ fn MaterialCard(
     rsx! {
         article { class: "material-card", aria_label: "Материал {title}",
             div { class: "material-cover", "data-state": "{status_class}", aria_hidden: "true",
-                span { "EPUB" }
+                span { "{format_short}" }
                 strong { "{cover_monogram(&title)}" }
             }
             div { class: "material-copy",
                 div { class: "material-card-heading",
                     div {
-                        span { class: "format-label", "EPUB · книга" }
+                        span { class: "format-label", "{format_label}" }
                         h3 { "{title}" }
                     }
                     span { class: "status-pill {status_class}", "{status_label}" }
@@ -401,7 +521,7 @@ fn MaterialCard(
                         button { class: "read-action", r#type: "button", onclick: move |_| on_open_reader.call(material_id), "Читать" }
                     }
                     button { class: "text-action", r#type: "button", onclick: move |_| on_details.call(details_entry.clone()), "Сведения" }
-                    a { class: "text-action", href: "{API_BASE}/materials/{material_id}/source", "Скачать исходник" }
+                    a { class: "text-action", href: "{API_BASE}/materials/{material_id}/source", "{source_download_label}" }
                     if matches!(entry.latest_job.status, JobStatus::Queued | JobStatus::Running) {
                         button { class: "text-action", r#type: "button", onclick: move |_| {
                             let csrf = cancel_job_csrf.clone();
@@ -454,44 +574,70 @@ struct SelectedEpub {
     bytes: Vec<u8>,
 }
 
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum AddSourceMode {
+    Epub,
+    Web,
+}
+
 #[component]
-fn UploadDialog(
+fn AddMaterialDialog(
     csrf_token: String,
     on_close: EventHandler<()>,
     on_accepted: EventHandler<AcceptedImport>,
 ) -> Element {
+    let mut mode = use_signal(|| AddSourceMode::Epub);
     let mut selected = use_signal(|| Option::<SelectedEpub>::None);
+    let mut url = use_signal(String::new);
     let mut busy = use_signal(|| false);
     let mut error = use_signal(String::new);
     rsx! {
-        dialog { class: "library-dialog upload-dialog", open: true, aria_label: "Добавить EPUB",
+        dialog { class: "library-dialog upload-dialog", open: true, aria_label: "Добавить материал",
             div { class: "dialog-heading",
                 div {
                     p { class: "eyebrow", "Новый материал" }
-                    h2 { "Добавить EPUB" }
+                    h2 { "Добавить материал" }
                 }
                 button { class: "icon-action", r#type: "button", aria_label: "Закрыть загрузку", disabled: busy(), onclick: move |_| on_close.call(()), "×" }
             }
-            p { "DRM-free reflowable EPUB до 100 MiB. Исходник сохраняется до запуска безопасного импортера." }
-            label { class: "upload-dropzone",
-                span { class: "upload-icon", aria_hidden: "true", "＋" }
-                strong { if let Some(upload) = selected.read().as_ref() { "{upload.name}" } else { "Выберите файл EPUB" } }
-                small { if let Some(upload) = selected.read().as_ref() { "{upload.bytes.len()} байт" } else { ".epub · до 100 MiB" } }
-                input {
-                    r#type: "file",
-                    accept: ".epub,application/epub+zip",
-                    disabled: busy(),
-                    aria_label: "Файл EPUB",
-                    onchange: move |event| {
-                        let Some(file) = event.files().into_iter().next() else { return; };
-                        spawn(async move {
-                            let name = file.name();
-                            match file.read_bytes().await {
-                                Ok(bytes) => selected.set(Some(SelectedEpub { name, bytes: bytes.to_vec() })),
-                                Err(_) => error.set("Не удалось прочитать выбранный EPUB.".to_owned()),
-                            }
-                        });
-                    },
+            div { class: "material-actions", role: "tablist", aria_label: "Тип источника",
+                button { class: "secondary-action", r#type: "button", role: "tab", aria_selected: mode() == AddSourceMode::Epub, onclick: move |_| mode.set(AddSourceMode::Epub), "EPUB" }
+                button { class: "secondary-action", r#type: "button", role: "tab", aria_selected: mode() == AddSourceMode::Web, onclick: move |_| mode.set(AddSourceMode::Web), "Web-ссылка" }
+            }
+            if mode() == AddSourceMode::Epub {
+                p { "DRM-free reflowable EPUB до 100 MiB. Исходник сохраняется до запуска безопасного импортера." }
+                label { class: "upload-dropzone",
+                    span { class: "upload-icon", aria_hidden: "true", "＋" }
+                    strong { if let Some(upload) = selected.read().as_ref() { "{upload.name}" } else { "Выберите файл EPUB" } }
+                    small { if let Some(upload) = selected.read().as_ref() { "{upload.bytes.len()} байт" } else { ".epub · до 100 MiB" } }
+                    input {
+                        r#type: "file",
+                        accept: ".epub,application/epub+zip",
+                        disabled: busy(),
+                        aria_label: "Файл EPUB",
+                        onchange: move |event| {
+                            let Some(file) = event.files().into_iter().next() else { return; };
+                            spawn(async move {
+                                let name = file.name();
+                                match file.read_bytes().await {
+                                    Ok(bytes) => selected.set(Some(SelectedEpub { name, bytes: bytes.to_vec() })),
+                                    Err(_) => error.set("Не удалось прочитать выбранный EPUB.".to_owned()),
+                                }
+                            });
+                        },
+                    }
+                }
+            } else {
+                p { "Укажите публичный HTTP(S) URL статьи. Lumi ограниченно загрузит HTML, сохранит snapshot и извлечёт основной текст." }
+                label { class: "account-field",
+                    span { "URL статьи" }
+                    input {
+                        r#type: "url",
+                        value: "{url}",
+                        placeholder: "https://example.org/article",
+                        disabled: busy(),
+                        oninput: move |event| url.set(event.value()),
+                    }
                 }
             }
             if !error().is_empty() {
@@ -499,13 +645,22 @@ fn UploadDialog(
             }
             div { class: "dialog-actions",
                 button { class: "secondary-action", r#type: "button", disabled: busy(), onclick: move |_| on_close.call(()), "Отмена" }
-                button { class: "primary-action", r#type: "button", disabled: busy() || selected.read().is_none(), onclick: move |_| {
-                    let Some(upload) = selected.read().clone() else { return; };
+                button { class: "primary-action", r#type: "button", disabled: busy() || (mode() == AddSourceMode::Epub && selected.read().is_none()) || (mode() == AddSourceMode::Web && url().trim().is_empty()), onclick: move |_| {
+                    let selected_upload = selected.read().clone();
+                    let source_url = url();
+                    let source_mode = mode();
                     let csrf = csrf_token.clone();
                     busy.set(true);
                     error.set(String::new());
                     spawn(async move {
-                        match upload_epub(&csrf, &upload).await {
+                        let result = match source_mode {
+                            AddSourceMode::Epub => match selected_upload.as_ref() {
+                                Some(upload) => upload_epub(&csrf, upload).await,
+                                None => return,
+                            },
+                            AddSourceMode::Web => import_web_url(&csrf, source_url.trim()).await,
+                        };
+                        match result {
                             Ok(accepted) => {
                                 on_accepted.call(accepted);
                                 on_close.call(());
@@ -528,6 +683,7 @@ fn MaterialDetailsDialog(entry: LibraryEntry, on_close: EventHandler<()>) -> Ele
         .active_revision_id
         .map(|id| id.to_string())
         .unwrap_or_else(|| "будет создана после импорта".to_owned());
+    let download_label = material_source_download_label(&entry.kind);
     rsx! {
         dialog { class: "library-dialog details-dialog", open: true, aria_label: "Сведения о материале",
             div { class: "dialog-heading",
@@ -553,7 +709,7 @@ fn MaterialDetailsDialog(entry: LibraryEntry, on_close: EventHandler<()>) -> Ele
                 }
             }
             div { class: "dialog-actions",
-                a { class: "secondary-action", href: "{API_BASE}/materials/{entry.id}/source", "Скачать исходник" }
+                a { class: "secondary-action", href: "{API_BASE}/materials/{entry.id}/source", "{download_label}" }
                 button { class: "primary-action", r#type: "button", onclick: move |_| on_close.call(()), "Готово" }
             }
         }
@@ -755,6 +911,51 @@ async fn upload_epub(csrf: &str, upload: &SelectedEpub) -> Result<AcceptedImport
     parse_json(response).await
 }
 
+async fn import_web_url(csrf: &str, url: &str) -> Result<AcceptedImport, ApiError> {
+    let request = Request::post(&format!("{API_BASE}/imports/url"))
+        .credentials(RequestCredentials::Include)
+        .header("X-Lumi-CSRF", csrf)
+        .header("Idempotency-Key", &Uuid::now_v7().to_string())
+        .json(&ImportWebUrlRequest {
+            url: url.to_owned(),
+        })
+        .map_err(network_error)?;
+    parse_json(request.send().await.map_err(network_error)?).await
+}
+
+async fn load_telegram_status() -> Result<TelegramConnectionStatus, ApiError> {
+    let response = Request::get(&format!("{API_BASE}/providers/telegram/connection"))
+        .credentials(RequestCredentials::Include)
+        .send()
+        .await
+        .map_err(network_error)?;
+    parse_json(response).await
+}
+
+async fn create_telegram_pairing(csrf: &str) -> Result<TelegramPairingResponse, ApiError> {
+    let response = Request::post(&format!("{API_BASE}/providers/telegram/pairing"))
+        .credentials(RequestCredentials::Include)
+        .header("X-Lumi-CSRF", csrf)
+        .send()
+        .await
+        .map_err(network_error)?;
+    parse_json(response).await
+}
+
+async fn unlink_telegram(csrf: &str) -> Result<(), ApiError> {
+    let response = Request::delete(&format!("{API_BASE}/providers/telegram/connection"))
+        .credentials(RequestCredentials::Include)
+        .header("X-Lumi-CSRF", csrf)
+        .send()
+        .await
+        .map_err(network_error)?;
+    if response.ok() {
+        Ok(())
+    } else {
+        Err(api_response_error(&response))
+    }
+}
+
 async fn change_library_state(
     material_id: Uuid,
     library_state: LibraryState,
@@ -853,11 +1054,38 @@ fn material_status_class(status: MaterialImportStatus) -> &'static str {
 fn job_stage_label(stage: lumi_core::JobStage) -> &'static str {
     match stage {
         lumi_core::JobStage::SourceAccepted => "Исходник сохранён",
+        lumi_core::JobStage::FetchingSource => "Загружаем страницу",
+        lumi_core::JobStage::CapturingSnapshot => "Сохраняем snapshot",
+        lumi_core::JobStage::ExtractingContent => "Извлекаем основной текст",
         lumi_core::JobStage::ValidatingContainer => "Проверяем контейнер",
         lumi_core::JobStage::Normalizing => "Нормализуем главы",
         lumi_core::JobStage::Persisting => "Публикуем результат",
         lumi_core::JobStage::ReaderDocumentBuilt => "Готовим документ чтения",
         lumi_core::JobStage::Committed => "Импорт завершён",
+    }
+}
+
+fn material_format_short(kind: &MaterialKind) -> &'static str {
+    match kind {
+        MaterialKind::Epub => "EPUB",
+        MaterialKind::WebPage => "WEB",
+        MaterialKind::Telegram => "TG",
+    }
+}
+
+fn material_format_label(kind: &MaterialKind) -> &'static str {
+    match kind {
+        MaterialKind::Epub => "EPUB · книга",
+        MaterialKind::WebPage => "Web · статья",
+        MaterialKind::Telegram => "Telegram · текст",
+    }
+}
+
+fn material_source_download_label(kind: &MaterialKind) -> &'static str {
+    match kind {
+        MaterialKind::Epub => "Скачать исходник",
+        MaterialKind::WebPage => "Скачать snapshot",
+        MaterialKind::Telegram => "Скачать сохранённый текст",
     }
 }
 
