@@ -1,11 +1,12 @@
 //! Safe DRM-free EPUB import into Lumi's normalized reader contracts.
 
+use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 use std::io::{Cursor, Read};
 
 use ammonia::Builder;
-use quick_xml::events::{BytesStart, Event};
-use quick_xml::{Reader, XmlVersion};
+use quick_xml::events::{BytesEnd, BytesStart, Event};
+use quick_xml::{Reader, Writer, XmlVersion};
 use scraper::{Html, Selector};
 use serde::Serialize;
 use thiserror::Error;
@@ -185,6 +186,9 @@ pub enum EpubImportError {
     /// Publication requires DRM or fixed-layout support outside S1.
     #[error("unsupported EPUB publication: {0}")]
     UnsupportedPublication(&'static str),
+    /// No linear spine document produced reader content or a safe placeholder.
+    #[error("EPUB has no readable linear spine items")]
+    NoReadableSpine,
     /// ZIP reader failure.
     #[error("invalid EPUB ZIP container: {0}")]
     Zip(#[from] zip::result::ZipError),
@@ -215,6 +219,7 @@ impl EpubImportError {
             Self::Xml(_) => "epub_invalid_xml",
             Self::InvalidReference(_) => "epub_invalid_reference",
             Self::UnsupportedPublication(_) => "epub_unsupported_publication",
+            Self::NoReadableSpine => "epub_no_readable_spine",
             Self::Zip(_) => "epub_invalid_zip",
             Self::Io(_) => "epub_read_failed",
             Self::Serialization(_) => "epub_normalization_failed",
@@ -273,6 +278,14 @@ where
             "mimetype must contain application/epub+zip without padding",
         ));
     }
+    let mut diagnostics = Vec::new();
+    if !archive_summary.mimetype_is_canonical {
+        diagnostics.push(warning(
+            "epub_mimetype_noncanonical",
+            "The EPUB mimetype entry was accepted but is not the first stored ZIP entry.",
+            Some("mimetype".to_owned()),
+        ));
+    }
 
     let container = read_entry(
         &mut archive,
@@ -304,7 +317,7 @@ where
         source_name: request.source_name.to_owned(),
         source_hash: source_hash.clone(),
     };
-    let (resources, resource_hashes, mut diagnostics) = extract_resources(
+    let (resources, resource_hashes, mut resource_diagnostics) = extract_resources(
         &mut archive,
         &archive_summary.names,
         &package_path,
@@ -312,6 +325,7 @@ where
         limits,
         &is_cancelled,
     )?;
+    diagnostics.append(&mut resource_diagnostics);
     let normalized = normalize_spine(
         &mut archive,
         &archive_summary.names,
@@ -332,7 +346,7 @@ where
         limits,
         &is_cancelled,
     )?
-    .unwrap_or_else(|| fallback_navigation(&normalized.units));
+    .unwrap_or_else(|| fallback_navigation(&normalized.units, &normalized.nodes));
     if navigation.is_empty() {
         diagnostics.push(warning(
             "epub_navigation_missing",
@@ -426,6 +440,7 @@ fn check_cancelled(is_cancelled: &impl Fn() -> bool) -> Result<(), EpubImportErr
 #[derive(Debug)]
 struct ArchiveSummary {
     names: HashSet<String>,
+    mimetype_is_canonical: bool,
 }
 
 fn validate_archive(
@@ -441,6 +456,7 @@ fn validate_archive(
     }
 
     let mut names = HashSet::with_capacity(archive.len());
+    let mut mimetype_is_canonical = false;
     let mut expanded_bytes = 0_u64;
     let mut compressed_bytes = 0_u64;
     for index in 0..archive.len() {
@@ -478,10 +494,8 @@ fn validate_archive(
                 reason: "only stored and Deflate entries are supported",
             });
         }
-        if index == 0 && (path != "mimetype" || entry.compression() != CompressionMethod::Stored) {
-            return Err(EpubImportError::InvalidContainer(
-                "mimetype must be the first stored ZIP entry",
-            ));
+        if path == "mimetype" {
+            mimetype_is_canonical = index == 0 && entry.compression() == CompressionMethod::Stored;
         }
         if entry.size() > limits.resource_bytes {
             return Err(EpubImportError::EntryTooLarge {
@@ -514,7 +528,10 @@ fn validate_archive(
         limits.compression_ratio,
         "<archive>",
     )?;
-    Ok(ArchiveSummary { names })
+    Ok(ArchiveSummary {
+        names,
+        mimetype_is_canonical,
+    })
 }
 
 fn ensure_ratio(
@@ -843,8 +860,25 @@ fn extract_resources(
         {
             continue;
         }
-        let path = resolve_reference(package_path, &item.href)?;
-        ensure_known_entry(names, &path)?;
+        let path = match resolve_reference(package_path, &item.href) {
+            Ok(path) => path,
+            Err(_) => {
+                diagnostics.push(warning(
+                    "epub_resource_unavailable",
+                    "An optional EPUB resource reference was invalid and was omitted.",
+                    Some(redact_reference(&item.href)),
+                ));
+                continue;
+            }
+        };
+        if !names.contains(&path) {
+            diagnostics.push(warning(
+                "epub_resource_unavailable",
+                "An optional EPUB resource was missing and was omitted.",
+                Some(path),
+            ));
+            continue;
+        }
         if item.media_type == "image/svg+xml" {
             diagnostics.push(warning(
                 "epub_svg_resource_omitted",
@@ -895,13 +929,14 @@ fn normalize_spine(
     let mut documents = Vec::new();
     for spine_item in package.spine.iter().filter(|item| item.linear) {
         check_cancelled(is_cancelled)?;
-        let item =
-            package
-                .manifest
-                .get(&spine_item.idref)
-                .ok_or(EpubImportError::InvalidContainer(
-                    "OPF spine does not resolve to a manifest item",
-                ))?;
+        let Some(item) = package.manifest.get(&spine_item.idref) else {
+            diagnostics.push(warning(
+                "epub_spine_item_skipped",
+                "A spine item that did not resolve to the OPF manifest was skipped.",
+                Some(spine_item.idref.clone()),
+            ));
+            continue;
+        };
         if !is_content_document(&item.media_type) {
             diagnostics.push(warning(
                 "epub_spine_media_type_unsupported",
@@ -910,8 +945,25 @@ fn normalize_spine(
             ));
             continue;
         }
-        let path = resolve_reference(package_path, &item.href)?;
-        ensure_known_entry(names, &path)?;
+        let path = match resolve_reference(package_path, &item.href) {
+            Ok(path) => path,
+            Err(_) => {
+                diagnostics.push(warning(
+                    "epub_spine_item_skipped",
+                    "A spine item with an invalid content reference was skipped.",
+                    Some(redact_reference(&item.href)),
+                ));
+                continue;
+            }
+        };
+        if !names.contains(&path) {
+            diagnostics.push(warning(
+                "epub_spine_item_skipped",
+                "A spine content document that was missing from the archive was skipped.",
+                Some(path),
+            ));
+            continue;
+        }
         let unit_index = documents.len();
         unit_paths.insert(path.clone(), vec![format!("unit-{unit_index}")]);
         documents.push((spine_item.idref.clone(), path));
@@ -919,7 +971,7 @@ fn normalize_spine(
     for (unit_index, (spine_idref, path)) in documents.into_iter().enumerate() {
         check_cancelled(is_cancelled)?;
         let content = read_entry(archive, &path, limits.content_document_bytes, is_cancelled)?;
-        let normalized = normalize_content_document(
+        let outcome = normalize_content_document(
             &content,
             package_path,
             &spine_idref,
@@ -928,15 +980,42 @@ fn normalize_spine(
             resources,
             &unit_paths,
         )?;
-        diagnostics.extend(normalized.diagnostics);
-        blocks.extend(normalized.blocks.clone());
-        unit_paths.insert(path, normalized.node.path.clone());
-        nodes.push(normalized.node);
-        units.push(normalized.unit);
+        match outcome {
+            NormalizedContentOutcome::Imported(normalized) => {
+                let normalized = *normalized;
+                diagnostics.extend(normalized.diagnostics);
+                unit_paths.insert(path, normalized.node.path.clone());
+                blocks.extend(normalized.blocks);
+                nodes.push(normalized.node);
+                units.push(normalized.unit);
+            }
+            NormalizedContentOutcome::Skipped(diagnostic) => {
+                unit_paths.remove(&path);
+                diagnostics.push(diagnostic);
+            }
+        }
     }
     if units.is_empty() {
-        return Err(EpubImportError::InvalidContainer(
-            "EPUB has no readable linear spine items",
+        return Err(EpubImportError::NoReadableSpine);
+    }
+    let mut valid_paths = HashSet::new();
+    for node in &nodes {
+        collect_node_paths(node, &mut valid_paths);
+    }
+    let removed_links = nodes
+        .iter_mut()
+        .map(|node| prune_dangling_links(node, &valid_paths))
+        .sum::<usize>();
+    for block in &mut blocks {
+        block
+            .links
+            .retain(|link| valid_paths.contains(&link.target_path));
+    }
+    if removed_links > 0 {
+        diagnostics.push(warning(
+            "epub_internal_link_target_unresolved",
+            "Internal links to skipped or unavailable EPUB content were omitted.",
+            None,
         ));
     }
     Ok(NormalizedSpine {
@@ -948,11 +1027,35 @@ fn normalize_spine(
     })
 }
 
+fn collect_node_paths(node: &ReadingNode, paths: &mut HashSet<Vec<String>>) {
+    paths.insert(node.path.clone());
+    for child in &node.children {
+        collect_node_paths(child, paths);
+    }
+}
+
+fn prune_dangling_links(node: &mut ReadingNode, valid_paths: &HashSet<Vec<String>>) -> usize {
+    let original_len = node.links.len();
+    node.links
+        .retain(|link| valid_paths.contains(&link.target_path));
+    original_len - node.links.len()
+        + node
+            .children
+            .iter_mut()
+            .map(|child| prune_dangling_links(child, valid_paths))
+            .sum::<usize>()
+}
+
 struct NormalizedContentDocument {
     unit: ContentUnit,
     blocks: Vec<ContentBlock>,
     node: ReadingNode,
     diagnostics: Vec<ImportDiagnostic>,
+}
+
+enum NormalizedContentOutcome {
+    Imported(Box<NormalizedContentDocument>),
+    Skipped(ImportDiagnostic),
 }
 
 fn normalize_content_document(
@@ -963,8 +1066,34 @@ fn normalize_content_document(
     unit_index: usize,
     resources: &ResourceHashes,
     unit_paths: &HashMap<String, Vec<String>>,
-) -> Result<NormalizedContentDocument, EpubImportError> {
+) -> Result<NormalizedContentOutcome, EpubImportError> {
     let source = String::from_utf8_lossy(content);
+    let html_source = html_parser_source(&source);
+    let raw_document = Html::parse_document(html_source.as_ref());
+    let raw_svg_selector =
+        Selector::parse("svg").map_err(|error| EpubImportError::Xml(error.to_string()))?;
+    let raw_svg_image_selector =
+        Selector::parse("image").map_err(|error| EpubImportError::Xml(error.to_string()))?;
+    let mut svg_projections = raw_document
+        .select(&raw_svg_selector)
+        .map(|svg| {
+            svg.select(&raw_svg_image_selector).find_map(|image| {
+                let mut href = None;
+                let mut label = None;
+                for (name, value) in image.value().attrs() {
+                    match name {
+                        "href" => href = Some(value),
+                        "alt" | "aria-label" if label.is_none() => label = Some(value),
+                        _ => {}
+                    }
+                }
+                let resolved = resolve_reference(content_path, href?).ok()?;
+                let hash = resources.get(&resolved)?.clone();
+                Some((label.unwrap_or("Illustration").to_owned(), hash))
+            })
+        })
+        .collect::<Vec<_>>()
+        .into_iter();
     let allowed_tags = [
         "html",
         "head",
@@ -1004,6 +1133,7 @@ fn normalize_content_document(
         "sup",
         "span",
         "br",
+        "svg",
     ]
     .into_iter()
     .collect::<HashSet<_>>();
@@ -1012,10 +1142,10 @@ fn normalize_content_document(
     // Source ids are parsed only into normalized target paths and are never
     // rendered as raw EPUB markup. Retaining them here preserves footnotes.
     sanitizer.generic_attributes(["id"].into_iter().collect());
-    let cleaned = sanitizer.clean(&source).to_string();
+    let cleaned = sanitizer.clean(html_source.as_ref()).to_string();
     let document = Html::parse_document(&cleaned);
     let selector =
-        Selector::parse("h1,h2,h3,h4,h5,h6,p,blockquote,li,pre,table,figcaption,aside,img,hr")
+        Selector::parse("h1,h2,h3,h4,h5,h6,p,blockquote,li,pre,table,figcaption,aside,img,hr,svg")
             .map_err(|error| EpubImportError::Xml(error.to_string()))?;
     let unit_path = vec![format!("unit-{unit_index}")];
     let target_paths = document
@@ -1070,6 +1200,30 @@ fn normalize_content_document(
                     ));
                 }
                 (ReadingNodeKind::Image, alt, hash)
+            }
+            "svg" => {
+                let projected = svg_projections.next().flatten();
+                if let Some((label, hash)) = projected {
+                    diagnostics.push(warning(
+                        "epub_svg_image_projected",
+                        "An SVG image wrapper was projected to its safe local image resource.",
+                        Some(content_path.to_owned()),
+                    ));
+                    (ReadingNodeKind::Image, label, Some(hash))
+                } else {
+                    diagnostics.push(warning(
+                        "epub_unsupported_block_placeholder",
+                        "Unsupported SVG content was replaced with a reader placeholder.",
+                        Some(content_path.to_owned()),
+                    ));
+                    (
+                        ReadingNodeKind::PluginPlaceholder {
+                            capability: "epub.svg".to_owned(),
+                        },
+                        "SVG content".to_owned(),
+                        None,
+                    )
+                }
             }
             _ => (ReadingNodeKind::Paragraph, text, None),
         };
@@ -1156,9 +1310,11 @@ fn normalize_content_document(
         }
     }
     if children.is_empty() {
-        return Err(EpubImportError::InvalidContainer(
-            "spine content document has no readable content",
-        ));
+        return Ok(NormalizedContentOutcome::Skipped(warning(
+            "epub_spine_item_skipped",
+            "A linear spine item with no readable content was skipped.",
+            Some(content_path.to_owned()),
+        )));
     }
 
     let title = children
@@ -1199,12 +1355,68 @@ fn normalize_content_document(
         links: Vec::new(),
         children,
     };
-    Ok(NormalizedContentDocument {
-        unit,
-        blocks,
-        node,
-        diagnostics,
-    })
+    Ok(NormalizedContentOutcome::Imported(Box::new(
+        NormalizedContentDocument {
+            unit,
+            blocks,
+            node,
+            diagnostics,
+        },
+    )))
+}
+
+fn html_parser_source(source: &str) -> Cow<'_, str> {
+    let mut reader = Reader::from_str(source);
+    let mut writer = Writer::new(Vec::with_capacity(source.len()));
+    let mut changed = false;
+    loop {
+        let event = match reader.read_event() {
+            Ok(Event::Empty(element)) if !is_html_void_element(element.local_name().as_ref()) => {
+                let name = String::from_utf8_lossy(element.name().as_ref()).into_owned();
+                if writer
+                    .write_event(Event::Start(element.into_owned()))
+                    .and_then(|()| writer.write_event(Event::End(BytesEnd::new(name))))
+                    .is_err()
+                {
+                    return Cow::Borrowed(source);
+                }
+                changed = true;
+                continue;
+            }
+            Ok(Event::Eof) => break,
+            Ok(event) => event.into_owned(),
+            Err(_) => return Cow::Borrowed(source),
+        };
+        if writer.write_event(event).is_err() {
+            return Cow::Borrowed(source);
+        }
+    }
+    if !changed {
+        return Cow::Borrowed(source);
+    }
+    String::from_utf8(writer.into_inner())
+        .map(Cow::Owned)
+        .unwrap_or_else(|_| Cow::Borrowed(source))
+}
+
+fn is_html_void_element(name: &[u8]) -> bool {
+    matches!(
+        name,
+        b"area"
+            | b"base"
+            | b"br"
+            | b"col"
+            | b"embed"
+            | b"hr"
+            | b"img"
+            | b"input"
+            | b"link"
+            | b"meta"
+            | b"param"
+            | b"source"
+            | b"track"
+            | b"wbr"
+    )
 }
 
 fn internal_link(
@@ -1409,14 +1621,14 @@ fn parse_ncx_navigation(
     Ok(items)
 }
 
-fn fallback_navigation(units: &[ContentUnit]) -> Vec<NavigationItem> {
+fn fallback_navigation(units: &[ContentUnit], nodes: &[ReadingNode]) -> Vec<NavigationItem> {
     units
         .iter()
-        .enumerate()
-        .map(|(index, unit)| NavigationItem {
+        .zip(nodes)
+        .map(|(unit, node)| NavigationItem {
             id: format!("nav-{}", unit.id),
             label: unit.title.clone(),
-            target_path: vec![format!("unit-{index}")],
+            target_path: node.path.clone(),
             children: Vec::new(),
         })
         .collect()
@@ -1539,6 +1751,140 @@ mod tests {
     }
 
     #[test]
+    fn import_should_accept_mimetype_after_other_entries_with_warning(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let source = fixture_epub(FixtureVariant::MimetypeAfterContainer)?;
+        let imported = import(&source, || false)?;
+
+        assert!(imported
+            .revision
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == "epub_mimetype_noncanonical"));
+        Ok(())
+    }
+
+    #[test]
+    fn import_should_accept_deflated_mimetype_with_warning(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let source = fixture_epub(FixtureVariant::DeflatedMimetype)?;
+        let imported = import(&source, || false)?;
+
+        assert!(imported
+            .revision
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == "epub_mimetype_noncanonical"));
+        Ok(())
+    }
+
+    #[test]
+    fn import_should_continue_when_optional_resource_is_missing(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let source = fixture_epub(FixtureVariant::MissingResource)?;
+        let imported = import(&source, || false)?;
+
+        assert!(imported
+            .revision
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == "epub_resource_unavailable"));
+        Ok(())
+    }
+
+    #[test]
+    fn import_should_project_svg_wrapped_local_image() -> Result<(), Box<dyn std::error::Error>> {
+        let source = spine_recovery_epub(
+            br#"<html xmlns="http://www.w3.org/1999/xhtml"><body><svg xmlns="http://www.w3.org/2000/svg"><image xlink:href="images/cover.png" xmlns:xlink="http://www.w3.org/1999/xlink"/></svg></body></html>"#,
+            Some(br#"<html><body><p>Readable chapter</p></body></html>"#),
+        )?;
+        let imported = import(&source, || false)?;
+        let cover = &imported.reading_document.nodes[0].children[0];
+
+        assert!(
+            matches!(cover.kind, ReadingNodeKind::Image) && cover.resource_hash.is_some(),
+            "SVG projection produced {cover:?}; diagnostics: {:?}",
+            imported.revision.diagnostics
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn import_should_replace_complex_svg_with_placeholder() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let source = spine_recovery_epub(
+            br#"<html><body><svg><path d="M0 0 L10 10"/></svg></body></html>"#,
+            Some(br#"<html><body><p>Readable chapter</p></body></html>"#),
+        )?;
+        let imported = import(&source, || false)?;
+        let cover = &imported.reading_document.nodes[0].children[0];
+
+        assert!(matches!(
+            cover.kind,
+            ReadingNodeKind::PluginPlaceholder { .. }
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn import_should_expand_xhtml_self_closing_non_void_elements(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let source = spine_recovery_epub(
+            br#"<html xmlns="http://www.w3.org/1999/xhtml"><head><title/></head><body><p>Readable XHTML body</p></body></html>"#,
+            None,
+        )?;
+        let imported = import(&source, || false)?;
+
+        assert_eq!(imported.package.units.len(), 1);
+        Ok(())
+    }
+
+    #[test]
+    fn import_should_skip_empty_spine_item_with_warning() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let source = spine_recovery_epub(
+            br#"<html><body></body></html>"#,
+            Some(br#"<html><body><p>Readable chapter</p></body></html>"#),
+        )?;
+        let imported = import(&source, || false)?;
+
+        assert!(imported
+            .revision
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == "epub_spine_item_skipped"));
+        Ok(())
+    }
+
+    #[test]
+    fn fallback_navigation_should_target_surviving_spine_unit(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let source = spine_recovery_epub(
+            br#"<html><body></body></html>"#,
+            Some(br#"<html><body><p>Readable chapter</p></body></html>"#),
+        )?;
+        let imported = import(&source, || false)?;
+
+        assert_eq!(
+            imported.reading_document.navigation[0].target_path,
+            vec!["unit-1"]
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn import_should_reject_epub_when_every_spine_item_is_empty(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let source = spine_recovery_epub(br#"<html><body></body></html>"#, None)?;
+        let Err(error) = import(&source, || false) else {
+            return Err(std::io::Error::other("empty EPUB was accepted").into());
+        };
+
+        assert_eq!(error.code(), "epub_no_readable_spine");
+        Ok(())
+    }
+
+    #[test]
     fn import_should_stop_when_cancelled() -> Result<(), Box<dyn std::error::Error>> {
         let source = fixture_epub(FixtureVariant::Supported)?;
         let Err(error) = import(&source, || true) else {
@@ -1589,6 +1935,9 @@ mod tests {
         Locked,
         CompressionRatio,
         Large,
+        MimetypeAfterContainer,
+        DeflatedMimetype,
+        MissingResource,
     }
 
     fn fixture_epub(variant: FixtureVariant) -> Result<Vec<u8>, std::io::Error> {
@@ -1599,13 +1948,23 @@ mod tests {
         let mimetype_fixture = mimetype_fixture
             .strip_suffix(b"\n")
             .unwrap_or(mimetype_fixture);
-        write(&mut writer, "mimetype", mimetype_fixture, stored)?;
+        if !matches!(variant, FixtureVariant::MimetypeAfterContainer) {
+            let mimetype_options = if matches!(variant, FixtureVariant::DeflatedMimetype) {
+                deflated
+            } else {
+                stored
+            };
+            write(&mut writer, "mimetype", mimetype_fixture, mimetype_options)?;
+        }
         write(
             &mut writer,
             "META-INF/container.xml",
             include_bytes!("../../../tests/fixtures/epub/supported/META-INF/container.xml"),
             deflated,
         )?;
+        if matches!(variant, FixtureVariant::MimetypeAfterContainer) {
+            write(&mut writer, "mimetype", mimetype_fixture, stored)?;
+        }
         if matches!(variant, FixtureVariant::Locked) {
             write(
                 &mut writer,
@@ -1645,12 +2004,14 @@ mod tests {
                 .to_vec()
         };
         write(&mut writer, "EPUB/text/chapter.xhtml", &chapter, deflated)?;
-        write(
-            &mut writer,
-            "EPUB/images/pixel.png",
-            include_bytes!("../../../tests/fixtures/epub/supported/EPUB/images/pixel.png"),
-            deflated,
-        )?;
+        if !matches!(variant, FixtureVariant::MissingResource) {
+            write(
+                &mut writer,
+                "EPUB/images/pixel.png",
+                include_bytes!("../../../tests/fixtures/epub/supported/EPUB/images/pixel.png"),
+                deflated,
+            )?;
+        }
         if matches!(variant, FixtureVariant::CompressionRatio) {
             write(
                 &mut writer,
@@ -1662,6 +2023,74 @@ mod tests {
         if matches!(variant, FixtureVariant::Traversal) {
             writer.start_file("../escape.xhtml", deflated)?;
             writer.write_all(b"escape")?;
+        }
+        writer
+            .finish()
+            .map(Cursor::into_inner)
+            .map_err(std::io::Error::other)
+    }
+
+    fn spine_recovery_epub(
+        first_document: &[u8],
+        second_document: Option<&[u8]>,
+    ) -> Result<Vec<u8>, std::io::Error> {
+        let mut writer = ZipWriter::new(Cursor::new(Vec::new()));
+        let stored = SimpleFileOptions::default().compression_method(CompressionMethod::Stored);
+        let deflated = SimpleFileOptions::default().compression_method(CompressionMethod::Deflated);
+        write(&mut writer, "mimetype", EPUB_MIMETYPE, stored)?;
+        write(
+            &mut writer,
+            "META-INF/container.xml",
+            include_bytes!("../../../tests/fixtures/epub/supported/META-INF/container.xml"),
+            deflated,
+        )?;
+        let (second_manifest, second_spine) = if second_document.is_some() {
+            (
+                r#"<item id="chapter" href="text/chapter.xhtml" media-type="application/xhtml+xml"/>"#,
+                r#"<itemref idref="chapter"/>"#,
+            )
+        } else {
+            ("", "")
+        };
+        let package = format!(
+            r#"<?xml version="1.0" encoding="UTF-8"?>
+<package xmlns="http://www.idpf.org/2007/opf" version="3.0" unique-identifier="book-id">
+  <metadata xmlns:dc="http://purl.org/dc/elements/1.1/">
+    <dc:identifier id="book-id">urn:uuid:spine-recovery</dc:identifier>
+    <dc:title>Spine recovery</dc:title>
+    <dc:language>en</dc:language>
+  </metadata>
+  <manifest>
+    <item id="first" href="cover.xhtml" media-type="application/xhtml+xml"/>
+    <item id="cover-image" href="images/cover.png" media-type="image/png"/>
+    {second_manifest}
+  </manifest>
+  <spine>
+    <itemref idref="first"/>
+    {second_spine}
+  </spine>
+</package>"#
+        );
+        write(
+            &mut writer,
+            "EPUB/package.opf",
+            package.as_bytes(),
+            deflated,
+        )?;
+        write(&mut writer, "EPUB/cover.xhtml", first_document, deflated)?;
+        write(
+            &mut writer,
+            "EPUB/images/cover.png",
+            include_bytes!("../../../tests/fixtures/epub/supported/EPUB/images/pixel.png"),
+            deflated,
+        )?;
+        if let Some(second_document) = second_document {
+            write(
+                &mut writer,
+                "EPUB/text/chapter.xhtml",
+                second_document,
+                deflated,
+            )?;
         }
         writer
             .finish()

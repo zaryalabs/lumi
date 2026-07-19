@@ -59,6 +59,8 @@ Package; reader отвечает за типографику, постранич
 ### Нормализация контента
 
 - Каждый readable spine item превращается в один или несколько `ReadingNode`.
+- XHTML self-closing non-void elements нормализуются по XML-семантике до
+  tolerant HTML parsing, чтобы корректный XHTML не терял `body`.
 - XHTML/HTML не рендерится напрямую. Импортер разбирает DOM и мапит
   разрешенные элементы в общую модель reader.
 - CSS EPUB не переносится в reader как внешний вид. Можно извлекать только
@@ -71,6 +73,9 @@ Package; reader отвечает за типографику, постранич
 - Элементы, которым нужен отдельный runtime, переводятся в standard plugin
   placeholders: MathML/LaTeX, Mermaid-like diagrams, сложный SVG, media overlays
   и scripted interactivity.
+- SVG wrapper, который ссылается на локальное raster-изображение из manifest,
+  проецируется в typed `Image`; исходный SVG markup при этом не попадает в
+  reader.
 - SVG, media overlays, code highlighting и MathML/LaTeX являются стандартными
   first-party capabilities для полноценного EPUB-пути. Они могут быть
   реализованы как стандартные плагины, но должны поставляться и тестироваться
@@ -359,6 +364,9 @@ expanded, 64 MiB на resource, 2 MiB на package XML, 8 MiB на content docum
 - Не исполнять scripts и inline handlers.
 - Отклонять DTD/external entities в package XML; parser не получает
   network/filesystem resolver.
+- Требовать точное значение `mimetype`; безопасное отклонение от канонической
+  позиции/Stored compression принимать только после ZIP security validation и
+  сохранять как compatibility diagnostic.
 - Не загружать remote resources автоматически.
 - Не доверять SVG как безопасному HTML. SVG либо проходит через отдельный
   sanitizer/plugin, либо показывается как безопасно изолированный resource.

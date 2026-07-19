@@ -51,14 +51,26 @@ Package XML разбирается без DTD/external entities: любой `DOC
 правила canonical ordering входят в `importer_version`, чтобы одинаковый source
 при той же версии давал детерминированные stable ids, package hash и source map.
 
-`mimetype` проверяется как первый stored entry со значением
-`application/epub+zip`. `META-INF/container.xml` обязателен. Remote schemes,
-scripts, inline event handlers, iframes, foreign CSS и unsafe SVG не попадают в
-reader. Unsupported content создаёт diagnostic/placeholder, если безопасно
-продолжить; нарушение container/security limits завершает job как failed.
+Канонический `mimetype` является первым stored entry со значением
+`application/epub+zip`. Importer всегда требует единственный entry с точным
+значением, но после полной проверки ZIP security принимает безопасное
+отклонение в позиции или Deflate-сжатии с diagnostic
+`epub_mimetype_noncanonical`. Отсутствующее или неверное значение остаётся
+fatal. `META-INF/container.xml` обязателен. Remote schemes, scripts, inline
+event handlers, iframes, foreign CSS и unsafe SVG не попадают в reader.
+Unsupported content создаёт diagnostic/placeholder, если безопасно продолжить;
+нарушение container/security limits завершает job как failed.
 Fixed-layout metadata и DRM/encrypted resources детектируются до нормализации:
 S1 возвращает явный unsupported/locked diagnostic и не направляет их в
 reflowable `ReadingDocument` path.
+
+XHTML сначала получает XML-aware compatibility normalization: self-closing
+non-void элементы разворачиваются перед передачей tolerant HTML parser. Каждый
+linear spine item нормализуется независимо. Пустой item пропускается с
+`epub_spine_item_skipped`, сложный SVG становится typed plugin placeholder, а
+SVG wrapper над локальным raster resource — typed `Image`. Импорт завершается
+ошибкой `epub_no_readable_spine` только если вся публикация не дала ни одного
+читаемого unit или безопасного placeholder.
 
 Worker проверяет cancellation между entries и при streaming чтении. В logs
 попадают code, media type, sizes и source path после безопасного redaction, но

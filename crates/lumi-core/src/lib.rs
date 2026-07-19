@@ -46,7 +46,7 @@ pub const EPUB_FIXTURE_IMPORTER_VERSION: &str = "s0.1";
 pub const EPUB_IMPORTER_ID: &str = "lumi.epub";
 
 /// Version of the deterministic real EPUB importer.
-pub const EPUB_IMPORTER_VERSION: &str = "s1.2";
+pub const EPUB_IMPORTER_VERSION: &str = "s1.3";
 
 /// Importer id used by the baseline raw web snapshot pipeline.
 pub const WEB_IMPORTER_ID: &str = "lumi.web.raw-snapshot";

@@ -340,11 +340,7 @@ pg-t: db-up db-migrate ## Run mandatory PostgreSQL-backed integration suites
 	LUMI_TEST_DATABASE_URL=$(DATABASE_URL) $(CARGO) test -p lumi-server
 
 compatibility: ## Run committed EPUB, Web and Telegram compatibility suites
-	$(CARGO) test -p lumi-core epub::tests::import_should_build_typed_document_for_supported_epub
-	$(CARGO) test -p lumi-core epub::tests::import_should_reject_path_traversal
-	$(CARGO) test -p lumi-core epub::tests::import_should_reject_package_doctype
-	$(CARGO) test -p lumi-core epub::tests::import_should_reject_locked_publication
-	$(CARGO) test -p lumi-core epub::tests::import_should_reject_excessive_compression_ratio
+	$(CARGO) test -p lumi-core epub::tests
 	$(CARGO) test -p lumi-core fixtures
 	$(CARGO) test -p lumi-core sources
 	LUMI_TEST_DATABASE_URL=$(DATABASE_URL) $(CARGO) test -p lumi-server telegram
