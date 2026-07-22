@@ -160,9 +160,15 @@ Diagnostics являются частью revision audit trail, но не пол
 Telegram locator; каждая раскрытая страница образует следующий `ContentUnit` и
 сохраняет Web locator исходного snapshot. Fallback unit нераскрытой ссылки
 хранит исходный HTTP(S) URL и безопасную diagnostic без сетевых подробностей.
+Ссылки, которые после capture имеют один `canonical_url`, раскрываются один раз;
+повторные вхождения остаются в исходном Telegram text block и получают
+диагностику дедупликации.
 
 При переносе блоков Web normalizer заново формирует уникальные block ids,
 `node_path`, navigation targets и internal targets относительно нового unit.
+Для raw HTML он сначала выбирает содержательный semantic container, затем
+ограниченно оценивает плотные `div`/`section`, а при отсутствии структурных
+блоков использует bounded `text_content` snapshot как последний fallback.
 Изображения ссылаются на content-addressed `resource_hash`; envelope, snapshots
 и разрешённые изображения представлены в manifest. Поэтому anchors и progress
 остаются общими для web, desktop и mobile и не зависят от DOM-путей Telegram

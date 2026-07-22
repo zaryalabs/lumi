@@ -1,5 +1,7 @@
 //! Shared baseline source contracts and deterministic Web/Telegram normalizers.
 
+use std::collections::HashSet;
+
 use scraper::{ElementRef, Html, Selector};
 use serde::{Deserialize, Serialize};
 use url::Url;
@@ -22,6 +24,11 @@ const MAX_NORMALIZED_PACKAGE_BYTES: usize = 8 * 1024 * 1024;
 const MAX_WEB_METADATA_CHARS: usize = 2_048;
 const MAX_WEB_LINK_URL_CHARS: usize = 2_048;
 const MAX_WEB_LINK_LABEL_CHARS: usize = 4_096;
+const MIN_GENERIC_WEB_WORDS: usize = 80;
+const MIN_GENERIC_WEB_PARAGRAPHS: usize = 2;
+const MIN_WEB_TEXT_FALLBACK_WORDS: usize = 80;
+const MAX_WEB_LINK_DENSITY_PERCENT: usize = 40;
+const COMPACT_WEB_CANDIDATE_PERCENT: usize = 85;
 const MAX_TELEGRAM_BLOCKS: usize = 2_048;
 const MAX_TELEGRAM_PARAGRAPH_CHARS: usize = 131_072;
 
@@ -434,8 +441,7 @@ pub fn import_web_snapshot(
         return Err(SourceImportError::SnapshotChecksumMismatch);
     }
     let document = Html::parse_document(&snapshot.rendered_dom);
-    let candidate = first_element(&document, &["article", "main", "body"])
-        .ok_or(SourceImportError::NoExtractableContent)?;
+    let candidate = select_web_content_candidate(&document)?;
     let base_url = Url::parse(&snapshot.base_url).ok();
     let block_selector = selector("h1,h2,h3,h4,h5,h6,p,li,blockquote,pre,table,hr,img,figcaption")?;
     let link_selector = selector("a[href]")?;
@@ -443,73 +449,128 @@ pub fn import_web_snapshot(
     let mut navigation = Vec::new();
     let mut diagnostics = snapshot.diagnostics.clone();
     let mut total_chars = 0_usize;
-    for (index, element) in candidate
-        .select(&block_selector)
-        .filter(|element| !is_boilerplate(element) && !is_nested_composite(element))
-        .take(MAX_WEB_BLOCKS)
-        .enumerate()
-    {
-        let tag = element.value().name();
-        let text = normalized_element_text(&element);
-        total_chars = total_chars.saturating_add(text.chars().count());
-        if total_chars > MAX_WEB_TOTAL_CHARS {
-            return Err(SourceImportError::WebContentTooComplex);
-        }
-        let kind = web_node_kind(tag);
-        if text.is_empty() && !matches!(kind, ReadingNodeKind::HorizontalRule) {
-            if tag == "img" {
-                diagnostics.push(ImportDiagnostic {
-                    severity: DiagnosticSeverity::Warning,
-                    code: "web_resource_placeholder".to_owned(),
-                    message: "An image without retained text was replaced by a placeholder."
-                        .to_owned(),
-                    source_path: Some(format!("{tag}[{index}]")),
-                });
-            } else {
-                continue;
-            }
-        }
-        let path = vec!["unit-0".to_owned(), format!("block-{index}")];
-        let block_id = format!(
-            "web-{}-{index}",
-            short_content_hash(format!("{}:{tag}:{text}", snapshot.checksum).as_bytes())
-        );
-        let locator = SourceLocator::Web(WebSourceLocator {
-            original_url: snapshot.original_url.clone(),
-            canonical_url: snapshot.canonical_url.clone(),
-            snapshot_checksum: snapshot.checksum.clone(),
-            capture_mode: "raw_fetch".to_owned(),
-            adapter_id: "generic-semantic".to_owned(),
-            dom_path: format!("{tag}[{index}]"),
-            selector_hint: Some(tag.to_owned()),
-            heading_path: Vec::new(),
-            text_offset_start: (!text.is_empty()).then_some(0),
-            text_offset_end: (!text.is_empty()).then(|| text.chars().count()),
+    let mut extraction_hint = "text_content".to_owned();
+    if let Some(candidate) = candidate {
+        extraction_hint = web_candidate_hint(&candidate.element);
+        diagnostics.push(ImportDiagnostic {
+            severity: DiagnosticSeverity::Info,
+            code: "web_content_candidate_selected".to_owned(),
+            message: format!(
+                "Selected web content candidate with {} words and {}% linked text.",
+                candidate.word_count,
+                candidate.link_density_percent()
+            ),
+            source_path: Some(extraction_hint.clone()),
         });
-        let links = web_links(&element, &link_selector, &text, base_url.as_ref());
-        if let ReadingNodeKind::Heading { .. } = kind {
-            navigation.push(NavigationItem {
-                id: format!("nav-{block_id}"),
-                label: text.clone(),
-                target_path: path.clone(),
-                children: Vec::new(),
+        for (index, element) in candidate
+            .element
+            .select(&block_selector)
+            .filter(|element| {
+                !is_boilerplate(element, &candidate.element) && !is_nested_composite(element)
+            })
+            .take(MAX_WEB_BLOCKS)
+            .enumerate()
+        {
+            let tag = element.value().name();
+            let text = normalized_element_text(&element);
+            total_chars = total_chars.saturating_add(text.chars().count());
+            if total_chars > MAX_WEB_TOTAL_CHARS {
+                return Err(SourceImportError::WebContentTooComplex);
+            }
+            let kind = web_node_kind(tag);
+            if text.is_empty() && !matches!(kind, ReadingNodeKind::HorizontalRule) {
+                if tag == "img" {
+                    diagnostics.push(ImportDiagnostic {
+                        severity: DiagnosticSeverity::Warning,
+                        code: "web_resource_placeholder".to_owned(),
+                        message: "An image without retained text was replaced by a placeholder."
+                            .to_owned(),
+                        source_path: Some(format!("{tag}[{index}]")),
+                    });
+                } else {
+                    continue;
+                }
+            }
+            let path = vec!["unit-0".to_owned(), format!("block-{index}")];
+            let block_id = format!(
+                "web-{}-{index}",
+                short_content_hash(format!("{}:{tag}:{text}", snapshot.checksum).as_bytes())
+            );
+            let locator = SourceLocator::Web(WebSourceLocator {
+                original_url: snapshot.original_url.clone(),
+                canonical_url: snapshot.canonical_url.clone(),
+                snapshot_checksum: snapshot.checksum.clone(),
+                capture_mode: "raw_fetch".to_owned(),
+                adapter_id: "generic-semantic".to_owned(),
+                dom_path: format!("{tag}[{index}]"),
+                selector_hint: Some(tag.to_owned()),
+                heading_path: Vec::new(),
+                text_offset_start: (!text.is_empty()).then_some(0),
+                text_offset_end: (!text.is_empty()).then(|| text.chars().count()),
+            });
+            let links = web_links(&element, &link_selector, &text, base_url.as_ref());
+            if let ReadingNodeKind::Heading { .. } = kind {
+                navigation.push(NavigationItem {
+                    id: format!("nav-{block_id}"),
+                    label: text.clone(),
+                    target_path: path.clone(),
+                    children: Vec::new(),
+                });
+            }
+            blocks.push(ContentBlock {
+                id: block_id,
+                node_path: path,
+                kind,
+                text: (!text.is_empty()).then_some(text.clone()),
+                resource_hash: None,
+                content_hash: content_hash(text.as_bytes()),
+                source_locator: locator,
+                links,
             });
         }
-        blocks.push(ContentBlock {
-            id: block_id,
-            node_path: path,
-            kind,
-            text: (!text.is_empty()).then_some(text.clone()),
-            resource_hash: None,
-            content_hash: content_hash(text.as_bytes()),
-            source_locator: locator,
-            links,
-        });
     }
-    if blocks
-        .iter()
-        .all(|block| block.text.as_deref().unwrap_or_default().trim().is_empty())
-    {
+    if blocks_have_no_text(&blocks) {
+        let fallback = normalized_plain_text(&snapshot.text_content);
+        if fallback.split_whitespace().count() >= MIN_WEB_TEXT_FALLBACK_WORDS {
+            extraction_hint = "text_content".to_owned();
+            diagnostics.push(ImportDiagnostic {
+                severity: DiagnosticSeverity::Warning,
+                code: "web_text_content_fallback".to_owned(),
+                message: "Structured extraction was empty; retained visible text was used."
+                    .to_owned(),
+                source_path: None,
+            });
+            blocks.clear();
+            navigation.clear();
+            blocks.push(ContentBlock {
+                id: format!(
+                    "web-{}-fallback",
+                    short_content_hash(
+                        format!("{}:text_content:{fallback}", snapshot.checksum).as_bytes()
+                    )
+                ),
+                node_path: vec!["unit-0".to_owned(), "block-0".to_owned()],
+                kind: ReadingNodeKind::Paragraph,
+                text: Some(fallback.clone()),
+                resource_hash: None,
+                content_hash: content_hash(fallback.as_bytes()),
+                source_locator: SourceLocator::Web(WebSourceLocator {
+                    original_url: snapshot.original_url.clone(),
+                    canonical_url: snapshot.canonical_url.clone(),
+                    snapshot_checksum: snapshot.checksum.clone(),
+                    capture_mode: "raw_fetch_text_fallback".to_owned(),
+                    adapter_id: "generic-semantic".to_owned(),
+                    dom_path: "text_content".to_owned(),
+                    selector_hint: None,
+                    heading_path: Vec::new(),
+                    text_offset_start: Some(0),
+                    text_offset_end: Some(fallback.chars().count()),
+                }),
+                links: Vec::new(),
+            });
+        }
+    }
+    if blocks_have_no_text(&blocks) {
         return Err(SourceImportError::NoExtractableContent);
     }
     let title = web_title(snapshot, &document, &blocks);
@@ -539,8 +600,8 @@ pub fn import_web_snapshot(
             snapshot_checksum: snapshot.checksum.clone(),
             capture_mode: "raw_fetch".to_owned(),
             adapter_id: "generic-semantic".to_owned(),
-            dom_path: "article".to_owned(),
-            selector_hint: Some("article,main,body".to_owned()),
+            dom_path: extraction_hint.clone(),
+            selector_hint: Some(extraction_hint),
             heading_path: Vec::new(),
             text_offset_start: None,
             text_offset_end: None,
@@ -754,9 +815,8 @@ pub fn import_telegram_composite(
         children: Vec::new(),
     }];
 
+    let mut expanded_web_identities = HashSet::new();
     for (link_index, url) in envelope.links.iter().enumerate() {
-        let unit_index = units.len();
-        let unit_id = format!("unit-{unit_index}");
         let section = web_sections.get(link_index);
         let snapshot = section.and_then(|section| section.snapshot.as_ref());
         diagnostics.extend(
@@ -764,6 +824,22 @@ pub fn import_telegram_composite(
                 .into_iter()
                 .flat_map(|section| section.diagnostics.iter().cloned()),
         );
+        let web_identity = snapshot
+            .and_then(|snapshot| snapshot.canonical_url.as_deref())
+            .or_else(|| snapshot.map(|snapshot| snapshot.final_url.as_str()))
+            .unwrap_or(url);
+        if !expanded_web_identities.insert(web_identity.to_owned()) {
+            diagnostics.push(ImportDiagnostic {
+                severity: DiagnosticSeverity::Info,
+                code: "telegram_duplicate_web_section_skipped".to_owned(),
+                message: "A repeated Telegram link resolved to an already expanded web page."
+                    .to_owned(),
+                source_path: Some(format!("links[{link_index}]")),
+            });
+            continue;
+        }
+        let unit_index = units.len();
+        let unit_id = format!("unit-{unit_index}");
         let imported = snapshot.and_then(|snapshot| {
             import_web_snapshot(owner_id, material_id, revision_id, snapshot)
                 .map_err(|error| {
@@ -1083,6 +1159,170 @@ fn first_element<'a>(document: &'a Html, candidates: &[&str]) -> Option<ElementR
     })
 }
 
+#[derive(Clone, Copy)]
+struct WebContentCandidate<'a> {
+    element: ElementRef<'a>,
+    word_count: usize,
+    paragraph_count: usize,
+    heading_count: usize,
+    linked_word_count: usize,
+    semantic_bonus: usize,
+    depth: usize,
+}
+
+impl WebContentCandidate<'_> {
+    fn link_density_percent(self) -> usize {
+        self.linked_word_count.saturating_mul(100) / self.word_count.max(1)
+    }
+
+    fn score(self) -> usize {
+        self.word_count
+            .saturating_add(self.paragraph_count.saturating_mul(40))
+            .saturating_add(self.heading_count.saturating_mul(20))
+            .saturating_add(self.semantic_bonus)
+            .saturating_sub(self.linked_word_count.saturating_mul(2))
+    }
+}
+
+fn select_web_content_candidate(
+    document: &Html,
+) -> Result<Option<WebContentCandidate<'_>>, SourceImportError> {
+    let paragraphs = selector("p")?;
+    let headings = selector("h1,h2,h3,h4,h5,h6")?;
+    let links = selector("a[href]")?;
+    let semantic = selector(
+        "article,main,[role='main'],[class~='article-body'],[class~='article-content'],[class~='post-content'],[class~='entry-content'],[id='article-body'],[id='post-content'],[id='post-content-body'],[id='entry-content']",
+    )?;
+    let mut best = None;
+    for element in document.select(&semantic) {
+        if web_candidate_is_excluded(&element) {
+            continue;
+        }
+        let candidate = web_content_candidate(element, &paragraphs, &headings, &links, true);
+        let has_structure = candidate.paragraph_count > 0 || candidate.heading_count > 0;
+        if candidate.word_count == 0
+            || (!has_structure && candidate.word_count < 20)
+            || candidate.link_density_percent() > 80
+        {
+            continue;
+        }
+        choose_web_candidate(&mut best, candidate);
+    }
+    if best.is_some() {
+        return Ok(best);
+    }
+
+    let generic = selector("section,div")?;
+    for element in document.select(&generic) {
+        if web_candidate_is_excluded(&element) {
+            continue;
+        }
+        let candidate = web_content_candidate(element, &paragraphs, &headings, &links, false);
+        if candidate.word_count < MIN_GENERIC_WEB_WORDS
+            || candidate.paragraph_count < MIN_GENERIC_WEB_PARAGRAPHS
+            || candidate.link_density_percent() > MAX_WEB_LINK_DENSITY_PERCENT
+        {
+            continue;
+        }
+        choose_web_candidate(&mut best, candidate);
+    }
+    Ok(best)
+}
+
+fn web_content_candidate<'a>(
+    element: ElementRef<'a>,
+    paragraphs: &Selector,
+    headings: &Selector,
+    links: &Selector,
+    semantic: bool,
+) -> WebContentCandidate<'a> {
+    let text = normalized_element_text(&element);
+    let linked_word_count = element
+        .select(links)
+        .map(|link| normalized_element_text(&link).split_whitespace().count())
+        .fold(0_usize, usize::saturating_add);
+    WebContentCandidate {
+        element,
+        word_count: text.split_whitespace().count(),
+        paragraph_count: element.select(paragraphs).take(MAX_WEB_BLOCKS).count(),
+        heading_count: element.select(headings).take(MAX_WEB_BLOCKS).count(),
+        linked_word_count,
+        semantic_bonus: if semantic { 200 } else { 0 },
+        depth: element.ancestors().count(),
+    }
+}
+
+fn choose_web_candidate<'a>(
+    best: &mut Option<WebContentCandidate<'a>>,
+    candidate: WebContentCandidate<'a>,
+) {
+    let Some(current) = *best else {
+        *best = Some(candidate);
+        return;
+    };
+    let candidate_is_compact = is_descendant_of(&candidate.element, &current.element)
+        && candidate.word_count.saturating_mul(100)
+            >= current
+                .word_count
+                .saturating_mul(COMPACT_WEB_CANDIDATE_PERCENT);
+    let current_is_compact = is_descendant_of(&current.element, &candidate.element)
+        && current.word_count.saturating_mul(100)
+            >= candidate
+                .word_count
+                .saturating_mul(COMPACT_WEB_CANDIDATE_PERCENT);
+    if candidate_is_compact
+        || (!current_is_compact
+            && (candidate.score(), candidate.depth) > (current.score(), current.depth))
+    {
+        *best = Some(candidate);
+    }
+}
+
+fn is_descendant_of(element: &ElementRef<'_>, ancestor: &ElementRef<'_>) -> bool {
+    element
+        .ancestors()
+        .skip(1)
+        .filter_map(ElementRef::wrap)
+        .any(|candidate| candidate == *ancestor)
+}
+
+fn web_candidate_is_excluded(element: &ElementRef<'_>) -> bool {
+    element
+        .ancestors()
+        .filter_map(ElementRef::wrap)
+        .any(|ancestor| {
+            matches!(
+                ancestor.value().name(),
+                "nav" | "footer" | "form" | "aside" | "script" | "style"
+            )
+        })
+        || element_has_boilerplate_identity(element)
+}
+
+fn web_candidate_hint(element: &ElementRef<'_>) -> String {
+    let tag = element.value().name();
+    if let Some(id) = element.value().attr("id") {
+        return format!("{tag}#{}", bounded_hint_token(id));
+    }
+    element.value().attr("class").map_or_else(
+        || tag.to_owned(),
+        |classes| {
+            classes.split_ascii_whitespace().next().map_or_else(
+                || tag.to_owned(),
+                |class| format!("{tag}.{}", bounded_hint_token(class)),
+            )
+        },
+    )
+}
+
+fn bounded_hint_token(value: &str) -> String {
+    value
+        .chars()
+        .filter(|character| !character.is_control())
+        .take(80)
+        .collect()
+}
+
 fn normalized_element_text(element: &ElementRef<'_>) -> String {
     element
         .descendants()
@@ -1110,38 +1350,73 @@ fn normalized_element_text(element: &ElementRef<'_>) -> String {
         .join(" ")
 }
 
-fn is_boilerplate(element: &ElementRef<'_>) -> bool {
-    element
-        .ancestors()
-        .filter_map(ElementRef::wrap)
-        .any(|ancestor| {
-            if matches!(
-                ancestor.value().name(),
-                "nav" | "footer" | "form" | "aside" | "script" | "style"
-            ) {
-                return true;
+fn normalized_plain_text(value: &str) -> String {
+    value
+        .split_whitespace()
+        .scan(0_usize, |count, fragment| {
+            if *count >= MAX_WEB_BLOCK_CHARS {
+                return None;
             }
-            let markers = ancestor
-                .value()
-                .attr("class")
-                .into_iter()
-                .chain(ancestor.value().attr("id"))
-                .flat_map(str::split_ascii_whitespace);
-            markers.into_iter().any(|marker| {
-                let marker = marker.to_ascii_lowercase();
-                [
-                    "comment",
-                    "sidebar",
-                    "cookie",
-                    "advert",
-                    "related",
-                    "share",
-                    "navigation",
-                ]
-                .iter()
-                .any(|noise| marker.contains(noise))
-            })
+            *count = count.saturating_add(fragment.chars().count() + 1);
+            Some(fragment)
         })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn blocks_have_no_text(blocks: &[ContentBlock]) -> bool {
+    blocks
+        .iter()
+        .all(|block| block.text.as_deref().unwrap_or_default().trim().is_empty())
+}
+
+fn is_boilerplate(element: &ElementRef<'_>, root: &ElementRef<'_>) -> bool {
+    for ancestor in element.ancestors().filter_map(ElementRef::wrap) {
+        let reached_root = ancestor == *root;
+        if matches!(
+            ancestor.value().name(),
+            "nav" | "footer" | "form" | "aside" | "script" | "style"
+        ) || element_has_boilerplate_identity(&ancestor)
+        {
+            return true;
+        }
+        if reached_root {
+            break;
+        }
+    }
+    false
+}
+
+fn element_has_boilerplate_identity(element: &ElementRef<'_>) -> bool {
+    element
+        .value()
+        .attr("class")
+        .into_iter()
+        .chain(element.value().attr("id"))
+        .flat_map(str::split_ascii_whitespace)
+        .any(boilerplate_marker)
+}
+
+fn boilerplate_marker(marker: &str) -> bool {
+    let marker = marker.to_ascii_lowercase();
+    [
+        "comment",
+        "sidebar",
+        "cookie",
+        "advert",
+        "related",
+        "share",
+        "navigation",
+    ]
+    .iter()
+    .any(|noise| {
+        marker.contains(noise)
+            && !matches!(
+                *noise,
+                "sidebar"
+                    if marker.contains("has-sidebar") || marker.contains("with-sidebar")
+            )
+    })
 }
 
 fn is_nested_composite(element: &ElementRef<'_>) -> bool {
@@ -1488,6 +1763,65 @@ mod tests {
     }
 
     #[test]
+    fn web_snapshot_keeps_article_inside_sidebar_layout() -> Result<(), SourceImportError> {
+        let imported = import_web_snapshot(
+            UserId::nil(),
+            MaterialId::nil(),
+            DocumentRevisionId::nil(),
+            &snapshot(include_str!("../../../tests/fixtures/web/habr-layout.html")),
+        )?;
+        let texts = imported
+            .package
+            .blocks
+            .iter()
+            .filter_map(|block| block.text.as_deref())
+            .collect::<Vec<_>>()
+            .join(" ");
+
+        assert!(
+            texts.contains("Первый содержательный абзац") && !texts.contains("Шум сайдбара"),
+            "unexpected extracted text: {texts}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn web_snapshot_selects_dense_div_only_content() -> Result<(), SourceImportError> {
+        let paragraph = "содержательное слово ".repeat(45);
+        let html = format!(
+            "<html><body><div id='app'><nav>Меню</nav><div class='story'><p>{paragraph}</p><p>{paragraph}</p></div></div></body></html>"
+        );
+        let imported = import_web_snapshot(
+            UserId::nil(),
+            MaterialId::nil(),
+            DocumentRevisionId::nil(),
+            &snapshot(&html),
+        )?;
+
+        assert_eq!(imported.package.blocks.len(), 2);
+        Ok(())
+    }
+
+    #[test]
+    fn web_snapshot_uses_retained_text_as_last_fallback() -> Result<(), SourceImportError> {
+        let paragraph = "видимый текст страницы ".repeat(30);
+        let html = format!("<html><body><p>{paragraph}</p></body></html>");
+        let imported = import_web_snapshot(
+            UserId::nil(),
+            MaterialId::nil(),
+            DocumentRevisionId::nil(),
+            &snapshot(&html),
+        )?;
+
+        assert!(imported
+            .package
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == "web_text_content_fallback"));
+        Ok(())
+    }
+
+    #[test]
     fn web_import_is_deterministic_and_paths_match_unit() -> Result<(), SourceImportError> {
         let fixture = snapshot("<article><h1>Title</h1><p>Text</p></article>");
         let first = import_web_snapshot(
@@ -1655,6 +1989,67 @@ mod tests {
 
         assert_eq!(publication.package.units[1].title, envelope.links[0]);
         assert!(publication.package.diagnostics.contains(&diagnostic));
+        Ok(())
+    }
+
+    #[test]
+    fn telegram_composite_deduplicates_expanded_canonical_pages() -> Result<(), SourceImportError> {
+        let envelope = TelegramUpdate {
+            update_id: 1,
+            bot_id: 77,
+            bot_scope: "telegram-bot:77".to_owned(),
+            telegram_user_id: 2,
+            chat_id: 3,
+            is_private_chat: true,
+            message_id: 4,
+            message_date: None,
+            text: Some("Две ссылки на одну статью".to_owned()),
+            is_caption: false,
+            entities: Vec::new(),
+            links: vec![
+                "https://example.test/article?utm_source=telegram".to_owned(),
+                "https://example.test/redirect/article".to_owned(),
+            ],
+            photos: Vec::new(),
+            media_group_id: None,
+            forwarded: true,
+            forward_origin: Some("Канал".to_owned()),
+            has_unsupported_payload: false,
+            unsupported_attachments: Vec::new(),
+        };
+        let first = snapshot("<article><h1>Статья</h1><p>Текст.</p></article>");
+        let second = snapshot("<article><h1>Статья</h1><p>Текст.</p></article>");
+        let publication = import_telegram_composite(
+            UserId::nil(),
+            MaterialId::nil(),
+            DocumentRevisionId::nil(),
+            &envelope,
+            &[],
+            &[
+                TelegramWebSection {
+                    url: envelope.links[0].clone(),
+                    snapshot: Some(first),
+                    diagnostics: Vec::new(),
+                },
+                TelegramWebSection {
+                    url: envelope.links[1].clone(),
+                    snapshot: Some(second),
+                    diagnostics: Vec::new(),
+                },
+            ],
+            &[],
+        )?;
+        let duplicate_diagnostics = publication
+            .package
+            .diagnostics
+            .iter()
+            .filter(|diagnostic| diagnostic.code == "telegram_duplicate_web_section_skipped")
+            .count();
+
+        assert_eq!(
+            (publication.package.units.len(), duplicate_diagnostics),
+            (2, 1)
+        );
         Ok(())
     }
 

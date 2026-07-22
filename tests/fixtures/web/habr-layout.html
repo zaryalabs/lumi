@@ -1,0 +1,23 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <title>Habr layout regression</title>
+</head>
+<body>
+  <main class="tm-layout__container">
+    <div class="tm-page__main_has-sidebar tm-page__main">
+      <article class="tm-article-presenter__content">
+        <h1>Статья внутри layout с сайдбаром</h1>
+        <div id="post-content-body" class="article-formatted-body">
+          <p>Первый содержательный абзац должен остаться в нормализованном документе.</p>
+          <p>Второй содержательный абзац подтверждает, что внешний layout не считается шумом.</p>
+        </div>
+      </article>
+      <aside class="tm-page__sidebar">
+        <p>Шум сайдбара не должен попасть в статью.</p>
+      </aside>
+    </div>
+  </main>
+</body>
+</html>
