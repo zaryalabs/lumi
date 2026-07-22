@@ -28,6 +28,8 @@ coordination document.
 
 ## Current Plans
 
+- [`telegram-composite-import.md`](telegram-composite-import.md) - staged plan
+  составного Telegram-импорта с изображениями и раскрытием web-ссылок.
 - [`playwright-agent-inspection.md`](playwright-agent-inspection.md) - local
   browser inspection notes for the Dioxus Web shell and reader surface.
 - [`s1-web-reader.md`](s1-web-reader.md) - staged implementation plan
