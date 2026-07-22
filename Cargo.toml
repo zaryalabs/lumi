@@ -19,6 +19,7 @@ ammonia = "4.1.4"
 async-trait = "0.1.89"
 axum = "0.8.9"
 base64 = "0.22.1"
+ring = "0.17.14"
 dioxus = { version = "0.7.0", default-features = false }
 ed25519-dalek = { version = "2.2.0", default-features = false, features = [
   "fast",
@@ -59,6 +60,10 @@ tokio = { version = "1.52.3", features = [
   "signal",
   "sync",
   "time",
+] }
+tokio-util = "0.7.17"
+teloxide-core = { version = "0.13.0", default-features = false, features = [
+  "rustls",
 ] }
 tower = { version = "0.5.3", features = ["limit", "util"] }
 tower-http = { version = "0.6.11", features = [

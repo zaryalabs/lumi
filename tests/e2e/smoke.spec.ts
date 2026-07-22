@@ -1,9 +1,5 @@
 import { devices, expect, test } from "@playwright/test";
 
-const e2eApiPort = process.env.LUMI_E2E_API_PORT ?? "8080";
-const telegramWebhook = `http://127.0.0.1:${e2eApiPort}/webhooks/telegram`;
-const telegramWebhookSecret = "lumi-e2e-webhook-secret-123456789";
-
 const supportedEpub = Buffer.from(
   "UEsDBBQAAAAAAAAAIQBvYassFAAAABQAAAAIAAAAbWltZXR5cGVhcHBsaWNhdGlvbi9lcHViK3ppcFBLAwQUAAAACAD9eO1cHBxuKlQAAABrAAAAFgAAAE1FVEEtSU5GL2NvbnRhaW5lci54bWyzsa/IzVEoSy0qzszPs1Uy1DNQsrezSc7PK0nMzEstsrMpys8vScvMSS1GMBXSSnNydAsSSzJslVwDQp30CxKTsxPTU/XyC9KU9O1s9JH06COMAgBQSwMEFAAAAAgA/XjtXFlgKDfMAAAAbQEAABAAAABFUFVCL3BhY2thZ2Uub3BmjdA9bsMwDAXgqwhag0RxstIKEMBbhy49ACEzCVFJFiQmdW9f2c7f2E16JD48EA5j8OpGufAQW91stvpgIaH7xjO98n3NLQQS7FHQgrB4ssc8/BTKqvv8OoJZMnCZUIZsP66BVbfrwDwS8BjP1+paimCeHzAvN2DkExWxwEJBcd/qiDetLplO83MzXiR4rQL1jGv5TdRqTMmzQ6lNzTxejdNKykOiLExlQcwb6pqHKTSKcc3/XTMVftYsiSMtcOWqPaOVn9buQ3M/p/0DUEsDBBQAAAAIAP147Vxvj8P2PgAAAEgAAAAOAAAARVBVQi9uYXYueGh0bWyzySjJzbGzScpPqbSzyUsss7NJVMgoSk2zVSpJrSjRTzbUqwCpULJzzkgsKEktstFPtLPRByvUh2jSB5sAAFBLAwQUAAAACAD9eO1cT/i+nUcAAABNAAAAEgAAAEVQVUIvdGV4dC9jMS54aHRtbLPJKMnNsbNJyk+ptLPJMLRzzkgsKEktstEHsm0K7AJSi4ozi0tS80oUilITcxRcA0KdFDJzC/KLSvRs9AvsbPQhOvXBxgAAUEsBAhQDFAAAAAAAAAAhAG9hqywUAAAAFAAAAAgAAAAAAAAAAAAAAIABAAAAAG1pbWV0eXBlUEsBAhQDFAAAAAgA/XjtXBwcbipUAAAAawAAABYAAAAAAAAAAAAAAIABOgAAAE1FVEEtSU5GL2NvbnRhaW5lci54bWxQSwECFAMUAAAACAD9eO1cWWAoN8wAAABtAQAAEAAAAAAAAAAAAAAAgAHCAAAARVBVQi9wYWNrYWdlLm9wZlBLAQIUAxQAAAAIAP147Vxvj8P2PgAAAEgAAAAOAAAAAAAAAAAAAACAAbwBAABFUFVCL25hdi54aHRtbFBLAQIUAxQAAAAIAP147VxP+L6dRwAAAE0AAAASAAAAAAAAAAAAAACAASYCAABFUFVCL3RleHQvYzEueGh0bWxQSwUGAAAAAAUABQA0AQAAnQIAAAAA",
   "base64",
@@ -217,63 +213,6 @@ test("persists an API-backed EPUB library lifecycle", async ({ page }) => {
   await expect(
     page.getByRole("region", { name: "Пустая библиотека" }),
   ).toBeVisible();
-  await page.getByRole("button", { name: "Подключить Telegram" }).click();
-  const telegramRegion = page.getByRole("region", {
-    name: "Подключение Telegram",
-  });
-  const pairingToken = (
-    await telegramRegion.getByRole("status").locator("code").innerText()
-  ).trim();
-  const updateBase = Date.now();
-  const pairingResponse = await page.request.post(telegramWebhook, {
-    headers: {
-      "Content-Type": "application/json",
-      "X-Telegram-Bot-Api-Secret-Token": telegramWebhookSecret,
-    },
-    data: {
-      update_id: updateBase,
-      message: {
-        message_id: updateBase,
-        date: Math.floor(Date.now() / 1000),
-        chat: { id: updateBase, type: "private" },
-        from: { id: updateBase },
-        text: `/start ${pairingToken}`,
-      },
-    },
-  });
-  expect(pairingResponse.ok()).toBeTruthy();
-  await expect(page.getByText("Подключён", { exact: true })).toBeVisible({
-    timeout: 10_000,
-  });
-  const telegramUpdate = {
-    update_id: updateBase + 1,
-    message: {
-      message_id: updateBase + 1,
-      date: Math.floor(Date.now() / 1000),
-      chat: { id: updateBase, type: "private" },
-      from: { id: updateBase },
-      text: "Beta duplicate fixture from Telegram",
-    },
-  };
-  for (let attempt = 0; attempt < 2; attempt += 1) {
-    const response = await page.request.post(telegramWebhook, {
-      headers: {
-        "Content-Type": "application/json",
-        "X-Telegram-Bot-Api-Secret-Token": telegramWebhookSecret,
-      },
-      data: telegramUpdate,
-    });
-    expect(response.ok()).toBeTruthy();
-  }
-  await page.reload();
-  await expect(
-    page.getByRole("region", { name: "Активная сессия" }),
-  ).toBeVisible();
-  await expect(
-    page.getByRole("article").filter({
-      hasText: "Beta duplicate fixture from Telegram",
-    }),
-  ).toHaveCount(1, { timeout: 15_000 });
   await page
     .getByRole("button", { name: "＋ Добавить материал", exact: true })
     .click();

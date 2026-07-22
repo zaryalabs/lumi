@@ -9,15 +9,15 @@ mod auth_api;
 mod blob;
 mod imports;
 mod telegram;
+mod telegram_runtime;
 mod web;
 
 use std::collections::HashMap;
-use std::fmt;
 use std::sync::{Arc, RwLock, RwLockReadGuard, RwLockWriteGuard};
 use std::time::Duration;
 
 use axum::{
-    body::{to_bytes, Body},
+    body::Body,
     extract::{DefaultBodyLimit, Multipart, Path, State},
     http::{header, HeaderMap, HeaderValue, Method, StatusCode},
     middleware,
@@ -33,21 +33,23 @@ use lumi_core::{
     ImportDiagnostic, ImportStatusEntry, ImportWebUrlRequest, ImportedFixture, Job, JobId, JobKind,
     JobStage, JobStatus, LibraryEntry, LibraryState, Material, MaterialId, MaterialImportStatus,
     MoveReadingPositionCommand, NormalizedContentPackage, ReaderSettings, ReadingDocument,
-    ReadingProgress, SchemaMigration, ServiceCapabilities, TelegramConnectionStatus,
-    UpdateAnnotationCommand, UpdateLibraryStateCommand, UpdateReaderSettingsCommand, UserId,
+    ReadingProgress, SchemaMigration, ServiceCapabilities, TelegramBotSettings,
+    TelegramConnectionStatus, UpdateAnnotationCommand, UpdateLibraryStateCommand,
+    UpdateReaderSettingsCommand, UpdateTelegramBotTokenRequest, UserId,
 };
 use serde::{Deserialize, Serialize};
-use sha2::Digest;
 use tower_http::{
     cors::{AllowOrigin, CorsLayer},
     request_id::{MakeRequestUuid, PropagateRequestIdLayer, SetRequestIdLayer},
     timeout::TimeoutLayer,
     trace::TraceLayer,
 };
+use zeroize::Zeroize;
 
 use account::{AccountStore, AuthenticatedSession, MemoryAccountStore, PgAccountStore};
 use imports::{ImportService, ImportServiceError};
 use telegram::{TelegramService, TelegramServiceError};
+use telegram_runtime::{TelegramRuntime, TelegramRuntimeError};
 
 /// Default bind address for local development.
 pub const DEFAULT_BIND_ADDRESS: &str = "127.0.0.1:8080";
@@ -57,21 +59,8 @@ pub const DEFAULT_DATABASE_URL: &str = "postgres://lumi:lumi-local@127.0.0.1:543
 pub const DEFAULT_WEB_ORIGIN: &str = "http://127.0.0.1:5173";
 /// Default content-addressed blob root for local development.
 pub const DEFAULT_BLOB_ROOT: &str = ".local/blob-store";
-
-const TELEGRAM_WEBHOOK_SECRET_HEADER: &str = "x-telegram-bot-api-secret-token";
-const MAX_TELEGRAM_WEBHOOK_BODY_BYTES: usize = 256 * 1024;
-const MAX_TELEGRAM_WEBHOOK_HEADERS: usize = 48;
-const MAX_TELEGRAM_WEBHOOK_HEADER_BYTES: usize = 16 * 1024;
-const TELEGRAM_WEBHOOK_TIMEOUT: Duration = Duration::from_secs(8);
-
-#[derive(Clone, Eq, PartialEq)]
-struct SecretString(String);
-
-impl fmt::Debug for SecretString {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str("SecretString([redacted])")
-    }
-}
+/// Default root for generated local server-side secret keys.
+pub const DEFAULT_SECRET_ROOT: &str = ".local/secrets";
 
 /// Runtime configuration for the Lumi server process.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -82,7 +71,7 @@ pub struct AppConfig {
     auth_audience: String,
     secure_cookie: bool,
     blob_root: std::path::PathBuf,
-    telegram_webhook_secret: Option<SecretString>,
+    secret_root: std::path::PathBuf,
     deployment_mode: String,
 }
 
@@ -104,10 +93,9 @@ impl AppConfig {
         let blob_root = std::env::var_os("LUMI_BLOB_ROOT")
             .map(std::path::PathBuf::from)
             .unwrap_or_else(|| std::path::PathBuf::from(DEFAULT_BLOB_ROOT));
-        let telegram_webhook_secret = std::env::var("LUMI_TELEGRAM_WEBHOOK_SECRET")
-            .ok()
-            .filter(|value| !value.is_empty())
-            .map(SecretString);
+        let secret_root = std::env::var_os("LUMI_SECRET_ROOT")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|| std::path::PathBuf::from(DEFAULT_SECRET_ROOT));
         let deployment_mode =
             std::env::var("LUMI_DEPLOYMENT_MODE").unwrap_or_else(|_| "local".to_owned());
 
@@ -118,7 +106,7 @@ impl AppConfig {
             auth_audience,
             secure_cookie,
             blob_root,
-            telegram_webhook_secret,
+            secret_root,
             deployment_mode,
         }
     }
@@ -147,10 +135,10 @@ impl AppConfig {
         &self.blob_root
     }
 
-    fn telegram_webhook_secret(&self) -> Option<&str> {
-        self.telegram_webhook_secret
-            .as_ref()
-            .map(|secret| secret.0.as_str())
+    /// Filesystem root used for generated server-side secret keys.
+    #[must_use]
+    pub fn secret_root(&self) -> &std::path::Path {
+        &self.secret_root
     }
 }
 
@@ -228,8 +216,7 @@ pub struct AppState {
     accounts: Arc<dyn AccountStore>,
     security: SecurityConfig,
     imports: Option<Arc<ImportService>>,
-    telegram: Option<Arc<TelegramService>>,
-    telegram_webhook_secret: Option<SecretString>,
+    telegram: Option<Arc<TelegramRuntime>>,
 }
 
 impl AppState {
@@ -259,7 +246,6 @@ impl AppState {
             security: SecurityConfig::local(),
             imports: None,
             telegram: None,
-            telegram_webhook_secret: None,
         }
     }
 
@@ -276,7 +262,6 @@ impl AppState {
         config: &AppConfig,
         recover_imports: bool,
     ) -> anyhow::Result<Self> {
-        validate_telegram_webhook_secret(config.telegram_webhook_secret())?;
         validate_deployment_security(config)?;
         tokio::fs::create_dir_all(config.blob_root())
             .await
@@ -294,21 +279,19 @@ impl AppState {
                 .await
                 .map_err(|error| anyhow::anyhow!(error))?;
         }
-        let telegram = (config.deployment_mode == "local"
-            || config.telegram_webhook_secret.is_some())
-        .then(|| {
-            Arc::new(TelegramService::from_env(
-                accounts.pool().clone(),
-                Arc::clone(&imports),
-            ))
-        });
+        let telegram = TelegramRuntime::open(
+            accounts.pool().clone(),
+            Arc::clone(&imports),
+            config.secret_root(),
+        )
+        .await
+        .map_err(|error| anyhow::anyhow!(error))?;
         Ok(Self {
             repository: Arc::new(RwLock::new(Repository::default())),
             accounts: Arc::new(accounts),
             security: SecurityConfig::from_app(config),
             imports: Some(imports),
-            telegram,
-            telegram_webhook_secret: config.telegram_webhook_secret.clone(),
+            telegram: Some(telegram),
         })
     }
 
@@ -326,7 +309,6 @@ impl AppState {
             security: SecurityConfig::local(),
             imports: None,
             telegram: None,
-            telegram_webhook_secret: None,
         }
     }
 
@@ -344,10 +326,27 @@ impl AppState {
             .ok_or(AppError::Unavailable("durable import service"))
     }
 
-    fn telegram(&self) -> Result<&Arc<TelegramService>, AppError> {
+    fn telegram(&self) -> Result<Arc<TelegramService>, AppError> {
         self.telegram
             .as_ref()
-            .ok_or(AppError::Unavailable("Telegram provider service"))
+            .ok_or(AppError::Unavailable("Telegram runtime"))?
+            .service()
+            .map_err(map_telegram_runtime_error)
+    }
+
+    fn telegram_runtime(&self) -> Result<&Arc<TelegramRuntime>, AppError> {
+        self.telegram
+            .as_ref()
+            .ok_or(AppError::Unavailable("Telegram runtime"))
+    }
+
+    /// Run the embedded Telegram listener until `cancellation` is triggered.
+    pub async fn run_telegram(self, cancellation: tokio_util::sync::CancellationToken) {
+        if let Some(runtime) = self.telegram {
+            runtime.run(cancellation).await;
+        } else {
+            cancellation.cancelled().await;
+        }
     }
 }
 
@@ -405,6 +404,13 @@ pub fn build_router_with_state(state: AppState) -> Router {
                 .put(update_reader_settings)
                 .layer(DefaultBodyLimit::max(64 * 1024)),
         )
+        .route("/settings/telegram", get(get_telegram_bot_settings))
+        .route(
+            "/settings/telegram/token",
+            put(update_telegram_bot_token)
+                .delete(delete_telegram_bot_token)
+                .layer(DefaultBodyLimit::max(1024)),
+        )
         .route("/revisions/{revision_id}", get(get_revision))
         .route(
             "/revisions/{revision_id}/package",
@@ -456,19 +462,8 @@ pub fn build_router_with_state(state: AppState) -> Router {
         .parse::<HeaderValue>()
         .unwrap_or_else(|_| HeaderValue::from_static(DEFAULT_WEB_ORIGIN));
 
-    let mut router = Router::new().nest("/api/v1", api);
-    if state.telegram_webhook_secret.is_some() {
-        router = router.merge(
-            Router::new()
-                .route(
-                    "/webhooks/telegram",
-                    post(telegram_webhook)
-                        .layer(DefaultBodyLimit::max(MAX_TELEGRAM_WEBHOOK_BODY_BYTES)),
-                )
-                .with_state(state.clone()),
-        );
-    }
-    router
+    Router::new()
+        .nest("/api/v1", api)
         .layer(
             CorsLayer::new()
                 .allow_origin(AllowOrigin::exact(allowed_origin))
@@ -495,18 +490,6 @@ pub fn build_router_with_state(state: AppState) -> Router {
         ))
         .layer(tower::limit::ConcurrencyLimitLayer::new(256))
         .layer(TraceLayer::new_for_http())
-}
-
-fn validate_telegram_webhook_secret(secret: Option<&str>) -> anyhow::Result<()> {
-    if secret.is_some_and(|value| {
-        !(32..=256).contains(&value.len())
-            || value.bytes().any(|byte| !(0x21..=0x7e).contains(&byte))
-    }) {
-        anyhow::bail!(
-            "LUMI_TELEGRAM_WEBHOOK_SECRET must contain 32 to 256 visible ASCII characters"
-        );
-    }
-    Ok(())
 }
 
 fn validate_deployment_security(config: &AppConfig) -> anyhow::Result<()> {
@@ -557,93 +540,6 @@ fn validate_deployment_security(config: &AppConfig) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn webhook_secret_matches(expected: &str, supplied: &str) -> bool {
-    let expected_hash = sha2::Sha256::digest(expected.as_bytes());
-    let supplied_hash = sha2::Sha256::digest(supplied.as_bytes());
-    expected_hash
-        .iter()
-        .zip(supplied_hash.iter())
-        .fold(0_u8, |difference, (left, right)| {
-            difference | (left ^ right)
-        })
-        == 0
-}
-
-async fn telegram_webhook(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    body: Body,
-) -> Result<Response, AppError> {
-    let header_bytes = headers
-        .iter()
-        .map(|(name, value)| name.as_str().len().saturating_add(value.as_bytes().len()))
-        .sum::<usize>();
-    if headers.len() > MAX_TELEGRAM_WEBHOOK_HEADERS
-        || header_bytes > MAX_TELEGRAM_WEBHOOK_HEADER_BYTES
-    {
-        return Err(AppError::PayloadTooLarge);
-    }
-    let expected = state
-        .telegram_webhook_secret
-        .as_ref()
-        .ok_or(AppError::NotFound("Telegram webhook"))?;
-    let supplied = headers
-        .get(TELEGRAM_WEBHOOK_SECRET_HEADER)
-        .and_then(|value| value.to_str().ok())
-        .ok_or(AppError::Forbidden("Telegram webhook secret is required"))?;
-    if !webhook_secret_matches(&expected.0, supplied) {
-        return Err(AppError::Forbidden("Telegram webhook secret is invalid"));
-    }
-    if headers
-        .get(header::CONTENT_TYPE)
-        .and_then(|value| value.to_str().ok())
-        .is_none_or(|value| {
-            value
-                .split(';')
-                .next()
-                .is_none_or(|media_type| media_type.trim() != "application/json")
-        })
-    {
-        return Ok(StatusCode::NO_CONTENT.into_response());
-    }
-
-    let service = state.telegram.clone();
-    let outcome = tokio::time::timeout(TELEGRAM_WEBHOOK_TIMEOUT, async move {
-        let Ok(payload) = to_bytes(body, MAX_TELEGRAM_WEBHOOK_BODY_BYTES).await else {
-            return Ok(None);
-        };
-        let update = match telegram::parse_webhook_update(&payload) {
-            Ok(Some(update)) => update,
-            Ok(None) | Err(TelegramServiceError::InvalidUpdate) => return Ok(None),
-            Err(error) => return Err(map_telegram_webhook_error(error)),
-        };
-        let service = service.ok_or(AppError::Unavailable("Telegram provider service"))?;
-        match service.handle_update(&update).await {
-            Ok(reply) => Ok(Some(reply)),
-            Err(
-                TelegramServiceError::InvalidUpdate
-                | TelegramServiceError::UpdateConflict
-                | TelegramServiceError::PairingConflict,
-            ) => Ok(None),
-            Err(error) => Err(map_telegram_webhook_error(error)),
-        }
-    })
-    .await
-    .map_err(|_| AppError::Unavailable("Telegram webhook processing"))??;
-
-    Ok(outcome.map_or_else(
-        || StatusCode::NO_CONTENT.into_response(),
-        |reply| {
-            Json(serde_json::json!({
-                "method": "sendMessage",
-                "chat_id": reply.chat_id,
-                "text": reply.text,
-            }))
-            .into_response()
-        },
-    ))
-}
-
 /// Apply the forward-only SQLx migration set to a PostgreSQL database.
 ///
 /// Production deployments should run this as a separate deploy step before
@@ -667,33 +563,6 @@ pub async fn run_migrations(database_url: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Run the local-development Telegram long-polling transport.
-///
-/// # Errors
-///
-/// Returns an error when configuration, PostgreSQL, Telegram transport or the
-/// durable update handler is unavailable.
-pub async fn run_telegram_long_poll(config: &AppConfig) -> anyhow::Result<()> {
-    if config.deployment_mode != "local" {
-        anyhow::bail!("Telegram long polling is restricted to local deployment mode");
-    }
-    let token = std::env::var("LUMI_TELEGRAM_BOT_TOKEN")
-        .map_err(|_| anyhow::anyhow!("LUMI_TELEGRAM_BOT_TOKEN is required"))?;
-    std::env::var("LUMI_TELEGRAM_BOT_SCOPE")
-        .map_err(|_| anyhow::anyhow!("LUMI_TELEGRAM_BOT_SCOPE is required for the runner"))?;
-    // Claim/lease fencing makes concurrent startup recovery safe: active jobs
-    // keep their lease and queued/expired jobs are claimed by exactly one worker.
-    let state = AppState::persistent_with_recovery(config, true).await?;
-    let service = Arc::clone(
-        state
-            .telegram()
-            .map_err(|_| anyhow::anyhow!("Telegram provider service is unavailable"))?,
-    );
-    telegram::run_long_poll(service, &token)
-        .await
-        .map_err(|error| anyhow::anyhow!(error))
-}
-
 async fn health() -> Json<HealthResponse> {
     Json(HealthResponse::ok("lumi-server"))
 }
@@ -715,7 +584,11 @@ async fn readiness(State(state): State<AppState>) -> Result<Json<HealthResponse>
 
 async fn capabilities(State(state): State<AppState>) -> Json<ServiceCapabilities> {
     let mut capabilities = ServiceCapabilities::s1();
-    if state.telegram.is_none() {
+    if state
+        .telegram
+        .as_ref()
+        .is_none_or(|runtime| !runtime.is_running())
+    {
         capabilities.features.retain(|feature| {
             !matches!(
                 feature.as_str(),
@@ -723,12 +596,10 @@ async fn capabilities(State(state): State<AppState>) -> Json<ServiceCapabilities
             )
         });
     }
-    if state.telegram_webhook_secret.is_some() {
-        capabilities
-            .route_groups
-            .push("webhooks/telegram".to_owned());
-        capabilities.features.push("telegram-webhook".to_owned());
-    }
+    capabilities.route_groups.push("settings".to_owned());
+    capabilities
+        .features
+        .push("embedded-telegram-long-polling".to_owned());
     Json(capabilities)
 }
 
@@ -1245,6 +1116,40 @@ async fn retry_job(
         .map_err(map_import_error)
 }
 
+async fn get_telegram_bot_settings(
+    State(state): State<AppState>,
+) -> Result<Json<TelegramBotSettings>, AppError> {
+    state
+        .telegram_runtime()?
+        .settings()
+        .map(Json)
+        .map_err(map_telegram_runtime_error)
+}
+
+async fn update_telegram_bot_token(
+    State(state): State<AppState>,
+    Extension(session): Extension<AuthenticatedSession>,
+    Json(mut request): Json<UpdateTelegramBotTokenRequest>,
+) -> Result<Json<TelegramBotSettings>, AppError> {
+    let result = state
+        .telegram_runtime()?
+        .configure(&request.token, session.user_id)
+        .await;
+    request.token.zeroize();
+    result.map(Json).map_err(map_telegram_runtime_error)
+}
+
+async fn delete_telegram_bot_token(
+    State(state): State<AppState>,
+) -> Result<Json<TelegramBotSettings>, AppError> {
+    state
+        .telegram_runtime()?
+        .remove()
+        .await
+        .map(Json)
+        .map_err(map_telegram_runtime_error)
+}
+
 async fn list_annotations(
     State(state): State<AppState>,
     Extension(session): Extension<AuthenticatedSession>,
@@ -1649,15 +1554,15 @@ fn map_telegram_error(error: TelegramServiceError) -> AppError {
     }
 }
 
-fn map_telegram_webhook_error(error: TelegramServiceError) -> AppError {
+fn map_telegram_runtime_error(error: TelegramRuntimeError) -> AppError {
     match error {
-        TelegramServiceError::InvalidUpdate => AppError::BadRequest(error.to_string()),
-        TelegramServiceError::UpdateConflict | TelegramServiceError::PairingConflict => {
-            AppError::Conflict(error.to_string())
-        }
-        TelegramServiceError::UpdateInProgress | TelegramServiceError::Unavailable => {
-            AppError::Unavailable("Telegram webhook processing")
-        }
+        TelegramRuntimeError::NotConfigured => AppError::Unavailable("Telegram bot configuration"),
+        TelegramRuntimeError::InvalidToken => AppError::BadRequest(error.to_string()),
+        TelegramRuntimeError::AlreadyRunning => AppError::Conflict(error.to_string()),
+        TelegramRuntimeError::Provider => AppError::Unavailable("Telegram Bot API"),
+        TelegramRuntimeError::Storage
+        | TelegramRuntimeError::SecretStore
+        | TelegramRuntimeError::State => AppError::Unavailable("Telegram settings"),
     }
 }
 
@@ -2043,73 +1948,18 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn telegram_webhook_is_absent_without_secret() -> Result<(), Box<dyn std::error::Error>> {
+    async fn telegram_settings_require_an_authenticated_session(
+    ) -> Result<(), Box<dyn std::error::Error>> {
         let response = build_router()
             .oneshot(
                 Request::builder()
-                    .method("POST")
-                    .uri("/webhooks/telegram")
+                    .uri("/api/v1/settings/telegram")
                     .body(Body::empty())?,
             )
             .await?;
 
-        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
         Ok(())
-    }
-
-    #[tokio::test]
-    async fn telegram_webhook_rejects_secret_before_parsing_body(
-    ) -> Result<(), Box<dyn std::error::Error>> {
-        let mut state = AppState::empty();
-        state.telegram_webhook_secret = Some(SecretString("a".repeat(32)));
-        let response = build_router_with_state(state)
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri("/webhooks/telegram")
-                    .header(TELEGRAM_WEBHOOK_SECRET_HEADER, "wrong-secret")
-                    .body(Body::from("this is intentionally not JSON"))?,
-            )
-            .await?;
-
-        assert_eq!(response.status(), StatusCode::FORBIDDEN);
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn authenticated_malformed_webhook_is_acknowledged_without_retry(
-    ) -> Result<(), Box<dyn std::error::Error>> {
-        let secret = "a".repeat(32);
-        let mut state = AppState::empty();
-        state.telegram_webhook_secret = Some(SecretString(secret.clone()));
-        let response = build_router_with_state(state)
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri("/webhooks/telegram")
-                    .header(TELEGRAM_WEBHOOK_SECRET_HEADER, secret)
-                    .header(header::CONTENT_TYPE, "application/json")
-                    .body(Body::from("not-json"))?,
-            )
-            .await?;
-
-        assert_eq!(response.status(), StatusCode::NO_CONTENT);
-        Ok(())
-    }
-
-    #[test]
-    fn telegram_webhook_secret_is_redacted_and_validated() {
-        let value = "sensitive-webhook-secret-value-123";
-        let secret = SecretString(value.to_owned());
-
-        assert!(!format!("{secret:?}").contains(value));
-        assert!(validate_telegram_webhook_secret(Some(value)).is_ok());
-        assert!(validate_telegram_webhook_secret(Some("short")).is_err());
-        assert!(webhook_secret_matches(value, value));
-        assert!(!webhook_secret_matches(
-            value,
-            "different-webhook-secret-value-12"
-        ));
     }
 
     #[tokio::test]
@@ -2510,14 +2360,32 @@ mod tests {
         run_migrations(&database_url).await?;
         let blob_root =
             std::env::temp_dir().join(format!("lumi-route-matrix-{}", uuid::Uuid::now_v7()));
+        let secret_root = std::env::temp_dir().join(format!(
+            "lumi-route-matrix-secrets-{}",
+            uuid::Uuid::now_v7()
+        ));
         let mut config = AppConfig::from_env();
         config.database_url = database_url;
         config.blob_root = blob_root.clone();
+        config.secret_root = secret_root.clone();
         config.bind_address = DEFAULT_BIND_ADDRESS.to_owned();
         config.deployment_mode = "local".to_owned();
         let app = build_router_with_state(AppState::persistent(&config).await?);
         let owner = register_test_session(app.clone(), 0x81).await?;
         let foreign = register_test_session(app.clone(), 0x82).await?;
+        for session in [&owner, &foreign] {
+            let response = app
+                .clone()
+                .oneshot(
+                    session.apply(
+                        Request::builder()
+                            .uri("/api/v1/settings/telegram")
+                            .body(Body::empty())?,
+                    ),
+                )
+                .await?;
+            assert_eq!(response.status(), StatusCode::OK);
+        }
         let imported: ImportFixtureResponse = request_json_with_session(
             app.clone(),
             Request::builder()
@@ -2596,6 +2464,7 @@ mod tests {
             )
             .await?;
         let _ = tokio::fs::remove_dir_all(blob_root).await;
+        let _ = tokio::fs::remove_dir_all(secret_root).await;
         assert_eq!(replay.status(), StatusCode::UNAUTHORIZED);
         Ok(())
     }

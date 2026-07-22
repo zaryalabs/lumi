@@ -29,10 +29,11 @@ provenance, сетевой границы и provider idempotency.
   минут и потребляется один раз. Pairing update claim, consume/link и outcome
   фиксируются одной PostgreSQL transaction.
 - `(bot_scope, update_id)` связан с payload hash и durable outcome. Duplicate
-  возвращает тот же ответ; другой payload конфликтует. Long polling — local
-  transport, один runner на обязательный уникальный scope. API server и runner
-  могут выполнять один lease-safe recovery: активный claim остаётся нетронутым,
-  а expired job атомарно переочередивается и может быть захвачен лишь один раз.
+  возвращает тот же ответ; другой payload конфликтует. Первоначальный отдельный
+  local runner заменён встроенным `teloxide-core` listener и UI settings в
+  [ADR 0012](0012-embedded-telegram-bot-settings.md). API server выполняет один
+  lease-safe recovery: активный claim остаётся нетронутым, а expired job
+  атомарно переочередивается и может быть захвачен лишь один раз.
 - Admission сериализован до blob write: максимум 16 незавершённых imports на
   аккаунт и 8 активных workers. Durable worker claim/lease запрещает stale
   process публиковать после recovery другим process.

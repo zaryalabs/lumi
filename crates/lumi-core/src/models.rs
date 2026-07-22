@@ -1141,6 +1141,52 @@ pub struct TelegramConnectionStatus {
     pub pairing_expires_at: Option<TimestampMs>,
 }
 
+/// Runtime state of the instance-wide Telegram bot listener.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TelegramBotRuntimeStatus {
+    /// No bot token has been configured.
+    Unconfigured,
+    /// A newly supplied token is being checked with Telegram.
+    Validating,
+    /// The listener is starting or restarting.
+    Starting,
+    /// Long polling is active.
+    Running,
+    /// The listener stopped after a recoverable provider or storage error.
+    Degraded,
+    /// The listener was explicitly stopped.
+    Stopped,
+}
+
+/// Safe projection of the instance-wide Telegram bot configuration.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct TelegramBotSettings {
+    /// Whether an encrypted bot token is stored.
+    pub configured: bool,
+    /// Stable Telegram bot id returned by `getMe`.
+    pub bot_id: Option<u64>,
+    /// Telegram bot username returned by `getMe`.
+    pub bot_username: Option<String>,
+    /// Short non-secret fingerprint used to identify token rotations.
+    pub token_fingerprint: Option<String>,
+    /// Current embedded listener state.
+    pub status: TelegramBotRuntimeStatus,
+    /// Last successful provider validation timestamp in milliseconds.
+    pub last_checked_at: Option<TimestampMs>,
+    /// Redacted operator-facing failure reason.
+    pub last_error: Option<String>,
+    /// Monotonic settings revision.
+    pub configuration_revision: u64,
+}
+
+/// Command that installs or rotates the instance-wide Telegram bot token.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct UpdateTelegramBotTokenRequest {
+    /// Token obtained from BotFather. The server never returns this value.
+    pub token: String,
+}
+
 /// Import state projected onto a material card in the web library.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]

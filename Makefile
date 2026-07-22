@@ -232,14 +232,6 @@ server-r: ## Run the local Axum server
 		exit 1; \
 	fi
 
-telegram-r: ## Run the local Telegram long-polling transport
-	@if [ -f "$(RUST_MANIFEST)" ]; then \
-		DATABASE_URL=$(DATABASE_URL) $(CARGO) run -p lumi-server --bin lumi-telegram-long-poll; \
-	else \
-		echo "No Cargo.toml found; cannot run Telegram transport"; \
-		exit 1; \
-	fi
-
 db-up: ## Start the local PostgreSQL service
 	LUMI_POSTGRES_PORT=$(LUMI_POSTGRES_PORT) docker compose up -d --wait postgres
 
@@ -389,4 +381,4 @@ clean: ## Remove common local build and cache artifacts
 	rm -rf $(WEB_DIR)/dist $(WEB_DIR)/target
 	rm -rf $(E2E_DIR)/test-results $(E2E_DIR)/playwright-report
 
-.PHONY: help init fmt l dl t c pc docs-fmt docs-l rust-fmt rust-l rust-web-check rust-web-l rust-dl rust-t up logs down reset db-up db-down db-migrate server-r web-r telegram-r prototype-r prototype-e2e pagination-spike-r pagination-spike-e2e stage0-spikes web-build e2e-fmt e2e-l e2e-dl web-e2e agent-inspect clean
+.PHONY: help init fmt l dl t c pc docs-fmt docs-l rust-fmt rust-l rust-web-check rust-web-l rust-dl rust-t up logs down reset db-up db-down db-migrate server-r web-r prototype-r prototype-e2e pagination-spike-r pagination-spike-e2e stage0-spikes web-build e2e-fmt e2e-l e2e-dl web-e2e agent-inspect clean

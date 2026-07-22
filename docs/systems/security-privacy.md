@@ -75,10 +75,10 @@ Native clients can disable cloud replica for private vault:
   possible.
 - Destructive migrations require backup/snapshot strategy.
 - Non-local web deployment fail-closed требует HTTPS origin, matching auth
-  audience и Secure cookies; Telegram long polling остаётся local-only.
-- Production Telegram webhook существует только с runtime secret, проверяемым
-  до body parsing; permanent authenticated payload failures не создают retry
-  storm, transient failures остаются retryable.
+  audience и Secure cookies.
+- Telegram bot token проверяется через provider, хранится как AEAD-шифротекст и
+  не возвращается через API; отдельный local master key не хранится в
+  PostgreSQL. Встроенный long polling использует durable idempotent handler.
 - Readiness проверяет migration compatibility и bounded blob
   write/rename/read/delete sentinel; backup связывает quiesced PostgreSQL и blob
   artifacts manifest/checksums и проверяется disposable restore drill.

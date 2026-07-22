@@ -1,7 +1,9 @@
+use std::future::IntoFuture;
 use std::net::SocketAddr;
 
 use anyhow::{anyhow, Context};
 use lumi_server::{build_router_with_state, shutdown_signal, AppConfig, AppState};
+use tokio_util::sync::CancellationToken;
 use tracing_subscriber::EnvFilter;
 
 #[tokio::main]
@@ -28,10 +30,31 @@ async fn main() -> anyhow::Result<()> {
 
     tracing::info!(%address, "starting Lumi server");
 
-    axum::serve(listener, build_router_with_state(state))
-        .with_graceful_shutdown(shutdown_signal())
-        .await
-        .context("Lumi server failed")?;
+    let cancellation = CancellationToken::new();
+    let server = axum::serve(listener, build_router_with_state(state.clone()))
+        .with_graceful_shutdown(cancellation.clone().cancelled_owned())
+        .into_future();
+    let telegram = state.run_telegram(cancellation.clone());
+    tokio::pin!(server);
+    tokio::pin!(telegram);
+
+    tokio::select! {
+        result = &mut server => {
+            cancellation.cancel();
+            result.context("Lumi server failed")?;
+            telegram.await;
+        }
+        () = &mut telegram => {
+            cancellation.cancel();
+            server.await.context("Lumi server failed")?;
+            anyhow::bail!("embedded Telegram supervisor stopped unexpectedly");
+        }
+        () = shutdown_signal() => {
+            cancellation.cancel();
+            server.await.context("Lumi server failed")?;
+            telegram.await;
+        }
+    }
 
     Ok(())
 }

@@ -27,24 +27,23 @@ LUMI_WEB_FIXTURE_ROOT=tests/fixtures/web make server-r
 
 URL `https://fixtures.lumi.test/article` тогда не обращается к сети.
 
-## Telegram long polling
+## Telegram-бот
 
-API server и runner должны получить один уникальный scope конкретного bot:
+Запустите обычный стек и войдите в Lumi. Откройте «Настройки → Telegram-бот»,
+введите token из BotFather и дождитесь статуса «Работает». Основной
+`lumi-server` сам проверяет token через `getMe` и запускает встроенный long
+polling listener на `teloxide-core`; отдельный процесс и env для Telegram не
+нужны.
 
-```sh
-export LUMI_TELEGRAM_BOT_SCOPE=lumi-local-my-bot
-export LUMI_TELEGRAM_BOT_USERNAME=my_lumi_bot
-export LUMI_TELEGRAM_BOT_TOKEN='секрет из BotFather'
-make server-r
-make telegram-r
-```
+Настройка глобальна для экземпляра Lumi. На текущем прототипном этапе её может
+изменить любой авторизованный пользователь. Токен не возвращается в browser,
+PostgreSQL содержит только шифротекст, а master key лежит в persistent secret
+root. При замене токена тем же bot id пользовательские привязки сохраняются;
+другой bot id требует нового pairing.
 
-Не запускайте два runner с одним scope: PostgreSQL advisory lock отклонит
-второй. Не переиспользуйте scope для другого bot. Token нельзя передавать в
-аргументах, URL приложения, logs или fixtures. Long polling — только local
-transport. Опциональный production-safe webhook/secret boundary теперь описан
-в [`beta-staging.md`](beta-staging.md): route отсутствует без runtime secret, а
-факт внешней регистрации подтверждает operator, не repository.
+PostgreSQL advisory lock защищает от случайного запуска двух listeners для
+одного bot id. Webhook сохранён только как будущее направление в
+[ADR 0012](../adr/0012-embedded-telegram-bot-settings.md).
 
 В UI plaintext pairing token показывается один раз, исчезает после connection
 или expiry и не кэшируется response. `/start <token>`, `/help`, `/unlink`,
@@ -57,11 +56,13 @@ direct/forwarded text и одна public web URL поддерживаются. G
 - `429`: уже 16 queued/running imports аккаунта; дождитесь завершения.
 - Одновременно работает до 8 normalizers на process.
 - Source download: attachment, `private, no-store`, `nosniff`.
-- API server и runner используют один claim/lease-safe recovery: активный lease
+- API server и встроенный listener используют один claim/lease-safe recovery: активный lease
   не перехватывается, а queued/expired job получает ровно одного worker owner.
 - Duplicate Telegram update возвращает durable outcome без второго material.
 
 ```sh
 make c
-make web-e2e
 ```
+
+Живой token и доставку сообщения проверяют вручную локально или на сервере;
+browser E2E для этого provider-сценария не требуется.

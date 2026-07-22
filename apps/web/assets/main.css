@@ -685,6 +685,67 @@ p {
   border-radius: 9px;
   background: var(--surface-muted);
 }
+.settings-view {
+  width: min(860px, calc(100% - 40px));
+}
+.telegram-settings {
+  display: grid;
+  gap: 20px;
+  padding: clamp(22px, 5vw, 38px);
+  border: 1px solid var(--line);
+  border-radius: 18px;
+  background: var(--surface);
+}
+.settings-notice {
+  margin: 0;
+  padding: 14px;
+  border-left: 3px solid var(--accent);
+  border-radius: 0 9px 9px 0;
+  color: var(--muted);
+  background: var(--accent-soft);
+  line-height: 1.55;
+}
+.settings-summary {
+  display: grid;
+  gap: 10px;
+  margin: 0;
+}
+.settings-summary div {
+  display: grid;
+  grid-template-columns: minmax(90px, 0.35fr) 1fr;
+  gap: 16px;
+  padding-bottom: 10px;
+  border-bottom: 1px solid var(--line);
+}
+.settings-summary dt {
+  color: var(--muted);
+}
+.settings-summary dd {
+  min-width: 0;
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+.telegram-token-field {
+  max-width: 620px;
+}
+.runtime-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+}
+.runtime-status::before {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: currentcolor;
+  content: "";
+}
+.runtime-running {
+  color: var(--accent-strong);
+}
+.runtime-stopped {
+  color: var(--danger);
+}
 
 /* Dialogs */
 .library-dialog,

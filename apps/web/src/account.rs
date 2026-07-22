@@ -8,8 +8,9 @@ use lumi_core::{
     ChallengeResponse, CompleteLoginRequest, ContinueReadingEntry, CreateChallengeRequest,
     DerivedAuthMaterial, ImportWebUrlRequest, Job, JobStatus, LibraryEntry, LibraryState,
     MaterialImportStatus, MaterialKind, ReadingProgress, RegisterAccountRequest,
-    ServiceCapabilities, SessionBootstrap, TelegramConnectionStatus, TelegramPairingResponse,
-    UpdateLibraryStateCommand,
+    ServiceCapabilities, SessionBootstrap, TelegramBotRuntimeStatus, TelegramBotSettings,
+    TelegramConnectionStatus, TelegramPairingResponse, UpdateLibraryStateCommand,
+    UpdateTelegramBotTokenRequest,
 };
 use uuid::Uuid;
 use wasm_bindgen::closure::Closure;
@@ -25,20 +26,26 @@ pub(crate) const API_BASE: &str = match option_env!("LUMI_API_BASE") {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum AppRoute {
     Library,
+    Settings,
     Reader(Uuid),
 }
 
 fn initial_route() -> AppRoute {
-    web_sys::window()
+    let hash = web_sys::window()
         .and_then(|window| window.location().hash().ok())
-        .and_then(|hash| hash.strip_prefix("#reader/").map(str::to_owned))
-        .and_then(|id| Uuid::parse_str(&id).ok())
+        .unwrap_or_default();
+    if hash == "#settings" {
+        return AppRoute::Settings;
+    }
+    hash.strip_prefix("#reader/")
+        .and_then(|id| Uuid::parse_str(id).ok())
         .map_or(AppRoute::Library, AppRoute::Reader)
 }
 
 fn set_browser_route(route: AppRoute) {
     let hash = match route {
         AppRoute::Library => "library".to_owned(),
+        AppRoute::Settings => "settings".to_owned(),
         AppRoute::Reader(material_id) => format!("reader/{material_id}"),
     };
     if let Some(window) = web_sys::window() {
@@ -139,14 +146,24 @@ pub(crate) fn AccountGate() -> Element {
             rsx! {
                 div { class: "library-app",
                     a { class: "skip-link", href: "#main-content", "Перейти к содержанию" }
-                    if route() == AppRoute::Library {
+                    if !matches!(route(), AppRoute::Reader(_)) {
                     header { class: "library-topbar",
-                        a { class: "library-brand", href: "#library", aria_label: "Lumi — библиотека", onclick: move |_| route.set(AppRoute::Library),
+                        a { class: "library-brand", href: "#library", aria_label: "Lumi — библиотека", onclick: move |_| {
+                            set_browser_route(AppRoute::Library);
+                            route.set(AppRoute::Library);
+                        },
                             span { class: "brand-mark", aria_hidden: "true", "L" }
                             strong { "Lumi" }
                         }
                         nav { aria_label: "Основная навигация",
-                            a { href: "#library", aria_current: if route() == AppRoute::Library { "page" } else { "false" }, onclick: move |_| route.set(AppRoute::Library), "Библиотека" }
+                            a { href: "#library", aria_current: if route() == AppRoute::Library { "page" } else { "false" }, onclick: move |_| {
+                                set_browser_route(AppRoute::Library);
+                                route.set(AppRoute::Library);
+                            }, "Библиотека" }
+                            a { href: "#settings", aria_current: if route() == AppRoute::Settings { "page" } else { "false" }, onclick: move |_| {
+                                set_browser_route(AppRoute::Settings);
+                                route.set(AppRoute::Settings);
+                            }, "Настройки" }
                         }
                         div { class: "account-session-bar", role: "region", aria_label: "Активная сессия",
                             span { "{account_label}" }
@@ -175,6 +192,8 @@ pub(crate) fn AccountGate() -> Element {
                                 route.set(AppRoute::Library);
                             }
                         }
+                    } else if route() == AppRoute::Settings {
+                        SettingsApp { csrf_token: csrf.read().clone() }
                     } else {
                         LibraryApp {
                             csrf_token: csrf.read().clone(),
@@ -202,6 +221,165 @@ pub(crate) fn AccountGate() -> Element {
                 }
             }
         },
+    }
+}
+
+#[component]
+fn SettingsApp(csrf_token: String) -> Element {
+    let mut settings = use_signal(|| Option::<TelegramBotSettings>::None);
+    let mut token = use_signal(String::new);
+    let mut error = use_signal(String::new);
+    let mut busy = use_signal(|| false);
+
+    use_effect(move || {
+        spawn(async move {
+            match load_telegram_bot_settings().await {
+                Ok(value) => settings.set(Some(value)),
+                Err(load_error) => error.set(load_error.to_string()),
+            }
+        });
+    });
+
+    let settings_snapshot = settings.read().clone();
+    let configured = settings_snapshot
+        .as_ref()
+        .is_some_and(|value| value.configured);
+    let running = settings_snapshot
+        .as_ref()
+        .is_some_and(|value| value.status == TelegramBotRuntimeStatus::Running);
+    let bot_label = settings_snapshot
+        .as_ref()
+        .and_then(|value| value.bot_username.as_deref())
+        .map_or_else(
+            || "без username".to_owned(),
+            |username| format!("@{username}"),
+        );
+    let bot_id_label = settings_snapshot
+        .as_ref()
+        .and_then(|value| value.bot_id)
+        .map_or_else(|| "—".to_owned(), |id| id.to_string());
+    let fingerprint_label = settings_snapshot
+        .as_ref()
+        .and_then(|value| value.token_fingerprint.as_deref())
+        .unwrap_or("скрыт")
+        .to_owned();
+    let save_csrf = csrf_token.clone();
+    let delete_csrf = csrf_token;
+
+    rsx! {
+        main { id: "main-content", class: "library-view settings-view", aria_label: "Настройки Lumi",
+            header { class: "library-hero",
+                div {
+                    p { class: "eyebrow", "Конфигурация" }
+                    h1 { "Настройки" }
+                    p { class: "library-lead", "Подключения и параметры этого экземпляра Lumi." }
+                }
+            }
+
+            section { class: "library-section telegram-settings", aria_label: "Настройки Telegram-бота",
+                div { class: "section-heading",
+                    div {
+                        p { class: "eyebrow", "Источник" }
+                        h2 { "Telegram-бот" }
+                    }
+                    span { class: if running { "runtime-status runtime-running" } else { "runtime-status runtime-stopped" },
+                        if settings.read().is_none() && error().is_empty() {
+                            "Проверяем…"
+                        } else if running {
+                            "Работает"
+                        } else {
+                            "Не работает"
+                        }
+                    }
+                }
+
+                p { class: "settings-notice", role: "note",
+                    "Это глобальная настройка сервера. Пока в Lumi нет ролей, любой вошедший пользователь может заменить токен бота."
+                }
+
+                if let Some(current) = settings_snapshot.as_ref() {
+                    if current.configured {
+                        dl { class: "settings-summary",
+                            div { dt { "Бот" } dd { "{bot_label}" } }
+                            div { dt { "Bot ID" } dd { "{bot_id_label}" } }
+                            div { dt { "Токен" } dd { "{fingerprint_label}" } }
+                        }
+                    }
+                    if let Some(runtime_error) = current.last_error.as_ref() {
+                        p { class: "account-error", role: "status", "{runtime_error}" }
+                    }
+                }
+
+                if !error().is_empty() {
+                    p { class: "account-error", role: "alert", "{error}" }
+                }
+
+                label { class: "account-field telegram-token-field",
+                    span { if configured { "Новый токен BotFather" } else { "Токен BotFather" } }
+                    input {
+                        r#type: "password",
+                        name: "telegram_bot_token",
+                        autocomplete: "off",
+                        spellcheck: "false",
+                        placeholder: "123456789:AA…",
+                        value: "{token}",
+                        oninput: move |event| token.set(event.value()),
+                    }
+                }
+                p { class: "capability-note", "Lumi проверит токен через Telegram, сохранит его зашифрованным и не покажет снова." }
+
+                div { class: "material-actions",
+                    button { class: "primary-action", r#type: "button", disabled: busy() || token().trim().is_empty(), onclick: move |_| {
+                        let submitted_token = token.read().clone();
+                        let csrf = save_csrf.clone();
+                        busy.set(true);
+                        error.set(String::new());
+                        spawn(async move {
+                            match update_telegram_bot_token(&csrf, &submitted_token).await {
+                                Ok(value) => {
+                                    token.set(String::new());
+                                    settings.set(Some(value));
+                                    for _ in 0..10 {
+                                        browser_delay(500).await;
+                                        match load_telegram_bot_settings().await {
+                                            Ok(value) if matches!(value.status, TelegramBotRuntimeStatus::Running | TelegramBotRuntimeStatus::Degraded) => {
+                                                settings.set(Some(value));
+                                                break;
+                                            }
+                                            Ok(value) => settings.set(Some(value)),
+                                            Err(load_error) => {
+                                                error.set(load_error.to_string());
+                                                break;
+                                            }
+                                        }
+                                    }
+                                }
+                                Err(save_error) => error.set(save_error.to_string()),
+                            }
+                            busy.set(false);
+                        });
+                    }, if busy() { "Проверяем…" } else if configured { "Заменить токен" } else { "Подключить бота" } }
+
+                    if configured {
+                        button { class: "danger-action", r#type: "button", disabled: busy(), onclick: move |_| {
+                            let csrf = delete_csrf.clone();
+                            busy.set(true);
+                            error.set(String::new());
+                            spawn(async move {
+                                match delete_telegram_bot_token(&csrf).await {
+                                    Ok(value) => {
+                                        token.set(String::new());
+                                        settings.set(Some(value));
+                                    }
+                                    Err(delete_error) => error.set(delete_error.to_string()),
+                                }
+                                busy.set(false);
+                            });
+                        }, "Отключить бота" }
+                    }
+                }
+            }
+        }
     }
 }
 
@@ -245,6 +423,15 @@ fn LibraryApp(csrf_token: String, on_open_reader: EventHandler<Uuid>) -> Element
         });
     });
     use_effect(move || {
+        let telegram_available = capabilities.read().as_ref().is_some_and(|value| {
+            value
+                .features
+                .iter()
+                .any(|feature| feature == "telegram-one-time-pairing")
+        });
+        if !telegram_available {
+            return;
+        }
         spawn(async move {
             match load_telegram_status().await {
                 Ok(status) => telegram_status.set(Some(status)),
@@ -1128,6 +1315,39 @@ async fn import_web_url(csrf: &str, url: &str) -> Result<AcceptedImport, ApiErro
 async fn load_telegram_status() -> Result<TelegramConnectionStatus, ApiError> {
     let response = Request::get(&format!("{API_BASE}/providers/telegram/connection"))
         .credentials(RequestCredentials::Include)
+        .send()
+        .await
+        .map_err(network_error)?;
+    parse_json(response).await
+}
+
+async fn load_telegram_bot_settings() -> Result<TelegramBotSettings, ApiError> {
+    let response = Request::get(&format!("{API_BASE}/settings/telegram"))
+        .credentials(RequestCredentials::Include)
+        .send()
+        .await
+        .map_err(network_error)?;
+    parse_json(response).await
+}
+
+async fn update_telegram_bot_token(
+    csrf: &str,
+    token: &str,
+) -> Result<TelegramBotSettings, ApiError> {
+    let request = Request::put(&format!("{API_BASE}/settings/telegram/token"))
+        .credentials(RequestCredentials::Include)
+        .header("X-Lumi-CSRF", csrf)
+        .json(&UpdateTelegramBotTokenRequest {
+            token: token.to_owned(),
+        })
+        .map_err(network_error)?;
+    parse_json(request.send().await.map_err(network_error)?).await
+}
+
+async fn delete_telegram_bot_token(csrf: &str) -> Result<TelegramBotSettings, ApiError> {
+    let response = Request::delete(&format!("{API_BASE}/settings/telegram/token"))
+        .credentials(RequestCredentials::Include)
+        .header("X-Lumi-CSRF", csrf)
         .send()
         .await
         .map_err(network_error)?;

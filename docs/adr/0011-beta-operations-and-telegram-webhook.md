@@ -1,6 +1,8 @@
 # ADR 0011: beta operations и Telegram webhook boundary
 
-Status: accepted
+Status: superseded для Telegram transport решением
+[ADR 0012](0012-embedded-telegram-bot-settings.md); остальные beta operations
+остаются accepted
 
 ## Контекст
 

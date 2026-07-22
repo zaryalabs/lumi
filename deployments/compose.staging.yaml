@@ -28,9 +28,10 @@ services:
 
   blob-init:
     image: busybox:1.37
-    command: ["sh", "-c", "chown -R 65532:65532 /var/lib/lumi/blobs"]
+    command: ["sh", "-c", "chown -R 65532:65532 /var/lib/lumi/blobs /var/lib/lumi/secrets"]
     volumes:
       - staging-blobs:/var/lib/lumi/blobs
+      - staging-secrets:/var/lib/lumi/secrets
     restart: "no"
 
   server:
@@ -45,9 +46,7 @@ services:
       LUMI_SECURE_COOKIE: "1"
       LUMI_DEPLOYMENT_MODE: staging
       LUMI_BLOB_ROOT: /var/lib/lumi/blobs
-      LUMI_TELEGRAM_BOT_SCOPE: ${LUMI_TELEGRAM_BOT_SCOPE:-lumi-staging}
-      LUMI_TELEGRAM_BOT_USERNAME: ${LUMI_TELEGRAM_BOT_USERNAME:-}
-      LUMI_TELEGRAM_WEBHOOK_SECRET: ${LUMI_TELEGRAM_WEBHOOK_SECRET:-}
+      LUMI_SECRET_ROOT: /var/lib/lumi/secrets
       RUST_LOG: ${RUST_LOG:-info,tower_http=info}
     depends_on:
       migrate:
@@ -63,6 +62,7 @@ services:
       - "127.0.0.1:${LUMI_STAGING_PORT:-8080}:8080"
     volumes:
       - staging-blobs:/var/lib/lumi/blobs
+      - staging-secrets:/var/lib/lumi/secrets
     read_only: true
     tmpfs:
       - /tmp
@@ -111,4 +111,5 @@ services:
 volumes:
   staging-postgres:
   staging-blobs:
+  staging-secrets:
   staging-backups:

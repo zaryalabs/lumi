@@ -31,8 +31,8 @@ Dioxus Fullstack/server functions можно использовать для UI-
 /api/v1/rooms/*
 /api/v1/shares/*
 /api/v1/providers/*
+/api/v1/settings/telegram
 /api/v1/exports/*
-/webhooks/telegram/*
 /mcp/*
 /ws/sync
 /ws/rooms/:id
@@ -47,7 +47,8 @@ Responsibilities:
 - `search` - serious server-side web search and retrieval API.
 - `sync` - native full-copy sync, cursors, changes and snapshots.
 - `rooms/shares` - social/shared reading spaces and public/share objects.
-- `webhooks/telegram` - Telegram ingestion entrypoint.
+- `settings/telegram` - instance-wide bot configuration and listener status.
+- `providers/telegram` - account pairing over the embedded transport.
 - `mcp` - external agent integration with scoped tools.
 
 ### Contract rules
@@ -56,7 +57,7 @@ Responsibilities:
 - Binary frames or streaming body for blob chunks and future sync frames.
 - `application/problem+json` for errors.
 - Request IDs in every request/response.
-- Idempotency keys for uploads, imports, mutations and webhooks.
+- Idempotency keys for uploads, imports and mutations.
 - Cursor pagination for list/change APIs.
 - Explicit body size limits per route.
 - Stable API version in path.

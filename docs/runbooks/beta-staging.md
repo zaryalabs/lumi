@@ -38,15 +38,16 @@ Dioxus Web с тем же HTTPS API origin, обслужить его через
 проверить CORS/origin до открытия beta. `make staging-smoke` собирает server
 image, запускает изолированный Compose project и проверяет health/readiness.
 
-Telegram webhook включается только непустым secret длиной 32–256 visible ASCII.
-После operator registration Telegram должен отправлять JSON с
-`X-Telegram-Bot-Api-Secret-Token`. `telegram-webhook` появляется в capabilities
-только при включённом route. Long polling в staging/production завершится с
-ошибкой до подключения к provider.
+Telegram-бот настраивается после входа через «Настройки → Telegram-бот».
+`lumi-server` хранит token как шифротекст и запускает встроенный long polling.
+Named volume `staging-secrets` содержит local master key и не входит в blob
+backup: после потери volume или переноса restore token нужно ввести повторно.
+Webhook не является активным staging transport; будущая граница сохранена в
+[ADR 0012](../adr/0012-embedded-telegram-bot-settings.md).
 
 ## Logs и alerts
 
-Server/runner пишут JSON events. Request middleware создаёт и возвращает
+Server и встроенный listener пишут JSON events. Request middleware создаёт и возвращает
 `x-request-id`; events не содержат request/Telegram body или runtime secrets.
 Минимальные vendor-neutral alerts заданы в `deployments/alerts.yaml`: readiness,
 error rate, import failures и stale backup. Перед beta operator должен привязать
