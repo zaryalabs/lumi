@@ -4,8 +4,8 @@ use std::sync::Arc;
 
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
 use lumi_core::{
-    AcceptedImport, TelegramConnectionStatus, TelegramMessageSnapshot, TelegramPairingResponse,
-    TelegramReply, TelegramUpdate,
+    AcceptedImport, TelegramConnectionStatus, TelegramPairingResponse, TelegramReply,
+    TelegramUpdate,
 };
 use rand::{rngs::OsRng, RngCore};
 use sha2::{Digest, Sha256};
@@ -24,12 +24,18 @@ mod sqlx {
 
 const PAIRING_TTL: Duration = Duration::minutes(10);
 const TOKEN_DOMAIN: &[u8] = b"lumi.telegram.pairing.v1\0";
+#[cfg(not(test))]
+const MEDIA_GROUP_QUIET_WINDOW: std::time::Duration = std::time::Duration::from_secs(2);
+#[cfg(test)]
+const MEDIA_GROUP_QUIET_WINDOW: std::time::Duration = std::time::Duration::from_millis(75);
+const MEDIA_GROUP_CLOSURE_LEASE_SQL: &str = "1 minute";
 
 #[derive(Clone)]
 pub(crate) struct TelegramService {
     pool: PgPool,
     imports: Arc<ImportService>,
     bot_scope: String,
+    bot_id: u64,
     bot_username: Option<String>,
 }
 
@@ -38,12 +44,14 @@ impl TelegramService {
         pool: PgPool,
         imports: Arc<ImportService>,
         bot_scope: String,
+        bot_id: u64,
         bot_username: Option<String>,
     ) -> Self {
         Self {
             pool,
             imports,
             bot_scope,
+            bot_id,
             bot_username,
         }
     }
@@ -411,7 +419,7 @@ impl TelegramService {
         if text == "/help" {
             return Ok(reply(
                 update.chat_id,
-                "Поддерживаются direct/forwarded text и одна публичная HTTP(S) ссылка. Файлы, media и batches пока не поддерживаются. /unlink отключает аккаунт.",
+                "Поддерживаются текст, пересылки, Telegram-фото и публичные HTTP(S)-ссылки. Видео, GIF, аудио и файлы пропускаются. /unlink отключает аккаунт.",
                 None,
             ));
         }
@@ -422,10 +430,17 @@ impl TelegramService {
                 None,
             ));
         };
-        if update.has_unsupported_payload || text.is_empty() || text.starts_with('/') {
+        if !update.has_importable_content() && update.has_unsupported_payload {
             return Ok(reply(
                 update.chat_id,
-                "Этот тип сообщения пока не поддерживается. Отправьте текст или одну публичную web-ссылку.",
+                "Вложение не поддерживается. Отправьте текст, Telegram-фото или публичную web-ссылку.",
+                None,
+            ));
+        }
+        if !update.has_importable_content() || text.starts_with('/') {
+            return Ok(reply(
+                update.chat_id,
+                "В сообщении нет поддерживаемого содержимого. Отправьте текст, Telegram-фото или публичную web-ссылку.",
                 None,
             ));
         }
@@ -435,36 +450,200 @@ impl TelegramService {
             device_id: identity.device_id,
             csrf_hash: [0; 32],
         };
+        if update.media_group_id.is_some() {
+            self.accumulate_media_group(&identity, update).await?;
+            return Ok(reply(
+                update.chat_id,
+                "Часть Telegram-альбома принята; материал будет собран асинхронно после завершения группы.",
+                None,
+            ));
+        }
         let idempotency_key = format!("telegram:{}:{}", self.bot_scope, update.update_id);
-        let accepted = if is_single_web_url(text) {
-            self.imports
-                .accept_web(&session, text, &idempotency_key)
-                .await
-                .map_err(map_import_error)?
+        let mut envelope = update.clone();
+        envelope.bot_id = self.bot_id;
+        envelope.bot_scope.clone_from(&self.bot_scope);
+        let accepted =
+            if is_single_web_url(text) && envelope.photos.is_empty() && !envelope.forwarded {
+                self.imports
+                    .accept_web(&session, text, &idempotency_key)
+                    .await
+                    .map_err(map_import_error)?
+            } else {
+                self.imports
+                    .accept_telegram_composite(&session, &envelope, &idempotency_key)
+                    .await
+                    .map_err(map_import_error)?
+            };
+        let reply_text = if update.has_unsupported_payload {
+            "Поддерживаемые части приняты и обрабатываются асинхронно; остальные вложения пропущены."
         } else {
-            self.imports
-                .accept_telegram(
-                    &session,
-                    &TelegramMessageSnapshot {
-                        update_id: update.update_id,
-                        telegram_user_id: update.telegram_user_id,
-                        chat_id: update.chat_id,
-                        message_id: update.message_id,
-                        message_date: update.message_date,
-                        text: text.to_owned(),
-                        forwarded: update.forwarded,
-                        forward_origin: update.forward_origin.clone(),
-                    },
-                    &idempotency_key,
-                )
-                .await
-                .map_err(map_import_error)?
+            "Материал принят и обрабатывается асинхронно."
         };
-        Ok(reply(
-            update.chat_id,
-            "Материал принят в общую библиотеку Lumi.",
-            Some(accepted),
-        ))
+        Ok(reply(update.chat_id, reply_text, Some(accepted)))
+    }
+
+    async fn accumulate_media_group(
+        &self,
+        identity: &TelegramIdentity,
+        update: &TelegramUpdate,
+    ) -> Result<(), TelegramServiceError> {
+        let media_group_id = update
+            .media_group_id
+            .as_deref()
+            .ok_or(TelegramServiceError::InvalidUpdate)?;
+        let mut envelope = update.clone();
+        envelope.bot_id = self.bot_id;
+        envelope.bot_scope.clone_from(&self.bot_scope);
+        let mut tx = self.pool.begin().await.map_err(storage_error)?;
+        let group_id = Uuid::now_v7();
+        sqlx::query(
+            "INSERT INTO telegram_media_groups (group_id, bot_scope, media_group_id, user_id, device_id, status) VALUES ($1, $2, $3, $4, $5, 'accumulating') ON CONFLICT (bot_scope, media_group_id, user_id) DO NOTHING",
+        )
+        .bind(group_id)
+        .bind(&self.bot_scope)
+        .bind(media_group_id)
+        .bind(identity.user_id)
+        .bind(identity.device_id)
+        .execute(&mut *tx)
+        .await
+        .map_err(storage_error)?;
+        let row = sqlx::query(
+            "SELECT group_id, status FROM telegram_media_groups WHERE bot_scope = $1 AND media_group_id = $2 AND user_id = $3 FOR UPDATE",
+        )
+        .bind(&self.bot_scope)
+        .bind(media_group_id)
+        .bind(identity.user_id)
+        .fetch_one(&mut *tx)
+        .await
+        .map_err(storage_error)?;
+        let group_id: Uuid = row.try_get("group_id").map_err(storage_error)?;
+        let status: String = row.try_get("status").map_err(storage_error)?;
+        if status == "completed" {
+            tx.commit().await.map_err(storage_error)?;
+            return Ok(());
+        }
+        let inserted = sqlx::query(
+            "INSERT INTO telegram_media_group_items (group_id, update_id, message_id, envelope) VALUES ($1, $2, $3, $4) ON CONFLICT DO NOTHING",
+        )
+        .bind(group_id)
+        .bind(update.update_id)
+        .bind(update.message_id)
+        .bind(serde_json::to_value(&envelope).map_err(|_| TelegramServiceError::InvalidUpdate)?)
+        .execute(&mut *tx)
+        .await
+        .map_err(storage_error)?;
+        if inserted.rows_affected() == 1 {
+            sqlx::query(
+                "UPDATE telegram_media_groups SET status = 'accumulating', closure_claim_id = NULL, closure_lease_expires_at = NULL, updated_at = now() WHERE group_id = $1",
+            )
+            .bind(group_id)
+            .execute(&mut *tx)
+            .await
+            .map_err(storage_error)?;
+        }
+        tx.commit().await.map_err(storage_error)?;
+        self.spawn_media_group_closure(group_id);
+        Ok(())
+    }
+
+    fn spawn_media_group_closure(&self, group_id: Uuid) {
+        let service = self.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(MEDIA_GROUP_QUIET_WINDOW).await;
+            if let Err(error) = service.finalize_media_group(group_id).await {
+                tracing::warn!(%group_id, %error, "Telegram media group closure will be recovered");
+            }
+        });
+    }
+
+    async fn finalize_media_group(&self, group_id: Uuid) -> Result<(), TelegramServiceError> {
+        let claim_id = Uuid::now_v7();
+        let quiet_millis = i64::try_from(MEDIA_GROUP_QUIET_WINDOW.as_millis())
+            .map_err(|_| TelegramServiceError::Unavailable)?;
+        let row = sqlx::query(
+            "UPDATE telegram_media_groups SET status = 'closing', closure_claim_id = $2, closure_lease_expires_at = now() + $3::interval WHERE group_id = $1 AND bot_scope = $4 AND ((status = 'accumulating' AND updated_at <= now() - ($5 * interval '1 millisecond')) OR (status = 'closing' AND (closure_lease_expires_at IS NULL OR closure_lease_expires_at < now()))) RETURNING user_id, device_id",
+        )
+        .bind(group_id)
+        .bind(claim_id)
+        .bind(MEDIA_GROUP_CLOSURE_LEASE_SQL)
+        .bind(&self.bot_scope)
+        .bind(quiet_millis)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(storage_error)?;
+        let Some(row) = row else {
+            return Ok(());
+        };
+        let user_id: Uuid = row.try_get("user_id").map_err(storage_error)?;
+        let device_id: Uuid = row.try_get("device_id").map_err(storage_error)?;
+        let rows = sqlx::query(
+            "SELECT envelope FROM telegram_media_group_items WHERE group_id = $1 ORDER BY message_id, update_id",
+        )
+        .bind(group_id)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(storage_error)?;
+        let envelopes = rows
+            .into_iter()
+            .map(|row| {
+                let value: serde_json::Value = row.try_get("envelope").map_err(storage_error)?;
+                serde_json::from_value::<TelegramUpdate>(value)
+                    .map_err(|_| TelegramServiceError::Unavailable)
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let envelope = merge_media_group(&envelopes).ok_or(TelegramServiceError::InvalidUpdate)?;
+        let session = AuthenticatedSession {
+            user_id,
+            session_id: Uuid::nil(),
+            device_id,
+            csrf_hash: [0; 32],
+        };
+        let idempotency_key = format!("telegram:{}:media-group:{group_id}", self.bot_scope);
+        let accepted = match self
+            .imports
+            .accept_telegram_composite(&session, &envelope, &idempotency_key)
+            .await
+        {
+            Ok(accepted) => accepted,
+            Err(error) => {
+                let _ = sqlx::query(
+                    "UPDATE telegram_media_groups SET status = 'accumulating', closure_claim_id = NULL, closure_lease_expires_at = NULL, updated_at = now() WHERE group_id = $1 AND closure_claim_id = $2",
+                )
+                .bind(group_id)
+                .bind(claim_id)
+                .execute(&self.pool)
+                .await;
+                return Err(map_import_error(error));
+            }
+        };
+        let updated = sqlx::query(
+            "UPDATE telegram_media_groups SET status = 'completed', accepted_import = $3, completed_at = now(), closure_claim_id = NULL, closure_lease_expires_at = NULL WHERE group_id = $1 AND closure_claim_id = $2 AND status = 'closing'",
+        )
+        .bind(group_id)
+        .bind(claim_id)
+        .bind(serde_json::to_value(accepted).map_err(|_| TelegramServiceError::Unavailable)?)
+        .execute(&self.pool)
+        .await
+        .map_err(storage_error)?;
+        if updated.rows_affected() == 1 {
+            Ok(())
+        } else {
+            Err(TelegramServiceError::UpdateInProgress)
+        }
+    }
+
+    pub(crate) async fn recover_media_groups(&self) -> Result<(), TelegramServiceError> {
+        let rows = sqlx::query(
+            "SELECT group_id FROM telegram_media_groups WHERE bot_scope = $1 AND status IN ('accumulating', 'closing')",
+        )
+        .bind(&self.bot_scope)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(storage_error)?;
+        for row in rows {
+            self.spawn_media_group_closure(row.try_get("group_id").map_err(storage_error)?);
+        }
+        Ok(())
     }
 
     async fn claim_update(
@@ -608,6 +787,62 @@ struct TelegramIdentity {
     device_id: Uuid,
 }
 
+fn merge_media_group(envelopes: &[TelegramUpdate]) -> Option<TelegramUpdate> {
+    let mut merged = envelopes.first()?.clone();
+    merged.photos.clear();
+    merged.links.clear();
+    merged.unsupported_attachments.clear();
+    let mut selected_text = None;
+    for envelope in envelopes.iter() {
+        if envelope.bot_scope != merged.bot_scope
+            || envelope.bot_id != merged.bot_id
+            || envelope.media_group_id != merged.media_group_id
+            || envelope.telegram_user_id != merged.telegram_user_id
+            || envelope.chat_id != merged.chat_id
+        {
+            return None;
+        }
+        merged.photos.extend(envelope.photos.iter().cloned());
+        for link in &envelope.links {
+            if !merged.links.contains(link) {
+                merged.links.push(link.clone());
+            }
+        }
+        for attachment in &envelope.unsupported_attachments {
+            if !merged.unsupported_attachments.contains(attachment) {
+                merged.unsupported_attachments.push(attachment.clone());
+            }
+        }
+        if selected_text.is_none()
+            && envelope
+                .text
+                .as_deref()
+                .is_some_and(|text| !text.trim().is_empty())
+        {
+            selected_text = Some((
+                envelope.text.clone(),
+                envelope.is_caption,
+                envelope.entities.clone(),
+                envelope.forwarded,
+                envelope.forward_origin.clone(),
+            ));
+        }
+    }
+    if let Some((text, is_caption, entities, forwarded, forward_origin)) = selected_text {
+        merged.text = text;
+        merged.is_caption = is_caption;
+        merged.entities = entities;
+        merged.forwarded = forwarded;
+        merged.forward_origin = forward_origin;
+    } else {
+        merged.text = None;
+        merged.is_caption = false;
+        merged.entities.clear();
+    }
+    merged.has_unsupported_payload = !merged.unsupported_attachments.is_empty();
+    Some(merged)
+}
+
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum TelegramServiceError {
     #[error("Telegram update is invalid")]
@@ -739,6 +974,14 @@ fn validate_update(update: &TelegramUpdate) -> Result<(), TelegramServiceError> 
             .forward_origin
             .as_ref()
             .is_some_and(|value| value.len() > 512)
+        || update.bot_scope.len() > 256
+        || update.entities.len() > 4_096
+        || update.links.len() > 128
+        || update.photos.len() > 128
+        || update
+            .media_group_id
+            .as_ref()
+            .is_some_and(|value| value.len() > 256)
     {
         Err(TelegramServiceError::InvalidUpdate)
     } else {
@@ -781,6 +1024,27 @@ fn timestamp_ms(value: OffsetDateTime) -> u64 {
 mod tests {
     use super::*;
 
+    struct FakeTelegramMedia;
+
+    #[async_trait::async_trait]
+    impl crate::telegram_media::TelegramMediaCapture for FakeTelegramMedia {
+        async fn capture(
+            &self,
+            _bot_id: u64,
+            photo: &lumi_core::TelegramPhotoDescriptor,
+        ) -> Result<
+            crate::telegram_media::CapturedTelegramMedia,
+            crate::telegram_media::TelegramMediaError,
+        > {
+            let mut bytes = b"\xff\xd8\xfffixture-".to_vec();
+            bytes.extend_from_slice(photo.file_unique_id.as_bytes());
+            Ok(crate::telegram_media::CapturedTelegramMedia {
+                media_type: "image/jpeg".to_owned(),
+                bytes,
+            })
+        }
+    }
+
     async fn postgres_service() -> Result<
         Option<(PgPool, TelegramService, AuthenticatedSession, String)>,
         Box<dyn std::error::Error>,
@@ -812,16 +1076,18 @@ mod tests {
         .bind(user_id)
         .execute(&pool)
         .await?;
-        let imports = Arc::new(ImportService::local_with_web_fixtures(
+        let imports = Arc::new(ImportService::local_with_web_fixtures_and_media(
             pool.clone(),
             std::env::temp_dir().join(format!("lumi-stage6-{}", Uuid::now_v7())),
             std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures/web"),
+            Arc::new(FakeTelegramMedia),
         ));
         let scope = format!("stage6-test-{}", Uuid::now_v7());
         let service = TelegramService {
             pool: pool.clone(),
             imports,
             bot_scope: scope.clone(),
+            bot_id: 1,
             bot_username: Some("lumi_stage6_test_bot".to_owned()),
         };
         let session = AuthenticatedSession {
@@ -836,15 +1102,23 @@ mod tests {
     fn update(update_id: i64, telegram_user_id: i64, text: &str) -> TelegramUpdate {
         TelegramUpdate {
             update_id,
+            bot_id: 1,
+            bot_scope: "telegram-bot:1".to_owned(),
             telegram_user_id,
             chat_id: telegram_user_id,
             is_private_chat: true,
             message_id: update_id + 100,
             message_date: Some(1_783_890_000),
             text: Some(text.to_owned()),
+            is_caption: false,
+            entities: Vec::new(),
+            links: Vec::new(),
+            photos: Vec::new(),
+            media_group_id: None,
             forwarded: false,
             forward_origin: None,
             has_unsupported_payload: false,
+            unsupported_attachments: Vec::new(),
         }
     }
 
@@ -867,7 +1141,13 @@ mod tests {
         accepted: &AcceptedImport,
     ) -> Result<lumi_core::ReadingDocument, Box<dyn std::error::Error>> {
         for _ in 0..200 {
-            let job = service.imports.job(user_id, accepted.job.id).await?;
+            let job = service
+                .imports
+                .job(user_id, accepted.job.id)
+                .await
+                .map_err(|error| {
+                    std::io::Error::other(format!("Telegram import job lookup failed: {error:?}"))
+                })?;
             match job.status {
                 lumi_core::JobStatus::Succeeded => {
                     let revision_id = job
@@ -876,7 +1156,12 @@ mod tests {
                     return Ok(service
                         .imports
                         .reading_document(user_id, revision_id)
-                        .await?);
+                        .await
+                        .map_err(|error| {
+                            std::io::Error::other(format!(
+                                "Telegram reading document lookup failed: {error:?}"
+                            ))
+                        })?);
                 }
                 lumi_core::JobStatus::Failed | lumi_core::JobStatus::Cancelled => {
                     return Err(std::io::Error::other(format!(
@@ -891,6 +1176,30 @@ mod tests {
             }
         }
         Err(std::io::Error::other("import did not finish").into())
+    }
+
+    async fn wait_for_media_group_import(
+        pool: &PgPool,
+        scope: &str,
+        user_id: Uuid,
+        media_group_id: &str,
+    ) -> Result<AcceptedImport, Box<dyn std::error::Error>> {
+        for _ in 0..200 {
+            let value: Option<serde_json::Value> = sqlx::query_scalar(
+                "SELECT accepted_import FROM telegram_media_groups WHERE bot_scope = $1 AND user_id = $2 AND media_group_id = $3 AND status = 'completed'",
+            )
+            .bind(scope)
+            .bind(user_id)
+            .bind(media_group_id)
+            .fetch_optional(pool)
+            .await?
+            .flatten();
+            if let Some(value) = value {
+                return Ok(serde_json::from_value(value)?);
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        }
+        Err(std::io::Error::other("media group did not close").into())
     }
 
     #[test]
@@ -913,21 +1222,61 @@ mod tests {
     fn typed_update_validation_bounds_content() {
         let update = TelegramUpdate {
             update_id: 1,
+            bot_id: 1,
+            bot_scope: "telegram-bot:1".to_owned(),
             telegram_user_id: 2,
             chat_id: 3,
             is_private_chat: true,
             message_id: 4,
             message_date: None,
             text: Some("x".repeat(256 * 1024 + 1)),
+            is_caption: false,
+            entities: Vec::new(),
+            links: Vec::new(),
+            photos: Vec::new(),
+            media_group_id: None,
             forwarded: false,
             forward_origin: None,
             has_unsupported_payload: false,
+            unsupported_attachments: Vec::new(),
         };
 
         assert!(matches!(
             validate_update(&update),
             Err(TelegramServiceError::InvalidUpdate)
         ));
+    }
+
+    #[test]
+    fn media_group_merge_preserves_photo_order_and_caption(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let mut first = update(1, 2, "");
+        first.media_group_id = Some("album".to_owned());
+        first.photos.push(lumi_core::TelegramPhotoDescriptor {
+            file_id: "first".to_owned(),
+            file_unique_id: "first".to_owned(),
+            width: 100,
+            height: 100,
+            byte_size: Some(100),
+        });
+        let mut second = update(2, 2, "Подпись");
+        second.media_group_id = Some("album".to_owned());
+        second.is_caption = true;
+        second.photos.push(lumi_core::TelegramPhotoDescriptor {
+            file_id: "second".to_owned(),
+            file_unique_id: "second".to_owned(),
+            width: 200,
+            height: 200,
+            byte_size: Some(200),
+        });
+
+        let merged = merge_media_group(&[first, second])
+            .ok_or_else(|| std::io::Error::other("valid media group did not merge"))?;
+
+        assert_eq!(merged.text.as_deref(), Some("Подпись"));
+        assert_eq!(merged.photos[0].file_id, "first");
+        assert_eq!(merged.photos[1].file_id, "second");
+        Ok(())
     }
 
     #[tokio::test]
@@ -1085,6 +1434,67 @@ mod tests {
         .fetch_one(&pool)
         .await?;
         assert_eq!(duplicate_materials, 3);
+
+        let media_group_id = format!("album-{}", Uuid::now_v7());
+        let mut first_photo = update(70_013, telegram_user_id, "Подпись альбома");
+        first_photo.is_caption = true;
+        first_photo.media_group_id = Some(media_group_id.clone());
+        first_photo.photos.push(lumi_core::TelegramPhotoDescriptor {
+            file_id: "photo-one".to_owned(),
+            file_unique_id: "photo-one".to_owned(),
+            width: 640,
+            height: 480,
+            byte_size: Some(100),
+        });
+        let mut second_photo = update(70_014, telegram_user_id, "");
+        second_photo.media_group_id = Some(media_group_id.clone());
+        second_photo
+            .photos
+            .push(lumi_core::TelegramPhotoDescriptor {
+                file_id: "photo-two".to_owned(),
+                file_unique_id: "photo-two".to_owned(),
+                width: 800,
+                height: 600,
+                byte_size: Some(100),
+            });
+        assert!(service
+            .handle_update(&first_photo)
+            .await?
+            .accepted_import
+            .is_none());
+        assert!(service
+            .handle_update(&second_photo)
+            .await?
+            .accepted_import
+            .is_none());
+        sqlx::query(
+            "UPDATE telegram_media_groups SET updated_at = now() - interval '1 minute' WHERE bot_scope = $1 AND user_id = $2 AND media_group_id = $3",
+        )
+        .bind(&scope)
+        .bind(session.user_id)
+        .bind(&media_group_id)
+        .execute(&pool)
+        .await?;
+        service.recover_media_groups().await?;
+        let album_import =
+            wait_for_media_group_import(&pool, &scope, session.user_id, &media_group_id).await?;
+        let album_document = wait_for_document(&service, session.user_id, &album_import).await?;
+        assert_eq!(
+            album_document
+                .nodes
+                .iter()
+                .flat_map(|node| &node.children)
+                .filter(|node| node.kind == lumi_core::ReadingNodeKind::Image)
+                .count(),
+            2
+        );
+        let album_materials: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM materials WHERE owner_user_id = $1 AND kind = 'telegram'",
+        )
+        .bind(session.user_id)
+        .fetch_one(&pool)
+        .await?;
+        assert_eq!(album_materials, 4);
 
         let unsupported = fixture_update(
             include_str!("../../../tests/fixtures/telegram/unsupported.json"),

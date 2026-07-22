@@ -478,7 +478,7 @@ fn LibraryApp(csrf_token: String, on_open_reader: EventHandler<Uuid>) -> Element
                 div {
                     p { class: "eyebrow", "Личное пространство" }
                     h1 { "Ваша библиотека" }
-                    p { class: "library-lead", "EPUB, web-статьи и Telegram-тексты в вашей облачной библиотеке." }
+                    p { class: "library-lead", "EPUB, web-статьи и составные материалы из Telegram в вашей облачной библиотеке." }
                 }
                 button {
                     id: "add-material-button",
@@ -602,7 +602,7 @@ fn LibraryApp(csrf_token: String, on_open_reader: EventHandler<Uuid>) -> Element
                 if !capabilities_loaded {
                     p { class: "capability-note", role: "status", "Проверяем поддержку Telegram…" }
                 } else if telegram_enabled {
-                    p { "Привяжите личный чат, чтобы отправлять в Lumi текст, пересланные сообщения и одиночные web-ссылки. Текст и ограниченная атрибуция пересылки будут сохранены в вашем облачном аккаунте Lumi." }
+                    p { "Привяжите личный чат, чтобы отправлять в Lumi текст, пересылки, Telegram-фото и публичные web-ссылки. Альбом собирается в один материал; видео, GIF, аудио и файлы пропускаются." }
                 } else {
                     p { class: "capability-note", role: "status", "Этот сервер пока не поддерживает импорт из Telegram." }
                 }
@@ -1478,6 +1478,8 @@ fn job_stage_label(stage: lumi_core::JobStage) -> &'static str {
         lumi_core::JobStage::SourceAccepted => "Исходник сохранён",
         lumi_core::JobStage::FetchingSource => "Загружаем страницу",
         lumi_core::JobStage::CapturingSnapshot => "Сохраняем snapshot",
+        lumi_core::JobStage::CapturingTelegramMedia => "Сохраняем фото из Telegram",
+        lumi_core::JobStage::FetchingLinkedSources => "Загружаем связанные страницы",
         lumi_core::JobStage::ExtractingContent => "Извлекаем основной текст",
         lumi_core::JobStage::ValidatingContainer => "Проверяем контейнер",
         lumi_core::JobStage::Normalizing => "Нормализуем главы",
@@ -1499,7 +1501,7 @@ fn material_format_label(kind: &MaterialKind) -> &'static str {
     match kind {
         MaterialKind::Epub => "EPUB · книга",
         MaterialKind::WebPage => "Web · статья",
-        MaterialKind::Telegram => "Telegram · текст",
+        MaterialKind::Telegram => "Telegram · составной материал",
     }
 }
 
@@ -1507,7 +1509,7 @@ fn material_source_download_label(kind: &MaterialKind) -> &'static str {
     match kind {
         MaterialKind::Epub => "Скачать исходник",
         MaterialKind::WebPage => "Скачать snapshot",
-        MaterialKind::Telegram => "Скачать сохранённый текст",
+        MaterialKind::Telegram => "Скачать исходное Telegram-сообщение",
     }
 }
 

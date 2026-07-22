@@ -159,6 +159,13 @@ pub fn s1_schema_migrations() -> Vec<SchemaMigration> {
                 "Source-neutral web and Telegram imports, pairing and durable update claims."
                     .to_owned(),
         },
+        SchemaMigration {
+            id: "s1-0007-telegram-composite-source".to_owned(),
+            schema_version: DOMAIN_SCHEMA_VERSION.to_owned(),
+            description:
+                "Composite Telegram envelopes, partial artifacts and durable media groups."
+                    .to_owned(),
+        },
     ]);
     migrations
 }
@@ -679,6 +686,9 @@ pub struct TelegramSourceLocator {
     pub forwarded: bool,
     /// Paragraph index within the normalized message.
     pub paragraph_index: usize,
+    /// Image index within the Telegram section, when this locator targets media.
+    #[serde(default)]
+    pub media_index: Option<usize>,
     /// Text start offset inside the paragraph.
     pub text_offset_start: Option<usize>,
     /// Text end offset inside the paragraph.
@@ -1087,6 +1097,10 @@ pub enum JobStage {
     FetchingSource,
     /// An immutable source snapshot is being assembled.
     CapturingSnapshot,
+    /// Telegram-hosted photos are being captured into immutable blobs.
+    CapturingTelegramMedia,
+    /// Linked web sources are being captured for a composite material.
+    FetchingLinkedSources,
     /// Semantic content is being extracted from the source snapshot.
     ExtractingContent,
     /// EPUB container and package metadata are being validated.
@@ -1287,6 +1301,6 @@ mod tests {
     fn migrations_cover_s1_contract_groups() {
         let migrations = s1_schema_migrations();
 
-        assert_eq!(migrations.len(), 10);
+        assert_eq!(migrations.len(), 11);
     }
 }

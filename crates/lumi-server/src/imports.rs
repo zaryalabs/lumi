@@ -6,16 +6,17 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use lumi_core::{
-    content_hash, import_epub, import_telegram_text, import_web_snapshot, AcceptedImport,
-    Annotation, AnnotationExport, AnnotationKind, BlobManifest, BlobRef, BlobRole,
-    ContinueReadingEntry, CreateAnnotationCommand, DeleteAnnotationCommand, DiagnosticSeverity,
-    DocumentRevision, DocumentRevisionId, EpubImportError, EpubImportRequest, EpubLimits,
-    ImportDiagnostic, ImportStatusEntry, ImportedEpub, ImportedPublication,
-    ImportedPublicationResource, Job, JobId, JobKind, JobStage, JobStatus, LibraryEntry,
-    LibraryState, Material, MaterialId, MaterialImportStatus, MaterialKind,
-    MoveReadingPositionCommand, NormalizedContentPackage, ReaderSettings, ReadingDocument,
-    ReadingNode, ReadingNodeKind, ReadingProgress, RenderPlan, SourceIdentity,
-    TelegramMessageSnapshot, UpdateAnnotationCommand,
+    content_hash, import_epub, import_telegram_composite, import_telegram_text,
+    import_web_snapshot, AcceptedImport, Annotation, AnnotationExport, AnnotationKind,
+    BlobManifest, BlobRef, BlobRole, ContinueReadingEntry, CreateAnnotationCommand,
+    DeleteAnnotationCommand, DiagnosticSeverity, DocumentRevision, DocumentRevisionId,
+    EpubImportError, EpubImportRequest, EpubLimits, ImportDiagnostic, ImportStatusEntry,
+    ImportedEpub, ImportedPublication, ImportedPublicationResource, Job, JobId, JobKind, JobStage,
+    JobStatus, LibraryEntry, LibraryState, Material, MaterialId, MaterialImportStatus,
+    MaterialKind, MoveReadingPositionCommand, NormalizedContentPackage, ReaderSettings,
+    ReadingDocument, ReadingNode, ReadingNodeKind, ReadingProgress, RenderPlan, SourceIdentity,
+    TelegramCapturedImage, TelegramMessageSnapshot, TelegramPhotoDescriptor, TelegramUpdate,
+    TelegramWebSection, UpdateAnnotationCommand,
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -27,6 +28,10 @@ use uuid::Uuid;
 
 use crate::account::AuthenticatedSession;
 use crate::blob::{BlobStore, BlobStoreError, LocalBlobStore, StoredBlob};
+use crate::telegram_media::{
+    RuntimeTelegramMediaCapture, TelegramMediaCapture, TelegramMediaRegistry,
+    MAX_TELEGRAM_IMAGE_BYTES,
+};
 use crate::web::{BoundedWebFetcher, WebCapture};
 
 mod sqlx {
@@ -40,9 +45,13 @@ const SOURCE_MEDIA_TYPE: &str = "application/epub+zip";
 const MAX_ACTIVE_IMPORT_WORKERS: usize = 8;
 const MAX_PENDING_IMPORTS_PER_ACCOUNT: i64 = 16;
 const MAX_CONCURRENT_EPUB_UPLOADS: usize = 2;
+const MAX_TELEGRAM_IMAGES: usize = 10;
+const MAX_TELEGRAM_TOTAL_IMAGE_BYTES: usize = 30 * 1024 * 1024;
+const MAX_TELEGRAM_LINKS: usize = 8;
+const MAX_TELEGRAM_WEB_FETCHES: usize = 3;
 const WORKER_LEASE_SQL: &str = "30 minutes";
 const SOURCE_RESERVATION_LEASE_SQL: &str = "1 minute";
-const REQUIRED_MIGRATION_COUNT: i64 = 7;
+const REQUIRED_MIGRATION_COUNT: i64 = 9;
 #[cfg(not(test))]
 const HEARTBEAT_INTERVAL: std::time::Duration = std::time::Duration::from_secs(30);
 #[cfg(test)]
@@ -73,6 +82,8 @@ pub(crate) struct ImportService {
     pool: PgPool,
     blobs: Arc<dyn BlobStore>,
     web_capture: Arc<dyn WebCapture>,
+    telegram_media: Arc<dyn TelegramMediaCapture>,
+    telegram_media_registry: Arc<TelegramMediaRegistry>,
     cancellations: Arc<Mutex<HashMap<JobId, Arc<AtomicBool>>>>,
     worker_slots: Arc<Semaphore>,
     upload_slots: Arc<Semaphore>,
@@ -86,10 +97,13 @@ pub(crate) struct UploadAdmission {
 
 impl ImportService {
     pub(crate) fn local(pool: PgPool, blob_root: PathBuf) -> Self {
+        let telegram_media_registry = TelegramMediaRegistry::new();
         Self {
             pool,
             blobs: Arc::new(LocalBlobStore::new(blob_root)),
             web_capture: Arc::new(BoundedWebFetcher::from_env()),
+            telegram_media: RuntimeTelegramMediaCapture::new(Arc::clone(&telegram_media_registry)),
+            telegram_media_registry,
             cancellations: Arc::new(Mutex::new(HashMap::new())),
             worker_slots: Arc::new(Semaphore::new(MAX_ACTIVE_IMPORT_WORKERS)),
             upload_slots: Arc::new(Semaphore::new(MAX_CONCURRENT_EPUB_UPLOADS)),
@@ -113,20 +127,28 @@ impl ImportService {
     }
 
     #[cfg(test)]
-    pub(crate) fn local_with_web_fixtures(
+    pub(crate) fn local_with_web_fixtures_and_media(
         pool: PgPool,
         blob_root: PathBuf,
         fixture_root: PathBuf,
+        telegram_media: Arc<dyn TelegramMediaCapture>,
     ) -> Self {
+        let telegram_media_registry = TelegramMediaRegistry::new();
         Self {
             pool,
             blobs: Arc::new(LocalBlobStore::new(blob_root)),
             web_capture: Arc::new(BoundedWebFetcher::fixtures(fixture_root)),
+            telegram_media,
+            telegram_media_registry,
             cancellations: Arc::new(Mutex::new(HashMap::new())),
             worker_slots: Arc::new(Semaphore::new(MAX_ACTIVE_IMPORT_WORKERS)),
             upload_slots: Arc::new(Semaphore::new(MAX_CONCURRENT_EPUB_UPLOADS)),
             account_upload_slots: Arc::new(Mutex::new(HashMap::new())),
         }
+    }
+
+    pub(crate) fn telegram_media_registry(&self) -> Arc<TelegramMediaRegistry> {
+        Arc::clone(&self.telegram_media_registry)
     }
 
     pub(crate) fn try_begin_upload(
@@ -501,20 +523,54 @@ impl ImportService {
         .await
     }
 
-    pub(crate) async fn accept_telegram(
+    pub(crate) async fn accept_telegram_composite(
         self: &Arc<Self>,
         session: &AuthenticatedSession,
-        snapshot: &TelegramMessageSnapshot,
+        envelope: &TelegramUpdate,
         idempotency_key: &str,
     ) -> Result<AcceptedImport, ImportServiceError> {
         validate_idempotency_key(idempotency_key)?;
-        let bytes = serde_json::to_vec(snapshot).map_err(|_| ImportServiceError::Unavailable)?;
+        if !envelope.has_importable_content() {
+            return Err(ImportServiceError::BadRequest(
+                "Telegram envelope contains no importable content",
+            ));
+        }
+        let bytes = serde_json::to_vec(envelope).map_err(|_| ImportServiceError::Unavailable)?;
         let source_hash = content_hash(&bytes);
-        let title = snapshot
+        let title = envelope
             .forward_origin
             .clone()
-            .unwrap_or_else(|| snapshot.text.chars().take(80).collect());
+            .or_else(|| {
+                envelope
+                    .text
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|text| !text.is_empty())
+                    .map(|text| text.chars().take(80).collect())
+            })
+            .unwrap_or_else(|| "Материал из Telegram".to_owned());
         let request_hash = Sha256::digest(&bytes);
+        let image_blobs = envelope
+            .photos
+            .iter()
+            .cloned()
+            .map(|descriptor| TelegramImageArtifact {
+                descriptor,
+                blob_hash: None,
+                media_type: None,
+                diagnostic: None,
+            })
+            .collect();
+        let web_snapshots = envelope
+            .links
+            .iter()
+            .cloned()
+            .map(|url| TelegramWebArtifact {
+                url,
+                snapshot_blob_hash: None,
+                diagnostic: None,
+            })
+            .collect();
         self.accept_pending_source(
             session,
             idempotency_key,
@@ -522,18 +578,21 @@ impl ImportService {
             title,
             SourceIdentity {
                 format: lumi_core::SourceFormat::Telegram,
-                source_name: format!("telegram:{}/{}", snapshot.chat_id, snapshot.message_id),
+                source_name: format!("telegram:{}/{}", envelope.chat_id, envelope.message_id),
                 source_hash: source_hash.clone(),
             },
-            SourceRef::TelegramText {
-                snapshot_blob_hash: source_hash.clone(),
+            SourceRef::TelegramComposite {
+                message_blob_hash: source_hash.clone(),
+                image_blobs,
+                web_snapshots,
+                bot_id: envelope.bot_id,
                 device_id: session.device_id,
             },
             request_hash.as_slice(),
-            "import.telegram_text",
+            "import.telegram_composite",
             Some(PendingBlob {
                 hash: source_hash,
-                media_type: "application/vnd.lumi.telegram-message+json",
+                media_type: "application/vnd.lumi.telegram-envelope+json",
                 bytes,
             }),
         )
@@ -1080,6 +1139,10 @@ impl ImportService {
             SourceRef::TelegramText { .. } => (
                 "message.json".to_owned(),
                 "application/vnd.lumi.telegram-message+json".to_owned(),
+            ),
+            SourceRef::TelegramComposite { .. } => (
+                "envelope.json".to_owned(),
+                "application/vnd.lumi.telegram-envelope+json".to_owned(),
             ),
         };
         Ok((name, media_type, bytes))
@@ -1952,6 +2015,19 @@ impl ImportService {
                 )
                 .await
             }
+            source_ref @ SourceRef::TelegramComposite { .. } => {
+                self.run_telegram_composite(
+                    job_id,
+                    claim_id,
+                    user_id,
+                    space_id,
+                    material_id,
+                    attempt,
+                    source_ref,
+                    Arc::clone(&cancellation),
+                )
+                .await
+            }
         };
         heartbeat.abort();
         self.remove_cancellation(job_id);
@@ -2329,6 +2405,377 @@ impl ImportService {
                 .await
             }
         }
+    }
+
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "worker context is explicit across the composite source adapter boundary"
+    )]
+    async fn run_telegram_composite(
+        &self,
+        job_id: JobId,
+        claim_id: Uuid,
+        user_id: Uuid,
+        space_id: Uuid,
+        material_id: Uuid,
+        attempt: i32,
+        mut source_ref: SourceRef,
+        cancellation: Arc<AtomicBool>,
+    ) -> Result<(), ImportServiceError> {
+        let SourceRef::TelegramComposite {
+            message_blob_hash,
+            bot_id,
+            ..
+        } = &source_ref
+        else {
+            return Err(ImportServiceError::Unavailable);
+        };
+        let envelope_bytes = self
+            .blobs
+            .get(message_blob_hash)
+            .await
+            .map_err(map_blob_error)?;
+        self.persist_blob_parts(
+            message_blob_hash,
+            "application/vnd.lumi.telegram-envelope+json",
+            &envelope_bytes,
+        )
+        .await?;
+        let envelope: TelegramUpdate =
+            serde_json::from_slice(&envelope_bytes).map_err(|_| ImportServiceError::Unavailable)?;
+        let bot_id = *bot_id;
+        let mut diagnostics = Vec::new();
+
+        self.set_stage(job_id, claim_id, "capturing_telegram_media")
+            .await?;
+        let mut total_image_bytes = 0_usize;
+        let image_count = match &source_ref {
+            SourceRef::TelegramComposite { image_blobs, .. } => image_blobs.len(),
+            _ => 0,
+        };
+        for index in 0..image_count {
+            if cancellation.load(Ordering::Acquire) {
+                return self
+                    .fail(
+                        job_id,
+                        claim_id,
+                        material_id,
+                        attempt,
+                        cancelled_diagnostic(),
+                        true,
+                    )
+                    .await;
+            }
+            if index >= MAX_TELEGRAM_IMAGES {
+                let diagnostic = telegram_part_diagnostic(
+                    "telegram_image_count_limit",
+                    "Telegram image was skipped because the material image limit was reached.",
+                    format!("photo[{index}]"),
+                );
+                set_image_diagnostic(&mut source_ref, index, diagnostic.clone())?;
+                diagnostics.push(diagnostic);
+                self.persist_running_source_ref(job_id, claim_id, &source_ref)
+                    .await?;
+                continue;
+            }
+            let existing = match &source_ref {
+                SourceRef::TelegramComposite { image_blobs, .. } => image_blobs[index]
+                    .blob_hash
+                    .as_ref()
+                    .zip(image_blobs[index].media_type.as_ref())
+                    .map(|(hash, media_type)| (hash.clone(), media_type.clone())),
+                _ => None,
+            };
+            if let Some((hash, _)) = existing {
+                let bytes = self.blobs.get(&hash).await.map_err(map_blob_error)?;
+                if total_image_bytes.saturating_add(bytes.len()) > MAX_TELEGRAM_TOTAL_IMAGE_BYTES {
+                    let diagnostic = telegram_part_diagnostic(
+                        "telegram_image_total_limit",
+                        "Telegram image was skipped because the material byte limit was reached.",
+                        format!("photo[{index}]"),
+                    );
+                    set_image_diagnostic(&mut source_ref, index, diagnostic.clone())?;
+                    diagnostics.push(diagnostic);
+                } else {
+                    total_image_bytes += bytes.len();
+                }
+                self.persist_running_source_ref(job_id, claim_id, &source_ref)
+                    .await?;
+                continue;
+            }
+            let descriptor = match &source_ref {
+                SourceRef::TelegramComposite { image_blobs, .. } => {
+                    image_blobs[index].descriptor.clone()
+                }
+                _ => return Err(ImportServiceError::Unavailable),
+            };
+            let capture = self.capture_telegram_photo(bot_id, &descriptor).await;
+            match capture {
+                Ok(captured)
+                    if captured.bytes.len() <= MAX_TELEGRAM_IMAGE_BYTES
+                        && total_image_bytes.saturating_add(captured.bytes.len())
+                            <= MAX_TELEGRAM_TOTAL_IMAGE_BYTES =>
+                {
+                    let hash = content_hash(&captured.bytes);
+                    self.persist_blob_parts(&hash, &captured.media_type, &captured.bytes)
+                        .await?;
+                    total_image_bytes += captured.bytes.len();
+                    if let SourceRef::TelegramComposite { image_blobs, .. } = &mut source_ref {
+                        image_blobs[index].blob_hash = Some(hash);
+                        image_blobs[index].media_type = Some(captured.media_type);
+                        image_blobs[index].diagnostic = None;
+                    }
+                }
+                Ok(_) => {
+                    let diagnostic = telegram_part_diagnostic(
+                        "telegram_image_total_limit",
+                        "Telegram image was skipped because the material byte limit was reached.",
+                        format!("photo[{index}]"),
+                    );
+                    set_image_diagnostic(&mut source_ref, index, diagnostic.clone())?;
+                    diagnostics.push(diagnostic);
+                }
+                Err(error) => {
+                    let diagnostic = telegram_part_diagnostic(
+                        "telegram_image_capture_failed",
+                        &error.to_string(),
+                        format!("photo[{index}]"),
+                    );
+                    set_image_diagnostic(&mut source_ref, index, diagnostic.clone())?;
+                    diagnostics.push(diagnostic);
+                }
+            }
+            self.persist_running_source_ref(job_id, claim_id, &source_ref)
+                .await?;
+        }
+
+        self.set_stage(job_id, claim_id, "fetching_linked_sources")
+            .await?;
+        let web_jobs = match &source_ref {
+            SourceRef::TelegramComposite { web_snapshots, .. } => web_snapshots
+                .iter()
+                .take(MAX_TELEGRAM_LINKS)
+                .enumerate()
+                .filter(|(_, artifact)| {
+                    artifact.snapshot_blob_hash.is_none() && artifact.diagnostic.is_none()
+                })
+                .map(|(index, artifact)| (index, artifact.url.clone()))
+                .collect::<Vec<_>>(),
+            _ => Vec::new(),
+        };
+        let semaphore = Arc::new(Semaphore::new(MAX_TELEGRAM_WEB_FETCHES));
+        let mut captures = tokio::task::JoinSet::new();
+        for (index, url) in web_jobs {
+            let web_capture = Arc::clone(&self.web_capture);
+            let semaphore = Arc::clone(&semaphore);
+            captures.spawn(async move {
+                let permit = semaphore
+                    .acquire_owned()
+                    .await
+                    .map_err(|_| ImportServiceError::Unavailable)?;
+                let result = web_capture.capture(&url).await;
+                drop(permit);
+                Ok::<_, ImportServiceError>((index, result))
+            });
+        }
+        while let Some(result) = captures.join_next().await {
+            let (index, capture) = result.map_err(|_| ImportServiceError::Unavailable)??;
+            match capture {
+                Ok(snapshot) => {
+                    let bytes = serde_json::to_vec(&snapshot)
+                        .map_err(|_| ImportServiceError::Unavailable)?;
+                    let hash = content_hash(&bytes);
+                    self.persist_blob_parts(
+                        &hash,
+                        "application/vnd.lumi.web-snapshot+json",
+                        &bytes,
+                    )
+                    .await?;
+                    if let SourceRef::TelegramComposite { web_snapshots, .. } = &mut source_ref {
+                        web_snapshots[index].snapshot_blob_hash = Some(hash);
+                        web_snapshots[index].diagnostic = None;
+                    }
+                }
+                Err(error) => {
+                    let mut diagnostic = error.diagnostic();
+                    diagnostic.source_path = Some(format!("links[{index}]"));
+                    if let SourceRef::TelegramComposite { web_snapshots, .. } = &mut source_ref {
+                        web_snapshots[index].diagnostic = Some(diagnostic.clone());
+                    }
+                    diagnostics.push(diagnostic);
+                }
+            }
+            self.persist_running_source_ref(job_id, claim_id, &source_ref)
+                .await?;
+        }
+        if let SourceRef::TelegramComposite { web_snapshots, .. } = &mut source_ref {
+            for (index, artifact) in web_snapshots
+                .iter_mut()
+                .enumerate()
+                .skip(MAX_TELEGRAM_LINKS)
+            {
+                let diagnostic = telegram_part_diagnostic(
+                    "telegram_link_count_limit",
+                    "Telegram link was not expanded because the material link limit was reached.",
+                    format!("links[{index}]"),
+                );
+                artifact.diagnostic = Some(diagnostic.clone());
+                diagnostics.push(diagnostic);
+            }
+        }
+        self.persist_running_source_ref(job_id, claim_id, &source_ref)
+            .await?;
+
+        let (images, web_sections) = self
+            .load_telegram_composite_artifacts(&source_ref, &mut diagnostics)
+            .await?;
+        self.set_stage(job_id, claim_id, "normalizing").await?;
+        let imported = tokio::task::spawn_blocking(move || {
+            import_telegram_composite(
+                user_id,
+                material_id,
+                Uuid::now_v7(),
+                &envelope,
+                &images,
+                &web_sections,
+                &diagnostics,
+            )
+        })
+        .await
+        .map_err(|_| ImportServiceError::Unavailable)?;
+        match imported {
+            Ok(publication) if !cancellation.load(Ordering::Acquire) => {
+                self.persist_success(
+                    job_id,
+                    claim_id,
+                    space_id,
+                    &source_ref,
+                    attempt,
+                    publication,
+                )
+                .await
+            }
+            Ok(_) => {
+                self.fail(
+                    job_id,
+                    claim_id,
+                    material_id,
+                    attempt,
+                    cancelled_diagnostic(),
+                    true,
+                )
+                .await
+            }
+            Err(error) => {
+                self.fail(
+                    job_id,
+                    claim_id,
+                    material_id,
+                    attempt,
+                    source_import_diagnostic("telegram", &error.to_string()),
+                    false,
+                )
+                .await
+            }
+        }
+    }
+
+    async fn capture_telegram_photo(
+        &self,
+        bot_id: u64,
+        descriptor: &TelegramPhotoDescriptor,
+    ) -> Result<
+        crate::telegram_media::CapturedTelegramMedia,
+        crate::telegram_media::TelegramMediaError,
+    > {
+        let mut last_error = None;
+        for retry in 0..3 {
+            match self.telegram_media.capture(bot_id, descriptor).await {
+                Ok(captured) => return Ok(captured),
+                Err(error) if error.is_retryable() && retry < 2 => {
+                    last_error = Some(error);
+                    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                }
+                Err(error) => return Err(error),
+            }
+        }
+        Err(last_error.unwrap_or(crate::telegram_media::TelegramMediaError::CredentialUnavailable))
+    }
+
+    async fn persist_running_source_ref(
+        &self,
+        job_id: JobId,
+        claim_id: Uuid,
+        source_ref: &SourceRef,
+    ) -> Result<(), ImportServiceError> {
+        let updated = sqlx::query(
+            "UPDATE import_jobs SET source_ref = $3, lease_expires_at = now() + $4::interval, updated_at = now() WHERE job_id = $1 AND worker_claim_id = $2 AND status = 'running'",
+        )
+        .bind(job_id)
+        .bind(claim_id)
+        .bind(serde_json::to_value(source_ref).map_err(|_| ImportServiceError::Unavailable)?)
+        .bind(WORKER_LEASE_SQL)
+        .execute(&self.pool)
+        .await
+        .map_err(log_storage_error)?;
+        (updated.rows_affected() == 1)
+            .then_some(())
+            .ok_or(ImportServiceError::Conflict)
+    }
+
+    async fn load_telegram_composite_artifacts(
+        &self,
+        source_ref: &SourceRef,
+        diagnostics: &mut Vec<ImportDiagnostic>,
+    ) -> Result<(Vec<TelegramCapturedImage>, Vec<TelegramWebSection>), ImportServiceError> {
+        let SourceRef::TelegramComposite {
+            image_blobs,
+            web_snapshots,
+            ..
+        } = source_ref
+        else {
+            return Err(ImportServiceError::Unavailable);
+        };
+        let mut images = Vec::new();
+        let mut total_bytes = 0_usize;
+        for artifact in image_blobs.iter().take(MAX_TELEGRAM_IMAGES) {
+            if let Some(diagnostic) = artifact.diagnostic.as_ref() {
+                diagnostics.push(diagnostic.clone());
+            }
+            let Some((hash, media_type)) = artifact
+                .blob_hash
+                .as_ref()
+                .zip(artifact.media_type.as_ref())
+            else {
+                continue;
+            };
+            let bytes = self.blobs.get(hash).await.map_err(map_blob_error)?;
+            if total_bytes.saturating_add(bytes.len()) > MAX_TELEGRAM_TOTAL_IMAGE_BYTES {
+                continue;
+            }
+            total_bytes += bytes.len();
+            images.push(TelegramCapturedImage {
+                descriptor: artifact.descriptor.clone(),
+                media_type: media_type.clone(),
+                content_hash: hash.clone(),
+                bytes,
+            });
+        }
+        let mut sections = Vec::with_capacity(web_snapshots.len());
+        for artifact in web_snapshots {
+            let snapshot = if let Some(hash) = artifact.snapshot_blob_hash.as_ref() {
+                let bytes = self.blobs.get(hash).await.map_err(map_blob_error)?;
+                Some(serde_json::from_slice(&bytes).map_err(|_| ImportServiceError::Unavailable)?)
+            } else {
+                None
+            };
+            sections.push(TelegramWebSection {
+                url: artifact.url.clone(),
+                snapshot,
+                diagnostics: artifact.diagnostic.iter().cloned().collect(),
+            });
+        }
+        Ok((images, sections))
     }
 
     async fn set_stage(
@@ -2711,6 +3158,32 @@ fn source_import_diagnostic(kind: &str, message: &str) -> ImportDiagnostic {
     }
 }
 
+fn telegram_part_diagnostic(code: &str, message: &str, source_path: String) -> ImportDiagnostic {
+    ImportDiagnostic {
+        severity: DiagnosticSeverity::Warning,
+        code: code.to_owned(),
+        message: message.to_owned(),
+        source_path: Some(source_path),
+    }
+}
+
+fn set_image_diagnostic(
+    source_ref: &mut SourceRef,
+    index: usize,
+    diagnostic: ImportDiagnostic,
+) -> Result<(), ImportServiceError> {
+    let SourceRef::TelegramComposite { image_blobs, .. } = source_ref else {
+        return Err(ImportServiceError::Unavailable);
+    };
+    let artifact = image_blobs
+        .get_mut(index)
+        .ok_or(ImportServiceError::Unavailable)?;
+    artifact.blob_hash = None;
+    artifact.media_type = None;
+    artifact.diagnostic = Some(diagnostic);
+    Ok(())
+}
+
 fn cancelled_diagnostic() -> ImportDiagnostic {
     ImportDiagnostic {
         severity: DiagnosticSeverity::Info,
@@ -2744,6 +3217,28 @@ enum SourceRef {
         snapshot_blob_hash: String,
         device_id: Uuid,
     },
+    TelegramComposite {
+        message_blob_hash: String,
+        image_blobs: Vec<TelegramImageArtifact>,
+        web_snapshots: Vec<TelegramWebArtifact>,
+        bot_id: u64,
+        device_id: Uuid,
+    },
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+struct TelegramImageArtifact {
+    descriptor: TelegramPhotoDescriptor,
+    blob_hash: Option<String>,
+    media_type: Option<String>,
+    diagnostic: Option<ImportDiagnostic>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+struct TelegramWebArtifact {
+    url: String,
+    snapshot_blob_hash: Option<String>,
+    diagnostic: Option<ImportDiagnostic>,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -2759,7 +3254,8 @@ impl SourceRef {
         match self {
             Self::Epub { device_id, .. }
             | Self::WebPage { device_id, .. }
-            | Self::TelegramText { device_id, .. } => *device_id,
+            | Self::TelegramText { device_id, .. }
+            | Self::TelegramComposite { device_id, .. } => *device_id,
         }
     }
 
@@ -2772,6 +3268,9 @@ impl SourceRef {
             Self::TelegramText {
                 snapshot_blob_hash, ..
             } => Some(snapshot_blob_hash),
+            Self::TelegramComposite {
+                message_blob_hash, ..
+            } => Some(message_blob_hash),
         }
     }
 
@@ -2780,6 +3279,7 @@ impl SourceRef {
             Self::Epub { .. } => SOURCE_MEDIA_TYPE,
             Self::WebPage { .. } => "application/vnd.lumi.web-snapshot+json",
             Self::TelegramText { .. } => "application/vnd.lumi.telegram-message+json",
+            Self::TelegramComposite { .. } => "application/vnd.lumi.telegram-envelope+json",
         }
     }
 
@@ -2787,7 +3287,7 @@ impl SourceRef {
         match self {
             Self::Epub { .. } => "epub",
             Self::WebPage { .. } => "web_page",
-            Self::TelegramText { .. } => "telegram",
+            Self::TelegramText { .. } | Self::TelegramComposite { .. } => "telegram",
         }
     }
 
@@ -2796,6 +3296,7 @@ impl SourceRef {
             Self::Epub { file_name, .. } => file_name.clone(),
             Self::WebPage { .. } => "snapshot.json".to_owned(),
             Self::TelegramText { .. } => "message.json".to_owned(),
+            Self::TelegramComposite { .. } => "envelope.json".to_owned(),
         }
     }
 }
@@ -3441,6 +3942,8 @@ fn parse_stage(value: &str) -> Result<JobStage, ImportServiceError> {
         "source_accepted" => Ok(JobStage::SourceAccepted),
         "fetching_source" => Ok(JobStage::FetchingSource),
         "capturing_snapshot" => Ok(JobStage::CapturingSnapshot),
+        "capturing_telegram_media" => Ok(JobStage::CapturingTelegramMedia),
+        "fetching_linked_sources" => Ok(JobStage::FetchingLinkedSources),
         "extracting_content" => Ok(JobStage::ExtractingContent),
         "validating_container" => Ok(JobStage::ValidatingContainer),
         "normalizing" => Ok(JobStage::Normalizing),

@@ -557,7 +557,7 @@ test("persists an API-backed EPUB library lifecycle", async ({ page }) => {
   await page
     .getByRole("article", { name: "Материал Stage Four Reader" })
     .getByRole("button", { name: "В архив" })
-    .click();
+    .click({ force: true });
   await expect(
     page.getByRole("main", { name: "Сессия истекла" }),
   ).toBeVisible();

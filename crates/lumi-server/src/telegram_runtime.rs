@@ -1,18 +1,23 @@
 //! Instance-wide Telegram bot settings and embedded listener lifecycle.
 
+use std::collections::HashSet;
 use std::fmt;
 use std::path::Path;
 use std::sync::{Arc, RwLock};
 
 use lumi_core::{
-    TelegramBotRuntimeStatus, TelegramBotSettings, TelegramReply, TelegramUpdate, TimestampMs,
+    TelegramBotRuntimeStatus, TelegramBotSettings, TelegramEntity, TelegramEntityKind,
+    TelegramPhotoDescriptor, TelegramReply, TelegramUnsupportedAttachment, TelegramUpdate,
+    TimestampMs,
 };
 use ring::{aead, rand as ring_rand};
 use sha2::{Digest, Sha256};
 use sqlx_core::row::Row;
 use sqlx_postgres::PgPool;
 use teloxide_core::prelude::*;
-use teloxide_core::types::{Message, MessageOrigin, Update, UpdateKind};
+use teloxide_core::types::{
+    Message, MessageEntity, MessageEntityKind, MessageOrigin, Update, UpdateKind,
+};
 use time::OffsetDateTime;
 use tokio::io::AsyncWriteExt;
 use tokio::sync::{watch, Mutex};
@@ -305,6 +310,7 @@ impl TelegramRuntime {
         self.store.delete().await?;
         replace_lock(&self.configured, None)?;
         replace_lock(&self.service, None)?;
+        self.imports.telegram_media_registry().clear();
         replace_lock(
             &self.status,
             settings_projection(None, TelegramBotRuntimeStatus::Unconfigured, None),
@@ -401,6 +407,14 @@ impl TelegramRuntime {
         bot.delete_webhook()
             .await
             .map_err(|_| TelegramRuntimeError::Provider)?;
+        let _media_lease = self
+            .imports
+            .telegram_media_registry()
+            .publish(configured.bot_id, bot.clone());
+        service
+            .recover_media_groups()
+            .await
+            .map_err(|_| TelegramRuntimeError::Storage)?;
         self.set_runtime_status(TelegramBotRuntimeStatus::Running, None)?;
         let mut offset = None;
         loop {
@@ -433,7 +447,8 @@ impl TelegramRuntime {
             let mut retry_batch = false;
             for update in updates {
                 let next_offset = update.id.as_offset();
-                let Some(update) = telegram_update(update) else {
+                let bot_scope = format!("telegram-bot:{}", configured.bot_id);
+                let Some(update) = telegram_update(update, configured.bot_id, &bot_scope) else {
                     offset = Some(next_offset);
                     continue;
                 };
@@ -520,34 +535,232 @@ fn telegram_request_error_kind(error: &teloxide_core::RequestError) -> &'static 
     }
 }
 
-fn telegram_update(update: Update) -> Option<TelegramUpdate> {
+fn telegram_update(update: Update, bot_id: u64, bot_scope: &str) -> Option<TelegramUpdate> {
     let UpdateKind::Message(message) = update.kind else {
         return None;
     };
-    telegram_message(update.id.0, &message)
+    telegram_message(update.id.0, bot_id, bot_scope, &message)
 }
 
-fn telegram_message(update_id: u32, message: &Message) -> Option<TelegramUpdate> {
+fn telegram_message(
+    update_id: u32,
+    bot_id: u64,
+    bot_scope: &str,
+    message: &Message,
+) -> Option<TelegramUpdate> {
     if !message.chat.is_private() {
         return None;
     }
     let sender = message.from.as_ref()?;
     let telegram_user_id = i64::try_from(sender.id.0).ok()?;
+    let text = message.text().or_else(|| message.caption());
+    let is_caption = message.text().is_none() && message.caption().is_some();
+    let raw_entities = if is_caption {
+        message.caption_entities().unwrap_or_default()
+    } else {
+        message.entities().unwrap_or_default()
+    };
+    let entities = text
+        .map(|text| telegram_entities(text, raw_entities))
+        .unwrap_or_default();
+    let links = text
+        .map(|text| telegram_links(text, &entities))
+        .unwrap_or_default();
+    let photos = message
+        .photo()
+        .and_then(|sizes| {
+            sizes.iter().max_by_key(|size| {
+                (
+                    u64::from(size.width) * u64::from(size.height),
+                    size.file.size,
+                )
+            })
+        })
+        .map(|photo| {
+            vec![TelegramPhotoDescriptor {
+                file_id: photo.file.id.0.clone(),
+                file_unique_id: photo.file.unique_id.0.clone(),
+                width: photo.width,
+                height: photo.height,
+                byte_size: (photo.file.size != u32::MAX).then_some(u64::from(photo.file.size)),
+            }]
+        })
+        .unwrap_or_default();
+    let unsupported_attachments = unsupported_attachments(message);
     Some(TelegramUpdate {
         update_id: i64::from(update_id),
+        bot_id,
+        bot_scope: bot_scope.to_owned(),
         telegram_user_id,
         chat_id: message.chat.id.0,
         is_private_chat: true,
         message_id: i64::from(message.id.0),
         message_date: Some(message.date.timestamp()),
-        text: message.text().map(str::to_owned),
+        text: text.map(str::to_owned),
+        is_caption,
+        entities,
+        links,
+        photos,
+        media_group_id: message.media_group_id().map(|id| id.0.clone()),
         forwarded: message.forward_origin().is_some(),
         forward_origin: message.forward_origin().and_then(redacted_forward_origin),
-        has_unsupported_payload: message.document().is_some()
-            || message.photo().is_some()
-            || message.video().is_some()
-            || message.audio().is_some(),
+        has_unsupported_payload: !unsupported_attachments.is_empty(),
+        unsupported_attachments,
     })
+}
+
+fn telegram_entities(text: &str, entities: &[MessageEntity]) -> Vec<TelegramEntity> {
+    entities
+        .iter()
+        .filter_map(|entity| {
+            let (offset_start, offset_end) =
+                utf16_range_to_scalar(text, entity.offset, entity.length)?;
+            let kind = telegram_entity_kind(&entity.kind);
+            let url = match &entity.kind {
+                MessageEntityKind::Url => {
+                    let value = text
+                        .chars()
+                        .skip(offset_start)
+                        .take(offset_end.saturating_sub(offset_start))
+                        .collect::<String>();
+                    normalized_http_url(&value)
+                }
+                MessageEntityKind::TextLink { url } => normalized_http_url(url.as_str()),
+                _ => None,
+            };
+            Some(TelegramEntity {
+                kind,
+                offset_start,
+                offset_end,
+                url,
+            })
+        })
+        .collect()
+}
+
+fn telegram_entity_kind(kind: &MessageEntityKind) -> TelegramEntityKind {
+    match kind {
+        MessageEntityKind::Mention => TelegramEntityKind::Mention,
+        MessageEntityKind::Hashtag => TelegramEntityKind::Hashtag,
+        MessageEntityKind::Cashtag => TelegramEntityKind::Cashtag,
+        MessageEntityKind::BotCommand => TelegramEntityKind::BotCommand,
+        MessageEntityKind::Url => TelegramEntityKind::Url,
+        MessageEntityKind::Email => TelegramEntityKind::Email,
+        MessageEntityKind::PhoneNumber => TelegramEntityKind::PhoneNumber,
+        MessageEntityKind::Bold => TelegramEntityKind::Bold,
+        MessageEntityKind::Blockquote => TelegramEntityKind::Blockquote,
+        MessageEntityKind::ExpandableBlockquote => TelegramEntityKind::ExpandableBlockquote,
+        MessageEntityKind::Italic => TelegramEntityKind::Italic,
+        MessageEntityKind::Underline => TelegramEntityKind::Underline,
+        MessageEntityKind::Strikethrough => TelegramEntityKind::Strikethrough,
+        MessageEntityKind::Spoiler => TelegramEntityKind::Spoiler,
+        MessageEntityKind::Code => TelegramEntityKind::Code,
+        MessageEntityKind::Pre { .. } => TelegramEntityKind::Pre,
+        MessageEntityKind::TextLink { .. } => TelegramEntityKind::TextLink,
+        MessageEntityKind::TextMention { .. } => TelegramEntityKind::TextMention,
+        MessageEntityKind::CustomEmoji { .. } => TelegramEntityKind::CustomEmoji,
+    }
+}
+
+fn utf16_range_to_scalar(text: &str, offset: usize, length: usize) -> Option<(usize, usize)> {
+    let end = offset.checked_add(length)?;
+    let mut utf16_index = 0;
+    let mut scalar_index = 0;
+    let mut scalar_start = (offset == 0).then_some(0);
+    let mut scalar_end = (end == 0).then_some(0);
+    for character in text.chars() {
+        if utf16_index == offset {
+            scalar_start = Some(scalar_index);
+        }
+        if utf16_index == end {
+            scalar_end = Some(scalar_index);
+        }
+        utf16_index += character.len_utf16();
+        scalar_index += 1;
+    }
+    if utf16_index == offset {
+        scalar_start = Some(scalar_index);
+    }
+    if utf16_index == end {
+        scalar_end = Some(scalar_index);
+    }
+    scalar_start.zip(scalar_end)
+}
+
+fn telegram_links(text: &str, entities: &[TelegramEntity]) -> Vec<String> {
+    let mut candidates = Vec::new();
+    let mut sequence = 0_usize;
+    for entity in entities {
+        if let Some(url) = entity.url.as_ref() {
+            candidates.push((entity.offset_start, sequence, url.clone()));
+            sequence += 1;
+        }
+    }
+    for (byte_start, _) in text
+        .match_indices("http://")
+        .chain(text.match_indices("https://"))
+    {
+        let candidate = text[byte_start..]
+            .split(char::is_whitespace)
+            .next()
+            .unwrap_or_default()
+            .trim_end_matches(|character: char| {
+                matches!(
+                    character,
+                    '.' | ',' | ';' | ':' | '!' | '?' | ')' | ']' | '}' | '\'' | '"'
+                )
+            });
+        if let Some(url) = normalized_http_url(candidate) {
+            candidates.push((text[..byte_start].chars().count(), sequence, url));
+            sequence += 1;
+        }
+    }
+    candidates.sort_by_key(|(position, sequence, _)| (*position, *sequence));
+    let mut seen = HashSet::new();
+    candidates
+        .into_iter()
+        .filter_map(|(_, _, url)| seen.insert(url.clone()).then_some(url))
+        .collect()
+}
+
+fn normalized_http_url(value: &str) -> Option<String> {
+    let mut url = url::Url::parse(value).ok()?;
+    if !matches!(url.scheme(), "http" | "https")
+        || url.host().is_none()
+        || !url.username().is_empty()
+        || url.password().is_some()
+        || value.len() > 2_048
+    {
+        return None;
+    }
+    url.set_fragment(None);
+    Some(url.into())
+}
+
+fn unsupported_attachments(message: &Message) -> Vec<TelegramUnsupportedAttachment> {
+    let mut attachments = Vec::new();
+    if message.video().is_some() {
+        attachments.push(TelegramUnsupportedAttachment::Video);
+    }
+    if message.video_note().is_some() {
+        attachments.push(TelegramUnsupportedAttachment::VideoNote);
+    }
+    if message.animation().is_some() {
+        attachments.push(TelegramUnsupportedAttachment::Animation);
+    }
+    if message.audio().is_some() {
+        attachments.push(TelegramUnsupportedAttachment::Audio);
+    }
+    if message.voice().is_some() {
+        attachments.push(TelegramUnsupportedAttachment::Voice);
+    }
+    if message.document().is_some() {
+        attachments.push(TelegramUnsupportedAttachment::Document);
+    }
+    if message.sticker().is_some() {
+        attachments.push(TelegramUnsupportedAttachment::Sticker);
+    }
+    attachments
 }
 
 fn redacted_forward_origin(origin: &MessageOrigin) -> Option<String> {
@@ -571,6 +784,7 @@ fn telegram_service(
         pool.clone(),
         Arc::clone(imports),
         format!("telegram-bot:{}", bot.bot_id),
+        bot.bot_id,
         bot.username.clone(),
     ))
 }
@@ -780,18 +994,26 @@ mod tests {
         )?;
 
         assert_eq!(
-            telegram_update(update),
+            telegram_update(update, 77, "telegram-bot:77"),
             Some(TelegramUpdate {
                 update_id: 100,
+                bot_id: 77,
+                bot_scope: "telegram-bot:77".to_owned(),
                 telegram_user_id: 42,
                 chat_id: 42,
                 is_private_chat: true,
                 message_id: 7,
                 message_date: Some(1_783_890_000),
                 text: Some("hello".to_owned()),
+                is_caption: false,
+                entities: Vec::new(),
+                links: Vec::new(),
+                photos: Vec::new(),
+                media_group_id: None,
                 forwarded: false,
                 forward_origin: None,
                 has_unsupported_payload: false,
+                unsupported_attachments: Vec::new(),
             })
         );
         Ok(())
@@ -803,7 +1025,62 @@ mod tests {
             r#"{"update_id":101,"message":{"message_id":8,"date":1783890001,"chat":{"id":-42,"type":"group","title":"Readers"},"from":{"id":42,"is_bot":false,"first_name":"Reader"},"text":"hello"}}"#,
         )?;
 
-        assert_eq!(telegram_update(update), None);
+        assert_eq!(telegram_update(update, 77, "telegram-bot:77"), None);
+        Ok(())
+    }
+
+    #[test]
+    fn caption_photo_entities_and_links_map_to_composite_envelope(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let update: Update = serde_json::from_str(
+            r#"{"update_id":102,"message":{"message_id":9,"date":1783890002,"chat":{"id":42,"type":"private","first_name":"Reader"},"from":{"id":42,"is_bot":false,"first_name":"Reader"},"photo":[{"file_id":"small","file_unique_id":"photo","file_size":100,"width":90,"height":90},{"file_id":"large","file_unique_id":"photo","file_size":200,"width":1280,"height":720}],"caption":"😀 сайт https://example.org/x","caption_entities":[{"type":"text_link","offset":3,"length":4,"url":"https://example.com/a"},{"type":"url","offset":8,"length":21}]}}"#,
+        )?;
+
+        let envelope = telegram_update(update, 77, "telegram-bot:77")
+            .ok_or_else(|| std::io::Error::other("photo update was ignored"))?;
+
+        assert_eq!(envelope.photos[0].file_id, "large");
+        assert_eq!(envelope.entities[0].offset_start, 2);
+        assert_eq!(
+            envelope.links,
+            vec![
+                "https://example.com/a".to_owned(),
+                "https://example.org/x".to_owned()
+            ]
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn video_caption_remains_importable_while_video_is_marked_unsupported(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let update: Update = serde_json::from_str(
+            r#"{"update_id":103,"message":{"message_id":10,"date":1783890003,"chat":{"id":42,"type":"private","first_name":"Reader"},"from":{"id":42,"is_bot":false,"first_name":"Reader"},"video":{"file_id":"video","file_unique_id":"video","file_size":100,"width":320,"height":240,"duration":1,"mime_type":"video/mp4"},"caption":"Сохранить подпись"}}"#,
+        )?;
+
+        let envelope = telegram_update(update, 77, "telegram-bot:77")
+            .ok_or_else(|| std::io::Error::other("video update was ignored"))?;
+
+        assert_eq!(
+            (envelope.text, envelope.unsupported_attachments),
+            (
+                Some("Сохранить подпись".to_owned()),
+                vec![TelegramUnsupportedAttachment::Video]
+            )
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn video_without_caption_has_no_importable_content() -> Result<(), Box<dyn std::error::Error>> {
+        let update: Update = serde_json::from_str(
+            r#"{"update_id":104,"message":{"message_id":11,"date":1783890004,"chat":{"id":42,"type":"private","first_name":"Reader"},"from":{"id":42,"is_bot":false,"first_name":"Reader"},"video":{"file_id":"video","file_unique_id":"video","file_size":100,"width":320,"height":240,"duration":1,"mime_type":"video/mp4"}}}"#,
+        )?;
+
+        let envelope = telegram_update(update, 77, "telegram-bot:77")
+            .ok_or_else(|| std::io::Error::other("video update was ignored"))?;
+
+        assert!(!envelope.has_importable_content());
         Ok(())
     }
 }

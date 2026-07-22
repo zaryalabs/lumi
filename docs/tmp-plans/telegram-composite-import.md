@@ -1,6 +1,6 @@
 # Составной импорт материалов из Telegram
 
-Status: `active`
+Status: `implemented`; live provider verification pending
 
 ## Назначение
 

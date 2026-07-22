@@ -5,11 +5,12 @@ use serde::{Deserialize, Serialize};
 use url::Url;
 
 use crate::{
-    content_hash, short_content_hash, BlobManifest, ContentBlock, ContentUnit, DiagnosticSeverity,
-    DocumentRevision, DocumentRevisionId, ImportDiagnostic, MaterialId, NavigationItem,
-    NormalizedContentPackage, NormalizedPackageManifest, ReadingLink, ReadingLinkKind,
-    ReadingNodeKind, SourceFormat, SourceIdentity, SourceLocator, TelegramSourceLocator,
-    TimestampMs, UserId, WebSourceLocator, NORMALIZED_PACKAGE_VERSION, TELEGRAM_IMPORTER_ID,
+    content_hash, short_content_hash, BlobManifest, BlobRef, BlobRole, ContentBlock, ContentUnit,
+    DiagnosticSeverity, DocumentRevision, DocumentRevisionId, ImportDiagnostic, MaterialId,
+    NavigationItem, NormalizedContentPackage, NormalizedPackageManifest, ReadingLink,
+    ReadingLinkKind, ReadingNodeKind, SourceFormat, SourceIdentity, SourceLocator,
+    TelegramSourceLocator, TimestampMs, UserId, WebSourceLocator, NORMALIZED_PACKAGE_VERSION,
+    TELEGRAM_COMPOSITE_IMPORTER_ID, TELEGRAM_COMPOSITE_IMPORTER_VERSION, TELEGRAM_IMPORTER_ID,
     TELEGRAM_IMPORTER_VERSION, WEB_IMPORTER_ID, WEB_IMPORTER_VERSION,
 };
 
@@ -36,6 +37,8 @@ pub enum ImportSourceKind {
     TelegramText,
     /// A single ordinary HTTP(S) URL delivered by Telegram.
     TelegramWebLink,
+    /// Telegram message, photos and expanded public web links.
+    TelegramComposite,
 }
 
 /// One redirect in a bounded web capture.
@@ -137,11 +140,111 @@ pub struct TelegramMessageSnapshot {
     pub forward_origin: Option<String>,
 }
 
+/// Normalized Telegram entity kind independent of transport library types.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TelegramEntityKind {
+    /// `@username` mention.
+    Mention,
+    /// Hashtag.
+    Hashtag,
+    /// Cashtag.
+    Cashtag,
+    /// Bot command.
+    BotCommand,
+    /// Explicit URL in message text.
+    Url,
+    /// Email address.
+    Email,
+    /// Phone number.
+    PhoneNumber,
+    /// Bold text.
+    Bold,
+    /// Block quote.
+    Blockquote,
+    /// Expandable block quote.
+    ExpandableBlockquote,
+    /// Italic text.
+    Italic,
+    /// Underlined text.
+    Underline,
+    /// Struck-through text.
+    Strikethrough,
+    /// Spoiler text.
+    Spoiler,
+    /// Inline code.
+    Code,
+    /// Preformatted block.
+    Pre,
+    /// URL carried by entity metadata.
+    TextLink,
+    /// Telegram user mention carried by entity metadata.
+    TextMention,
+    /// Custom emoji.
+    CustomEmoji,
+}
+
+/// One Telegram entity with Unicode-scalar offsets.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct TelegramEntity {
+    /// Entity semantic kind.
+    pub kind: TelegramEntityKind,
+    /// Inclusive Unicode-scalar start offset.
+    pub offset_start: usize,
+    /// Exclusive Unicode-scalar end offset.
+    pub offset_end: usize,
+    /// Sanitized HTTP(S) URL supplied by URL or text-link entities.
+    pub url: Option<String>,
+}
+
+/// Download descriptor for the largest Telegram photo size.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct TelegramPhotoDescriptor {
+    /// Bot-scoped identifier accepted by `getFile`.
+    pub file_id: String,
+    /// Stable Telegram file identifier that cannot be used for download.
+    pub file_unique_id: String,
+    /// Image width reported by Telegram.
+    pub width: u32,
+    /// Image height reported by Telegram.
+    pub height: u32,
+    /// File size reported by Telegram when known.
+    pub byte_size: Option<u64>,
+}
+
+/// Unsupported attachment class retained for user-facing diagnostics.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TelegramUnsupportedAttachment {
+    /// Video attachment.
+    Video,
+    /// Video note attachment.
+    VideoNote,
+    /// Animation or GIF attachment.
+    Animation,
+    /// Audio attachment.
+    Audio,
+    /// Voice attachment.
+    Voice,
+    /// Document or file attachment.
+    Document,
+    /// Sticker attachment.
+    Sticker,
+    /// Any other unsupported media class.
+    Other,
+}
+
 /// Transport-neutral subset of one Telegram Bot API update.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct TelegramUpdate {
     /// Bot API update id.
     pub update_id: i64,
+    /// Telegram bot id that accepted the update.
+    #[serde(default)]
+    pub bot_id: u64,
+    /// Stable bot scope derived from `bot_id`.
+    #[serde(default)]
+    pub bot_scope: String,
     /// Sender Telegram user id.
     pub telegram_user_id: i64,
     /// Private chat id.
@@ -154,6 +257,21 @@ pub struct TelegramUpdate {
     pub message_date: Option<i64>,
     /// Text body for supported text updates.
     pub text: Option<String>,
+    /// Whether `text` came from a media caption.
+    #[serde(default)]
+    pub is_caption: bool,
+    /// Normalized entities with Unicode-scalar offsets.
+    #[serde(default)]
+    pub entities: Vec<TelegramEntity>,
+    /// Unique HTTP(S) links in order of first appearance.
+    #[serde(default)]
+    pub links: Vec<String>,
+    /// Largest photo size selected from this update.
+    #[serde(default)]
+    pub photos: Vec<TelegramPhotoDescriptor>,
+    /// Telegram album identifier.
+    #[serde(default)]
+    pub media_group_id: Option<String>,
     /// Whether this is a forwarded message.
     pub forwarded: bool,
     /// Redacted forward attribution supplied by Telegram.
@@ -161,6 +279,45 @@ pub struct TelegramUpdate {
     /// Whether unsupported media or document data was present.
     #[serde(default)]
     pub has_unsupported_payload: bool,
+    /// Unsupported attachment classes present in the message.
+    #[serde(default)]
+    pub unsupported_attachments: Vec<TelegramUnsupportedAttachment>,
+}
+
+impl TelegramUpdate {
+    /// Return whether this envelope contains material that Lumi can import.
+    #[must_use]
+    pub fn has_importable_content(&self) -> bool {
+        self.text
+            .as_deref()
+            .is_some_and(|text| !text.trim().is_empty())
+            || !self.links.is_empty()
+            || !self.photos.is_empty()
+    }
+}
+
+/// Captured Telegram image passed into the pure composite normalizer.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TelegramCapturedImage {
+    /// Original Telegram descriptor.
+    pub descriptor: TelegramPhotoDescriptor,
+    /// Verified image media type.
+    pub media_type: String,
+    /// SHA-256 checksum of `bytes`.
+    pub content_hash: String,
+    /// Captured image bytes.
+    pub bytes: Vec<u8>,
+}
+
+/// Captured or failed web section passed into the pure composite normalizer.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TelegramWebSection {
+    /// Original ordered URL from the Telegram envelope.
+    pub url: String,
+    /// Immutable capture when fetch succeeded.
+    pub snapshot: Option<RenderedPageSnapshot>,
+    /// Safe diagnostics explaining a partial failure.
+    pub diagnostics: Vec<ImportDiagnostic>,
 }
 
 /// One reply produced by the transport-neutral Telegram handler.
@@ -430,6 +587,7 @@ pub fn import_telegram_text(
                 update_id: message.update_id,
                 forwarded: message.forwarded,
                 paragraph_index: index,
+                media_index: None,
                 text_offset_start: Some(0),
                 text_offset_end: Some(paragraph.chars().count()),
             }),
@@ -461,11 +619,378 @@ pub fn import_telegram_text(
             update_id: message.update_id,
             forwarded: message.forwarded,
             paragraph_index: 0,
+            media_index: None,
             text_offset_start: None,
             text_offset_end: None,
         }),
         owner_id,
     )
+}
+
+/// Normalize one Telegram envelope, captured photos and ordered web sections
+/// into a single multi-unit publication.
+///
+/// A failed photo or web section is represented by diagnostics and does not
+/// discard the remaining source-backed content.
+///
+/// # Errors
+///
+/// Returns [`SourceImportError`] when the envelope has no importable content or
+/// the resulting normalized package exceeds the configured complexity budget.
+pub fn import_telegram_composite(
+    owner_id: UserId,
+    material_id: MaterialId,
+    revision_id: DocumentRevisionId,
+    envelope: &TelegramUpdate,
+    images: &[TelegramCapturedImage],
+    web_sections: &[TelegramWebSection],
+    import_diagnostics: &[ImportDiagnostic],
+) -> Result<ImportedPublication, SourceImportError> {
+    if !envelope.has_importable_content() {
+        return Err(SourceImportError::EmptyTelegramText);
+    }
+    let envelope_bytes =
+        serde_json::to_vec(envelope).map_err(|_| SourceImportError::Serialization)?;
+    let source_hash = content_hash(&envelope_bytes);
+    let telegram_locator = telegram_envelope_locator(envelope, 0, None, None);
+    let mut blocks = Vec::new();
+    let mut resources = Vec::new();
+    let mut diagnostics = import_diagnostics.to_vec();
+
+    for (index, image) in images.iter().enumerate() {
+        if content_hash(&image.bytes) != image.content_hash {
+            diagnostics.push(ImportDiagnostic {
+                severity: DiagnosticSeverity::Warning,
+                code: "telegram_image_checksum_mismatch".to_owned(),
+                message: "A captured Telegram image failed checksum validation and was skipped."
+                    .to_owned(),
+                source_path: Some(format!("photo[{index}]")),
+            });
+            continue;
+        }
+        let block_index = blocks.len();
+        let path = vec!["unit-0".to_owned(), format!("block-{block_index}")];
+        blocks.push(ContentBlock {
+            id: format!(
+                "telegram-image-{}-{index}",
+                short_content_hash(image.content_hash.as_bytes())
+            ),
+            node_path: path,
+            kind: ReadingNodeKind::Image,
+            text: None,
+            resource_hash: Some(image.content_hash.clone()),
+            content_hash: image.content_hash.clone(),
+            source_locator: SourceLocator::Telegram(telegram_envelope_locator(
+                envelope,
+                0,
+                Some(index),
+                None,
+            )),
+            links: Vec::new(),
+        });
+        resources.push(ImportedPublicationResource {
+            path: format!(
+                "resources/telegram/{}-{}",
+                index,
+                short_content_hash(image.descriptor.file_unique_id.as_bytes())
+            ),
+            media_type: image.media_type.clone(),
+            content_hash: image.content_hash.clone(),
+            bytes: image.bytes.clone(),
+        });
+    }
+
+    if let Some(text) = envelope
+        .text
+        .as_deref()
+        .map(str::trim)
+        .filter(|text| !text.is_empty())
+    {
+        for (paragraph_index, paragraph) in split_paragraphs(text)?.iter().enumerate() {
+            let block_index = blocks.len();
+            blocks.push(ContentBlock {
+                id: format!(
+                    "telegram-{}-{paragraph_index}",
+                    short_content_hash(
+                        format!("{source_hash}:{paragraph_index}:{paragraph}").as_bytes()
+                    )
+                ),
+                node_path: vec!["unit-0".to_owned(), format!("block-{block_index}")],
+                kind: ReadingNodeKind::Paragraph,
+                text: Some((*paragraph).to_owned()),
+                resource_hash: None,
+                content_hash: content_hash(paragraph.as_bytes()),
+                source_locator: SourceLocator::Telegram(telegram_envelope_locator(
+                    envelope,
+                    paragraph_index,
+                    None,
+                    Some(paragraph.chars().count()),
+                )),
+                links: telegram_paragraph_links(envelope, paragraph),
+            });
+        }
+    }
+
+    let telegram_title = if envelope.forwarded {
+        envelope
+            .forward_origin
+            .as_deref()
+            .map(|origin| format!("Переслано: {origin}"))
+            .unwrap_or_else(|| "Переслано из Telegram".to_owned())
+    } else {
+        "Telegram".to_owned()
+    };
+    let telegram_block_ids = blocks.iter().map(|block| block.id.clone()).collect();
+    let mut units = vec![ContentUnit {
+        id: "unit-0".to_owned(),
+        title: telegram_title.clone(),
+        block_ids: telegram_block_ids,
+        source_locator: SourceLocator::Telegram(telegram_locator),
+    }];
+    let mut navigation = vec![NavigationItem {
+        id: "nav-unit-0".to_owned(),
+        label: telegram_title,
+        target_path: vec!["unit-0".to_owned()],
+        children: Vec::new(),
+    }];
+
+    for (link_index, url) in envelope.links.iter().enumerate() {
+        let unit_index = units.len();
+        let unit_id = format!("unit-{unit_index}");
+        let section = web_sections.get(link_index);
+        let snapshot = section.and_then(|section| section.snapshot.as_ref());
+        diagnostics.extend(
+            section
+                .into_iter()
+                .flat_map(|section| section.diagnostics.iter().cloned()),
+        );
+        let imported = snapshot.and_then(|snapshot| {
+            import_web_snapshot(owner_id, material_id, revision_id, snapshot)
+                .map_err(|error| {
+                    diagnostics.push(ImportDiagnostic {
+                        severity: DiagnosticSeverity::Warning,
+                        code: "telegram_web_extraction_failed".to_owned(),
+                        message: error.to_string(),
+                        source_path: Some(format!("links[{link_index}]")),
+                    });
+                })
+                .ok()
+        });
+        if let Some(snapshot) = snapshot {
+            let bytes =
+                serde_json::to_vec(snapshot).map_err(|_| SourceImportError::Serialization)?;
+            resources.push(ImportedPublicationResource {
+                path: format!("sources/web/{link_index}.json"),
+                media_type: "application/vnd.lumi.web-snapshot+json".to_owned(),
+                content_hash: content_hash(&bytes),
+                bytes,
+            });
+        }
+        if let Some(mut imported) = imported {
+            let first_unit = imported
+                .package
+                .units
+                .pop()
+                .ok_or(SourceImportError::Serialization)?;
+            let block_start = blocks.len();
+            for (local_index, mut block) in imported.package.blocks.into_iter().enumerate() {
+                block.id = format!("web-{link_index}-{}", block.id);
+                block.node_path = vec![unit_id.clone(), format!("block-{local_index}")];
+                for link in &mut block.links {
+                    if link
+                        .target_path
+                        .first()
+                        .is_some_and(|part| part == "unit-0")
+                    {
+                        link.target_path[0] = unit_id.clone();
+                    }
+                }
+                blocks.push(block);
+            }
+            let block_ids = blocks[block_start..]
+                .iter()
+                .map(|block| block.id.clone())
+                .collect();
+            let title = first_unit.title;
+            let children = imported
+                .package
+                .navigation
+                .into_iter()
+                .map(|item| remap_navigation(item, link_index, &unit_id))
+                .collect();
+            units.push(ContentUnit {
+                id: unit_id.clone(),
+                title: title.clone(),
+                block_ids,
+                source_locator: first_unit.source_locator,
+            });
+            navigation.push(NavigationItem {
+                id: format!("nav-{unit_id}"),
+                label: title,
+                target_path: vec![unit_id],
+                children,
+            });
+        } else {
+            let locator = fallback_web_locator(url);
+            let block_id = format!(
+                "web-fallback-{}-{link_index}",
+                short_content_hash(url.as_bytes())
+            );
+            blocks.push(ContentBlock {
+                id: block_id.clone(),
+                node_path: vec![unit_id.clone(), "block-0".to_owned()],
+                kind: ReadingNodeKind::Paragraph,
+                text: Some(url.clone()),
+                resource_hash: None,
+                content_hash: content_hash(url.as_bytes()),
+                source_locator: SourceLocator::Web(locator.clone()),
+                links: vec![ReadingLink {
+                    label: url.clone(),
+                    text_range: crate::TextRange {
+                        start: 0,
+                        end: url.chars().count(),
+                    },
+                    target_path: Vec::new(),
+                    kind: ReadingLinkKind::External,
+                    external_url: Some(url.clone()),
+                }],
+            });
+            units.push(ContentUnit {
+                id: unit_id.clone(),
+                title: url.clone(),
+                block_ids: vec![block_id],
+                source_locator: SourceLocator::Web(locator),
+            });
+            navigation.push(NavigationItem {
+                id: format!("nav-{unit_id}"),
+                label: url.clone(),
+                target_path: vec![unit_id],
+                children: Vec::new(),
+            });
+        }
+    }
+
+    if !envelope.unsupported_attachments.is_empty() {
+        diagnostics.push(ImportDiagnostic {
+            severity: DiagnosticSeverity::Info,
+            code: "telegram_unsupported_attachments_skipped".to_owned(),
+            message: "Unsupported Telegram attachments were skipped.".to_owned(),
+            source_path: None,
+        });
+    }
+    let mut unique_diagnostics = Vec::with_capacity(diagnostics.len());
+    for diagnostic in diagnostics {
+        if !unique_diagnostics.contains(&diagnostic) {
+            unique_diagnostics.push(diagnostic);
+        }
+    }
+    let title = telegram_composite_title(envelope);
+    let creators = envelope.forward_origin.iter().cloned().collect::<Vec<_>>();
+    build_publication_units(
+        material_id,
+        revision_id,
+        title,
+        creators,
+        None,
+        SourceIdentity {
+            format: SourceFormat::Telegram,
+            source_name: format!("telegram:{}/{}", envelope.chat_id, envelope.message_id),
+            source_hash,
+        },
+        TELEGRAM_COMPOSITE_IMPORTER_ID,
+        TELEGRAM_COMPOSITE_IMPORTER_VERSION,
+        units,
+        blocks,
+        navigation,
+        unique_diagnostics,
+        resources,
+    )
+}
+
+fn telegram_envelope_locator(
+    envelope: &TelegramUpdate,
+    paragraph_index: usize,
+    media_index: Option<usize>,
+    text_len: Option<usize>,
+) -> TelegramSourceLocator {
+    TelegramSourceLocator {
+        telegram_user_id: envelope.telegram_user_id,
+        chat_id: envelope.chat_id,
+        message_id: envelope.message_id,
+        update_id: envelope.update_id,
+        forwarded: envelope.forwarded,
+        paragraph_index,
+        media_index,
+        text_offset_start: text_len.map(|_| 0),
+        text_offset_end: text_len,
+    }
+}
+
+fn telegram_paragraph_links(envelope: &TelegramUpdate, paragraph: &str) -> Vec<ReadingLink> {
+    envelope
+        .links
+        .iter()
+        .filter_map(|url| {
+            paragraph.find(url).map(|byte_start| {
+                let start = paragraph[..byte_start].chars().count();
+                ReadingLink {
+                    label: url.clone(),
+                    text_range: crate::TextRange {
+                        start,
+                        end: start + url.chars().count(),
+                    },
+                    target_path: Vec::new(),
+                    kind: ReadingLinkKind::External,
+                    external_url: Some(url.clone()),
+                }
+            })
+        })
+        .collect()
+}
+
+fn telegram_composite_title(envelope: &TelegramUpdate) -> String {
+    if let Some(origin) = envelope.forward_origin.as_deref() {
+        return format!("Переслано: {origin}");
+    }
+    envelope
+        .text
+        .as_deref()
+        .map(str::trim)
+        .filter(|text| !text.is_empty())
+        .map(|text| text.chars().take(80).collect())
+        .unwrap_or_else(|| "Материал из Telegram".to_owned())
+}
+
+fn fallback_web_locator(url: &str) -> WebSourceLocator {
+    WebSourceLocator {
+        original_url: url.to_owned(),
+        canonical_url: None,
+        snapshot_checksum: String::new(),
+        capture_mode: "raw_fetch_failed".to_owned(),
+        adapter_id: "telegram-composite-fallback".to_owned(),
+        dom_path: String::new(),
+        selector_hint: None,
+        heading_path: Vec::new(),
+        text_offset_start: Some(0),
+        text_offset_end: Some(url.chars().count()),
+    }
+}
+
+fn remap_navigation(mut item: NavigationItem, link_index: usize, unit_id: &str) -> NavigationItem {
+    item.id = format!("web-{link_index}-{}", item.id);
+    if item
+        .target_path
+        .first()
+        .is_some_and(|part| part == "unit-0")
+    {
+        item.target_path[0] = unit_id.to_owned();
+    }
+    item.children = item
+        .children
+        .into_iter()
+        .map(|child| remap_navigation(child, link_index, unit_id))
+        .collect();
+    item
 }
 
 fn selector(value: &'static str) -> Result<Selector, SourceImportError> {
@@ -742,7 +1267,60 @@ fn build_publication(
     _owner_id: UserId,
 ) -> Result<ImportedPublication, SourceImportError> {
     let unit_id = "unit-0".to_owned();
+    let unit = ContentUnit {
+        id: unit_id.clone(),
+        title: title.clone(),
+        block_ids: blocks.iter().map(|block| block.id.clone()).collect(),
+        source_locator: unit_locator,
+    };
+    build_publication_units(
+        material_id,
+        revision_id,
+        title,
+        creators,
+        language,
+        source,
+        importer_id,
+        importer_version,
+        vec![unit],
+        blocks,
+        navigation,
+        diagnostics,
+        Vec::new(),
+    )
+}
+
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the multi-unit publication boundary keeps provenance and artifacts explicit"
+)]
+fn build_publication_units(
+    material_id: MaterialId,
+    revision_id: DocumentRevisionId,
+    title: String,
+    creators: Vec<String>,
+    language: Option<String>,
+    source: SourceIdentity,
+    importer_id: &str,
+    importer_version: &str,
+    units: Vec<ContentUnit>,
+    blocks: Vec<ContentBlock>,
+    navigation: Vec<NavigationItem>,
+    diagnostics: Vec<ImportDiagnostic>,
+    resources: Vec<ImportedPublicationResource>,
+) -> Result<ImportedPublication, SourceImportError> {
     let package_id = stable_uuid("package", &revision_id.to_string());
+    let reading_order = units.iter().map(|unit| unit.id.clone()).collect();
+    let resource_blobs = resources
+        .iter()
+        .map(|resource| BlobRef {
+            hash: resource.content_hash.clone(),
+            name: resource.path.clone(),
+            media_type: resource.media_type.clone(),
+            byte_len: u64::try_from(resource.bytes.len()).unwrap_or(u64::MAX),
+            role: BlobRole::Resource,
+        })
+        .collect();
     let package = NormalizedContentPackage {
         id: package_id,
         revision_id,
@@ -750,21 +1328,16 @@ fn build_publication(
             title.clone(),
             creators,
             language,
-            vec![unit_id.clone()],
+            reading_order,
             source.clone(),
         ),
-        units: vec![ContentUnit {
-            id: unit_id,
-            title: title.clone(),
-            block_ids: blocks.iter().map(|block| block.id.clone()).collect(),
-            source_locator: unit_locator,
-        }],
+        units,
         blocks,
         navigation,
         resources: BlobManifest {
             id: stable_uuid("manifest", &revision_id.to_string()),
             schema_version: crate::DOMAIN_SCHEMA_VERSION.to_owned(),
-            blobs: Vec::new(),
+            blobs: resource_blobs,
         },
         diagnostics: diagnostics.clone(),
     };
@@ -791,7 +1364,7 @@ fn build_publication(
         title,
         revision,
         package,
-        resources: Vec::new(),
+        resources,
     })
 }
 
@@ -965,6 +1538,123 @@ mod tests {
                 ..
             })
         ));
+        Ok(())
+    }
+
+    #[test]
+    fn telegram_composite_orders_image_text_and_web_units() -> Result<(), SourceImportError> {
+        let image_bytes = b"\xff\xd8\xfffixture".to_vec();
+        let envelope = TelegramUpdate {
+            update_id: 9,
+            bot_id: 77,
+            bot_scope: "telegram-bot:77".to_owned(),
+            telegram_user_id: 10,
+            chat_id: 11,
+            is_private_chat: true,
+            message_id: 12,
+            message_date: Some(13),
+            text: Some("Вводная https://example.test/article".to_owned()),
+            is_caption: true,
+            entities: Vec::new(),
+            links: vec!["https://example.test/article".to_owned()],
+            photos: vec![TelegramPhotoDescriptor {
+                file_id: "file".to_owned(),
+                file_unique_id: "unique".to_owned(),
+                width: 640,
+                height: 480,
+                byte_size: Some(image_bytes.len() as u64),
+            }],
+            media_group_id: None,
+            forwarded: false,
+            forward_origin: None,
+            has_unsupported_payload: false,
+            unsupported_attachments: Vec::new(),
+        };
+        let publication = import_telegram_composite(
+            UserId::nil(),
+            MaterialId::nil(),
+            DocumentRevisionId::nil(),
+            &envelope,
+            &[TelegramCapturedImage {
+                descriptor: envelope.photos[0].clone(),
+                media_type: "image/jpeg".to_owned(),
+                content_hash: content_hash(&image_bytes),
+                bytes: image_bytes,
+            }],
+            &[TelegramWebSection {
+                url: envelope.links[0].clone(),
+                snapshot: Some(snapshot("<article><h1>Статья</h1><p>Текст.</p></article>")),
+                diagnostics: Vec::new(),
+            }],
+            &[],
+        )?;
+
+        assert_eq!(
+            publication
+                .package
+                .units
+                .iter()
+                .map(|unit| unit.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["unit-0", "unit-1"]
+        );
+        assert_eq!(publication.package.blocks[0].kind, ReadingNodeKind::Image);
+        assert!(matches!(
+            publication
+                .package
+                .blocks
+                .last()
+                .map(|block| &block.source_locator),
+            Some(SourceLocator::Web(_))
+        ));
+        assert_eq!(publication.resources.len(), 2);
+        Ok(())
+    }
+
+    #[test]
+    fn telegram_composite_keeps_failed_link_as_fallback_unit() -> Result<(), SourceImportError> {
+        let envelope = TelegramUpdate {
+            update_id: 1,
+            bot_id: 77,
+            bot_scope: "telegram-bot:77".to_owned(),
+            telegram_user_id: 2,
+            chat_id: 3,
+            is_private_chat: true,
+            message_id: 4,
+            message_date: None,
+            text: Some("Ссылка".to_owned()),
+            is_caption: false,
+            entities: Vec::new(),
+            links: vec!["https://example.test/missing".to_owned()],
+            photos: Vec::new(),
+            media_group_id: None,
+            forwarded: false,
+            forward_origin: None,
+            has_unsupported_payload: false,
+            unsupported_attachments: Vec::new(),
+        };
+        let diagnostic = ImportDiagnostic {
+            severity: DiagnosticSeverity::Error,
+            code: "web_fetch_failed".to_owned(),
+            message: "remote request failed".to_owned(),
+            source_path: Some("links[0]".to_owned()),
+        };
+        let publication = import_telegram_composite(
+            UserId::nil(),
+            MaterialId::nil(),
+            DocumentRevisionId::nil(),
+            &envelope,
+            &[],
+            &[TelegramWebSection {
+                url: envelope.links[0].clone(),
+                snapshot: None,
+                diagnostics: vec![diagnostic.clone()],
+            }],
+            &[],
+        )?;
+
+        assert_eq!(publication.package.units[1].title, envelope.links[0]);
+        assert!(publication.package.diagnostics.contains(&diagnostic));
         Ok(())
     }
 

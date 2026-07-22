@@ -23,6 +23,9 @@ Telegram transport был разделён между local long polling в от
   сервера.
 - Bot scope выводится из стабильного Telegram bot id:
   `telegram-bot:<bot_id>`. Ротация токена того же бота сохраняет привязки.
+- После успешного `getMe` active listener публикует Bot API client в
+  late-bound media registry из ADR 0013. Import worker видит только capture
+  interface и исходный `bot_id`, но не token, encryption key или download URL.
 - Webhook, отдельный runner и Telegram env-конфигурация удаляются из активного
   runtime.
 

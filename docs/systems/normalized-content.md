@@ -153,6 +153,21 @@ Resolver проходит ступени:
 Diagnostics являются частью revision audit trail, но не пользовательским
 контентом. Их можно экспортировать для отладки и compatibility tests.
 
+### Составной provenance Telegram/Web
+
+Составной Telegram material использует один package и один revision, но не
+стирает provenance отдельных секций. `unit-0` и его text/image blocks имеют
+Telegram locator; каждая раскрытая страница образует следующий `ContentUnit` и
+сохраняет Web locator исходного snapshot. Fallback unit нераскрытой ссылки
+хранит исходный HTTP(S) URL и безопасную diagnostic без сетевых подробностей.
+
+При переносе блоков Web normalizer заново формирует уникальные block ids,
+`node_path`, navigation targets и internal targets относительно нового unit.
+Изображения ссылаются на content-addressed `resource_hash`; envelope, snapshots
+и разрешённые изображения представлены в manifest. Поэтому anchors и progress
+остаются общими для web, desktop и mobile и не зависят от DOM-путей Telegram
+секции.
+
 ## Нефункциональные требования
 
 - **Determinism.** Один source artifact при той же версии importer должен давать

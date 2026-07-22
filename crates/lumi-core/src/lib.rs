@@ -28,7 +28,7 @@ use serde::{Deserialize, Serialize};
 pub const API_VERSION: &str = "v1";
 
 /// Current domain schema marker for the S1 contracts.
-pub const DOMAIN_SCHEMA_VERSION: &str = "s1.2026-07-13.sources-v2";
+pub const DOMAIN_SCHEMA_VERSION: &str = "s1.2026-07-22.telegram-composite-v1";
 
 /// Current normalized content package marker for reflowable S1 documents.
 pub const NORMALIZED_PACKAGE_VERSION: &str = "normalized.reflowable.s1";
@@ -54,11 +54,17 @@ pub const WEB_IMPORTER_ID: &str = "lumi.web.raw-snapshot";
 /// Version of the deterministic baseline web extractor.
 pub const WEB_IMPORTER_VERSION: &str = "s1.0";
 
-/// Importer id used by the Telegram text normalizer.
+/// Importer id used by the legacy Telegram text normalizer.
 pub const TELEGRAM_IMPORTER_ID: &str = "lumi.telegram.text";
 
-/// Version of the deterministic Telegram text normalizer.
+/// Version of the deterministic legacy Telegram text normalizer.
 pub const TELEGRAM_IMPORTER_VERSION: &str = "s1.0";
+
+/// Importer id used by the composite Telegram normalizer.
+pub const TELEGRAM_COMPOSITE_IMPORTER_ID: &str = "lumi.telegram.composite";
+
+/// Version of the deterministic composite Telegram normalizer.
+pub const TELEGRAM_COMPOSITE_IMPORTER_VERSION: &str = "s1.0";
 
 /// Health state for Lumi services.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -181,6 +187,8 @@ impl ServiceCapabilities {
                 "import-diagnostics".to_owned(),
                 "public-web-url-import".to_owned(),
                 "telegram-text-import".to_owned(),
+                "telegram-composite-import".to_owned(),
+                "telegram-media-group-import".to_owned(),
                 "telegram-one-time-pairing".to_owned(),
             ],
         }

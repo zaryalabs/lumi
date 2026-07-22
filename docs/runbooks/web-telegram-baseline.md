@@ -47,14 +47,21 @@ PostgreSQL advisory lock защищает от случайного запуск
 
 В UI plaintext pairing token показывается один раз, исчезает после connection
 или expiry и не кэшируется response. `/start <token>`, `/help`, `/unlink`,
-direct/forwarded text и одна public web URL поддерживаются. Group/media/batches
-не импортируются. Text и ограниченная forward attribution сохраняются как
-личный cloud content. Unlink запрещает новые imports, но не удаляет материалы.
+direct/forwarded text, caption, Telegram-фото, альбомы и публичные web URL
+поддерживаются. Один пост/альбом создаёт один материал: сначала Telegram-текст и
+фото, затем отдельные web-секции. Видео, GIF, audio/voice, documents/files и
+stickers не скачиваются; их caption всё равно импортируется. Text и
+ограниченная forward attribution сохраняются как личный cloud content. Unlink
+запрещает новые imports, но не удаляет материалы.
 
 ## Limits и проверка
 
 - `429`: уже 16 queued/running imports аккаунта; дождитесь завершения.
 - Одновременно работает до 8 normalizers на process.
+- Composite material: до 10 изображений, 10 MiB на изображение, 30 MiB суммарно,
+  до 8 ссылок и 3 одновременных web fetch.
+- Album accumulator закрывает группу после quiet window; pending/closing группы
+  восстанавливаются после перезапуска server.
 - Source download: attachment, `private, no-store`, `nosniff`.
 - API server и встроенный listener используют один claim/lease-safe recovery: активный lease
   не перехватывается, а queued/expired job получает ровно одного worker owner.

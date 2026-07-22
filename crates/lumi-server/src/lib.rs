@@ -9,6 +9,7 @@ mod auth_api;
 mod blob;
 mod imports;
 mod telegram;
+mod telegram_media;
 mod telegram_runtime;
 mod web;
 
@@ -589,12 +590,9 @@ async fn capabilities(State(state): State<AppState>) -> Json<ServiceCapabilities
         .as_ref()
         .is_none_or(|runtime| !runtime.is_running())
     {
-        capabilities.features.retain(|feature| {
-            !matches!(
-                feature.as_str(),
-                "telegram-text-import" | "telegram-one-time-pairing"
-            )
-        });
+        capabilities
+            .features
+            .retain(|feature| !feature.starts_with("telegram-"));
     }
     capabilities.route_groups.push("settings".to_owned());
     capabilities
@@ -1968,7 +1966,7 @@ mod tests {
         let migrations: Vec<SchemaMigration> =
             json_get(build_router(), "/api/v1/schema/migrations").await?;
 
-        assert_eq!(migrations.len(), 10);
+        assert_eq!(migrations.len(), 11);
         Ok(())
     }
 
