@@ -148,6 +148,53 @@ test("retries a failed account bootstrap before offering sign-in", async ({
   ).toBeVisible();
 });
 
+test("switches EPUB reader pages through user clicks", async ({ page }) => {
+  await page.goto("/");
+  await page
+    .getByRole("button", { name: "Сгенерировать recovery phrase" })
+    .click();
+  await page.getByText("Я сохранил(а) все 24 слова", { exact: false }).click();
+  await page.getByRole("button", { name: "Создать аккаунт" }).click();
+  await expect(
+    page.getByRole("region", { name: "Пустая библиотека" }),
+  ).toBeVisible();
+
+  await page
+    .getByRole("button", { name: "＋ Добавить материал", exact: true })
+    .click();
+  const uploadDialog = page.getByRole("dialog", {
+    name: "Добавить материал",
+  });
+  await uploadDialog.getByLabel("Файл EPUB").setInputFiles({
+    name: "reader-navigation.epub",
+    mimeType: "application/epub+zip",
+    buffer: createReaderEpub(),
+  });
+  await uploadDialog
+    .getByRole("button", { name: "Добавить в библиотеку" })
+    .click();
+  const readerCard = page.getByRole("article", {
+    name: "Материал Stage Four Reader",
+  });
+  await expect(readerCard.getByText("Готово", { exact: true })).toBeVisible();
+  await readerCard.getByRole("button", { name: "Читать" }).click();
+
+  await expect(
+    page.getByRole("article", { name: /Страница 1 из/ }),
+  ).toBeVisible();
+  const pagination = page.getByRole("navigation", {
+    name: "Навигация по страницам",
+  });
+  await pagination.getByRole("button", { name: "Дальше" }).click();
+  await expect(
+    page.getByRole("article", { name: /Страница 2 из/ }),
+  ).toBeVisible();
+  await pagination.getByRole("button", { name: "Назад" }).click();
+  await expect(
+    page.getByRole("article", { name: /Страница 1 из/ }),
+  ).toBeVisible();
+});
+
 test("persists an API-backed EPUB library lifecycle", async ({ page }) => {
   test.setTimeout(60_000);
   await page.goto("/");
@@ -368,9 +415,7 @@ test("persists an API-backed EPUB library lifecycle", async ({ page }) => {
   );
   await notes.getByRole("button", { name: "Закрыть заметки" }).click();
 
-  await page
-    .getByRole("button", { name: "Дальше" })
-    .evaluate((element) => (element as HTMLButtonElement).click());
+  await page.getByRole("button", { name: "Дальше" }).click();
   await expect(
     page.getByRole("article", { name: /Страница 2 из/ }),
   ).toBeVisible();
@@ -382,9 +427,7 @@ test("persists an API-backed EPUB library lifecycle", async ({ page }) => {
   await expect(
     page.getByRole("button", { name: "Назад по истории" }),
   ).toBeEnabled();
-  await page
-    .getByRole("button", { name: "Назад по истории" })
-    .evaluate((element) => (element as HTMLButtonElement).click());
+  await page.getByRole("button", { name: "Назад по истории" }).click();
 
   const footnoteLink = page.getByRole("button", {
     name: "Перейти: примечание",
@@ -393,19 +436,15 @@ test("persists an API-backed EPUB library lifecycle", async ({ page }) => {
     if (await footnoteLink.count()) break;
     const next = page.getByRole("button", { name: "Дальше" });
     if (await next.isDisabled()) break;
-    await next.evaluate((element) => (element as HTMLButtonElement).click());
+    await next.click();
   }
-  await footnoteLink.evaluate((element) =>
-    (element as HTMLButtonElement).click(),
-  );
+  await footnoteLink.click();
   const footnote = page.getByRole("dialog", { name: "Сноска" });
   await expect(footnote).toBeFocused();
   await expect(footnote).toContainText("Сноска из нормализованного документа");
   await page.keyboard.press("Escape");
   await expect(footnote).toHaveCount(0);
-  await page
-    .getByRole("button", { name: "Перейти: вторую главу" })
-    .evaluate((element) => (element as HTMLButtonElement).click());
+  await page.getByRole("button", { name: "Перейти: вторую главу" }).click();
   await expect(
     page.getByRole("button", { name: "Назад по истории" }),
   ).toBeEnabled();

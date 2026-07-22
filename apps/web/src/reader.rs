@@ -2,6 +2,7 @@
 
 use std::cell::RefCell;
 use std::collections::{BTreeMap, HashMap};
+use std::rc::Rc;
 
 use dioxus::dioxus_core::spawn_forever;
 use dioxus::prelude::*;
@@ -21,16 +22,16 @@ use web_sys::{Element as DomElement, HtmlElement, Node, RequestCredentials};
 use super::account::API_BASE;
 
 thread_local! {
-    static PAGE_MAP_CACHE: RefCell<HashMap<String, PageMap>> = RefCell::new(HashMap::new());
+    static PAGE_MAP_CACHE: RefCell<HashMap<String, Rc<PageMap>>> = RefCell::new(HashMap::new());
 }
 
 #[derive(Clone)]
 struct ReaderView {
     entry: LibraryEntry,
-    document: ReadingDocument,
-    plan: RenderPlan,
+    document: Rc<ReadingDocument>,
+    plan: Rc<RenderPlan>,
     settings: ReaderSettings,
-    page_map: PageMap,
+    page_map: Rc<PageMap>,
     navigation: ReaderNavigation,
     toc_open: bool,
     settings_open: bool,
@@ -129,7 +130,7 @@ pub(crate) fn ReaderApp(
         spawn(async move {
             match load_reader(material_id).await {
                 Ok((entry, document, settings, progress, annotations)) => {
-                    let plan = RenderPlan::from_document(&document);
+                    let plan = Rc::new(RenderPlan::from_document(&document));
                     match browser_page_map(&plan, settings) {
                         Ok(page_map) => {
                             let mut navigation = ReaderNavigation::default();
@@ -144,7 +145,7 @@ pub(crate) fn ReaderApp(
                             navigation.move_to(restored_page, page_map.pages.len());
                             state.set(ReaderState::Ready(Box::new(ReaderView {
                                 entry,
-                                document,
+                                document: Rc::new(document),
                                 plan,
                                 settings,
                                 page_map,
@@ -249,6 +250,7 @@ pub(crate) fn ReaderApp(
             } else {
                 ""
             };
+            let reader_overlay_open = view.toc_open || view.settings_open || view.notes_open;
             rsx! {
                 main {
                     id: "main-content",
@@ -302,7 +304,7 @@ pub(crate) fn ReaderApp(
                             }
                         }
 
-                        section { class: "reader-stage {width_class}", aria_label: "Страница книги", aria_hidden: view.toc_open || view.settings_open || view.notes_open, inert: view.toc_open || view.settings_open || view.notes_open,
+                        section { class: "reader-stage {width_class}", aria_label: "Страница книги", aria_hidden: reader_overlay_open, inert: reader_overlay_open.then_some(true),
                             div { class: "reader-history", role: "toolbar", aria_label: "История переходов",
                                 button { r#type: "button", aria_label: "Назад по истории", disabled: !view.navigation.can_go_back(), onclick: move |_| {
                                     if let ReaderState::Ready(current) = &mut *state.write() { current.navigation.go_back(); persist_current(current, csrf, progress_generation, progress_in_flight, save_state); }
@@ -394,7 +396,7 @@ fn RenderedFragment(
     block: RenderBlock,
     range: TextRange,
     revision_id: Uuid,
-    plan: RenderPlan,
+    plan: Rc<RenderPlan>,
     annotations: Vec<AnnotationItem>,
     on_link: EventHandler<ReadingLink>,
 ) -> Element {
@@ -1819,7 +1821,7 @@ async fn save_progress(command: MoveReadingPositionCommand, csrf: &str) -> Resul
         .ok_or_else(|| format!("Позиция не сохранена: HTTP {}", response.status()))
 }
 
-fn browser_page_map(plan: &RenderPlan, settings: ReaderSettings) -> Result<PageMap, String> {
+fn browser_page_map(plan: &RenderPlan, settings: ReaderSettings) -> Result<Rc<PageMap>, String> {
     let window = web_sys::window().ok_or_else(|| "Browser window недоступен.".to_owned())?;
     let viewport = window
         .inner_width()
@@ -1882,7 +1884,7 @@ fn browser_page_map(plan: &RenderPlan, settings: ReaderSettings) -> Result<PageM
 
     let measured = measure_blocks(plan, &document, &page, &layout_key);
     page.remove();
-    let page_map = measured?;
+    let page_map = Rc::new(measured?);
     page_map.validate(plan).map_err(|error| error.to_string())?;
     PAGE_MAP_CACHE.with(|cache| {
         cache.borrow_mut().insert(layout_key, page_map.clone());
