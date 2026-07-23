@@ -82,7 +82,7 @@ pub(crate) fn ReaderRoute(
             }
         },
         ReaderRouteState::Failed(error) => rsx! {
-            main { id: "main-content", class: "reader-loading", aria_label: "Ошибка reader",
+            main { id: "main-content", class: "reader-loading", aria_label: "Ошибка чтения",
                 h1 { "Не удалось открыть материал" }
                 p { class: "library-alert", role: "alert", "{error}" }
                 button { class: "secondary-action", r#type: "button", onclick: move |_| on_close.call(()), "Вернуться в библиотеку" }
@@ -158,8 +158,8 @@ fn PdfReaderApp(material_id: Uuid, csrf_token: String, on_close: EventHandler<()
     match snapshot {
         PdfReaderState::Loading => loading_view("Готовим страницы PDF…"),
         PdfReaderState::Failed(error) => rsx! {
-            main { id: "main-content", class: "reader-loading", aria_label: "Ошибка PDF reader",
-                p { class: "eyebrow", "PDF reader unavailable" }
+            main { id: "main-content", class: "reader-loading", aria_label: "Ошибка чтения PDF",
+                p { class: "eyebrow", "PDF недоступен" }
                 h1 { "Не удалось открыть PDF" }
                 p { class: "library-alert", role: "alert", "{error}" }
                 button { class: "secondary-action", r#type: "button", onclick: move |_| on_close.call(()), "Вернуться в библиотеку" }

@@ -34,6 +34,7 @@ struct ReaderView {
     page_map: Rc<PageMap>,
     navigation: ReaderNavigation,
     toc_open: bool,
+    toc_query: String,
     settings_open: bool,
     notes_open: bool,
     footnote: Option<ReadingLink>,
@@ -130,6 +131,7 @@ pub(crate) fn ReaderApp(
         spawn(async move {
             match load_reader(material_id).await {
                 Ok((entry, document, settings, progress, annotations)) => {
+                    set_document_title(&format!("{} — Lumi", entry.display_title()));
                     let plan = Rc::new(RenderPlan::from_document(&document));
                     match browser_page_map(&plan, settings) {
                         Ok(page_map) => {
@@ -151,6 +153,7 @@ pub(crate) fn ReaderApp(
                                 page_map,
                                 navigation,
                                 toc_open: false,
+                                toc_query: String::new(),
                                 settings_open: false,
                                 notes_open: false,
                                 footnote: None,
@@ -196,8 +199,8 @@ pub(crate) fn ReaderApp(
             }
         },
         ReaderState::Failed(error) => rsx! {
-            main { id: "main-content", class: "reader-loading", aria_label: "Ошибка reader",
-                p { class: "eyebrow", "Reader unavailable" }
+            main { id: "main-content", class: "reader-loading", aria_label: "Ошибка чтения",
+                p { class: "eyebrow", "Материал недоступен" }
                 h1 { "Не удалось открыть материал" }
                 p { class: "library-alert", role: "alert", "{error}" }
                 div { class: "dialog-actions",
@@ -226,6 +229,9 @@ pub(crate) fn ReaderApp(
                 ReaderWidth::Wide => "wide",
             };
             let export_material_id = view.entry.id;
+            let page_height = browser_page_dimensions(view.settings)
+                .map(|(_, height)| height)
+                .unwrap_or(680.0);
             let current_save_state = save_state.read().clone();
             let save_label = if current_save_state.pending > 0 {
                 format!("Сохраняем {}…", current_save_state.latest_subject)
@@ -256,10 +262,13 @@ pub(crate) fn ReaderApp(
                     id: "main-content",
                     class: "reader-workspace {theme_class}",
                     aria_label: "Чтение {title}",
-                    style: "--reader-font-size: {view.settings.font_size_px}px; --reader-line-height: {view.settings.line_height_percent}%; --reader-progress: {((current_page + 1) * 100) / page_count.max(1)}%;",
+                    style: "--reader-font-size: {view.settings.font_size_px}px; --reader-line-height: {view.settings.line_height_percent}%; --reader-page-height: {page_height}px; --reader-progress: {((current_page + 1) * 100) / page_count.max(1)}%;",
                     onkeydown: move |event| if event.key() == Key::Escape { close_reader_overlay(state); },
                     header { class: "reader-topbar",
-                        button { class: "reader-back", r#type: "button", onclick: move |_| on_close.call(()), "← Библиотека" }
+                        button { class: "reader-back", r#type: "button", aria_label: "Вернуться в библиотеку", title: "Библиотека", onclick: move |_| on_close.call(()),
+                            span { aria_hidden: "true", "←" }
+                            span { class: "reader-back-label", "Библиотека" }
+                        }
                         div { class: "reader-title",
                             h1 { "{title}" }
                             span { "{creators}" }
@@ -270,7 +279,16 @@ pub(crate) fn ReaderApp(
                             button { id: "reader-notes-button", r#type: "button", aria_expanded: view.notes_open, aria_controls: "reader-notes-panel", onclick: move |_| {
                                 toggle_reader_panel(state, ReaderPanel::Notes);
                             }, "Заметки ({view.annotations.len()})" }
-                            button { r#type: "button", onclick: move |_| export_annotations(state, export_material_id), "Экспорт" }
+                            details { class: "reader-more",
+                                summary {
+                                    role: "button",
+                                    aria_label: "Дополнительные действия",
+                                    "Ещё"
+                                }
+                                div { class: "reader-more-menu",
+                                    button { r#type: "button", onclick: move |_| export_annotations(state, export_material_id), "Экспорт заметок" }
+                                }
+                            }
                         }
                         span { class: "reader-save-state {save_class}", role: "status", aria_live: "polite", "{save_label}" }
                         div { class: "reader-chapter-progress", aria_hidden: "true", span {} }
@@ -295,9 +313,30 @@ pub(crate) fn ReaderApp(
                                         close_reader_panel(state, ReaderPanel::Toc);
                                     }, "×" }
                                 }
+                                label { class: "toc-search",
+                                    span { "Поиск по оглавлению" }
+                                    input {
+                                        r#type: "search",
+                                        value: "{view.toc_query}",
+                                        placeholder: "Название главы…",
+                                        oninput: move |event| {
+                                            if let ReaderState::Ready(current) = &mut *state.write() {
+                                                current.toc_query = event.value();
+                                            }
+                                        }
+                                    }
+                                }
                                 ol {
                                     for item in view.document.navigation.clone() {
-                                        li { button { r#type: "button", onclick: move |_| jump_to_path(state, &item.target_path, csrf, progress_generation, progress_in_flight, save_state), "{item.label}" } }
+                                        if view.toc_query.trim().is_empty() || item.label.to_lowercase().contains(&view.toc_query.trim().to_lowercase()) {
+                                            li { button {
+                                                class: if view.page_map.page_for_path(&item.target_path) == Some(current_page) { "current" } else { "" },
+                                                aria_current: if view.page_map.page_for_path(&item.target_path) == Some(current_page) { "location" } else { "false" },
+                                                r#type: "button",
+                                                onclick: move |_| jump_to_path(state, &item.target_path, csrf, progress_generation, progress_in_flight, save_state),
+                                                "{item.label}"
+                                            } }
+                                        }
                                     }
                                 }
                                 button { class: "focus-sentinel", r#type: "button", aria_label: "Вернуться в начало панели", onfocus: move |_| focus_drawer_edge("reader-toc-panel", true) }
@@ -305,13 +344,17 @@ pub(crate) fn ReaderApp(
                         }
 
                         section { class: "reader-stage {width_class}", aria_label: "Страница книги", aria_hidden: reader_overlay_open, inert: reader_overlay_open.then_some(true),
-                            div { class: "reader-history", role: "toolbar", aria_label: "История переходов",
-                                button { r#type: "button", aria_label: "Назад по истории", disabled: !view.navigation.can_go_back(), onclick: move |_| {
-                                    if let ReaderState::Ready(current) = &mut *state.write() { current.navigation.go_back(); persist_current(current, csrf, progress_generation, progress_in_flight, save_state); }
-                                }, "↶" }
-                                button { r#type: "button", aria_label: "Вперёд по истории", disabled: !view.navigation.can_go_forward(), onclick: move |_| {
-                                    if let ReaderState::Ready(current) = &mut *state.write() { current.navigation.go_forward(); persist_current(current, csrf, progress_generation, progress_in_flight, save_state); }
-                                }, "↷" }
+                            if view.navigation.can_go_back() || view.navigation.can_go_forward() {
+                                div { class: "reader-history", role: "toolbar", aria_label: "История переходов",
+                                    button { r#type: "button", aria_label: "Назад по истории", disabled: !view.navigation.can_go_back(), onclick: move |_| {
+                                        if let ReaderState::Ready(current) = &mut *state.write() { current.navigation.go_back(); persist_current(current, csrf, progress_generation, progress_in_flight, save_state); }
+                                        reset_reader_page_view();
+                                    }, "↶" }
+                                    button { r#type: "button", aria_label: "Вперёд по истории", disabled: !view.navigation.can_go_forward(), onclick: move |_| {
+                                        if let ReaderState::Ready(current) = &mut *state.write() { current.navigation.go_forward(); persist_current(current, csrf, progress_generation, progress_in_flight, save_state); }
+                                        reset_reader_page_view();
+                                    }, "↷" }
+                                }
                             }
                             article { id: "reader-page-surface", class: "reader-page-surface", tabindex: "-1", aria_label: "Страница {current_page + 1} из {page_count}", onmouseup: move |_| capture_browser_selection(state), onkeyup: move |_| capture_browser_selection(state), ontouchend: move |_| capture_browser_selection(state),
                                 if let Some(page) = page {
@@ -348,7 +391,7 @@ pub(crate) fn ReaderApp(
                                 }
                                 label { class: "settings-control",
                                     span { "Размер текста: {view.settings.font_size_px}px" }
-                                    input { r#type: "range", min: "15", max: "30", value: "{view.settings.font_size_px}", aria_label: "Размер текста", oninput: move |event| {
+                                    input { r#type: "range", min: "15", max: "30", value: "{view.settings.font_size_px}", aria_label: "Размер текста", onchange: move |event| {
                                         if let Ok(value) = event.value().parse::<u16>() { update_settings(state, csrf, settings_generation, settings_in_flight, save_state, |settings| settings.font_size_px = value); }
                                     } }
                                 }
@@ -405,21 +448,49 @@ fn RenderedFragment(
     let content = rsx! {
         if continued { span { class: "continued-marker", aria_hidden: "true", "…" } }
         for segment in segments {
-            span {
-                class: "source-text {segment.class_name}",
-                "data-reader-source": "true",
-                "data-node-id": "{block.node_id}",
-                "data-scalar-start": "{segment.scalar_start}",
-                "{segment.text}"
-            }
-        }
-        for link in block.links.iter().filter(|link| ranges_intersect(link.text_range, range)).cloned() {
-            if link.kind == ReadingLinkKind::External {
-                if let Some(url) = safe_external_url(&link) {
-                    a { class: "inline-link", href: "{url}", target: "_blank", rel: "noopener noreferrer", "Открыть: {link.label}" }
+            if let Some(link_index) = segment.link_index {
+                if let Some(link) = block.links.get(link_index).cloned() {
+                    if link.kind == ReadingLinkKind::External {
+                        if let Some(url) = safe_external_url(&link) {
+                            a {
+                                class: "inline-link {segment.class_name}",
+                                href: "{url}",
+                                target: "_blank",
+                                rel: "noopener noreferrer",
+                                "data-reader-source": "true",
+                                "data-node-id": "{block.node_id}",
+                                "data-scalar-start": "{segment.scalar_start}",
+                                "{segment.text}"
+                            }
+                        } else {
+                            span {
+                                class: "source-text {segment.class_name}",
+                                "data-reader-source": "true",
+                                "data-node-id": "{block.node_id}",
+                                "data-scalar-start": "{segment.scalar_start}",
+                                "{segment.text}"
+                            }
+                        }
+                    } else {
+                        button {
+                            class: "inline-link {segment.class_name}",
+                            r#type: "button",
+                            "data-reader-source": "true",
+                            "data-node-id": "{block.node_id}",
+                            "data-scalar-start": "{segment.scalar_start}",
+                            onclick: move |_| on_link.call(link.clone()),
+                            "{segment.text}"
+                        }
+                    }
                 }
             } else {
-                button { class: "inline-link", r#type: "button", onclick: move |_| on_link.call(link.clone()), "Перейти: {link.label}" }
+                span {
+                    class: "source-text {segment.class_name}",
+                    "data-reader-source": "true",
+                    "data-node-id": "{block.node_id}",
+                    "data-scalar-start": "{segment.scalar_start}",
+                    "{segment.text}"
+                }
             }
         }
     };
@@ -477,6 +548,7 @@ struct TextSegment {
     text: String,
     scalar_start: usize,
     class_name: &'static str,
+    link_index: Option<usize>,
 }
 
 fn annotation_segments(
@@ -493,6 +565,7 @@ fn annotation_segments(
         return Vec::new();
     }
     let mut classes = vec![""; chars.len()];
+    let mut link_indices = vec![None; chars.len()];
     for item in annotations {
         let resolved = match plan.resolve_anchor(&item.annotation.anchor) {
             AnchorResolution::Resolved { anchor, .. } => anchor,
@@ -514,18 +587,29 @@ fn annotation_segments(
             }
         }
     }
+    for (link_index, link) in block.links.iter().enumerate() {
+        let start = link.text_range.start.max(visible.start);
+        let end = link.text_range.end.min(visible.end);
+        for scalar in start..end {
+            if let Some(value) = link_indices.get_mut(scalar.saturating_sub(visible.start)) {
+                *value = Some(link_index);
+            }
+        }
+    }
     let mut output = Vec::new();
     let mut start = 0;
     while start < chars.len() {
         let class_name = classes[start];
+        let link_index = link_indices[start];
         let mut end = start + 1;
-        while end < chars.len() && classes[end] == class_name {
+        while end < chars.len() && classes[end] == class_name && link_indices[end] == link_index {
             end += 1;
         }
         output.push(TextSegment {
             text: chars[start..end].iter().collect(),
             scalar_start: visible.start + start,
             class_name,
+            link_index,
         });
         start = end;
     }
@@ -554,7 +638,7 @@ fn NotesPanel(
                 button { id: "reader-notes-close", r#type: "button", aria_label: "Закрыть заметки", onclick: move |_| close_reader_panel(state, ReaderPanel::Notes), "×" }
             }
             if view.annotations.is_empty() {
-                p { class: "notes-empty", "Выделите фрагмент на странице, чтобы сохранить highlight или заметку." }
+                p { class: "notes-empty", "Выделите фрагмент на странице, чтобы сохранить выделение или заметку." }
             } else {
                 ol { class: "annotation-list",
                     for item in view.annotations.clone() {
@@ -625,7 +709,7 @@ fn AnnotationPanelItem(
         li { class: "annotation-item",
             button { class: "annotation-target", r#type: "button", onclick: move |_| navigate_to_annotation(state, &target_anchor, csrf, progress_generation, progress_in_flight, save_state), blockquote { "{quote}" } }
             match item.annotation.kind.clone() {
-                AnnotationKind::Highlight { style } => rsx! { p { class: "annotation-kind", "Highlight · {style:?}" } },
+                AnnotationKind::Highlight { .. } => rsx! { p { class: "annotation-kind", "Выделение" } },
                 AnnotationKind::Note { body } => rsx! {
                     p { class: "annotation-kind", "Заметка" }
                     p { "{body}" }
@@ -694,7 +778,7 @@ fn capture_browser_selection(mut state: Signal<ReaderState>) {
                 view.annotation_message = None;
             }
             Err(error) if error != "Выделение пусто" => {
-                view.annotation_message = Some(error)
+                view.annotation_message = Some("Выделите текст внутри страницы книги.".to_owned())
             }
             Err(_) => {}
         }
@@ -1156,7 +1240,7 @@ fn navigate_to_annotation(
             AnchorResolution::Resolved { anchor, .. } => anchor,
             AnchorResolution::Unresolved => {
                 view.annotation_message =
-                    Some("Anchor не удалось разрешить в текущей версии".to_owned());
+                    Some("Не удалось найти это место в текущей версии материала.".to_owned());
                 return;
             }
         };
@@ -1177,7 +1261,7 @@ fn navigate_to_annotation(
             }
         } else {
             view.annotation_message =
-                Some("Anchor не удалось разрешить в текущей версии".to_owned());
+                Some("Не удалось найти это место в текущей версии материала.".to_owned());
         }
     }
 }
@@ -1193,6 +1277,22 @@ fn focus_reader_node(node_id: &str) {
     if let Ok(element) = element.dyn_into::<HtmlElement>() {
         let _ = element.focus();
     }
+}
+
+fn set_document_title(title: &str) {
+    if let Some(document) = web_sys::window().and_then(|window| window.document()) {
+        document.set_title(title);
+    }
+}
+
+fn reset_reader_page_view() {
+    spawn_forever(async move {
+        browser_delay(20).await;
+        if let Some(window) = web_sys::window() {
+            window.scroll_to_with_x_and_y(0.0, 0.0);
+        }
+        focus_reader_node("reader-page-surface");
+    });
 }
 
 fn focus_drawer_edge(panel_id: &str, first: bool) {
@@ -1437,6 +1537,18 @@ fn export_annotations(mut state: Signal<ReaderState>, material_id: Uuid) {
         }
         let _ = web_sys::Url::revoke_object_url(&url);
         set_annotation_message(&mut state, "Экспорт подготовлен".to_owned());
+        dismiss_annotation_message_later(state, "Экспорт подготовлен");
+    });
+}
+
+fn dismiss_annotation_message_later(mut state: Signal<ReaderState>, expected: &'static str) {
+    spawn(async move {
+        browser_delay(3_000).await;
+        if let ReaderState::Ready(view) = &mut *state.write() {
+            if view.annotation_message.as_deref() == Some(expected) {
+                view.annotation_message = None;
+            }
+        }
     });
 }
 
@@ -1554,11 +1666,18 @@ fn move_page(
     in_flight: Signal<bool>,
     save_state: Signal<SaveState>,
 ) {
-    if let ReaderState::Ready(current) = &mut *state.write() {
+    let moved = if let ReaderState::Ready(current) = &mut *state.write() {
+        let previous = current.navigation.current();
         current
             .navigation
             .move_to(page, current.page_map.pages.len());
         persist_current(current, csrf, generation, in_flight, save_state);
+        current.navigation.current() != previous
+    } else {
+        false
+    };
+    if moved {
+        reset_reader_page_view();
     }
 }
 
@@ -1591,7 +1710,7 @@ fn jump_to_path(
         false
     };
     if navigated {
-        defer_reader_focus("reader-page-surface");
+        reset_reader_page_view();
     }
 }
 
@@ -1615,15 +1734,24 @@ fn activate_link(
         }
         return;
     }
-    if let ReaderState::Ready(current) = &mut *state.write() {
+    let navigated = if let ReaderState::Ready(current) = &mut *state.write() {
         if link.kind == ReadingLinkKind::Footnote {
             current.footnote = Some(link);
+            false
         } else if let Some(page) = current.page_map.page_for_path(&link.target_path) {
             current
                 .navigation
                 .jump_to(page, current.page_map.pages.len());
             persist_current(current, csrf, generation, in_flight, save_state);
+            true
+        } else {
+            false
         }
+    } else {
+        false
+    };
+    if navigated {
+        reset_reader_page_view();
     }
 }
 
@@ -1636,6 +1764,7 @@ fn update_settings(
     update: impl FnOnce(&mut ReaderSettings),
 ) {
     if let ReaderState::Ready(current) = &mut *state.write() {
+        let previous_settings = current.settings;
         let current_boundary = current
             .page_map
             .pages
@@ -1643,17 +1772,22 @@ fn update_settings(
             .map(|page| page.start.clone());
         update(&mut current.settings);
         current.settings = current.settings.normalized();
-        if let Ok(page_map) = browser_page_map(&current.plan, current.settings) {
-            let restored = current_boundary
-                .as_ref()
-                .and_then(|boundary| {
-                    page_map.page_for_boundary(&boundary.node_path, boundary.offset)
-                })
-                .unwrap_or_default();
-            current.page_map = page_map;
-            current
-                .navigation
-                .move_to(restored, current.page_map.pages.len());
+        let layout_changed = previous_settings.font_size_px != current.settings.font_size_px
+            || previous_settings.line_height_percent != current.settings.line_height_percent
+            || previous_settings.width != current.settings.width;
+        if layout_changed {
+            if let Ok(page_map) = browser_page_map(&current.plan, current.settings) {
+                let restored = current_boundary
+                    .as_ref()
+                    .and_then(|boundary| {
+                        page_map.page_for_boundary(&boundary.node_path, boundary.offset)
+                    })
+                    .unwrap_or_default();
+                current.page_map = page_map;
+                current
+                    .navigation
+                    .move_to(restored, current.page_map.pages.len());
+            }
         }
         let settings = current.settings;
         let csrf_token = csrf.read().clone();
@@ -1821,26 +1955,42 @@ async fn save_progress(command: MoveReadingPositionCommand, csrf: &str) -> Resul
         .ok_or_else(|| format!("Позиция не сохранена: HTTP {}", response.status()))
 }
 
-fn browser_page_map(plan: &RenderPlan, settings: ReaderSettings) -> Result<Rc<PageMap>, String> {
+fn browser_page_dimensions(settings: ReaderSettings) -> Result<(f64, f64), String> {
     let window = web_sys::window().ok_or_else(|| "Browser window недоступен.".to_owned())?;
-    let viewport = window
+    let viewport_width = window
         .inner_width()
         .map_err(|_| "Не удалось измерить viewport.".to_owned())?
         .as_f64()
         .unwrap_or(1024.0);
+    let viewport_height = window
+        .inner_height()
+        .map_err(|_| "Не удалось измерить высоту окна.".to_owned())?
+        .as_f64()
+        .unwrap_or(900.0);
     let width: f64 = match settings.width {
         ReaderWidth::Narrow => 560.0_f64,
         ReaderWidth::Balanced => 680.0_f64,
         ReaderWidth::Wide => 820.0_f64,
     }
-    .min((viewport - 32.0).max(300.0));
-    let height = if viewport < 720.0 { 520.0 } else { 680.0 };
+    .min((viewport_width - 32.0).max(300.0));
+    let reader_chrome_height = if viewport_width <= 760.0 {
+        198.0
+    } else {
+        186.0
+    };
+    let height = (viewport_height - reader_chrome_height).clamp(320.0, 680.0);
+    Ok((width, height))
+}
+
+fn browser_page_map(plan: &RenderPlan, settings: ReaderSettings) -> Result<Rc<PageMap>, String> {
+    let window = web_sys::window().ok_or_else(|| "Browser window недоступен.".to_owned())?;
+    let (width, height) = browser_page_dimensions(settings)?;
     let layout_key = format!(
-        "{}:{:.0}x{:.0}:{}:browser-page-map-v1",
+        "{}:{:.0}x{:.0}:{}:browser-page-map-v2",
         plan.revision_id,
         width,
         height,
-        settings.cache_key()
+        settings.layout_cache_key()
     );
     if let Some(cached) = PAGE_MAP_CACHE.with(|cache| cache.borrow().get(&layout_key).cloned()) {
         return Ok(cached);
@@ -1905,6 +2055,10 @@ fn measure_blocks(
         let end = text.chars().count().max(1);
         let mut start = 0;
         while start < end {
+            if block.atomic && !fragments.is_empty() {
+                finish_page(&mut pages, &mut fragments, page);
+                continue;
+            }
             let whole = measurement_block(document, block, text, start, end)?;
             page.append_child(&whole)
                 .map_err(|_| "Не удалось измерить reader block.".to_owned())?;
@@ -1914,6 +2068,9 @@ fn measure_blocks(
                     range: TextRange { start, end },
                 });
                 start = end;
+                if block.atomic {
+                    finish_page(&mut pages, &mut fragments, page);
+                }
                 continue;
             }
             whole.remove();
@@ -1929,6 +2086,7 @@ fn measure_blocks(
                     range: TextRange { start: 0, end: 1 },
                 });
                 start = end;
+                finish_page(&mut pages, &mut fragments, page);
                 continue;
             }
             let mut low = start + 1;
@@ -1952,7 +2110,7 @@ fn measure_blocks(
                 finish_page(&mut pages, &mut fragments, page);
                 continue;
             }
-            accepted = accepted.max(start + 1).min(end);
+            accepted = snap_page_break(text, start, accepted.max(start + 1).min(end), end);
             let part = measurement_block(document, block, text, start, accepted)?;
             page.append_child(&part)
                 .map_err(|_| "Не удалось разместить text range.".to_owned())?;
@@ -1977,6 +2135,28 @@ fn measure_blocks(
         layout_key: layout_key.to_owned(),
         pages,
     })
+}
+
+fn snap_page_break(text: &str, start: usize, accepted: usize, end: usize) -> usize {
+    if accepted >= end {
+        return end;
+    }
+    let characters = text.chars().collect::<Vec<_>>();
+    if accepted == 0
+        || accepted >= characters.len()
+        || !characters[accepted.saturating_sub(1)].is_alphanumeric()
+        || !characters[accepted].is_alphanumeric()
+    {
+        return accepted;
+    }
+    (start + 1..accepted)
+        .rev()
+        .find(|index| {
+            let previous = characters[index.saturating_sub(1)];
+            let next = characters[*index];
+            !previous.is_alphanumeric() || !next.is_alphanumeric()
+        })
+        .unwrap_or(accepted)
 }
 
 fn measurement_block(
@@ -2020,10 +2200,16 @@ fn measurement_block(
             .map_err(|_| "Не удалось измерить browser Range.".to_owned())?;
     }
     if block.atomic {
+        let height = match block.kind {
+            lumi_core::ReadingNodeKind::HorizontalRule => "1px",
+            lumi_core::ReadingNodeKind::Table => "180px",
+            lumi_core::ReadingNodeKind::Image => "min(360px, calc(100% - 1em))",
+            _ => "160px",
+        };
         element
             .set_attribute(
                 "style",
-                "min-height: 180px; break-inside: avoid; overflow: auto",
+                &format!("height: {height}; margin: 0; break-inside: avoid; overflow: hidden"),
             )
             .map_err(|_| "Не удалось настроить atomic block.".to_owned())?;
     } else {
@@ -2073,8 +2259,4 @@ fn utf16_offset(text: &str, scalar_offset: usize) -> u32 {
         .map(char::len_utf16)
         .sum::<usize>()
         .min(u32::MAX as usize) as u32
-}
-
-fn ranges_intersect(left: TextRange, right: TextRange) -> bool {
-    left.start < right.end && right.start < left.end
 }
