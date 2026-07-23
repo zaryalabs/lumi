@@ -13,6 +13,8 @@ WEB_PACKAGE := $(WEB_DIR)/Cargo.toml
 E2E_DIR := tests/e2e
 E2E_PACKAGE := $(E2E_DIR)/package.json
 E2E_NODE_MODULES := $(E2E_DIR)/node_modules
+WEB_NODE_MODULES := $(WEB_DIR)/node_modules
+WASM_TARGET_DIR := target/wasm
 OPS_DIR := ops
 
 GIT_SHA ?= $(shell git rev-parse HEAD)
@@ -44,7 +46,7 @@ RUSTUP_PATH_ENV := $(if $(RUSTUP_TOOLCHAIN_BIN),PATH=$(RUSTUP_TOOLCHAIN_BIN):$$P
 
 .DEFAULT_GOAL := help
 
-.PHONY: help prepare build push release-manifest deploy ci-clean-images ops-config cicd-contract-test production-compose-smoke init fmt l dl t c pc docs-fmt docs-l rust-fmt rust-l rust-web-check rust-web-l rust-dl rust-t up logs down reset server-r telegram-r db-up db-down db-migrate web-r prototype-r prototype-e2e pagination-spike-r pagination-spike-e2e stage0-spikes web-build e2e-fmt e2e-fmt-check e2e-l e2e-dl web-e2e pg-t compatibility security performance staging-config staging-smoke backup restore-drill restore-attestation-test restore-attestation beta-local beta agent-inspect
+.PHONY: help prepare build push release-manifest deploy ci-clean-images ops-config cicd-contract-test production-compose-smoke init fmt l dl t c pc docs-fmt docs-l rust-fmt rust-l rust-web-check rust-web-l rust-dl rust-t up logs down reset server-r telegram-r db-up db-down db-migrate pdfjs-assets web-r prototype-r prototype-e2e pagination-spike-r pagination-spike-e2e stage0-spikes web-build e2e-fmt e2e-fmt-check e2e-l e2e-dl web-e2e pg-t compatibility security performance staging-config staging-smoke backup restore-drill restore-attestation-test restore-attestation beta-local beta agent-inspect
 
 help: ## Show available make targets
 	@awk 'BEGIN {FS = ":.*## "}; /^[a-zA-Z0-9_.-]+:.*## / {printf "  %-16s %s\n", $$1, $$2}' $(MAKEFILE_LIST)
@@ -171,7 +173,7 @@ rust-web-l: ## Run Dioxus web lint when wasm target is installed
 	@if [ -f "$(WEB_PACKAGE)" ]; then \
 		WASM_LIBDIR=$$($(RUSTUP_PATH_ENV) rustc --target wasm32-unknown-unknown --print target-libdir 2>/dev/null); \
 		if [ -n "$$WASM_LIBDIR" ] && [ -d "$$WASM_LIBDIR" ]; then \
-			$(RUSTUP_PATH_ENV) $(CARGO) clippy -p lumi-web --target wasm32-unknown-unknown --no-default-features --features web -- -D warnings; \
+			$(RUSTUP_PATH_ENV) CARGO_TARGET_DIR=$(WASM_TARGET_DIR) $(CARGO) clippy -p lumi-web --target wasm32-unknown-unknown --no-default-features --features web -- -D warnings; \
 		else \
 			echo "wasm32-unknown-unknown is not installed; skipping Dioxus web lint"; \
 		fi; \
@@ -241,7 +243,11 @@ db-down: ## Stop the local PostgreSQL service
 db-migrate: ## Apply forward-only SQLx migrations
 	DATABASE_URL=$(DATABASE_URL) $(CARGO) run -p lumi-server --bin lumi-migrate
 
-web-r: ## Run the Dioxus web development server
+pdfjs-assets: ## Prepare pinned PDF.js browser assets
+	@if [ ! -d "$(WEB_NODE_MODULES)/pdfjs-dist" ]; then $(NPM) --prefix $(WEB_DIR) ci --ignore-scripts; fi
+	@$(NPM) --prefix $(WEB_DIR) run prepare:pdfjs
+
+web-r: pdfjs-assets ## Run the Dioxus web development server
 	@if [ -f "$(WEB_PACKAGE)" ]; then \
 		if command -v $(DX) >/dev/null 2>&1; then \
 			cd $(WEB_DIR) && $(RUSTUP_PATH_ENV) LUMI_API_BASE=$(LUMI_API_BASE) $(DX) serve --web --addr $(LUMI_WEB_HOST) --port $(LUMI_WEB_PORT); \
@@ -280,7 +286,7 @@ stage0-spikes: ## Run executable auth, EPUB and pagination spikes
 	$(CARGO) test -p $(STAGE0_SPIKE_PACKAGE)
 	$(MAKE) pagination-spike-e2e
 
-web-build: ## Build the Dioxus web app when dx is available
+web-build: pdfjs-assets ## Build the Dioxus web app when dx is available
 	@if [ -f "$(WEB_PACKAGE)" ]; then \
 		if command -v $(DX) >/dev/null 2>&1; then \
 			cd $(WEB_DIR) && $(RUSTUP_PATH_ENV) $(DX) build --web; \
@@ -333,6 +339,8 @@ pg-t: db-up db-migrate ## Run mandatory PostgreSQL-backed integration suites
 
 compatibility: ## Run committed EPUB, Web and Telegram compatibility suites
 	$(CARGO) test -p lumi-core epub::tests
+	$(CARGO) test -p lumi-core pdf::tests
+	$(CARGO) test -p lumi-server pdf_engine::tests
 	$(CARGO) test -p lumi-core fixtures
 	$(CARGO) test -p lumi-core sources
 	LUMI_TEST_DATABASE_URL=$(DATABASE_URL) $(CARGO) test -p lumi-server telegram

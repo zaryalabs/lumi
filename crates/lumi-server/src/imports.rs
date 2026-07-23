@@ -7,14 +7,15 @@ use std::sync::{Arc, Mutex};
 
 use lumi_core::{
     content_hash, import_epub, import_telegram_composite, import_telegram_text,
-    import_web_snapshot, AcceptedImport, Annotation, AnnotationExport, AnnotationKind,
-    BlobManifest, BlobRef, BlobRole, ContinueReadingEntry, CreateAnnotationCommand,
+    import_web_snapshot, normalize_pdf, AcceptedImport, Annotation, AnnotationExport,
+    AnnotationKind, BlobManifest, BlobRef, BlobRole, ContinueReadingEntry, CreateAnnotationCommand,
     DeleteAnnotationCommand, DiagnosticSeverity, DocumentRevision, DocumentRevisionId,
-    EpubImportError, EpubImportRequest, EpubLimits, ImportDiagnostic, ImportStatusEntry,
-    ImportedEpub, ImportedPublication, ImportedPublicationResource, Job, JobId, JobKind, JobStage,
-    JobStatus, LibraryEntry, LibraryState, Material, MaterialId, MaterialImportStatus,
-    MaterialKind, MoveReadingPositionCommand, NormalizedContentPackage, ReaderSettings,
-    ReadingDocument, ReadingNode, ReadingNodeKind, ReadingProgress, RenderPlan, SourceIdentity,
+    EpubImportError, EpubImportRequest, EpubLimits, FixedLayoutContentPackage, ImportDiagnostic,
+    ImportStatusEntry, ImportedEpub, ImportedPdf, ImportedPublication, ImportedPublicationResource,
+    Job, JobId, JobKind, JobStage, JobStatus, LibraryEntry, LibraryState, Material, MaterialId,
+    MaterialImportStatus, MaterialKind, MoveReadingPositionCommand, NormalizedContentPackage,
+    PageFidelityDocument, PdfImportRequest, PdfLimits, ReaderSettings, ReadingDocument,
+    ReadingNode, ReadingNodeKind, ReadingProgress, RenderPlan, SourceIdentity,
     TelegramCapturedImage, TelegramMessageSnapshot, TelegramPhotoDescriptor, TelegramUpdate,
     TelegramWebSection, UpdateAnnotationCommand,
 };
@@ -28,6 +29,7 @@ use uuid::Uuid;
 
 use crate::account::AuthenticatedSession;
 use crate::blob::{BlobStore, BlobStoreError, LocalBlobStore, StoredBlob};
+use crate::pdf_engine::{PdfEngine, PopplerPdfEngine};
 use crate::telegram_media::{
     RuntimeTelegramMediaCapture, TelegramMediaCapture, TelegramMediaRegistry,
     MAX_TELEGRAM_IMAGE_BYTES,
@@ -41,17 +43,18 @@ mod sqlx {
     pub(crate) use sqlx_core::query_scalar::query_scalar;
 }
 
-const SOURCE_MEDIA_TYPE: &str = "application/epub+zip";
+const EPUB_SOURCE_MEDIA_TYPE: &str = "application/epub+zip";
+const PDF_SOURCE_MEDIA_TYPE: &str = "application/pdf";
 const MAX_ACTIVE_IMPORT_WORKERS: usize = 8;
 const MAX_PENDING_IMPORTS_PER_ACCOUNT: i64 = 16;
-const MAX_CONCURRENT_EPUB_UPLOADS: usize = 2;
+const MAX_CONCURRENT_DOCUMENT_UPLOADS: usize = 2;
 const MAX_TELEGRAM_IMAGES: usize = 10;
 const MAX_TELEGRAM_TOTAL_IMAGE_BYTES: usize = 30 * 1024 * 1024;
 const MAX_TELEGRAM_LINKS: usize = 8;
 const MAX_TELEGRAM_WEB_FETCHES: usize = 3;
 const WORKER_LEASE_SQL: &str = "30 minutes";
 const SOURCE_RESERVATION_LEASE_SQL: &str = "1 minute";
-const REQUIRED_MIGRATION_COUNT: i64 = 9;
+const REQUIRED_MIGRATION_COUNT: i64 = 10;
 #[cfg(not(test))]
 const HEARTBEAT_INTERVAL: std::time::Duration = std::time::Duration::from_secs(30);
 #[cfg(test)]
@@ -82,6 +85,7 @@ pub(crate) struct ImportService {
     pool: PgPool,
     blobs: Arc<dyn BlobStore>,
     web_capture: Arc<dyn WebCapture>,
+    pdf_engine: Arc<dyn PdfEngine>,
     telegram_media: Arc<dyn TelegramMediaCapture>,
     telegram_media_registry: Arc<TelegramMediaRegistry>,
     cancellations: Arc<Mutex<HashMap<JobId, Arc<AtomicBool>>>>,
@@ -95,6 +99,51 @@ pub(crate) struct UploadAdmission {
     _account: OwnedSemaphorePermit,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum FileUploadKind {
+    Epub,
+    Pdf,
+}
+
+impl FileUploadKind {
+    fn detect(file_name: &str, source: &[u8]) -> Result<Self, ImportServiceError> {
+        let lowercase = file_name.to_ascii_lowercase();
+        let has_pdf_header = source
+            .get(..source.len().min(1_024))
+            .is_some_and(|prefix| prefix.windows(5).any(|window| window == b"%PDF-"));
+        if has_pdf_header || lowercase.ends_with(".pdf") {
+            Ok(Self::Pdf)
+        } else if lowercase.ends_with(".epub") {
+            Ok(Self::Epub)
+        } else {
+            Err(ImportServiceError::BadRequest(
+                "file must be an EPUB or PDF document",
+            ))
+        }
+    }
+
+    const fn source_kind(self) -> &'static str {
+        match self {
+            Self::Epub => "epub",
+            Self::Pdf => "pdf",
+        }
+    }
+
+    const fn media_type(self) -> &'static str {
+        match self {
+            Self::Epub => EPUB_SOURCE_MEDIA_TYPE,
+            Self::Pdf => PDF_SOURCE_MEDIA_TYPE,
+        }
+    }
+
+    const fn source_limit(self) -> u64 {
+        match self {
+            Self::Epub => EpubLimits::s1().source_bytes,
+            Self::Pdf => PdfLimits::web_v1().source_bytes,
+        }
+    }
+}
+
 impl ImportService {
     pub(crate) fn local(pool: PgPool, blob_root: PathBuf) -> Self {
         let telegram_media_registry = TelegramMediaRegistry::new();
@@ -102,11 +151,12 @@ impl ImportService {
             pool,
             blobs: Arc::new(LocalBlobStore::new(blob_root)),
             web_capture: Arc::new(BoundedWebFetcher::from_env()),
+            pdf_engine: Arc::new(PopplerPdfEngine::from_environment()),
             telegram_media: RuntimeTelegramMediaCapture::new(Arc::clone(&telegram_media_registry)),
             telegram_media_registry,
             cancellations: Arc::new(Mutex::new(HashMap::new())),
             worker_slots: Arc::new(Semaphore::new(MAX_ACTIVE_IMPORT_WORKERS)),
-            upload_slots: Arc::new(Semaphore::new(MAX_CONCURRENT_EPUB_UPLOADS)),
+            upload_slots: Arc::new(Semaphore::new(MAX_CONCURRENT_DOCUMENT_UPLOADS)),
             account_upload_slots: Arc::new(Mutex::new(HashMap::new())),
         }
     }
@@ -138,11 +188,12 @@ impl ImportService {
             pool,
             blobs: Arc::new(LocalBlobStore::new(blob_root)),
             web_capture: Arc::new(BoundedWebFetcher::fixtures(fixture_root)),
+            pdf_engine: Arc::new(PopplerPdfEngine::from_environment()),
             telegram_media,
             telegram_media_registry,
             cancellations: Arc::new(Mutex::new(HashMap::new())),
             worker_slots: Arc::new(Semaphore::new(MAX_ACTIVE_IMPORT_WORKERS)),
-            upload_slots: Arc::new(Semaphore::new(MAX_CONCURRENT_EPUB_UPLOADS)),
+            upload_slots: Arc::new(Semaphore::new(MAX_CONCURRENT_DOCUMENT_UPLOADS)),
             account_upload_slots: Arc::new(Mutex::new(HashMap::new())),
         }
     }
@@ -327,18 +378,19 @@ impl ImportService {
         source: Vec<u8>,
     ) -> Result<AcceptedImport, ImportServiceError> {
         let file_name = safe_file_name(file_name)?;
+        let upload_kind = FileUploadKind::detect(&file_name, &source)?;
         if idempotency_key.trim().is_empty() || idempotency_key.len() > 200 {
             return Err(ImportServiceError::BadRequest(
                 "Idempotency-Key must contain 1 to 200 characters",
             ));
         }
         if source.is_empty() {
-            return Err(ImportServiceError::BadRequest("EPUB upload is empty"));
+            return Err(ImportServiceError::BadRequest("document upload is empty"));
         }
         let source_len = u64::try_from(source.len()).unwrap_or(u64::MAX);
-        if source_len > EpubLimits::s1().source_bytes {
+        if source_len > upload_kind.source_limit() {
             return Err(ImportServiceError::BadRequest(
-                "EPUB upload exceeds the 100 MiB source limit",
+                "document upload exceeds the configured source limit",
             ));
         }
         let source_hash = content_hash(&source);
@@ -380,30 +432,39 @@ impl ImportService {
         let reservation_claim_id = Uuid::now_v7();
         let title = upload_title(&file_name);
         let source_identity = serde_json::json!({
-            "format": "epub",
+            "format": upload_kind.source_kind(),
             "source_name": file_name,
             "source_hash": source_hash,
         });
         sqlx::query(
-            "INSERT INTO materials (material_id, space_id, owner_user_id, kind, canonical_title, library_state, source_identity, import_status, created_at, updated_at) VALUES ($1, $2, $3, 'epub', $4, 'active', $5, 'queued', $6, $6)",
+            "INSERT INTO materials (material_id, space_id, owner_user_id, kind, canonical_title, library_state, source_identity, import_status, created_at, updated_at) VALUES ($1, $2, $3, $4, $5, 'active', $6, 'queued', $7, $7)",
         )
         .bind(material_id)
         .bind(space_id)
         .bind(session.user_id)
+        .bind(upload_kind.source_kind())
         .bind(&title)
         .bind(source_identity)
         .bind(now)
         .execute(&mut *tx)
         .await
         .map_err(log_storage_error)?;
-        let source_ref = SourceRef::Epub {
-            blob_hash: source_hash.clone(),
-            file_name: file_name.clone(),
-            media_type: SOURCE_MEDIA_TYPE.to_owned(),
-            device_id: session.device_id,
+        let source_ref = match upload_kind {
+            FileUploadKind::Epub => SourceRef::Epub {
+                blob_hash: source_hash.clone(),
+                file_name: file_name.clone(),
+                media_type: EPUB_SOURCE_MEDIA_TYPE.to_owned(),
+                device_id: session.device_id,
+            },
+            FileUploadKind::Pdf => SourceRef::Pdf {
+                blob_hash: source_hash.clone(),
+                file_name: file_name.clone(),
+                media_type: PDF_SOURCE_MEDIA_TYPE.to_owned(),
+                device_id: session.device_id,
+            },
         };
         sqlx::query(
-            "INSERT INTO import_jobs (job_id, user_id, space_id, status, stage, source_ref, result_material_id, idempotency_key, source_kind, worker_claim_id, lease_expires_at, created_at, updated_at) VALUES ($1, $2, $3, 'reserving_source', 'source_accepted', $4, $5, $6, 'epub', $7, $8 + $9::interval, $8, $8)",
+            "INSERT INTO import_jobs (job_id, user_id, space_id, status, stage, source_ref, result_material_id, idempotency_key, source_kind, worker_claim_id, lease_expires_at, created_at, updated_at) VALUES ($1, $2, $3, 'reserving_source', 'source_accepted', $4, $5, $6, $7, $8, $9 + $10::interval, $9, $9)",
         )
         .bind(job_id)
         .bind(session.user_id)
@@ -411,6 +472,7 @@ impl ImportService {
         .bind(serde_json::to_value(&source_ref).map_err(|_| ImportServiceError::Unavailable)?)
         .bind(material_id)
         .bind(idempotency_key)
+        .bind(upload_kind.source_kind())
         .bind(reservation_claim_id)
         .bind(now)
         .bind(SOURCE_RESERVATION_LEASE_SQL)
@@ -431,7 +493,10 @@ impl ImportService {
                 device_id: session.device_id,
                 idempotency_key: &format!("{idempotency_key}:material"),
                 change_kind: "create",
-                payload: serde_json::json!({ "kind": "epub", "import_status": "queued" }),
+                payload: serde_json::json!({
+                    "kind": upload_kind.source_kind(),
+                    "import_status": "queued"
+                }),
                 now,
             },
         )
@@ -464,7 +529,7 @@ impl ImportService {
         let reservation_heartbeat = self.spawn_reservation_heartbeat(job_id, reservation_claim_id);
         let pending_blob = PendingBlob {
             hash: source_hash,
-            media_type: SOURCE_MEDIA_TYPE,
+            media_type: upload_kind.media_type(),
             bytes: source,
         };
         match self.persist_reserved_blob(&pending_blob).await {
@@ -476,12 +541,12 @@ impl ImportService {
             }
             Err(error) => {
                 reservation_heartbeat.abort();
-                tracing::error!(%job_id, %error, "reserved EPUB source could not be stored");
+                tracing::error!(%job_id, %error, "reserved document source could not be stored");
                 self.fail_reserved_source(
                     job_id,
                     reservation_claim_id,
                     material_id,
-                    source_unavailable_diagnostic("epub"),
+                    source_unavailable_diagnostic(upload_kind.source_kind()),
                 )
                 .await?;
             }
@@ -1132,6 +1197,11 @@ impl ImportService {
                 media_type,
                 ..
             } => (file_name.clone(), media_type.clone()),
+            SourceRef::Pdf {
+                file_name,
+                media_type,
+                ..
+            } => (file_name.clone(), media_type.clone()),
             SourceRef::WebPage { .. } => (
                 "snapshot.json".to_owned(),
                 "application/vnd.lumi.web-snapshot+json".to_owned(),
@@ -1163,8 +1233,13 @@ impl ImportService {
         .map_err(log_storage_error)?
         .ok_or(ImportServiceError::NotFound)?;
         let payload: serde_json::Value = row.try_get("payload").map_err(log_storage_error)?;
-        let package: NormalizedContentPackage =
-            serde_json::from_value(payload).map_err(|_| ImportServiceError::Unavailable)?;
+        let diagnostics = payload
+            .get("diagnostics")
+            .cloned()
+            .map(serde_json::from_value)
+            .transpose()
+            .map_err(|_| ImportServiceError::Unavailable)?
+            .unwrap_or_default();
         Ok(DocumentRevision {
             id: row.try_get("revision_id").map_err(log_storage_error)?,
             material_id: row.try_get("material_id").map_err(log_storage_error)?,
@@ -1183,7 +1258,7 @@ impl ImportService {
                 .try_get("supersedes_revision_id")
                 .map_err(log_storage_error)?,
             created_at: timestamp_ms(row.try_get("created_at").map_err(log_storage_error)?),
-            diagnostics: package.diagnostics,
+            diagnostics,
         })
     }
 
@@ -1215,6 +1290,33 @@ impl ImportService {
             &package,
             revision.material_id,
         ))
+    }
+
+    pub(crate) async fn fixed_layout_package(
+        &self,
+        user_id: Uuid,
+        revision_id: DocumentRevisionId,
+    ) -> Result<FixedLayoutContentPackage, ImportServiceError> {
+        let payload: serde_json::Value = sqlx::query_scalar(
+            "SELECT p.payload FROM normalized_packages p JOIN document_revisions r ON r.revision_id = p.revision_id JOIN materials m ON m.material_id = r.material_id WHERE p.revision_id = $1 AND r.source_format = 'pdf' AND m.owner_user_id = $2",
+        )
+        .bind(revision_id)
+        .bind(user_id)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(log_storage_error)?
+        .ok_or(ImportServiceError::NotFound)?;
+        serde_json::from_value(payload).map_err(|_| ImportServiceError::Unavailable)
+    }
+
+    pub(crate) async fn page_fidelity_document(
+        &self,
+        user_id: Uuid,
+        revision_id: DocumentRevisionId,
+    ) -> Result<PageFidelityDocument, ImportServiceError> {
+        let package = self.fixed_layout_package(user_id, revision_id).await?;
+        let revision = self.revision(user_id, revision_id).await?;
+        Ok(package.page_fidelity_document(revision.material_id))
     }
 
     pub(crate) async fn reader_settings(
@@ -1372,8 +1474,8 @@ impl ImportService {
         {
             return Err(ImportServiceError::Conflict);
         }
-        let package_value: serde_json::Value = sqlx::query_scalar(
-            "SELECT p.payload FROM normalized_packages p JOIN document_revisions r ON r.revision_id = p.revision_id WHERE p.revision_id = $1 AND r.material_id = $2 AND r.space_id = $3",
+        let package_row = sqlx::query(
+            "SELECT p.payload, r.source_format FROM normalized_packages p JOIN document_revisions r ON r.revision_id = p.revision_id WHERE p.revision_id = $1 AND r.material_id = $2 AND r.space_id = $3",
         )
         .bind(command.revision_id)
         .bind(command.material_id)
@@ -1382,10 +1484,21 @@ impl ImportService {
         .await
         .map_err(log_storage_error)?
         .ok_or(ImportServiceError::NotFound)?;
-        let package: NormalizedContentPackage =
-            serde_json::from_value(package_value).map_err(|_| ImportServiceError::Unavailable)?;
-        let document = reading_document_from_package(&package, command.material_id);
-        validate_progress_locator(&RenderPlan::from_document(&document), &command.locator)?;
+        let package_value: serde_json::Value =
+            package_row.try_get("payload").map_err(log_storage_error)?;
+        let source_format: String = package_row
+            .try_get("source_format")
+            .map_err(log_storage_error)?;
+        if source_format == "pdf" {
+            let package: FixedLayoutContentPackage = serde_json::from_value(package_value)
+                .map_err(|_| ImportServiceError::Unavailable)?;
+            validate_pdf_anchor(&package, &command.locator, false)?;
+        } else {
+            let package: NormalizedContentPackage = serde_json::from_value(package_value)
+                .map_err(|_| ImportServiceError::Unavailable)?;
+            let document = reading_document_from_package(&package, command.material_id);
+            validate_progress_locator(&RenderPlan::from_document(&document), &command.locator)?;
+        }
         if reader_change_exists(
             &mut tx,
             space_id,
@@ -1496,8 +1609,8 @@ impl ImportService {
             tx.commit().await.map_err(log_storage_error)?;
             return Ok(annotation);
         }
-        let package_value: serde_json::Value = sqlx::query_scalar(
-            "SELECT p.payload FROM normalized_packages p JOIN document_revisions r ON r.revision_id = p.revision_id JOIN materials m ON m.material_id = r.material_id AND m.space_id = r.space_id WHERE p.revision_id = $1 AND r.material_id = $2 AND m.owner_user_id = $3 AND m.active_revision_id = $1 AND m.deleted_at IS NULL",
+        let package_row = sqlx::query(
+            "SELECT p.payload, r.source_format FROM normalized_packages p JOIN document_revisions r ON r.revision_id = p.revision_id JOIN materials m ON m.material_id = r.material_id AND m.space_id = r.space_id WHERE p.revision_id = $1 AND r.material_id = $2 AND m.owner_user_id = $3 AND m.active_revision_id = $1 AND m.deleted_at IS NULL",
         )
         .bind(command.revision_id)
         .bind(command.material_id)
@@ -1506,10 +1619,21 @@ impl ImportService {
         .await
         .map_err(log_storage_error)?
         .ok_or(ImportServiceError::NotFound)?;
-        let package: NormalizedContentPackage =
-            serde_json::from_value(package_value).map_err(|_| ImportServiceError::Unavailable)?;
-        let document = reading_document_from_package(&package, command.material_id);
-        validate_anchor_exact(&RenderPlan::from_document(&document), &command.anchor)?;
+        let package_value: serde_json::Value =
+            package_row.try_get("payload").map_err(log_storage_error)?;
+        let source_format: String = package_row
+            .try_get("source_format")
+            .map_err(log_storage_error)?;
+        if source_format == "pdf" {
+            let package: FixedLayoutContentPackage = serde_json::from_value(package_value)
+                .map_err(|_| ImportServiceError::Unavailable)?;
+            validate_pdf_anchor(&package, &command.anchor, true)?;
+        } else {
+            let package: NormalizedContentPackage = serde_json::from_value(package_value)
+                .map_err(|_| ImportServiceError::Unavailable)?;
+            let document = reading_document_from_package(&package, command.material_id);
+            validate_anchor_exact(&RenderPlan::from_document(&document), &command.anchor)?;
+        }
         let row = sqlx::query(
             "SELECT active_revision_id FROM materials WHERE material_id = $1 AND owner_user_id = $2 AND space_id = $3 AND deleted_at IS NULL FOR UPDATE",
         )
@@ -1767,6 +1891,7 @@ impl ImportService {
             owner_id: row.try_get("owner_user_id").map_err(log_storage_error)?,
             kind: match kind.as_str() {
                 "epub" => MaterialKind::Epub,
+                "pdf" => MaterialKind::Pdf,
                 "web_page" => MaterialKind::WebPage,
                 "telegram" => MaterialKind::Telegram,
                 _ => return Err(ImportServiceError::Unavailable),
@@ -1989,6 +2114,19 @@ impl ImportService {
                 )
                 .await
             }
+            source_ref @ SourceRef::Pdf { .. } => {
+                self.run_pdf(
+                    job_id,
+                    claim_id,
+                    user_id,
+                    space_id,
+                    material_id,
+                    attempt,
+                    source_ref,
+                    Arc::clone(&cancellation),
+                )
+                .await
+            }
             source_ref @ SourceRef::WebPage { .. } => {
                 self.run_web(
                     job_id,
@@ -2074,7 +2212,7 @@ impl ImportService {
                     .await;
             }
         };
-        self.persist_blob_parts(blob_hash, SOURCE_MEDIA_TYPE, &source)
+        self.persist_blob_parts(blob_hash, EPUB_SOURCE_MEDIA_TYPE, &source)
             .await?;
         self.set_stage(job_id, claim_id, "normalizing").await?;
         let revision_id = Uuid::now_v7();
@@ -2120,6 +2258,100 @@ impl ImportService {
             }
             Err(error) => {
                 let cancelled = matches!(error, EpubImportError::Cancelled);
+                self.fail(
+                    job_id,
+                    claim_id,
+                    material_id,
+                    attempt,
+                    error.diagnostic(),
+                    cancelled,
+                )
+                .await
+            }
+        }
+    }
+
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "worker context is explicit across the source adapter boundary"
+    )]
+    async fn run_pdf(
+        &self,
+        job_id: JobId,
+        claim_id: Uuid,
+        user_id: Uuid,
+        space_id: Uuid,
+        material_id: Uuid,
+        attempt: i32,
+        source_ref: SourceRef,
+        cancellation: Arc<AtomicBool>,
+    ) -> Result<(), ImportServiceError> {
+        let SourceRef::Pdf {
+            blob_hash,
+            file_name,
+            ..
+        } = &source_ref
+        else {
+            return Err(ImportServiceError::Unavailable);
+        };
+        self.set_stage(job_id, claim_id, "inspecting_document")
+            .await?;
+        let source = match self.blobs.get(blob_hash).await {
+            Ok(source) => source,
+            Err(_) => {
+                return self
+                    .fail(
+                        job_id,
+                        claim_id,
+                        material_id,
+                        attempt,
+                        source_unavailable_diagnostic("pdf"),
+                        false,
+                    )
+                    .await;
+            }
+        };
+        self.persist_blob_parts(blob_hash, PDF_SOURCE_MEDIA_TYPE, &source)
+            .await?;
+        let revision_id = Uuid::now_v7();
+        let source_name = file_name.clone();
+        let engine = Arc::clone(&self.pdf_engine);
+        let worker_cancellation = Arc::clone(&cancellation);
+        let imported = tokio::task::spawn_blocking(move || {
+            let inspected = engine.inspect(&source)?;
+            normalize_pdf(
+                PdfImportRequest {
+                    owner_id: user_id,
+                    material_id,
+                    revision_id,
+                    source_name: &source_name,
+                    source: &source,
+                },
+                PdfLimits::web_v1(),
+                inspected,
+                || worker_cancellation.load(Ordering::Acquire),
+            )
+        })
+        .await
+        .map_err(|_| ImportServiceError::Unavailable)?;
+        match imported {
+            Ok(imported) if !cancellation.load(Ordering::Acquire) => {
+                self.persist_pdf_success(job_id, claim_id, space_id, &source_ref, attempt, imported)
+                    .await
+            }
+            Ok(_) => {
+                self.fail(
+                    job_id,
+                    claim_id,
+                    material_id,
+                    attempt,
+                    lumi_core::PdfImportError::Cancelled.diagnostic(),
+                    true,
+                )
+                .await
+            }
+            Err(error) => {
+                let cancelled = matches!(error, lumi_core::PdfImportError::Cancelled);
                 self.fail(
                     job_id,
                     claim_id,
@@ -2887,7 +3119,35 @@ impl ImportService {
         space_id: Uuid,
         source_ref: &SourceRef,
         attempt: i32,
-        mut imported: ImportedPublication,
+        imported: ImportedPublication,
+    ) -> Result<(), ImportServiceError> {
+        let publication = PersistablePublication::from_reflowable(imported)?;
+        self.persist_publication(job_id, claim_id, space_id, source_ref, attempt, publication)
+            .await
+    }
+
+    async fn persist_pdf_success(
+        &self,
+        job_id: JobId,
+        claim_id: Uuid,
+        space_id: Uuid,
+        source_ref: &SourceRef,
+        attempt: i32,
+        imported: ImportedPdf,
+    ) -> Result<(), ImportServiceError> {
+        let publication = PersistablePublication::from_pdf(imported)?;
+        self.persist_publication(job_id, claim_id, space_id, source_ref, attempt, publication)
+            .await
+    }
+
+    async fn persist_publication(
+        &self,
+        job_id: JobId,
+        claim_id: Uuid,
+        space_id: Uuid,
+        source_ref: &SourceRef,
+        attempt: i32,
+        mut imported: PersistablePublication,
     ) -> Result<(), ImportServiceError> {
         self.set_stage(job_id, claim_id, "persisting").await?;
         let mut stored_resources = Vec::with_capacity(imported.resources.len());
@@ -2900,15 +3160,15 @@ impl ImportService {
             stored_resources.push((resource.clone(), stored));
         }
         imported.revision.created_at = timestamp_ms(OffsetDateTime::now_utc());
-        let package_bytes =
-            serde_json::to_vec(&imported.package).map_err(|_| ImportServiceError::Unavailable)?;
+        let package_bytes = serde_json::to_vec(&imported.package_payload)
+            .map_err(|_| ImportServiceError::Unavailable)?;
         let package_blob_hash = content_hash(&package_bytes);
         let stored_package = self
             .blobs
             .put(&package_blob_hash, &package_bytes)
             .await
             .map_err(map_blob_error)?;
-        let source_map = source_map(&imported.package)?;
+        let source_map = imported.source_map;
         let now = OffsetDateTime::now_utc();
         let mut tx = self.pool.begin().await.map_err(log_storage_error)?;
         let may_publish: bool = sqlx::query_scalar(
@@ -2970,13 +3230,13 @@ impl ImportService {
         .execute(&mut *tx)
         .await
         .map_err(log_storage_error)?;
-        let manifest_id = imported.package.resources.id;
+        let manifest_id = imported.resources_manifest.id;
         sqlx::query(
             "INSERT INTO blob_manifests (manifest_id, space_id, schema_version, created_at) VALUES ($1, $2, $3, $4)",
         )
         .bind(manifest_id)
         .bind(space_id)
-        .bind(&imported.package.resources.schema_version)
+        .bind(&imported.resources_manifest.schema_version)
         .bind(now)
         .execute(&mut *tx)
         .await
@@ -3010,10 +3270,10 @@ impl ImportService {
         sqlx::query(
             "INSERT INTO normalized_packages (package_id, revision_id, schema_version, payload, source_map, manifest_id, package_blob_hash, created_at) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
         )
-        .bind(imported.package.id)
+        .bind(imported.package_id)
         .bind(imported.revision.id)
         .bind(&imported.revision.package_format_version)
-        .bind(serde_json::to_value(&imported.package).map_err(|_| ImportServiceError::Unavailable)?)
+        .bind(imported.package_payload)
         .bind(source_map)
         .bind(manifest_id)
         .bind(&package_blob_hash)
@@ -3027,7 +3287,10 @@ impl ImportService {
         .bind(imported.revision.material_id)
         .bind(&imported.title)
         .bind(imported.revision.id)
-        .bind(serde_json::to_value(&imported.package.manifest.source).map_err(|_| ImportServiceError::Unavailable)?)
+        .bind(
+            serde_json::to_value(&imported.source_identity)
+                .map_err(|_| ImportServiceError::Unavailable)?,
+        )
         .bind(now)
         .execute(&mut *tx)
         .await
@@ -3199,10 +3462,76 @@ struct PendingBlob {
     bytes: Vec<u8>,
 }
 
+struct PersistablePublication {
+    title: String,
+    revision: DocumentRevision,
+    package_id: Uuid,
+    package_payload: serde_json::Value,
+    resources_manifest: BlobManifest,
+    source_map: serde_json::Value,
+    source_identity: SourceIdentity,
+    resources: Vec<ImportedPublicationResource>,
+}
+
+impl PersistablePublication {
+    fn from_reflowable(imported: ImportedPublication) -> Result<Self, ImportServiceError> {
+        let source_map = source_map(&imported.package)?;
+        let source_identity = imported.package.manifest.source.clone();
+        let package_id = imported.package.id;
+        let resources_manifest = imported.package.resources.clone();
+        let package_payload =
+            serde_json::to_value(imported.package).map_err(|_| ImportServiceError::Unavailable)?;
+        Ok(Self {
+            title: imported.title,
+            revision: imported.revision,
+            package_id,
+            package_payload,
+            resources_manifest,
+            source_map,
+            source_identity,
+            resources: imported.resources,
+        })
+    }
+
+    fn from_pdf(imported: ImportedPdf) -> Result<Self, ImportServiceError> {
+        let source_map = pdf_source_map(&imported.package)?;
+        let source_identity = imported.package.manifest.source.clone();
+        let package_id = imported.package.id;
+        let resources_manifest = imported.package.resources.clone();
+        let package_payload =
+            serde_json::to_value(imported.package).map_err(|_| ImportServiceError::Unavailable)?;
+        Ok(Self {
+            title: imported.title,
+            revision: imported.revision,
+            package_id,
+            package_payload,
+            resources_manifest,
+            source_map,
+            source_identity,
+            resources: imported
+                .resources
+                .into_iter()
+                .map(|resource| ImportedPublicationResource {
+                    path: resource.path,
+                    media_type: resource.media_type,
+                    content_hash: resource.content_hash,
+                    bytes: resource.bytes,
+                })
+                .collect(),
+        })
+    }
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 enum SourceRef {
     Epub {
+        blob_hash: String,
+        file_name: String,
+        media_type: String,
+        device_id: Uuid,
+    },
+    Pdf {
         blob_hash: String,
         file_name: String,
         media_type: String,
@@ -3253,6 +3582,7 @@ impl SourceRef {
     fn device_id(&self) -> Uuid {
         match self {
             Self::Epub { device_id, .. }
+            | Self::Pdf { device_id, .. }
             | Self::WebPage { device_id, .. }
             | Self::TelegramText { device_id, .. }
             | Self::TelegramComposite { device_id, .. } => *device_id,
@@ -3261,7 +3591,7 @@ impl SourceRef {
 
     fn source_blob_hash(&self) -> Option<&str> {
         match self {
-            Self::Epub { blob_hash, .. } => Some(blob_hash),
+            Self::Epub { blob_hash, .. } | Self::Pdf { blob_hash, .. } => Some(blob_hash),
             Self::WebPage {
                 snapshot_blob_hash, ..
             } => snapshot_blob_hash.as_deref(),
@@ -3276,7 +3606,8 @@ impl SourceRef {
 
     fn source_media_type(&self) -> &'static str {
         match self {
-            Self::Epub { .. } => SOURCE_MEDIA_TYPE,
+            Self::Epub { .. } => EPUB_SOURCE_MEDIA_TYPE,
+            Self::Pdf { .. } => PDF_SOURCE_MEDIA_TYPE,
             Self::WebPage { .. } => "application/vnd.lumi.web-snapshot+json",
             Self::TelegramText { .. } => "application/vnd.lumi.telegram-message+json",
             Self::TelegramComposite { .. } => "application/vnd.lumi.telegram-envelope+json",
@@ -3286,6 +3617,7 @@ impl SourceRef {
     fn source_format(&self) -> &'static str {
         match self {
             Self::Epub { .. } => "epub",
+            Self::Pdf { .. } => "pdf",
             Self::WebPage { .. } => "web_page",
             Self::TelegramText { .. } | Self::TelegramComposite { .. } => "telegram",
         }
@@ -3294,6 +3626,7 @@ impl SourceRef {
     fn logical_source_name(&self) -> String {
         match self {
             Self::Epub { file_name, .. } => file_name.clone(),
+            Self::Pdf { file_name, .. } => file_name.clone(),
             Self::WebPage { .. } => "snapshot.json".to_owned(),
             Self::TelegramText { .. } => "message.json".to_owned(),
             Self::TelegramComposite { .. } => "envelope.json".to_owned(),
@@ -3692,6 +4025,24 @@ fn validate_anchor_shape(
     revision_id: DocumentRevisionId,
     anchor: &lumi_core::Anchor,
 ) -> Result<(), ImportServiceError> {
+    if matches!(
+        anchor.source_locator,
+        Some(lumi_core::SourceLocator::Pdf(_))
+    ) {
+        if anchor.revision_id != revision_id
+            || anchor.quote.len() > 64 * 1024
+            || anchor.prefix.len() > 512
+            || anchor.suffix.len() > 512
+            || anchor.content_hash.is_empty()
+            || anchor.content_hash.len() > 128
+            || anchor.page_rects.len() > 256
+        {
+            return Err(ImportServiceError::BadRequest(
+                "PDF annotation anchor is incomplete or inconsistent",
+            ));
+        }
+        return Ok(());
+    }
     let range = anchor.text_range.ok_or(ImportServiceError::BadRequest(
         "annotation anchor needs a text range",
     ))?;
@@ -3720,6 +4071,65 @@ fn validate_anchor_shape(
         ));
     }
     Ok(())
+}
+
+fn validate_pdf_anchor(
+    package: &FixedLayoutContentPackage,
+    anchor: &lumi_core::Anchor,
+    require_selection: bool,
+) -> Result<(), ImportServiceError> {
+    let Some(lumi_core::SourceLocator::Pdf(locator)) = anchor.source_locator.as_ref() else {
+        return Err(ImportServiceError::BadRequest(
+            "PDF anchor needs PDF source provenance",
+        ));
+    };
+    let page = package
+        .pages
+        .get(locator.page_index as usize)
+        .filter(|page| page.page_index == locator.page_index)
+        .ok_or(ImportServiceError::BadRequest("PDF anchor page is unknown"))?;
+    let has_geometry = !locator.page_rects.is_empty() || !locator.page_quads.is_empty();
+    if anchor.revision_id != package.revision_id
+        || locator.pdf_file_checksum != package.manifest.source.source_hash
+        || locator.page_label != page.page_label
+        || locator.page_revision_hash != page.page_hash
+        || anchor.content_hash != page.page_hash
+        || locator.page_rects.len() > 256
+        || locator.page_quads.len() > 1_024
+        || locator.normalized_rects.len() > 256
+        || (require_selection && !has_geometry && anchor.quote.trim().is_empty())
+        || locator
+            .page_rects
+            .iter()
+            .chain(locator.normalized_rects.iter())
+            .any(|rect| !pdf_rect_is_valid(*rect))
+        || locator
+            .page_quads
+            .iter()
+            .any(|quad| !pdf_quad_is_finite(*quad))
+    {
+        return Err(ImportServiceError::BadRequest(
+            "PDF anchor does not match persisted page geometry",
+        ));
+    }
+    Ok(())
+}
+
+fn pdf_rect_is_valid(rect: lumi_core::PdfRect) -> bool {
+    rect.x.is_finite()
+        && rect.y.is_finite()
+        && rect.width.is_finite()
+        && rect.height.is_finite()
+        && rect.width >= 0.0
+        && rect.height >= 0.0
+}
+
+fn pdf_quad_is_finite(quad: lumi_core::PdfQuad) -> bool {
+    [
+        quad.x1, quad.y1, quad.x2, quad.y2, quad.x3, quad.y3, quad.x4, quad.y4,
+    ]
+    .into_iter()
+    .all(f32::is_finite)
 }
 
 fn validate_anchor_exact(
@@ -3818,6 +4228,7 @@ fn library_entry_from_row(
         owner_id: row.try_get("owner_user_id").map_err(log_storage_error)?,
         kind: match kind.as_str() {
             "epub" => MaterialKind::Epub,
+            "pdf" => MaterialKind::Pdf,
             "web_page" => MaterialKind::WebPage,
             "telegram" => MaterialKind::Telegram,
             _ => return Err(ImportServiceError::Unavailable),
@@ -3946,6 +4357,7 @@ fn parse_stage(value: &str) -> Result<JobStage, ImportServiceError> {
         "fetching_linked_sources" => Ok(JobStage::FetchingLinkedSources),
         "extracting_content" => Ok(JobStage::ExtractingContent),
         "validating_container" => Ok(JobStage::ValidatingContainer),
+        "inspecting_document" => Ok(JobStage::InspectingDocument),
         "normalizing" => Ok(JobStage::Normalizing),
         "persisting" => Ok(JobStage::Persisting),
         "reader_document_built" => Ok(JobStage::ReaderDocumentBuilt),
@@ -3972,6 +4384,25 @@ fn source_map(package: &NormalizedContentPackage) -> Result<serde_json::Value, I
                 "node_path": block.node_path,
                 "content_hash": block.content_hash,
                 "source_locator": block.source_locator,
+            })
+        })
+        .collect::<Vec<_>>();
+    serde_json::to_value(entries).map_err(|_| ImportServiceError::Unavailable)
+}
+
+fn pdf_source_map(
+    package: &FixedLayoutContentPackage,
+) -> Result<serde_json::Value, ImportServiceError> {
+    let entries = package
+        .pages
+        .iter()
+        .map(|page| {
+            serde_json::json!({
+                "page_index": page.page_index,
+                "page_label": page.page_label,
+                "page_hash": page.page_hash,
+                "crop_box": page.crop_box,
+                "text_layer_state": page.text_layer_state,
             })
         })
         .collect::<Vec<_>>();
@@ -4038,9 +4469,10 @@ fn safe_file_name(value: &str) -> Result<String, ImportServiceError> {
         .filter(|character| !character.is_control() && !matches!(character, '"' | '\\'))
         .take(240)
         .collect::<String>();
-    if name.is_empty() || !name.to_ascii_lowercase().ends_with(".epub") {
+    let lowercase = name.to_ascii_lowercase();
+    if name.is_empty() || !(lowercase.ends_with(".epub") || lowercase.ends_with(".pdf")) {
         Err(ImportServiceError::BadRequest(
-            "upload must have a non-empty .epub file name",
+            "upload must have a non-empty .epub or .pdf file name",
         ))
     } else {
         Ok(name)
@@ -4051,6 +4483,8 @@ fn upload_title(file_name: &str) -> String {
     file_name
         .strip_suffix(".epub")
         .or_else(|| file_name.strip_suffix(".EPUB"))
+        .or_else(|| file_name.strip_suffix(".pdf"))
+        .or_else(|| file_name.strip_suffix(".PDF"))
         .unwrap_or(file_name)
         .to_owned()
 }
@@ -4091,6 +4525,170 @@ mod tests {
         };
 
         assert!(matches!(error, ImportServiceError::BadRequest(_)));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn postgres_pdf_import_publishes_fixed_layout_reader_and_anchors(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let Ok(database_url) = std::env::var("LUMI_TEST_DATABASE_URL") else {
+            return Ok(());
+        };
+        let source = include_bytes!("../../../tests/fixtures/pdf/text-layer.pdf");
+        match PopplerPdfEngine::from_environment().inspect(source) {
+            Ok(_) => {}
+            Err(lumi_core::PdfImportError::EngineUnavailable(error)) => {
+                eprintln!("PDF import integration test skipped: {error}");
+                return Ok(());
+            }
+            Err(error) => return Err(error.into()),
+        }
+
+        crate::run_migrations(&database_url).await?;
+        let pool = sqlx_postgres::PgPoolOptions::new()
+            .max_connections(6)
+            .connect(&database_url)
+            .await?;
+        let user_id = Uuid::now_v7();
+        let device_id = Uuid::now_v7();
+        let space_id = Uuid::now_v7();
+        sqlx::query("INSERT INTO accounts (user_id, status) VALUES ($1, 'active')")
+            .bind(user_id)
+            .execute(&pool)
+            .await?;
+        sqlx::query("INSERT INTO sync_devices (device_id, user_id, name, kind) VALUES ($1, $2, 'PDF test', 'web')")
+            .bind(device_id)
+            .bind(user_id)
+            .execute(&pool)
+            .await?;
+        sqlx::query(
+            "INSERT INTO sync_spaces (space_id, owner_user_id, kind) VALUES ($1, $2, 'personal')",
+        )
+        .bind(space_id)
+        .bind(user_id)
+        .execute(&pool)
+        .await?;
+        let blob_root = std::env::temp_dir().join(format!("lumi-pdf-test-{}", Uuid::now_v7()));
+        let service = Arc::new(ImportService::local(pool, blob_root.clone()));
+        let session = AuthenticatedSession {
+            user_id,
+            session_id: Uuid::now_v7(),
+            device_id,
+            csrf_hash: [0; 32],
+        };
+        let accepted = service
+            .accept(
+                &session,
+                "text-layer.pdf",
+                "pdf-import-integration",
+                source.to_vec(),
+            )
+            .await?;
+        let job = tokio::time::timeout(std::time::Duration::from_secs(15), async {
+            loop {
+                let job = service.job(user_id, accepted.job.id).await?;
+                if matches!(
+                    job.status,
+                    JobStatus::Succeeded | JobStatus::Failed | JobStatus::Cancelled
+                ) {
+                    return Ok::<Job, ImportServiceError>(job);
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            }
+        })
+        .await??;
+        assert_eq!(job.status, JobStatus::Succeeded, "{:?}", job.diagnostics);
+        let revision_id = job
+            .revision_id
+            .ok_or_else(|| std::io::Error::other("PDF revision is missing"))?;
+        let entry = service.material(user_id, accepted.material_id).await?;
+        assert_eq!(entry.kind, MaterialKind::Pdf);
+        assert_eq!(entry.import_status, MaterialImportStatus::Ready);
+        let document = service.page_fidelity_document(user_id, revision_id).await?;
+        assert_eq!(document.pages.len(), 2);
+        assert_eq!(
+            document.text_layer_state,
+            lumi_core::PdfTextLayerState::Native
+        );
+        assert!(document.pages[1].width_points > document.pages[1].height_points);
+        let page = &document.pages[0];
+        let rect = lumi_core::PdfRect {
+            x: 62.0,
+            y: 120.0,
+            width: 180.0,
+            height: 18.0,
+        };
+        let source_locator = lumi_core::SourceLocator::Pdf(lumi_core::PdfSourceLocator {
+            pdf_file_checksum: entry.source_identity.source_hash.clone(),
+            page_index: page.page_index,
+            page_label: page.page_label.clone(),
+            page_revision_hash: page.page_hash.clone(),
+            page_rects: vec![rect],
+            page_quads: Vec::new(),
+            text_layer_revision: Some("integration-test.v1".to_owned()),
+            text_block_start: None,
+            text_block_end: None,
+            text_char_start: None,
+            text_char_end: None,
+            normalized_rects: vec![lumi_core::PdfRect {
+                x: rect.x / page.width_points,
+                y: rect.y / page.height_points,
+                width: rect.width / page.width_points,
+                height: rect.height / page.height_points,
+            }],
+        });
+        let anchor = lumi_core::Anchor {
+            revision_id,
+            node_path: vec!["page-0".to_owned()],
+            end_node_path: vec!["page-0".to_owned()],
+            text_range: Some(lumi_core::TextRange { start: 0, end: 15 }),
+            quote: "searchable text".to_owned(),
+            prefix: String::new(),
+            suffix: String::new(),
+            content_hash: page.page_hash.clone(),
+            source_locator: Some(source_locator.clone()),
+            end_source_locator: Some(source_locator),
+            page_rects: vec![lumi_core::PageRect {
+                page_index: 0,
+                x: rect.x,
+                y: rect.y,
+                width: rect.width,
+                height: rect.height,
+            }],
+        };
+        let annotation = service
+            .create_annotation(
+                &session,
+                CreateAnnotationCommand {
+                    material_id: entry.id,
+                    revision_id,
+                    anchor: anchor.clone(),
+                    kind: AnnotationKind::Highlight {
+                        style: HighlightStyle::Yellow,
+                    },
+                },
+                "pdf-annotation-integration",
+            )
+            .await?;
+        assert_eq!(annotation.anchor, anchor);
+        let progress = service
+            .move_reading_position(
+                &session,
+                MoveReadingPositionCommand {
+                    material_id: entry.id,
+                    revision_id,
+                    locator: anchor,
+                    progress_fraction: 0.5,
+                },
+                "pdf-progress-integration",
+            )
+            .await?;
+        assert_eq!(progress.progress_fraction, 0.5);
+        let (name, media_type, downloaded) = service.source(user_id, entry.id).await?;
+        assert_eq!(name, "text-layer.pdf");
+        assert_eq!(media_type, PDF_SOURCE_MEDIA_TYPE);
+        assert_eq!(downloaded, source);
+        let _ = tokio::fs::remove_dir_all(blob_root).await;
         Ok(())
     }
 
@@ -4604,7 +5202,7 @@ mod tests {
             .execute(&pool).await?;
         sqlx::query("INSERT INTO import_jobs (job_id, user_id, space_id, status, stage, source_ref, result_material_id, idempotency_key, source_kind, lease_expires_at) VALUES ($1, $2, $3, 'reserving_source', 'source_accepted', $4, $5, 'reservation-present', 'epub', now() - interval '1 second')")
             .bind(reserved_job).bind(user_id).bind(space_id)
-            .bind(serde_json::json!({"kind":"epub","blob_hash":source_hash,"file_name":"reserved.epub","media_type":SOURCE_MEDIA_TYPE,"device_id":device_id}))
+            .bind(serde_json::json!({"kind":"epub","blob_hash":source_hash,"file_name":"reserved.epub","media_type":EPUB_SOURCE_MEDIA_TYPE,"device_id":device_id}))
             .bind(reserved_material).execute(&pool).await?;
 
         let missing_hash = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
@@ -4783,7 +5381,7 @@ mod tests {
             .execute(&pool).await?;
         sqlx::query("INSERT INTO import_jobs (job_id, user_id, space_id, status, stage, source_ref, result_material_id, idempotency_key, source_kind) VALUES ($1, $2, $3, 'queued', 'source_accepted', $4, $5, 'heartbeat-cleanup', 'epub')")
             .bind(heartbeat_job).bind(user_id).bind(space_id)
-            .bind(serde_json::json!({"kind":"epub","blob_hash":missing_hash,"file_name":"heartbeat.epub","media_type":SOURCE_MEDIA_TYPE,"device_id":device_id}))
+            .bind(serde_json::json!({"kind":"epub","blob_hash":missing_hash,"file_name":"heartbeat.epub","media_type":EPUB_SOURCE_MEDIA_TYPE,"device_id":device_id}))
             .bind(heartbeat_material).execute(&pool).await?;
         let heartbeat_suffix = Uuid::now_v7().simple().to_string();
         let heartbeat_function = format!("lumi_test_fail_stage_{heartbeat_suffix}");

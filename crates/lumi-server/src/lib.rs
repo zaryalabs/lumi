@@ -8,6 +8,7 @@ mod account;
 mod auth_api;
 mod blob;
 mod imports;
+mod pdf_engine;
 mod telegram;
 mod telegram_media;
 mod telegram_runtime;
@@ -33,10 +34,10 @@ use lumi_core::{
     DocumentRevision, DocumentRevisionId, EpubFixture, EpubLimits, HealthResponse,
     ImportDiagnostic, ImportStatusEntry, ImportWebUrlRequest, ImportedFixture, Job, JobId, JobKind,
     JobStage, JobStatus, LibraryEntry, LibraryState, Material, MaterialId, MaterialImportStatus,
-    MoveReadingPositionCommand, NormalizedContentPackage, ReaderSettings, ReadingDocument,
-    ReadingProgress, SchemaMigration, ServiceCapabilities, TelegramBotSettings,
-    TelegramConnectionStatus, UpdateAnnotationCommand, UpdateLibraryStateCommand,
-    UpdateReaderSettingsCommand, UpdateTelegramBotTokenRequest, UserId,
+    MoveReadingPositionCommand, NormalizedContentPackage, PageFidelityDocument, PdfLimits,
+    ReaderSettings, ReadingDocument, ReadingProgress, SchemaMigration, ServiceCapabilities,
+    TelegramBotSettings, TelegramConnectionStatus, UpdateAnnotationCommand,
+    UpdateLibraryStateCommand, UpdateReaderSettingsCommand, UpdateTelegramBotTokenRequest, UserId,
 };
 use serde::{Deserialize, Serialize};
 use tower_http::{
@@ -376,7 +377,10 @@ pub fn build_router_with_state(state: AppState) -> Router {
             "/materials/{material_id}/library-state",
             patch(update_library_state).layer(DefaultBodyLimit::max(64 * 1024)),
         )
-        .route("/materials/{material_id}/source", get(download_source_epub))
+        .route(
+            "/materials/{material_id}/source",
+            get(download_source_document),
+        )
         .route(
             "/materials/{material_id}/annotations",
             get(list_annotations)
@@ -422,6 +426,10 @@ pub fn build_router_with_state(state: AppState) -> Router {
             get(get_reading_document),
         )
         .route(
+            "/revisions/{revision_id}/page-fidelity-document",
+            get(get_page_fidelity_document),
+        )
+        .route(
             "/revisions/{revision_id}/resources/{content_hash}",
             get(get_revision_resource),
         )
@@ -430,7 +438,7 @@ pub fn build_router_with_state(state: AppState) -> Router {
             "/imports/fixtures/{fixture_slug}",
             post(import_fixture_material),
         )
-        .route("/imports", get(list_imports).post(upload_epub))
+        .route("/imports", get(list_imports).post(upload_document))
         .route(
             "/imports/url",
             post(import_web_url).layer(DefaultBodyLimit::max(16 * 1024)),
@@ -451,7 +459,7 @@ pub fn build_router_with_state(state: AppState) -> Router {
             );
     }
     let protected = protected
-        .layer(DefaultBodyLimit::max(101 * 1024 * 1024))
+        .layer(DefaultBodyLimit::max(201 * 1024 * 1024))
         .route_layer(middleware::from_fn_with_state(
             state.clone(),
             auth_api::require_session,
@@ -755,17 +763,18 @@ async fn delete_material(
     Ok(StatusCode::NO_CONTENT)
 }
 
-async fn download_source_epub(
+async fn download_source_document(
     State(state): State<AppState>,
     Extension(session): Extension<AuthenticatedSession>,
     Path(material_id): Path<MaterialId>,
+    headers: HeaderMap,
 ) -> Result<Response, AppError> {
     if let Some(imports) = state.imports.as_ref() {
         let (file_name, media_type, bytes) = imports
             .source(session.user_id, material_id)
             .await
             .map_err(map_import_error)?;
-        return source_download_response(file_name, media_type, bytes);
+        return source_download_response(file_name, media_type, bytes, &headers);
     }
     let repository = read_repository(&state)?;
     repository.ensure_material_owned(session.user_id, material_id)?;
@@ -773,8 +782,8 @@ async fn download_source_epub(
         .source_downloads
         .get(&material_id)
         .cloned()
-        .ok_or(AppError::NotFound("source_epub"))?;
-    source_download_response(source.file_name, source.media_type, source.bytes)
+        .ok_or(AppError::NotFound("source_document"))?;
+    source_download_response(source.file_name, source.media_type, source.bytes, &headers)
 }
 
 async fn get_revision(
@@ -844,6 +853,19 @@ async fn get_reading_document(
         .ok_or(AppError::NotFound("reading_document"))?;
 
     Ok(Json(document))
+}
+
+async fn get_page_fidelity_document(
+    State(state): State<AppState>,
+    Extension(session): Extension<AuthenticatedSession>,
+    Path(revision_id): Path<DocumentRevisionId>,
+) -> Result<Json<PageFidelityDocument>, AppError> {
+    state
+        .imports()?
+        .page_fidelity_document(session.user_id, revision_id)
+        .await
+        .map(Json)
+        .map_err(map_import_error)
 }
 
 async fn get_revision_resource(
@@ -934,7 +956,7 @@ async fn list_imports(
         .map_err(map_import_error)
 }
 
-async fn upload_epub(
+async fn upload_document(
     State(state): State<AppState>,
     Extension(session): Extension<AuthenticatedSession>,
     headers: HeaderMap,
@@ -959,7 +981,7 @@ async fn upload_epub(
         }
         let file_name = field
             .file_name()
-            .ok_or_else(|| AppError::BadRequest("EPUB file name is required".to_owned()))?
+            .ok_or_else(|| AppError::BadRequest("document file name is required".to_owned()))?
             .to_owned();
         let mut bytes = Vec::new();
         while let Some(chunk) = field
@@ -967,7 +989,10 @@ async fn upload_epub(
             .await
             .map_err(|_| AppError::BadRequest("failed to read multipart upload".to_owned()))?
         {
-            if bytes.len().saturating_add(chunk.len()) > EpubLimits::s1().source_bytes as usize {
+            let upload_limit = PdfLimits::web_v1()
+                .source_bytes
+                .max(EpubLimits::s1().source_bytes);
+            if bytes.len().saturating_add(chunk.len()) > upload_limit as usize {
                 return Err(AppError::PayloadTooLarge);
             }
             bytes.extend_from_slice(&chunk);
@@ -1471,22 +1496,72 @@ fn source_download_response(
     file_name: String,
     media_type: String,
     bytes: Vec<u8>,
+    request_headers: &HeaderMap,
 ) -> Result<Response, AppError> {
     let safe_name = file_name
         .chars()
         .filter(|character| !matches!(character, '"' | '\\'))
         .collect::<String>();
-    Response::builder()
-        .status(StatusCode::OK)
+    let full_length = bytes.len();
+    let requested_range = request_headers
+        .get(header::RANGE)
+        .and_then(|value| value.to_str().ok())
+        .map(|value| parse_byte_range(value, full_length));
+    let (status, body, content_range) = match requested_range {
+        Some(Some((start, end))) => (
+            StatusCode::PARTIAL_CONTENT,
+            bytes[start..=end].to_vec(),
+            Some(format!("bytes {start}-{end}/{full_length}")),
+        ),
+        Some(None) => {
+            return Response::builder()
+                .status(StatusCode::RANGE_NOT_SATISFIABLE)
+                .header(header::CONTENT_RANGE, format!("bytes */{full_length}"))
+                .header("accept-ranges", "bytes")
+                .body(Body::empty())
+                .map_err(|_| AppError::Internal("failed to build range response"));
+        }
+        None => (StatusCode::OK, bytes, None),
+    };
+    let mut response = Response::builder()
+        .status(status)
         .header(header::CONTENT_TYPE, media_type)
         .header(header::CACHE_CONTROL, "private, no-store")
         .header("x-content-type-options", "nosniff")
+        .header("accept-ranges", "bytes")
+        .header(header::CONTENT_LENGTH, body.len().to_string())
         .header(
             header::CONTENT_DISPOSITION,
             format!("attachment; filename=\"{safe_name}\""),
-        )
-        .body(Body::from(bytes))
+        );
+    if let Some(content_range) = content_range {
+        response = response.header(header::CONTENT_RANGE, content_range);
+    }
+    response
+        .body(Body::from(body))
         .map_err(|_| AppError::Internal("failed to build source response"))
+}
+
+fn parse_byte_range(value: &str, length: usize) -> Option<(usize, usize)> {
+    let range = value.strip_prefix("bytes=")?;
+    if range.contains(',') || length == 0 {
+        return None;
+    }
+    let (start, end) = range.split_once('-')?;
+    if start.is_empty() {
+        let suffix = end.parse::<usize>().ok()?.min(length);
+        return (suffix > 0).then(|| (length - suffix, length - 1));
+    }
+    let start = start.parse::<usize>().ok()?;
+    if start >= length {
+        return None;
+    }
+    let end = if end.is_empty() {
+        length - 1
+    } else {
+        end.parse::<usize>().ok()?.min(length - 1)
+    };
+    (start <= end).then_some((start, end))
 }
 
 fn fixture_library_entry(
@@ -1871,6 +1946,28 @@ mod tests {
     }
 
     #[test]
+    fn byte_ranges_support_pdfjs_prefix_open_and_suffix_requests() {
+        assert_eq!(
+            parse_byte_range("bytes=0-65535", 100_000),
+            Some((0, 65_535))
+        );
+        assert_eq!(
+            parse_byte_range("bytes=65536-", 100_000),
+            Some((65_536, 99_999))
+        );
+        assert_eq!(
+            parse_byte_range("bytes=-1024", 100_000),
+            Some((98_976, 99_999))
+        );
+        assert_eq!(
+            parse_byte_range("bytes=99999-200000", 100_000),
+            Some((99_999, 99_999))
+        );
+        assert_eq!(parse_byte_range("bytes=100000-", 100_000), None);
+        assert_eq!(parse_byte_range("bytes=0-1,4-5", 100_000), None);
+    }
+
+    #[test]
     fn deployment_security_rejects_loopback_local_container_bind() {
         let mut local_container = AppConfig::from_env();
         local_container.deployment_mode = "local-container".to_owned();
@@ -1966,7 +2063,7 @@ mod tests {
         let migrations: Vec<SchemaMigration> =
             json_get(build_router(), "/api/v1/schema/migrations").await?;
 
-        assert_eq!(migrations.len(), 11);
+        assert_eq!(migrations.len(), 12);
         Ok(())
     }
 

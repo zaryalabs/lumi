@@ -1,4 +1,9 @@
 import { devices, expect, test } from "@playwright/test";
+import { readFileSync } from "node:fs";
+
+const textLayerPdf = readFileSync(
+  new URL("../fixtures/pdf/text-layer.pdf", import.meta.url),
+);
 
 const supportedEpub = Buffer.from(
   "UEsDBBQAAAAAAAAAIQBvYassFAAAABQAAAAIAAAAbWltZXR5cGVhcHBsaWNhdGlvbi9lcHViK3ppcFBLAwQUAAAACAD9eO1cHBxuKlQAAABrAAAAFgAAAE1FVEEtSU5GL2NvbnRhaW5lci54bWyzsa/IzVEoSy0qzszPs1Uy1DNQsrezSc7PK0nMzEstsrMpys8vScvMSS1GMBXSSnNydAsSSzJslVwDQp30CxKTsxPTU/XyC9KU9O1s9JH06COMAgBQSwMEFAAAAAgA/XjtXFlgKDfMAAAAbQEAABAAAABFUFVCL3BhY2thZ2Uub3BmjdA9bsMwDAXgqwhag0RxstIKEMBbhy49ACEzCVFJFiQmdW9f2c7f2E16JD48EA5j8OpGufAQW91stvpgIaH7xjO98n3NLQQS7FHQgrB4ssc8/BTKqvv8OoJZMnCZUIZsP66BVbfrwDwS8BjP1+paimCeHzAvN2DkExWxwEJBcd/qiDetLplO83MzXiR4rQL1jGv5TdRqTMmzQ6lNzTxejdNKykOiLExlQcwb6pqHKTSKcc3/XTMVftYsiSMtcOWqPaOVn9buQ3M/p/0DUEsDBBQAAAAIAP147Vxvj8P2PgAAAEgAAAAOAAAARVBVQi9uYXYueGh0bWyzySjJzbGzScpPqbSzyUsss7NJVMgoSk2zVSpJrSjRTzbUqwCpULJzzkgsKEktstFPtLPRByvUh2jSB5sAAFBLAwQUAAAACAD9eO1cT/i+nUcAAABNAAAAEgAAAEVQVUIvdGV4dC9jMS54aHRtbLPJKMnNsbNJyk+ptLPJMLRzzkgsKEktstEHsm0K7AJSi4ozi0tS80oUilITcxRcA0KdFDJzC/KLSvRs9AvsbPQhOvXBxgAAUEsBAhQDFAAAAAAAAAAhAG9hqywUAAAAFAAAAAgAAAAAAAAAAAAAAIABAAAAAG1pbWV0eXBlUEsBAhQDFAAAAAgA/XjtXBwcbipUAAAAawAAABYAAAAAAAAAAAAAAIABOgAAAE1FVEEtSU5GL2NvbnRhaW5lci54bWxQSwECFAMUAAAACAD9eO1cWWAoN8wAAABtAQAAEAAAAAAAAAAAAAAAgAHCAAAARVBVQi9wYWNrYWdlLm9wZlBLAQIUAxQAAAAIAP147Vxvj8P2PgAAAEgAAAAOAAAAAAAAAAAAAACAAbwBAABFUFVCL25hdi54aHRtbFBLAQIUAxQAAAAIAP147VxP+L6dRwAAAE0AAAASAAAAAAAAAAAAAACAASYCAABFUFVCL3RleHQvYzEueGh0bWxQSwUGAAAAAAUABQA0AQAAnQIAAAAA",
@@ -191,6 +196,85 @@ test("switches EPUB reader pages through user clicks", async ({ page }) => {
   ).toBeVisible();
 });
 
+test("imports and reads a PDF with selectable text and anchored highlights", async ({
+  page,
+}) => {
+  test.setTimeout(60_000);
+  await page.goto("/");
+  await page
+    .getByRole("button", { name: "Сгенерировать recovery phrase" })
+    .click();
+  await page.getByText("Я сохранил(а) все 24 слова", { exact: false }).click();
+  await page.getByRole("button", { name: "Создать аккаунт" }).click();
+  await expect(
+    page.getByRole("region", { name: "Пустая библиотека" }),
+  ).toBeVisible();
+
+  await page
+    .getByRole("button", { name: "＋ Добавить материал", exact: true })
+    .click();
+  const uploadDialog = page.getByRole("dialog", {
+    name: "Добавить материал",
+  });
+  await uploadDialog.getByRole("tab", { name: "PDF" }).click();
+  await uploadDialog.getByLabel("Файл PDF").setInputFiles({
+    name: "text-layer.pdf",
+    mimeType: "application/pdf",
+    buffer: textLayerPdf,
+  });
+  await uploadDialog
+    .getByRole("button", { name: "Добавить в библиотеку" })
+    .click();
+  const pdfCard = page.getByRole("article", {
+    name: "Материал Lumi PDF text layer fixture",
+  });
+  await expect(
+    pdfCard.getByText("PDF · документ", { exact: true }),
+  ).toBeVisible();
+  await expect(pdfCard.getByText("Готово", { exact: true })).toBeVisible();
+  await pdfCard.getByRole("button", { name: "Читать" }).click();
+
+  const reader = page.getByRole("main", {
+    name: "Чтение PDF Lumi PDF text layer fixture",
+  });
+  await expect(reader).toBeVisible();
+  const firstPage = reader.locator('[data-pdf-page="1"]');
+  await expect(firstPage).toHaveAttribute("data-render-state", "ready");
+  await expect(firstPage.locator("canvas")).toBeVisible();
+  const selectable = firstPage
+    .locator("[data-pdf-text='true']")
+    .filter({ hasText: "searchable" })
+    .first();
+  await expect(selectable).toBeVisible();
+  await selectable.evaluate((element) => {
+    const range = document.createRange();
+    range.selectNodeContents(element);
+    const selection = window.getSelection();
+    selection?.removeAllRanges();
+    selection?.addRange(range);
+    element.dispatchEvent(new MouseEvent("mouseup", { bubbles: true }));
+  });
+  await expect(reader.getByText("Выбранный фрагмент")).toBeVisible();
+  const highlightSaved = page.waitForResponse(
+    (response) =>
+      response.url().endsWith("/annotations") &&
+      response.request().method() === "POST" &&
+      response.ok(),
+  );
+  await reader.getByRole("button", { name: "Выделить" }).click();
+  await highlightSaved;
+  await expect(
+    firstPage.locator(".pdf-annotation-rect.highlight"),
+  ).toBeVisible();
+
+  await reader.getByRole("button", { name: "Следующая страница" }).click();
+  await expect(reader.getByText(/2\/2/)).toBeVisible();
+  await expect(reader.locator('[data-pdf-page="2"]')).toHaveAttribute(
+    "data-render-state",
+    "ready",
+  );
+});
+
 test("persists an API-backed EPUB library lifecycle", async ({ page }) => {
   test.setTimeout(60_000);
   await page.goto("/");
@@ -227,13 +311,21 @@ test("persists an API-backed EPUB library lifecycle", async ({ page }) => {
     .click();
   uploadDialog = page.getByRole("dialog", { name: "Добавить материал" });
   const epubTab = uploadDialog.getByRole("tab", { name: "EPUB" });
+  const pdfTab = uploadDialog.getByRole("tab", { name: "PDF" });
+  const webTab = uploadDialog.getByRole("tab", { name: "Web-ссылка" });
   await epubTab.focus();
   await page.keyboard.press("ArrowRight");
-  await expect(
-    uploadDialog.getByRole("tab", { name: "Web-ссылка" }),
-  ).toHaveAttribute("aria-selected", "true");
+  await expect(pdfTab).toHaveAttribute("aria-selected", "true");
+  await expect(pdfTab).toBeFocused();
+  await page.keyboard.press("ArrowRight");
+  await expect(webTab).toHaveAttribute("aria-selected", "true");
+  await expect(webTab).toBeFocused();
+  await page.keyboard.press("ArrowLeft");
+  await expect(pdfTab).toHaveAttribute("aria-selected", "true");
+  await expect(pdfTab).toBeFocused();
   await page.keyboard.press("ArrowLeft");
   await expect(epubTab).toHaveAttribute("aria-selected", "true");
+  await expect(epubTab).toBeFocused();
   await uploadDialog.getByLabel("Файл EPUB").setInputFiles({
     name: "browser.epub",
     mimeType: "application/epub+zip",

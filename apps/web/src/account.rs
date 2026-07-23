@@ -184,7 +184,7 @@ pub(crate) fn AccountGate() -> Element {
                     }
                     }
                     if let AppRoute::Reader(material_id) = route() {
-                        crate::reader::ReaderApp {
+                        crate::pdf_reader::ReaderRoute {
                             material_id,
                             csrf_token: csrf.read().clone(),
                             on_close: move |_| {
@@ -461,6 +461,12 @@ fn LibraryApp(csrf_token: String, on_open_reader: EventHandler<Uuid>) -> Element
             .iter()
             .any(|feature| feature == "public-web-url-import")
     });
+    let pdf_import_enabled = capabilities.read().as_ref().is_some_and(|value| {
+        value
+            .features
+            .iter()
+            .any(|feature| feature == "pdf-fixed-layout-import")
+    });
     let telegram_enabled = capabilities.read().as_ref().is_some_and(|value| {
         value
             .features
@@ -726,6 +732,7 @@ fn LibraryApp(csrf_token: String, on_open_reader: EventHandler<Uuid>) -> Element
             AddMaterialDialog {
                 csrf_token: csrf_token.clone(),
                 web_import_enabled,
+                pdf_import_enabled,
                 capabilities_loaded,
                 on_close: move |_| {
                     add_open.set(false);
@@ -893,7 +900,7 @@ fn MaterialCard(
 }
 
 #[derive(Clone)]
-struct SelectedEpub {
+struct SelectedUpload {
     name: String,
     bytes: Vec<u8>,
 }
@@ -901,6 +908,7 @@ struct SelectedEpub {
 #[derive(Clone, Copy, Eq, PartialEq)]
 enum AddSourceMode {
     Epub,
+    Pdf,
     Web,
 }
 
@@ -908,12 +916,13 @@ enum AddSourceMode {
 fn AddMaterialDialog(
     csrf_token: String,
     web_import_enabled: bool,
+    pdf_import_enabled: bool,
     capabilities_loaded: bool,
     on_close: EventHandler<()>,
     on_accepted: EventHandler<AcceptedImport>,
 ) -> Element {
     let mut mode = use_signal(|| AddSourceMode::Epub);
-    let mut selected = use_signal(|| Option::<SelectedEpub>::None);
+    let mut selected = use_signal(|| Option::<SelectedUpload>::None);
     let mut url = use_signal(String::new);
     let mut busy = use_signal(|| false);
     let mut error = use_signal(String::new);
@@ -931,8 +940,9 @@ fn AddMaterialDialog(
                 button { class: "icon-action", r#type: "button", aria_label: "Закрыть загрузку", disabled: busy(), onclick: move |_| on_close.call(()), "×" }
             }
             div { class: "source-tabs", role: "tablist", aria_label: "Тип источника",
-                button { id: "source-tab-epub", class: "secondary-action", r#type: "button", role: "tab", aria_selected: mode() == AddSourceMode::Epub, aria_controls: "source-panel-epub", tabindex: if mode() == AddSourceMode::Epub { "0" } else { "-1" }, onclick: move |_| mode.set(AddSourceMode::Epub), onkeydown: move |event| if matches!(event.key(), Key::ArrowRight | Key::ArrowLeft) && web_import_enabled { event.prevent_default(); mode.set(AddSourceMode::Web); focus_account_node("source-tab-web"); }, "EPUB" }
-                button { id: "source-tab-web", class: "secondary-action", r#type: "button", role: "tab", aria_selected: mode() == AddSourceMode::Web, aria_controls: "source-panel-web", aria_disabled: !web_import_enabled, disabled: !web_import_enabled, tabindex: if mode() == AddSourceMode::Web { "0" } else { "-1" }, onclick: move |_| mode.set(AddSourceMode::Web), onkeydown: move |event| if matches!(event.key(), Key::ArrowRight | Key::ArrowLeft) { event.prevent_default(); mode.set(AddSourceMode::Epub); focus_account_node("source-tab-epub"); }, "Web-ссылка" }
+                button { id: "source-tab-epub", class: "secondary-action", r#type: "button", role: "tab", aria_selected: mode() == AddSourceMode::Epub, aria_controls: "source-panel-epub", tabindex: if mode() == AddSourceMode::Epub { "0" } else { "-1" }, onclick: move |_| { mode.set(AddSourceMode::Epub); selected.set(None); }, onkeydown: move |event| if event.key() == Key::ArrowRight && pdf_import_enabled { event.prevent_default(); mode.set(AddSourceMode::Pdf); selected.set(None); defer_account_focus("source-tab-pdf"); }, "EPUB" }
+                button { id: "source-tab-pdf", class: "secondary-action", r#type: "button", role: "tab", aria_selected: mode() == AddSourceMode::Pdf, aria_controls: "source-panel-pdf", aria_disabled: !pdf_import_enabled, disabled: !pdf_import_enabled, tabindex: if mode() == AddSourceMode::Pdf { "0" } else { "-1" }, onclick: move |_| { mode.set(AddSourceMode::Pdf); selected.set(None); }, onkeydown: move |event| if event.key() == Key::ArrowLeft { event.prevent_default(); mode.set(AddSourceMode::Epub); selected.set(None); defer_account_focus("source-tab-epub"); } else if event.key() == Key::ArrowRight && web_import_enabled { event.prevent_default(); mode.set(AddSourceMode::Web); selected.set(None); defer_account_focus("source-tab-web"); }, "PDF" }
+                button { id: "source-tab-web", class: "secondary-action", r#type: "button", role: "tab", aria_selected: mode() == AddSourceMode::Web, aria_controls: "source-panel-web", aria_disabled: !web_import_enabled, disabled: !web_import_enabled, tabindex: if mode() == AddSourceMode::Web { "0" } else { "-1" }, onclick: move |_| { mode.set(AddSourceMode::Web); selected.set(None); }, onkeydown: move |event| if event.key() == Key::ArrowLeft && pdf_import_enabled { event.prevent_default(); mode.set(AddSourceMode::Pdf); defer_account_focus("source-tab-pdf"); } else if event.key() == Key::ArrowRight { event.prevent_default(); mode.set(AddSourceMode::Epub); defer_account_focus("source-tab-epub"); }, "Web-ссылка" }
             }
             if !capabilities_loaded {
                 p { class: "capability-note", role: "status", "Проверяем поддержку импорта по URL…" }
@@ -955,13 +965,39 @@ fn AddMaterialDialog(
                             spawn(async move {
                                 let name = file.name();
                                 match file.read_bytes().await {
-                                    Ok(bytes) => selected.set(Some(SelectedEpub { name, bytes: bytes.to_vec() })),
+                                    Ok(bytes) => selected.set(Some(SelectedUpload { name, bytes: bytes.to_vec() })),
                                     Err(_) => error.set("Не удалось прочитать выбранный EPUB.".to_owned()),
                                 }
                             });
                         },
                     }
                 }
+                }
+            } else if mode() == AddSourceMode::Pdf {
+                div { id: "source-panel-pdf", role: "tabpanel", aria_labelledby: "source-tab-pdf",
+                    p { "PDF до 200 MiB. Lumi сохраняет исходную верстку страниц и извлекает доступный текстовый слой." }
+                    label { class: "upload-dropzone",
+                        span { class: "upload-icon", aria_hidden: "true", "＋" }
+                        strong { if let Some(upload) = selected.read().as_ref() { "{upload.name}" } else { "Выберите файл PDF" } }
+                        small { if let Some(upload) = selected.read().as_ref() { "{upload.bytes.len()} байт" } else { ".pdf · до 200 MiB" } }
+                        input {
+                            r#type: "file",
+                            name: "pdf_file",
+                            accept: ".pdf,application/pdf",
+                            disabled: busy(),
+                            aria_label: "Файл PDF",
+                            onchange: move |event| {
+                                let Some(file) = event.files().into_iter().next() else { return; };
+                                spawn(async move {
+                                    let name = file.name();
+                                    match file.read_bytes().await {
+                                        Ok(bytes) => selected.set(Some(SelectedUpload { name, bytes: bytes.to_vec() })),
+                                        Err(_) => error.set("Не удалось прочитать выбранный PDF.".to_owned()),
+                                    }
+                                });
+                            },
+                        }
+                    }
                 }
             } else {
                 div { id: "source-panel-web", role: "tabpanel", aria_labelledby: "source-tab-web",
@@ -985,7 +1021,7 @@ fn AddMaterialDialog(
             }
             div { class: "dialog-actions",
                 button { class: "secondary-action", r#type: "button", disabled: busy(), onclick: move |_| on_close.call(()), "Отмена" }
-                button { class: "primary-action", r#type: "button", disabled: busy() || (mode() == AddSourceMode::Epub && selected.read().is_none()) || (mode() == AddSourceMode::Web && url().trim().is_empty()), onclick: move |_| {
+                button { class: "primary-action", r#type: "button", disabled: busy() || (matches!(mode(), AddSourceMode::Epub | AddSourceMode::Pdf) && selected.read().is_none()) || (mode() == AddSourceMode::Web && url().trim().is_empty()), onclick: move |_| {
                     let selected_upload = selected.read().clone();
                     let source_url = url();
                     let source_mode = mode();
@@ -995,7 +1031,11 @@ fn AddMaterialDialog(
                     spawn(async move {
                         let result = match source_mode {
                             AddSourceMode::Epub => match selected_upload.as_ref() {
-                                Some(upload) => upload_epub(&csrf, upload).await,
+                                Some(upload) => upload_document(&csrf, upload).await,
+                                None => return,
+                            },
+                            AddSourceMode::Pdf => match selected_upload.as_ref() {
+                                Some(upload) => upload_document(&csrf, upload).await,
                                 None => return,
                             },
                             AddSourceMode::Web => import_web_url(&csrf, source_url.trim()).await,
@@ -1280,16 +1320,16 @@ async fn logout(csrf: &str) -> Result<(), ApiError> {
     }
 }
 
-async fn upload_epub(csrf: &str, upload: &SelectedEpub) -> Result<AcceptedImport, ApiError> {
+async fn upload_document(csrf: &str, upload: &SelectedUpload) -> Result<AcceptedImport, ApiError> {
     let bytes = js_sys::Uint8Array::from(upload.bytes.as_slice());
     let parts = js_sys::Array::new();
     parts.push(&bytes);
     let blob = web_sys::Blob::new_with_u8_array_sequence(&parts)
-        .map_err(|_| ApiError::Message("Не удалось подготовить EPUB к отправке.".to_owned()))?;
+        .map_err(|_| ApiError::Message("Не удалось подготовить документ к отправке.".to_owned()))?;
     let form = web_sys::FormData::new()
         .map_err(|_| ApiError::Message("Browser FormData недоступен.".to_owned()))?;
     form.append_with_blob_and_filename("file", &blob, &upload.name)
-        .map_err(|_| ApiError::Message("Не удалось добавить EPUB в форму.".to_owned()))?;
+        .map_err(|_| ApiError::Message("Не удалось добавить документ в форму.".to_owned()))?;
     let request = Request::post(&format!("{API_BASE}/imports"))
         .credentials(RequestCredentials::Include)
         .header("X-Lumi-CSRF", csrf)
@@ -1482,6 +1522,7 @@ fn job_stage_label(stage: lumi_core::JobStage) -> &'static str {
         lumi_core::JobStage::FetchingLinkedSources => "Загружаем связанные страницы",
         lumi_core::JobStage::ExtractingContent => "Извлекаем основной текст",
         lumi_core::JobStage::ValidatingContainer => "Проверяем контейнер",
+        lumi_core::JobStage::InspectingDocument => "Проверяем PDF",
         lumi_core::JobStage::Normalizing => "Нормализуем главы",
         lumi_core::JobStage::Persisting => "Публикуем результат",
         lumi_core::JobStage::ReaderDocumentBuilt => "Готовим документ чтения",
@@ -1492,6 +1533,7 @@ fn job_stage_label(stage: lumi_core::JobStage) -> &'static str {
 fn material_format_short(kind: &MaterialKind) -> &'static str {
     match kind {
         MaterialKind::Epub => "EPUB",
+        MaterialKind::Pdf => "PDF",
         MaterialKind::WebPage => "WEB",
         MaterialKind::Telegram => "TG",
     }
@@ -1500,6 +1542,7 @@ fn material_format_short(kind: &MaterialKind) -> &'static str {
 fn material_format_label(kind: &MaterialKind) -> &'static str {
     match kind {
         MaterialKind::Epub => "EPUB · книга",
+        MaterialKind::Pdf => "PDF · документ",
         MaterialKind::WebPage => "Web · статья",
         MaterialKind::Telegram => "Telegram · составной материал",
     }
@@ -1508,6 +1551,7 @@ fn material_format_label(kind: &MaterialKind) -> &'static str {
 fn material_source_download_label(kind: &MaterialKind) -> &'static str {
     match kind {
         MaterialKind::Epub => "Скачать исходник",
+        MaterialKind::Pdf => "Скачать исходный PDF",
         MaterialKind::WebPage => "Скачать snapshot",
         MaterialKind::Telegram => "Скачать исходное Telegram-сообщение",
     }

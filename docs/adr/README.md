@@ -13,6 +13,10 @@ plugin, AI, search and account/auth boundaries.
   историческая webhook boundary;
 - [`0012`](0012-embedded-telegram-bot-settings.md) — встроенный Telegram
   listener и настройка bot token через UI.
+- [`0013`](0013-telegram-composite-import.md) — составной Telegram source и
+  durable media groups;
+- [`0014`](0014-pdf-fixed-layout-import-and-web-reader.md) — fixed-layout PDF
+  import, page anchors и Web renderer.
 
 ## Template
 

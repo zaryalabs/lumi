@@ -88,6 +88,9 @@ make db-migrate
 Настройка real EPUB import, blob root и restart recovery описана в
 [real-epub-import.md](real-epub-import.md).
 
+PDF import, Poppler и подготовка PDF.js assets описаны в
+[pdf-import.md](pdf-import.md).
+
 Проверка API-backed библиотеки, lifecycle-команд и source download описана в
 [api-backed-library.md](api-backed-library.md).
 

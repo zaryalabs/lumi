@@ -1,0 +1,11 @@
+{
+  "name": "lumi-web-assets",
+  "private": true,
+  "version": "0.1.0",
+  "scripts": {
+    "prepare:pdfjs": "node scripts/prepare-pdfjs.mjs"
+  },
+  "dependencies": {
+    "pdfjs-dist": "6.1.200"
+  }
+}

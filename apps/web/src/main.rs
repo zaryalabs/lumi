@@ -3,6 +3,8 @@ use dioxus::prelude::*;
 #[cfg(target_arch = "wasm32")]
 mod account;
 #[cfg(target_arch = "wasm32")]
+mod pdf_reader;
+#[cfg(target_arch = "wasm32")]
 mod reader;
 
 fn main() {
@@ -15,6 +17,7 @@ fn main() {
 fn App() -> Element {
     #[cfg(target_arch = "wasm32")]
     {
+        let _ = asset!("/assets/vendor/pdfjs", AssetOptions::folder());
         use_effect(|| {
             if let Some(root) = web_sys::window()
                 .and_then(|window| window.document())
@@ -25,6 +28,13 @@ fn App() -> Element {
         });
         rsx! {
             document::Stylesheet { href: asset!("/assets/main.css") }
+            document::Script {
+                src: asset!(
+                    "/assets/pdf-reader.js",
+                    AssetOptions::js().with_module(true)
+                ),
+                r#type: "module",
+            }
             document::Meta { name: "theme-color", content: "#f4f0e8" }
             account::AccountGate {}
         }

@@ -166,6 +166,13 @@ pub fn s1_schema_migrations() -> Vec<SchemaMigration> {
                 "Composite Telegram envelopes, partial artifacts and durable media groups."
                     .to_owned(),
         },
+        SchemaMigration {
+            id: "s1-0008-pdf-fixed-layout".to_owned(),
+            schema_version: DOMAIN_SCHEMA_VERSION.to_owned(),
+            description:
+                "PDF source imports, fixed-layout packages and page fidelity reader contracts."
+                    .to_owned(),
+        },
     ]);
     migrations
 }
@@ -276,6 +283,8 @@ pub struct UpdateLibraryStateCommand {
 pub enum MaterialKind {
     /// DRM-free reflowable EPUB imported through the S0 fixture path.
     Epub,
+    /// Fixed-layout PDF document rendered through a page fidelity surface.
+    Pdf,
     /// Public web page captured into an immutable text-first snapshot.
     WebPage,
     /// Direct or forwarded Telegram text normalized into the common reader.
@@ -311,6 +320,8 @@ pub struct SourceIdentity {
 pub enum SourceFormat {
     /// EPUB source.
     Epub,
+    /// PDF source.
+    Pdf,
     /// Immutable web page snapshot.
     WebPage,
     /// Telegram Bot API message snapshot.
@@ -451,6 +462,340 @@ pub struct ReadingDocument {
     pub nodes: Vec<ReadingNode>,
     /// Table-of-contents entries.
     pub navigation: Vec<NavigationItem>,
+}
+
+/// Reader-facing document for PDF and other fixed-layout revisions.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct PageFidelityDocument {
+    /// Material id represented by this document.
+    pub material_id: MaterialId,
+    /// Revision id represented by this document.
+    pub revision_id: DocumentRevisionId,
+    /// Reader-facing title.
+    pub title: String,
+    /// Creator names for reader chrome and export.
+    pub creators: Vec<String>,
+    /// Stable physical page models in document order.
+    pub pages: Vec<PdfPage>,
+    /// PDF outline/bookmark tree.
+    pub outline: Vec<PdfOutlineItem>,
+    /// Links grouped by source page.
+    pub links: Vec<PdfLink>,
+    /// State of the document-wide text layer.
+    pub text_layer_state: PdfTextLayerState,
+}
+
+/// Fixed-layout normalized package persisted for one PDF revision.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct FixedLayoutContentPackage {
+    /// Stable package id.
+    pub id: NormalizedPackageId,
+    /// Revision represented by this package.
+    pub revision_id: DocumentRevisionId,
+    /// Package manifest shared with reflowable packages.
+    pub manifest: NormalizedPackageManifest,
+    /// Stable physical page models.
+    pub pages: Vec<PdfPage>,
+    /// Extracted native or OCR text layers.
+    pub text_layers: Vec<PdfTextLayer>,
+    /// PDF outline/bookmark tree.
+    pub outline: Vec<PdfOutlineItem>,
+    /// Internal and external page links.
+    pub links: Vec<PdfLink>,
+    /// Resource manifest for source and derived assets.
+    pub resources: BlobManifest,
+    /// Structured diagnostics retained with the package.
+    pub diagnostics: Vec<ImportDiagnostic>,
+}
+
+impl FixedLayoutContentPackage {
+    /// Build the reader-facing page fidelity projection.
+    #[must_use]
+    pub fn page_fidelity_document(&self, material_id: MaterialId) -> PageFidelityDocument {
+        PageFidelityDocument {
+            material_id,
+            revision_id: self.revision_id,
+            title: self.manifest.title.clone(),
+            creators: self.manifest.creators.clone(),
+            pages: self.pages.clone(),
+            outline: self.outline.clone(),
+            links: self.links.clone(),
+            text_layer_state: aggregate_text_layer_state(&self.pages),
+        }
+    }
+}
+
+fn aggregate_text_layer_state(pages: &[PdfPage]) -> PdfTextLayerState {
+    let mut has_native = false;
+    let mut has_ocr = false;
+    let mut has_failed = false;
+    for page in pages {
+        match page.text_layer_state {
+            PdfTextLayerState::Native => has_native = true,
+            PdfTextLayerState::Ocr => has_ocr = true,
+            PdfTextLayerState::Mixed => {
+                has_native = true;
+                has_ocr = true;
+            }
+            PdfTextLayerState::None => {}
+            PdfTextLayerState::Failed => has_failed = true,
+        }
+    }
+    if has_native && has_ocr {
+        PdfTextLayerState::Mixed
+    } else if has_native {
+        PdfTextLayerState::Native
+    } else if has_ocr {
+        PdfTextLayerState::Ocr
+    } else if has_failed {
+        PdfTextLayerState::Failed
+    } else {
+        PdfTextLayerState::None
+    }
+}
+
+/// PDF document metadata extracted without executing active content.
+#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+pub struct PdfMetadata {
+    /// Document title.
+    pub title: Option<String>,
+    /// Document author.
+    pub author: Option<String>,
+    /// Document subject.
+    pub subject: Option<String>,
+    /// Document keywords.
+    pub keywords: Vec<String>,
+    /// Creating application.
+    pub creator: Option<String>,
+    /// Producing application.
+    pub producer: Option<String>,
+    /// PDF version reported by the parser.
+    pub pdf_version: Option<String>,
+}
+
+/// PDF encryption and access state.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PdfSecurityState {
+    /// The document is not encrypted.
+    None,
+    /// A password is required before import can continue.
+    PasswordRequired,
+    /// The document was opened with a supplied password.
+    Unlocked,
+    /// The document uses unsupported DRM.
+    UnsupportedDrm,
+    /// The document is malformed.
+    Malformed,
+    /// Suspicious active content or actions were found.
+    SuspiciousActions,
+}
+
+/// Availability and provenance of a PDF page text layer.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PdfTextLayerState {
+    /// No extractable text is available.
+    None,
+    /// Text was extracted from native PDF objects.
+    Native,
+    /// Text was produced by OCR.
+    Ocr,
+    /// Native and OCR text coexist.
+    Mixed,
+    /// Text extraction failed.
+    Failed,
+}
+
+/// Rectangle in a PDF page coordinate system.
+#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
+pub struct PdfRect {
+    /// Left coordinate.
+    pub x: f32,
+    /// Top coordinate after crop and rotation are applied.
+    pub y: f32,
+    /// Rectangle width.
+    pub width: f32,
+    /// Rectangle height.
+    pub height: f32,
+}
+
+impl PartialEq for PdfRect {
+    fn eq(&self, other: &Self) -> bool {
+        self.x.to_bits() == other.x.to_bits()
+            && self.y.to_bits() == other.y.to_bits()
+            && self.width.to_bits() == other.width.to_bits()
+            && self.height.to_bits() == other.height.to_bits()
+    }
+}
+
+impl Eq for PdfRect {}
+
+/// Four-corner PDF text geometry in canonical page points.
+#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
+pub struct PdfQuad {
+    /// Top-left X coordinate.
+    pub x1: f32,
+    /// Top-left Y coordinate.
+    pub y1: f32,
+    /// Top-right X coordinate.
+    pub x2: f32,
+    /// Top-right Y coordinate.
+    pub y2: f32,
+    /// Bottom-left X coordinate.
+    pub x3: f32,
+    /// Bottom-left Y coordinate.
+    pub y3: f32,
+    /// Bottom-right X coordinate.
+    pub x4: f32,
+    /// Bottom-right Y coordinate.
+    pub y4: f32,
+}
+
+impl PartialEq for PdfQuad {
+    fn eq(&self, other: &Self) -> bool {
+        self.x1.to_bits() == other.x1.to_bits()
+            && self.y1.to_bits() == other.y1.to_bits()
+            && self.x2.to_bits() == other.x2.to_bits()
+            && self.y2.to_bits() == other.y2.to_bits()
+            && self.x3.to_bits() == other.x3.to_bits()
+            && self.y3.to_bits() == other.y3.to_bits()
+            && self.x4.to_bits() == other.x4.to_bits()
+            && self.y4.to_bits() == other.y4.to_bits()
+    }
+}
+
+impl Eq for PdfQuad {}
+
+/// Stable page model for a fixed-layout PDF revision.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct PdfPage {
+    /// Zero-based physical page index.
+    pub page_index: u32,
+    /// User-visible page label.
+    pub page_label: String,
+    /// MediaBox in canonical page coordinates.
+    pub media_box: PdfRect,
+    /// CropBox in canonical page coordinates.
+    pub crop_box: PdfRect,
+    /// Clockwise rotation in degrees.
+    pub rotation: i16,
+    /// Visible page width in PDF points.
+    pub width_points: f32,
+    /// Visible page height in PDF points.
+    pub height_points: f32,
+    /// Content hash used to validate page anchors.
+    pub page_hash: String,
+    /// Text layer availability for this page.
+    pub text_layer_state: PdfTextLayerState,
+    /// Optional thumbnail resource hash.
+    pub thumbnail_resource_hash: Option<String>,
+    /// Stable diagnostic codes affecting this page.
+    pub import_issues: Vec<String>,
+}
+
+/// PDF outline entry used for reader navigation.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct PdfOutlineItem {
+    /// Stable outline id.
+    pub id: String,
+    /// User-visible label.
+    pub label: String,
+    /// Zero-based target page when resolvable.
+    pub target_page_index: Option<u32>,
+    /// Optional target rectangle.
+    pub target_rect: Option<PdfRect>,
+    /// Nested outline entries.
+    pub children: Vec<PdfOutlineItem>,
+}
+
+/// PDF link behavior.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", tag = "type")]
+pub enum PdfLinkTarget {
+    /// Link to another page in the same document.
+    Internal {
+        /// Zero-based target page.
+        page_index: u32,
+    },
+    /// Sanitized external HTTP(S) link.
+    External {
+        /// Absolute URL opened only after explicit user action.
+        url: String,
+    },
+}
+
+/// Link hit area on a PDF page.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct PdfLink {
+    /// Zero-based source page index.
+    pub page_index: u32,
+    /// Link hit area in canonical page points.
+    pub rect: PdfRect,
+    /// Navigation target.
+    pub target: PdfLinkTarget,
+}
+
+/// Extracted text layer for one PDF page.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct PdfTextLayer {
+    /// Zero-based page index.
+    pub page_index: u32,
+    /// Engine that created this layer.
+    pub extraction_engine: String,
+    /// Versioned extraction rules marker.
+    pub extraction_revision: String,
+    /// Best-effort language hints.
+    pub language_hints: Vec<String>,
+    /// Confidence in reconstructed reading order from zero to one.
+    pub reading_order_confidence: f32,
+    /// Ordered text blocks.
+    pub blocks: Vec<PdfTextBlock>,
+}
+
+/// Text block reconstructed from one PDF page.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct PdfTextBlock {
+    /// Stable block index within the page.
+    pub block_index: u32,
+    /// Block bounds.
+    pub bbox: PdfRect,
+    /// Reconstructed block text.
+    pub text: String,
+    /// Ordered lines in the block.
+    pub lines: Vec<PdfTextLine>,
+}
+
+/// Text line reconstructed from one PDF block.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct PdfTextLine {
+    /// Stable line index within the block.
+    pub line_index: u32,
+    /// Line bounds.
+    pub bbox: PdfRect,
+    /// Reconstructed line text.
+    pub text: String,
+    /// Ordered spans in the line.
+    pub spans: Vec<PdfTextSpan>,
+}
+
+/// Text span and geometry reconstructed from a PDF page.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct PdfTextSpan {
+    /// Stable span index within the line.
+    pub span_index: u32,
+    /// Span text.
+    pub text: String,
+    /// Span bounds.
+    pub bbox: PdfRect,
+    /// Precise glyph or run quads when provided by the engine.
+    pub quads: Vec<PdfQuad>,
+    /// Optional source font name.
+    pub font_name: Option<String>,
+    /// Optional font size in points.
+    pub font_size: Option<f32>,
+    /// Text direction marker such as `ltr`, `rtl` or `ttb`.
+    pub direction: Option<String>,
 }
 
 /// Reader-facing node independent of DOM, WebView or Dioxus types.
@@ -635,6 +980,8 @@ pub enum BlobRole {
 pub enum SourceLocator {
     /// EPUB-specific source locator.
     Epub(EpubSourceLocator),
+    /// PDF page and optional text geometry provenance.
+    Pdf(PdfSourceLocator),
     /// Web snapshot DOM provenance.
     Web(WebSourceLocator),
     /// Telegram message provenance.
@@ -712,6 +1059,35 @@ pub struct EpubSourceLocator {
     pub text_offset_end: Option<usize>,
     /// EPUB CFI compatibility field when available.
     pub epub_cfi: Option<String>,
+}
+
+/// PDF-specific source locator retained alongside the shared anchor.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct PdfSourceLocator {
+    /// SHA-256 checksum of the immutable source PDF.
+    pub pdf_file_checksum: String,
+    /// Zero-based physical page index.
+    pub page_index: u32,
+    /// User-visible page label.
+    pub page_label: String,
+    /// Hash of the imported page model.
+    pub page_revision_hash: String,
+    /// Bounding rectangles in canonical page points.
+    pub page_rects: Vec<PdfRect>,
+    /// Precise selection quads in canonical page points.
+    pub page_quads: Vec<PdfQuad>,
+    /// Optional text layer extraction revision.
+    pub text_layer_revision: Option<String>,
+    /// Optional start block index.
+    pub text_block_start: Option<u32>,
+    /// Optional end block index.
+    pub text_block_end: Option<u32>,
+    /// Optional Unicode scalar start offset.
+    pub text_char_start: Option<usize>,
+    /// Optional Unicode scalar end offset.
+    pub text_char_end: Option<usize>,
+    /// Normalized page rectangles used only as a recovery fallback.
+    pub normalized_rects: Vec<PdfRect>,
 }
 
 /// Source-backed reader anchor.
@@ -1105,6 +1481,8 @@ pub enum JobStage {
     ExtractingContent,
     /// EPUB container and package metadata are being validated.
     ValidatingContainer,
+    /// A fixed-layout document is being inspected for pages, metadata and text.
+    InspectingDocument,
     /// Normalization is in progress.
     Normalizing,
     /// Immutable blobs and package records are being persisted.
@@ -1301,6 +1679,6 @@ mod tests {
     fn migrations_cover_s1_contract_groups() {
         let migrations = s1_schema_migrations();
 
-        assert_eq!(migrations.len(), 11);
+        assert_eq!(migrations.len(), 12);
     }
 }
