@@ -49,7 +49,8 @@ Responsibilities:
 - `rooms/shares` - social/shared reading spaces and public/share objects.
 - `settings/telegram` - admin-only instance-wide bot configuration and
   listener status.
-- `providers/telegram` - account pairing over the embedded transport.
+- `settings/telegram` одновременно определяет администратора-владельца
+  embedded transport; отдельного provider pairing API нет.
 - `mcp` - external agent integration with scoped tools.
 
 ### Contract rules

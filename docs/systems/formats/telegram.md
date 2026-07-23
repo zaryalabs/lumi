@@ -41,8 +41,8 @@ server-side import inbox аккаунта, а затем обычная синх
 
 ## Пользовательские сценарии
 
-- Пользователь создает или открывает web-аккаунт Lumi и привязывает к нему
-  Telegram-аккаунт через pairing token.
+- Администратор добавляет системного бота, после чего первое сообщение в
+  private chat автоматически привязывает Telegram identity к его Lumi account.
 - Пользователь пересылает боту пост из канала, сообщение из чата или несколько
   сообщений подряд.
 - Пользователь отправляет ссылку на публичный `t.me` пост.
@@ -62,20 +62,13 @@ server-side import inbox аккаунта, а затем обычная синх
 
 ### Привязка пользователя
 
-- Lumi создает системного Telegram-бота.
-- Пользователь привязывает Telegram через deep link вида
-  `/start <pairing_token>`, созданный в приложении Lumi.
-- `pairing_token` должен быть одноразовым, короткоживущим и связанным с Lumi
-  `user_id` web-аккаунта.
-- После `/start` backend сохраняет связь между Lumi user id и Telegram
-  `user_id` / private `chat_id`.
-- Бот может поддерживать fallback-сценарий: пользователь сначала пишет боту, а
-  бот выдает код или ссылку, которую нужно подтвердить в авторизованной web
-  session Lumi.
-- Один Lumi user может привязать несколько Telegram identities только если это
-  явно разрешено настройками аккаунта.
-- Один Telegram identity не может быть одновременно привязан к нескольким Lumi
-  users без явного re-link flow.
+- Администратор настраивает системного Telegram-бота через BotFather token.
+- Backend сохраняет `user_id` и `device_id` администратора вместе с глобальной
+  настройкой бота.
+- Первое валидное сообщение в private chat сохраняет связь с Telegram
+  `user_id` / `chat_id` и сразу проходит в import pipeline.
+- Один бот допускает одну активную Telegram identity; другой sender не может
+  перехватить уже созданную связь.
 
 ### Прием материалов
 
@@ -153,12 +146,11 @@ backend может принять Telegram update, скачать файл, со
 
 Базовые команды:
 
-- `/start` - начало и pairing.
+- `/start` - справка о готовности бота; параметр и подтверждение не нужны.
 - `/help` - краткое описание поддерживаемых действий.
 - `/status` - последние материалы и их состояние.
 - `/devices` - состояние доставки по устройствам, если это не раскрывает лишние
   данные.
-- `/unlink` - отвязать Telegram identity.
 - `/batch` - включить режим сбора нескольких сообщений в один материал.
 - `/done` - завершить текущий batch.
 - `/cancel` - отменить текущий batch или processing job.
@@ -226,7 +218,6 @@ Telegram Bot API update
 Сущности:
 
 - `TelegramIdentity` - связь Telegram user/chat с Lumi user.
-- `TelegramPairingToken` - одноразовый токен привязки.
 - `TelegramUpdateLog` - idempotency log по `update_id`.
 - `TelegramIngestionJob` - durable job обработки входящего сообщения.
 - `TelegramBufferedPayload` - raw payload, files metadata и extracted content.
@@ -275,8 +266,8 @@ TelegramSourceRef {
 2. Проверить private-chat boundary и basic payload limits.
 3. Записать `TelegramUpdateLog` для idempotency.
 4. Определить Telegram sender и найти `TelegramIdentity`.
-5. Если identity не привязан, обработать только `/start`, pairing или fallback
-   flow, который отправляет пользователя в web-аккаунт Lumi.
+5. Если identity ещё не создана, атомарно привязать sender к администратору,
+   сохранившему глобальную настройку бота.
 6. Атомарно сохранить immutable envelope и общий durable import job; для
    `media_group_id` добавить update в PostgreSQL accumulator.
 7. Подтвердить durable admission и продвинуть polling offset.
@@ -292,7 +283,7 @@ TelegramSourceRef {
 - `teloxide-core` - core популярного Rust framework для типизированных Telegram
   Bot API types и requests; lifecycle long polling и retries контролирует
   `lumi-server`.
-- `axum` - settings, pairing и основной backend routing.
+- `axum` - admin settings и основной backend routing.
 - `serde` / `serde_json` - хранение raw update payload и typed conversion.
 - `sqlx` - durable storage для identities, jobs, update log и delivery state.
 - `reqwest` или HTTP client, используемый `teloxide`, - скачивание файлов через
@@ -309,7 +300,6 @@ TelegramSourceRef {
 - `accounts` / `web_accounts`;
 - `account_import_jobs`;
 - `telegram_identities`;
-- `telegram_pairing_tokens`;
 - `telegram_update_log`;
 - `telegram_ingestion_jobs`;
 - `telegram_buffered_payloads`;

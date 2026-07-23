@@ -57,6 +57,8 @@ struct ConfiguredBot {
     fingerprint: String,
     bot_id: u64,
     username: Option<String>,
+    owner_user_id: Option<Uuid>,
+    owner_device_id: Option<Uuid>,
     revision: u64,
     last_validated_at: OffsetDateTime,
 }
@@ -80,7 +82,7 @@ impl TelegramSettingsStore {
 
     async fn load(&self) -> Result<Option<ConfiguredBot>, TelegramRuntimeError> {
         let row = sqlx::query(
-            "SELECT encrypted_token, encryption_nonce, token_fingerprint, bot_id, bot_username, configuration_revision, last_validated_at FROM telegram_bot_settings WHERE singleton_id = TRUE",
+            "SELECT encrypted_token, encryption_nonce, token_fingerprint, bot_id, bot_username, configured_by_user_id, configured_by_device_id, configuration_revision, last_validated_at FROM telegram_bot_settings WHERE singleton_id = TRUE",
         )
         .fetch_optional(&self.pool)
         .await
@@ -100,6 +102,12 @@ impl TelegramSettingsStore {
             fingerprint: row.try_get("token_fingerprint").map_err(storage_error)?,
             bot_id: u64::try_from(bot_id).map_err(|_| TelegramRuntimeError::Storage)?,
             username: row.try_get("bot_username").map_err(storage_error)?,
+            owner_user_id: row
+                .try_get("configured_by_user_id")
+                .map_err(storage_error)?,
+            owner_device_id: row
+                .try_get("configured_by_device_id")
+                .map_err(storage_error)?,
             revision: u64::try_from(revision).map_err(|_| TelegramRuntimeError::Storage)?,
             last_validated_at: row.try_get("last_validated_at").map_err(storage_error)?,
         }))
@@ -111,12 +119,13 @@ impl TelegramSettingsStore {
         bot_id: u64,
         username: Option<&str>,
         user_id: Uuid,
+        device_id: Uuid,
     ) -> Result<ConfiguredBot, TelegramRuntimeError> {
         let (ciphertext, nonce) = self.encrypt(token)?;
         let fingerprint = token_fingerprint(token);
         let bot_id = i64::try_from(bot_id).map_err(|_| TelegramRuntimeError::InvalidToken)?;
         let row = sqlx::query(
-            "INSERT INTO telegram_bot_settings (singleton_id, encrypted_token, encryption_nonce, token_fingerprint, bot_id, bot_username, configuration_revision, configured_by_user_id, configured_at, last_validated_at) VALUES (TRUE, $1, $2, $3, $4, $5, 1, $6, now(), now()) ON CONFLICT (singleton_id) DO UPDATE SET encrypted_token = EXCLUDED.encrypted_token, encryption_nonce = EXCLUDED.encryption_nonce, token_fingerprint = EXCLUDED.token_fingerprint, bot_id = EXCLUDED.bot_id, bot_username = EXCLUDED.bot_username, configuration_revision = telegram_bot_settings.configuration_revision + 1, configured_by_user_id = EXCLUDED.configured_by_user_id, configured_at = now(), last_validated_at = now() RETURNING configuration_revision, last_validated_at",
+            "INSERT INTO telegram_bot_settings (singleton_id, encrypted_token, encryption_nonce, token_fingerprint, bot_id, bot_username, configuration_revision, configured_by_user_id, configured_by_device_id, configured_at, last_validated_at) VALUES (TRUE, $1, $2, $3, $4, $5, 1, $6, $7, now(), now()) ON CONFLICT (singleton_id) DO UPDATE SET encrypted_token = EXCLUDED.encrypted_token, encryption_nonce = EXCLUDED.encryption_nonce, token_fingerprint = EXCLUDED.token_fingerprint, bot_id = EXCLUDED.bot_id, bot_username = EXCLUDED.bot_username, configuration_revision = telegram_bot_settings.configuration_revision + 1, configured_by_user_id = EXCLUDED.configured_by_user_id, configured_by_device_id = EXCLUDED.configured_by_device_id, configured_at = now(), last_validated_at = now() RETURNING configuration_revision, last_validated_at",
         )
         .bind(ciphertext)
         .bind(nonce)
@@ -124,6 +133,7 @@ impl TelegramSettingsStore {
         .bind(bot_id)
         .bind(username)
         .bind(user_id)
+        .bind(device_id)
         .fetch_one(&self.pool)
         .await
         .map_err(storage_error)?;
@@ -135,6 +145,8 @@ impl TelegramSettingsStore {
             fingerprint,
             bot_id: u64::try_from(bot_id).map_err(|_| TelegramRuntimeError::Storage)?,
             username: username.map(str::to_owned),
+            owner_user_id: Some(user_id),
+            owner_device_id: Some(device_id),
             revision: u64::try_from(revision).map_err(|_| TelegramRuntimeError::Storage)?,
             last_validated_at: row.try_get("last_validated_at").map_err(storage_error)?,
         })
@@ -261,6 +273,7 @@ impl TelegramRuntime {
         &self,
         token: &str,
         user_id: Uuid,
+        device_id: Uuid,
     ) -> Result<TelegramBotSettings, TelegramRuntimeError> {
         let _configuration_guard = self.configuration_lock.lock().await;
         validate_token_shape(token)?;
@@ -285,7 +298,13 @@ impl TelegramRuntime {
         };
         let configured = match self
             .store
-            .save(token, me.user.id.0, me.user.username.as_deref(), user_id)
+            .save(
+                token,
+                me.user.id.0,
+                me.user.username.as_deref(),
+                user_id,
+                device_id,
+            )
             .await
         {
             Ok(configured) => configured,
@@ -785,7 +804,8 @@ fn telegram_service(
         Arc::clone(imports),
         format!("telegram-bot:{}", bot.bot_id),
         bot.bot_id,
-        bot.username.clone(),
+        bot.owner_user_id,
+        bot.owner_device_id,
     ))
 }
 

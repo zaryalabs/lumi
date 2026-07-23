@@ -91,7 +91,7 @@ Status: accepted
 | FMT-WEB-003 | Mobile WebView capture and explicit regenerate snapshot UX | integration | ACC-005, RD-001 | `formats/web-reader.md` |
 | FMT-WEB-004 | Generic article extractor with optional fixture-backed site adapters | foundation | FMT-WEB-001 | `formats/web-reader.md`, `quality.md` |
 | FMT-WEB-005 | Web article revisions, diff visibility and anchor migration after recapture | product | FMT-WEB-004, CORE-007 | `formats/web-reader.md`, `normalized-content.md` |
-| FMT-TG-001 | Telegram bot pairing through short-lived account token | integration | ACC-001, ACC-005 | `formats/telegram.md`, `web-account.md` |
+| FMT-TG-001 | Telegram bot auto-link to the configuring instance admin | integration | ACC-001, ACC-005 | `formats/telegram.md`, `web-account.md` |
 | FMT-TG-002 | Telegram ingestion buffer for text, forwards, links, files and media captions | integration | FMT-TG-001, CORE-010 | `formats/telegram.md` |
 | FMT-TG-003 | Explicit `/batch` mode for grouping several Telegram messages into one material | product | FMT-TG-002 | `formats/telegram.md` |
 | FMT-X-001 | X public URL import through official Post Lookup API | integration | ACC-005, SEC-003 | `formats/x.md` |

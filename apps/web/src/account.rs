@@ -9,8 +9,7 @@ use lumi_core::{
     DerivedAuthMaterial, ImportWebUrlRequest, InstanceRole, Job, JobStatus, LibraryEntry,
     LibraryState, MaterialImportStatus, MaterialKind, ReadingProgress, RegisterAccountRequest,
     ServiceCapabilities, SessionBootstrap, TelegramBotRuntimeStatus, TelegramBotSettings,
-    TelegramConnectionStatus, TelegramPairingResponse, UpdateLibraryStateCommand,
-    UpdateTelegramBotTokenRequest,
+    UpdateLibraryStateCommand, UpdateTelegramBotTokenRequest,
 };
 use uuid::Uuid;
 use wasm_bindgen::closure::Closure;
@@ -245,7 +244,7 @@ pub(crate) fn AccountGate() -> Element {
                             }
                         }
                     } else if route() == AppRoute::Connections {
-                        ConnectionsApp { csrf_token: csrf.read().clone() }
+                        ConnectionsApp {}
                     } else if route() == AppRoute::Settings && is_admin {
                         SettingsApp { csrf_token: csrf.read().clone() }
                     } else {
@@ -364,6 +363,18 @@ fn SettingsApp(csrf_token: String) -> Element {
                             div { dt { "Bot ID" } dd { "{bot_id_label}" } }
                             div { dt { "Токен" } dd { "{fingerprint_label}" } }
                         }
+                        p { class: "capability-note",
+                            "Отдельное подтверждение не требуется: откройте бота и сразу отправьте материал. Первый личный чат привяжется к этому аккаунту администратора автоматически."
+                        }
+                        if let Some(username) = current.bot_username.as_ref() {
+                            a {
+                                class: "secondary-action",
+                                href: "https://t.me/{username}",
+                                target: "_blank",
+                                rel: "noopener noreferrer",
+                                "Открыть Telegram"
+                            }
+                        }
                     }
                     if let Some(runtime_error) = current.last_error.as_ref() {
                         p { class: "account-error", role: "status", "{runtime_error}" }
@@ -478,11 +489,8 @@ fn SettingsApp(csrf_token: String) -> Element {
 }
 
 #[component]
-fn ConnectionsApp(csrf_token: String) -> Element {
-    let mut telegram_status = use_signal(|| Option::<TelegramConnectionStatus>::None);
-    let mut telegram_pairing = use_signal(|| Option::<TelegramPairingResponse>::None);
+fn ConnectionsApp() -> Element {
     let mut error = use_signal(String::new);
-    let mut busy = use_signal(|| false);
     let mut capabilities = use_signal(|| Option::<ServiceCapabilities>::None);
 
     use_effect(move || {
@@ -495,24 +503,6 @@ fn ConnectionsApp(csrf_token: String) -> Element {
             }
         });
     });
-    use_effect(move || {
-        let telegram_available = capabilities.read().as_ref().is_some_and(|value| {
-            value
-                .features
-                .iter()
-                .any(|feature| feature == "telegram-one-time-pairing")
-        });
-        if !telegram_available {
-            return;
-        }
-        spawn(async move {
-            match load_telegram_status().await {
-                Ok(status) => telegram_status.set(Some(status)),
-                Err(api_error) => error.set(api_error.to_string()),
-            }
-        });
-    });
-
     let capabilities_loaded = capabilities.read().is_some();
     let telegram_enabled = capabilities.read().as_ref().is_some_and(|value| {
         value
@@ -522,10 +512,8 @@ fn ConnectionsApp(csrf_token: String) -> Element {
             && value
                 .features
                 .iter()
-                .any(|feature| feature == "telegram-one-time-pairing")
+                .any(|feature| feature == "telegram-admin-auto-link")
     });
-    let unlink_csrf = csrf_token.clone();
-    let pairing_csrf = csrf_token;
 
     rsx! {
         main { id: "main-content", class: "library-view connections-view", aria_label: "Личные подключения",
@@ -548,10 +536,8 @@ fn ConnectionsApp(csrf_token: String) -> Element {
                             "Проверяем…"
                         } else if !telegram_enabled {
                             "Недоступен"
-                        } else if telegram_status.read().as_ref().is_some_and(|status| status.connected) {
-                            "Подключён"
                         } else {
-                            "Не подключён"
+                            "Без отдельной привязки"
                         }
                     }
                 }
@@ -559,7 +545,7 @@ fn ConnectionsApp(csrf_token: String) -> Element {
                 if !capabilities_loaded {
                     p { class: "capability-note", role: "status", "Проверяем поддержку Telegram…" }
                 } else if telegram_enabled {
-                    p { "Привяжите личный чат, чтобы отправлять в Lumi текст, пересылки, фотографии и публичные ссылки. Альбом фотографий станет одним материалом." }
+                    p { "Если администратор добавил Telegram-бота, отдельный код подключения не нужен. Откройте бота и сразу отправьте или перешлите текст, фотографию либо публичную ссылку. Первый личный чат будет привязан автоматически." }
                 } else {
                     p { class: "capability-note", role: "status", "Импорт из Telegram не включён на этом сервере. Обратитесь к администратору Lumi." }
                 }
@@ -572,94 +558,10 @@ fn ConnectionsApp(csrf_token: String) -> Element {
                             spawn(async move {
                                 match load_capabilities().await {
                                     Ok(value) => capabilities.set(Some(value)),
-                                    Err(api_error) => {
-                                        error.set(format!("Не удалось проверить возможности сервера: {api_error}"));
-                                        return;
-                                    }
-                                }
-                                match load_telegram_status().await {
-                                    Ok(status) => telegram_status.set(Some(status)),
-                                    Err(api_error) => error.set(api_error.to_string()),
+                                    Err(api_error) => error.set(format!("Не удалось проверить возможности сервера: {api_error}")),
                                 }
                             });
                         }, "Повторить" }
-                    }
-                }
-
-                if let Some(pairing) = telegram_pairing.read().as_ref() {
-                    div { class: "library-alert", role: "status",
-                        p { "Одноразовый код действует 10 минут:" }
-                        code { "{pairing.token}" }
-                        if let Some(link) = pairing.deep_link.as_ref() {
-                            a { class: "secondary-action", href: "{link}", target: "_blank", rel: "noopener noreferrer", "Открыть Telegram" }
-                        }
-                    }
-                }
-
-                if telegram_enabled {
-                    div { class: "material-actions",
-                        if telegram_status.read().as_ref().is_some_and(|status| status.connected) {
-                            button { class: "secondary-action", r#type: "button", disabled: busy(), onclick: move |_| {
-                                let csrf = unlink_csrf.clone();
-                                busy.set(true);
-                                error.set(String::new());
-                                spawn(async move {
-                                    match unlink_telegram(&csrf).await {
-                                        Ok(()) => {
-                                            telegram_pairing.set(None);
-                                            telegram_status.set(Some(TelegramConnectionStatus {
-                                                connected: false,
-                                                telegram_user_id: None,
-                                                linked_at: None,
-                                                pairing_expires_at: None,
-                                            }));
-                                        }
-                                        Err(api_error) => error.set(api_error.to_string()),
-                                    }
-                                    busy.set(false);
-                                });
-                            }, if busy() { "Отключаем…" } else { "Отключить Telegram" } }
-                        } else {
-                            button { class: "primary-action", r#type: "button", disabled: busy() || telegram_pairing.read().is_some(), onclick: move |_| {
-                                let csrf = pairing_csrf.clone();
-                                busy.set(true);
-                                error.set(String::new());
-                                telegram_pairing.set(None);
-                                spawn(async move {
-                                    match create_telegram_pairing(&csrf).await {
-                                        Ok(pairing) => {
-                                            let expires_at = pairing.expires_at;
-                                            telegram_pairing.set(Some(pairing));
-                                            busy.set(false);
-                                            loop {
-                                                browser_delay(2_000).await;
-                                                if js_sys::Date::now() as u64 >= expires_at {
-                                                    telegram_pairing.set(None);
-                                                    error.set("Одноразовый код истёк. Создайте новый.".to_owned());
-                                                    break;
-                                                }
-                                                match load_telegram_status().await {
-                                                    Ok(status) if status.connected => {
-                                                        telegram_status.set(Some(status));
-                                                        telegram_pairing.set(None);
-                                                        error.set(String::new());
-                                                        break;
-                                                    }
-                                                    Ok(status) => telegram_status.set(Some(status)),
-                                                    Err(api_error) => {
-                                                        error.set(format!("{api_error} Повторяем проверку…"));
-                                                    }
-                                                }
-                                            }
-                                        }
-                                        Err(api_error) => {
-                                            error.set(api_error.to_string());
-                                            busy.set(false);
-                                        }
-                                    }
-                                });
-                            }, if busy() { "Создаём код…" } else if telegram_pairing.read().is_some() { "Ожидаем Telegram…" } else { "Подключить Telegram" } }
-                        }
                     }
                 }
             }
@@ -1596,15 +1498,6 @@ async fn import_web_url(csrf: &str, url: &str) -> Result<AcceptedImport, ApiErro
     parse_json(request.send().await.map_err(network_error)?).await
 }
 
-async fn load_telegram_status() -> Result<TelegramConnectionStatus, ApiError> {
-    let response = Request::get(&format!("{API_BASE}/providers/telegram/connection"))
-        .credentials(RequestCredentials::Include)
-        .send()
-        .await
-        .map_err(network_error)?;
-    parse_json(response).await
-}
-
 async fn load_telegram_bot_settings() -> Result<TelegramBotSettings, ApiError> {
     let response = Request::get(&format!("{API_BASE}/settings/telegram"))
         .credentials(RequestCredentials::Include)
@@ -1636,30 +1529,6 @@ async fn delete_telegram_bot_token(csrf: &str) -> Result<TelegramBotSettings, Ap
         .await
         .map_err(network_error)?;
     parse_json(response).await
-}
-
-async fn create_telegram_pairing(csrf: &str) -> Result<TelegramPairingResponse, ApiError> {
-    let response = Request::post(&format!("{API_BASE}/providers/telegram/pairing"))
-        .credentials(RequestCredentials::Include)
-        .header("X-Lumi-CSRF", csrf)
-        .send()
-        .await
-        .map_err(network_error)?;
-    parse_json(response).await
-}
-
-async fn unlink_telegram(csrf: &str) -> Result<(), ApiError> {
-    let response = Request::delete(&format!("{API_BASE}/providers/telegram/connection"))
-        .credentials(RequestCredentials::Include)
-        .header("X-Lumi-CSRF", csrf)
-        .send()
-        .await
-        .map_err(network_error)?;
-    if response.ok() {
-        Ok(())
-    } else {
-        Err(api_response_error(&response))
-    }
 }
 
 async fn change_library_state(

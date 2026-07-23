@@ -37,8 +37,8 @@ use lumi_core::{
     LumLimits, MarkdownLimits, Material, MaterialId, MaterialImportStatus,
     MoveReadingPositionCommand, NormalizedContentPackage, PageFidelityDocument, PdfLimits,
     ReaderSettings, ReadingDocument, ReadingProgress, SchemaMigration, ServiceCapabilities,
-    TelegramBotSettings, TelegramConnectionStatus, UpdateAnnotationCommand,
-    UpdateLibraryStateCommand, UpdateReaderSettingsCommand, UpdateTelegramBotTokenRequest, UserId,
+    TelegramBotSettings, UpdateAnnotationCommand, UpdateLibraryStateCommand,
+    UpdateReaderSettingsCommand, UpdateTelegramBotTokenRequest, UserId,
 };
 use serde::{Deserialize, Serialize};
 use tower_http::{
@@ -51,7 +51,6 @@ use zeroize::Zeroize;
 
 use account::{AccountStore, AuthenticatedSession, MemoryAccountStore, PgAccountStore};
 use imports::{ImportService, ImportServiceError};
-use telegram::{TelegramService, TelegramServiceError};
 use telegram_runtime::{TelegramRuntime, TelegramRuntimeError};
 
 /// Default bind address for local development.
@@ -355,14 +354,6 @@ impl AppState {
             .ok_or(AppError::Unavailable("durable import service"))
     }
 
-    fn telegram(&self) -> Result<Arc<TelegramService>, AppError> {
-        self.telegram
-            .as_ref()
-            .ok_or(AppError::Unavailable("Telegram runtime"))?
-            .service()
-            .map_err(map_telegram_runtime_error)
-    }
-
     fn telegram_runtime(&self) -> Result<&Arc<TelegramRuntime>, AppError> {
         self.telegram
             .as_ref()
@@ -392,7 +383,7 @@ pub fn build_router_with_state(state: AppState) -> Router {
         .route("/capabilities", get(capabilities))
         .route("/schema/migrations", get(schema_migrations))
         .merge(auth_api::public_routes());
-    let mut protected = Router::new()
+    let protected = Router::new()
         .merge(auth_api::protected_account_routes())
         .route("/materials", get(list_materials))
         .route("/materials/continue-reading", get(continue_reading))
@@ -474,17 +465,6 @@ pub fn build_router_with_state(state: AppState) -> Router {
         .route("/jobs/{job_id}/diagnostics", get(get_job_diagnostics))
         .route("/jobs/{job_id}/cancel", post(cancel_job))
         .route("/jobs/{job_id}/retry", post(retry_job));
-    if state.telegram.is_some() {
-        protected = protected
-            .route(
-                "/providers/telegram/pairing",
-                post(create_telegram_pairing).layer(DefaultBodyLimit::max(1024)),
-            )
-            .route(
-                "/providers/telegram/connection",
-                get(get_telegram_connection).delete(unlink_telegram),
-            );
-    }
     let protected = protected
         .layer(DefaultBodyLimit::max(201 * 1024 * 1024))
         .route_layer(middleware::from_fn_with_state(
@@ -1061,50 +1041,6 @@ async fn import_web_url(
     Ok((StatusCode::ACCEPTED, Json(accepted)).into_response())
 }
 
-async fn create_telegram_pairing(
-    State(state): State<AppState>,
-    Extension(session): Extension<AuthenticatedSession>,
-) -> Result<Response, AppError> {
-    let response = state
-        .telegram()?
-        .create_pairing(&session)
-        .await
-        .map_err(map_telegram_error)?;
-    Ok((
-        StatusCode::CREATED,
-        [
-            (header::CACHE_CONTROL, "no-store"),
-            (header::PRAGMA, "no-cache"),
-        ],
-        Json(response),
-    )
-        .into_response())
-}
-
-async fn get_telegram_connection(
-    State(state): State<AppState>,
-    Extension(session): Extension<AuthenticatedSession>,
-) -> Result<Json<TelegramConnectionStatus>, AppError> {
-    state
-        .telegram()?
-        .status(session.user_id)
-        .await
-        .map(Json)
-        .map_err(map_telegram_error)
-}
-
-async fn unlink_telegram(
-    State(state): State<AppState>,
-    Extension(session): Extension<AuthenticatedSession>,
-) -> Result<StatusCode, AppError> {
-    state
-        .telegram()?
-        .unlink_account(session.user_id)
-        .await
-        .map_err(map_telegram_error)?;
-    Ok(StatusCode::NO_CONTENT)
-}
-
 async fn get_job(
     State(state): State<AppState>,
     Extension(session): Extension<AuthenticatedSession>,
@@ -1197,7 +1133,7 @@ async fn update_telegram_bot_token(
     auth_api::require_instance_admin(&session)?;
     let result = state
         .telegram_runtime()?
-        .configure(&request.token, session.user_id)
+        .configure(&request.token, session.user_id, session.device_id)
         .await;
     request.token.zeroize();
     result.map(Json).map_err(map_telegram_runtime_error)
@@ -1660,16 +1596,6 @@ fn map_import_error(error: ImportServiceError) -> AppError {
     }
 }
 
-fn map_telegram_error(error: TelegramServiceError) -> AppError {
-    match error {
-        TelegramServiceError::InvalidUpdate => AppError::BadRequest(error.to_string()),
-        TelegramServiceError::UpdateConflict
-        | TelegramServiceError::UpdateInProgress
-        | TelegramServiceError::PairingConflict => AppError::Conflict(error.to_string()),
-        TelegramServiceError::Unavailable => AppError::Unavailable("Telegram provider service"),
-    }
-}
-
 fn map_telegram_runtime_error(error: TelegramRuntimeError) -> AppError {
     match error {
         TelegramRuntimeError::NotConfigured => AppError::Unavailable("Telegram bot configuration"),
@@ -2083,23 +2009,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn disabled_telegram_omits_capability_and_provider_routes(
-    ) -> Result<(), Box<dyn std::error::Error>> {
+    async fn disabled_telegram_omits_capabilities() -> Result<(), Box<dyn std::error::Error>> {
         let app = build_router_with_state(AppState::empty());
-        let capabilities: ServiceCapabilities =
-            json_get(app.clone(), "/api/v1/capabilities").await?;
+        let capabilities: ServiceCapabilities = json_get(app, "/api/v1/capabilities").await?;
         assert!(!capabilities
             .features
             .iter()
             .any(|feature| feature.starts_with("telegram-")));
-        let response = app
-            .oneshot(authenticated_request(
-                Request::builder()
-                    .uri("/api/v1/providers/telegram/connection")
-                    .body(Body::empty())?,
-            ))
-            .await?;
-        assert_eq!(response.status(), StatusCode::NOT_FOUND);
         Ok(())
     }
 

@@ -175,10 +175,10 @@ S0 architecture.
 - Save a public HTTP/HTTPS article URL through web UI. The baseline may use a
   bounded raw fetch wrapped in `RenderedPageSnapshot`; it does not need a cloud
   browser, authenticated-page capture or JavaScript rendering.
-- Pair one Telegram identity through a short-lived account token and accept
-  direct/forwarded text plus ordinary public web links. One message creates one
-  material; a message containing only a supported web URL uses the same web
-  import path.
+- Auto-link the first private Telegram identity to the administrator who
+  configured the bot and accept direct/forwarded text plus ordinary public web
+  links without an additional token. One message creates one material; a
+  message containing only a supported web URL uses the same web import path.
 - Library view:
   - list materials;
   - open material;
@@ -228,9 +228,9 @@ S0 architecture.
   material.
 - A public server-rendered article can be saved by URL and opened through the
   same `ReadingDocument` reader with source metadata retained.
-- A user can pair the Telegram bot, send or forward text, and receive one
-  durable material in the web library; redelivery of the same update does not
-  create a duplicate.
+- After the administrator configures the Telegram bot, they can immediately
+  send or forward text and receive one durable material in the web library;
+  redelivery of the same update does not create a duplicate.
 - An ordinary web link sent to the bot enters the same bounded web import path.
 - Data is stored through the same domain entities planned for native sync, not
   through web-only tables.

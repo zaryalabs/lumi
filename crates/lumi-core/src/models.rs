@@ -156,7 +156,7 @@ pub fn s1_schema_migrations() -> Vec<SchemaMigration> {
             id: "s1-0006-web-telegram-sources".to_owned(),
             schema_version: DOMAIN_SCHEMA_VERSION.to_owned(),
             description:
-                "Source-neutral web and Telegram imports, pairing and durable update claims."
+                "Source-neutral web and Telegram imports, admin auto-link and durable update claims."
                     .to_owned(),
         },
         SchemaMigration {
@@ -1581,30 +1581,6 @@ pub struct AcceptedImport {
 pub struct ImportWebUrlRequest {
     /// Public URL to capture through the bounded server-side source adapter.
     pub url: String,
-}
-
-/// One-time Telegram pairing token shown exactly once to an authenticated user.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-pub struct TelegramPairingResponse {
-    /// Plaintext token used in `/start <token>`; it is never persisted.
-    pub token: String,
-    /// Telegram deep link when a bot username is configured.
-    pub deep_link: Option<String>,
-    /// Expiry timestamp in milliseconds.
-    pub expires_at: TimestampMs,
-}
-
-/// Account-scoped Telegram connection projection.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-pub struct TelegramConnectionStatus {
-    /// Whether one active Telegram identity is linked.
-    pub connected: bool,
-    /// Linked Telegram user id, if connected.
-    pub telegram_user_id: Option<i64>,
-    /// Link creation timestamp in milliseconds.
-    pub linked_at: Option<TimestampMs>,
-    /// Expiry of the most recently issued unconsumed token.
-    pub pairing_expires_at: Option<TimestampMs>,
 }
 
 /// Runtime state of the instance-wide Telegram bot listener.

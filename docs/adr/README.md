@@ -19,6 +19,8 @@ plugin, AI, search and account/auth boundaries.
   import, page anchors и Web renderer.
 - [`0016`](0016-instance-admin-bootstrap.md) — instance-wide роль
   администратора и безопасный bootstrap через публичный auth lookup id.
+- [`0017`](0017-telegram-admin-auto-link.md) — автопривязка Telegram-бота к
+  администратору без одноразового pairing token.
 
 ## Template
 

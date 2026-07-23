@@ -77,8 +77,9 @@ are future full-copy replicas**.
 - Device list нужен для sync status, revocation и диагностики.
 - Desktop/mobile могут подключаться через seed phrase login или future device
   pairing flow из уже авторизованного клиента.
-- Telegram pairing token создается только из авторизованного аккаунта и связан
-  с `user_id`.
+- Telegram identity автоматически связывается с `user_id` и `device_id`
+  администратора, сохранившего глобальную настройку бота; отдельный pairing
+  token не создаётся.
 
 ### Account profile
 

@@ -234,7 +234,7 @@ impl ServiceCapabilities {
                 "telegram-text-import".to_owned(),
                 "telegram-composite-import".to_owned(),
                 "telegram-media-group-import".to_owned(),
-                "telegram-one-time-pairing".to_owned(),
+                "telegram-admin-auto-link".to_owned(),
             ],
         }
     }
