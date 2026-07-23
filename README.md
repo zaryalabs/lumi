@@ -22,7 +22,8 @@ Lumi — open-source приложение для вдумчивого чтени
 [docs/early-slices.md](docs/early-slices.md). EPUB остаётся полным эталонным
 импортёром, а публичные web URL и приём текста/ссылок через Telegram-бота входят
 как намеренно узкие baseline-источники. Реализованы постоянные аккаунты,
-durable-импорт реальных EPUB, полностью API-backed библиотека, рабочий
+durable-импорт реальных EPUB, Markdown и portable `.lum` packages, полностью
+API-backed библиотека, рабочий
 browser-measured пагинированный reader, durable-аннотации, progress UX и общий
 baseline приёма источников из Web/Telegram. Web-библиотека и reader используют
 reader-first визуальную систему paper/sage на desktop и touch layouts, включая

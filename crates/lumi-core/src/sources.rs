@@ -929,6 +929,7 @@ pub fn import_telegram_composite(
                     target_path: Vec::new(),
                     kind: ReadingLinkKind::External,
                     external_url: Some(url.clone()),
+                    source_target: None,
                 }],
             });
             units.push(ContentUnit {
@@ -1018,6 +1019,7 @@ fn telegram_paragraph_links(envelope: &TelegramUpdate, paragraph: &str) -> Vec<R
                     target_path: Vec::new(),
                     kind: ReadingLinkKind::External,
                     external_url: Some(url.clone()),
+                    source_target: None,
                 }
             })
         })
@@ -1491,6 +1493,7 @@ fn web_links(
                 target_path: Vec::new(),
                 kind: ReadingLinkKind::External,
                 external_url: Some(resolved),
+                source_target: None,
             })
         })
         .collect()

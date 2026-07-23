@@ -9,6 +9,8 @@ mod auth;
 mod epub;
 mod fixtures;
 #[cfg(feature = "markdown-import")]
+mod lum;
+#[cfg(feature = "markdown-import")]
 mod markdown;
 mod models;
 mod pdf;
@@ -22,6 +24,8 @@ pub use fixtures::{
     EpubFixture, EpubFixtureResource, EpubFixtureSection, ImportError, ImportedFixture,
 };
 #[cfg(feature = "markdown-import")]
+pub use lum::*;
+#[cfg(feature = "markdown-import")]
 pub use markdown::*;
 pub use models::*;
 pub use pdf::*;
@@ -34,7 +38,7 @@ use serde::{Deserialize, Serialize};
 pub const API_VERSION: &str = "v1";
 
 /// Current domain schema marker for the S1 contracts.
-pub const DOMAIN_SCHEMA_VERSION: &str = "s1.2026-07-23.markdown-import-v1";
+pub const DOMAIN_SCHEMA_VERSION: &str = "s1.2026-07-23.lum-import-v1";
 
 /// Current normalized content package marker for reflowable S1 documents.
 pub const NORMALIZED_PACKAGE_VERSION: &str = "normalized.reflowable.s1";
@@ -89,6 +93,18 @@ pub const MARKDOWN_IMPORTER_VERSION: &str = "v1.0";
 
 /// Maximum standalone Markdown source size accepted by the initial web boundary.
 pub const MARKDOWN_WEB_SOURCE_BYTES: u64 = 10 * 1024 * 1024;
+
+/// Importer id used by the portable LUM book pipeline.
+pub const LUM_IMPORTER_ID: &str = "lumi.lum";
+
+/// Version of the deterministic portable LUM importer.
+pub const LUM_IMPORTER_VERSION: &str = "v0.1";
+
+/// Media type of a portable `.lum` ZIP package.
+pub const LUM_SOURCE_MEDIA_TYPE: &str = "application/vnd.lumi.lum+zip";
+
+/// Maximum portable LUM package size accepted by the initial web boundary.
+pub const LUM_WEB_SOURCE_BYTES: u64 = 100 * 1024 * 1024;
 
 /// Health state for Lumi services.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -197,6 +213,7 @@ impl ServiceCapabilities {
                 "content-addressed-local-dev-blobs".to_owned(),
                 "real-epub-importer".to_owned(),
                 "markdown-import".to_owned(),
+                "lum-import".to_owned(),
                 "pdf-fixed-layout-import".to_owned(),
                 "pdf-page-fidelity-reader".to_owned(),
                 "pdf-native-text-layer".to_owned(),

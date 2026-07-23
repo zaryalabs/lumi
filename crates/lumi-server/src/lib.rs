@@ -33,8 +33,8 @@ use lumi_core::{
     ContinueReadingEntry, CreateAnnotationCommand, DeleteAnnotationCommand, DiagnosticSeverity,
     DocumentRevision, DocumentRevisionId, EpubFixture, EpubLimits, HealthResponse,
     ImportDiagnostic, ImportStatusEntry, ImportWebUrlRequest, ImportedFixture, Job, JobId, JobKind,
-    JobStage, JobStatus, LibraryEntry, LibraryState, MarkdownLimits, Material, MaterialId,
-    MaterialImportStatus, MoveReadingPositionCommand, NormalizedContentPackage,
+    JobStage, JobStatus, LibraryEntry, LibraryState, LumLimits, MarkdownLimits, Material,
+    MaterialId, MaterialImportStatus, MoveReadingPositionCommand, NormalizedContentPackage,
     PageFidelityDocument, PdfLimits, ReaderSettings, ReadingDocument, ReadingProgress,
     SchemaMigration, ServiceCapabilities, TelegramBotSettings, TelegramConnectionStatus,
     UpdateAnnotationCommand, UpdateLibraryStateCommand, UpdateReaderSettingsCommand,
@@ -1011,6 +1011,8 @@ fn document_upload_limit(file_name: &str) -> u64 {
     let lowercase = file_name.to_ascii_lowercase();
     if lowercase.ends_with(".md") || lowercase.ends_with(".markdown") {
         MarkdownLimits::web_v1().source_bytes
+    } else if lowercase.ends_with(".lum") {
+        LumLimits::web_v1().source_bytes
     } else {
         PdfLimits::web_v1()
             .source_bytes
@@ -1917,6 +1919,10 @@ mod tests {
             MarkdownLimits::web_v1().source_bytes
         );
         assert!(document_upload_limit("book.epub") > document_upload_limit("notes.md"));
+        assert_eq!(
+            document_upload_limit("book.LUM"),
+            LumLimits::web_v1().source_bytes
+        );
     }
 
     #[test]
@@ -2058,6 +2064,10 @@ mod tests {
             .features
             .iter()
             .any(|feature| feature == "markdown-import"));
+        assert!(capabilities
+            .features
+            .iter()
+            .any(|feature| feature == "lum-import"));
         assert!(!capabilities
             .features
             .iter()
@@ -2086,7 +2096,7 @@ mod tests {
         let migrations: Vec<SchemaMigration> =
             json_get(build_router(), "/api/v1/schema/migrations").await?;
 
-        assert_eq!(migrations.len(), 13);
+        assert_eq!(migrations.len(), 14);
         Ok(())
     }
 

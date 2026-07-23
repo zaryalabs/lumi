@@ -6,18 +6,20 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use lumi_core::{
-    content_hash, import_epub, import_markdown, import_telegram_composite, import_telegram_text,
-    import_web_snapshot, normalize_pdf, AcceptedImport, Annotation, AnnotationExport,
-    AnnotationKind, BlobManifest, BlobRef, BlobRole, ContinueReadingEntry, CreateAnnotationCommand,
-    DeleteAnnotationCommand, DiagnosticSeverity, DocumentRevision, DocumentRevisionId,
-    EpubImportError, EpubImportRequest, EpubLimits, FixedLayoutContentPackage, ImportDiagnostic,
-    ImportStatusEntry, ImportedEpub, ImportedPdf, ImportedPublication, ImportedPublicationResource,
-    Job, JobId, JobKind, JobStage, JobStatus, LibraryEntry, LibraryState, MarkdownImportError,
+    content_hash, import_epub, import_lum, import_markdown, import_telegram_composite,
+    import_telegram_text, import_web_snapshot, normalize_pdf, AcceptedImport, Annotation,
+    AnnotationExport, AnnotationKind, BlobManifest, BlobRef, BlobRole, ContinueReadingEntry,
+    CreateAnnotationCommand, DeleteAnnotationCommand, DiagnosticSeverity, DocumentRevision,
+    DocumentRevisionId, EpubImportError, EpubImportRequest, EpubLimits, FixedLayoutContentPackage,
+    ImportDiagnostic, ImportStatusEntry, ImportedEpub, ImportedPdf, ImportedPublication,
+    ImportedPublicationResource, Job, JobId, JobKind, JobStage, JobStatus, LibraryEntry,
+    LibraryState, LumImportError, LumImportRequest, LumLimits, MarkdownImportError,
     MarkdownImportRequest, MarkdownLimits, Material, MaterialId, MaterialImportStatus,
     MaterialKind, MoveReadingPositionCommand, NormalizedContentPackage, PageFidelityDocument,
     PdfImportRequest, PdfLimits, ReaderSettings, ReadingDocument, ReadingNode, ReadingNodeKind,
     ReadingProgress, RenderPlan, SourceIdentity, TelegramCapturedImage, TelegramMessageSnapshot,
     TelegramPhotoDescriptor, TelegramUpdate, TelegramWebSection, UpdateAnnotationCommand,
+    LUM_SOURCE_MEDIA_TYPE,
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -55,7 +57,7 @@ const MAX_TELEGRAM_LINKS: usize = 8;
 const MAX_TELEGRAM_WEB_FETCHES: usize = 3;
 const WORKER_LEASE_SQL: &str = "30 minutes";
 const SOURCE_RESERVATION_LEASE_SQL: &str = "1 minute";
-const REQUIRED_MIGRATION_COUNT: i64 = 11;
+const REQUIRED_MIGRATION_COUNT: i64 = 12;
 #[cfg(not(test))]
 const HEARTBEAT_INTERVAL: std::time::Duration = std::time::Duration::from_secs(30);
 #[cfg(test)]
@@ -105,6 +107,7 @@ enum FileUploadKind {
     Epub,
     Pdf,
     Markdown,
+    Lum,
 }
 
 impl FileUploadKind {
@@ -119,9 +122,11 @@ impl FileUploadKind {
             Ok(Self::Epub)
         } else if lowercase.ends_with(".md") || lowercase.ends_with(".markdown") {
             Ok(Self::Markdown)
+        } else if lowercase.ends_with(".lum") {
+            Ok(Self::Lum)
         } else {
             Err(ImportServiceError::BadRequest(
-                "file must be an EPUB, PDF or Markdown document",
+                "file must be an EPUB, PDF, Markdown or LUM document",
             ))
         }
     }
@@ -131,6 +136,7 @@ impl FileUploadKind {
             Self::Epub => "epub",
             Self::Pdf => "pdf",
             Self::Markdown => "markdown",
+            Self::Lum => "lum",
         }
     }
 
@@ -139,6 +145,7 @@ impl FileUploadKind {
             Self::Epub => EPUB_SOURCE_MEDIA_TYPE,
             Self::Pdf => PDF_SOURCE_MEDIA_TYPE,
             Self::Markdown => MARKDOWN_SOURCE_MEDIA_TYPE,
+            Self::Lum => LUM_SOURCE_MEDIA_TYPE,
         }
     }
 
@@ -147,6 +154,7 @@ impl FileUploadKind {
             Self::Epub => EpubLimits::s1().source_bytes,
             Self::Pdf => PdfLimits::web_v1().source_bytes,
             Self::Markdown => MarkdownLimits::web_v1().source_bytes,
+            Self::Lum => LumLimits::web_v1().source_bytes,
         }
     }
 }
@@ -473,6 +481,12 @@ impl ImportService {
                 blob_hash: source_hash.clone(),
                 file_name: file_name.clone(),
                 media_type: MARKDOWN_SOURCE_MEDIA_TYPE.to_owned(),
+                device_id: session.device_id,
+            },
+            FileUploadKind::Lum => SourceRef::Lum {
+                blob_hash: source_hash.clone(),
+                file_name: file_name.clone(),
+                media_type: LUM_SOURCE_MEDIA_TYPE.to_owned(),
                 device_id: session.device_id,
             },
         };
@@ -1220,6 +1234,11 @@ impl ImportService {
                 media_type,
                 ..
             } => (file_name.clone(), media_type.clone()),
+            SourceRef::Lum {
+                file_name,
+                media_type,
+                ..
+            } => (file_name.clone(), media_type.clone()),
             SourceRef::WebPage { .. } => (
                 "snapshot.json".to_owned(),
                 "application/vnd.lumi.web-snapshot+json".to_owned(),
@@ -1913,6 +1932,7 @@ impl ImportService {
                 "web_page" => MaterialKind::WebPage,
                 "telegram" => MaterialKind::Telegram,
                 "markdown" => MaterialKind::Markdown,
+                "lum" => MaterialKind::Lum,
                 _ => return Err(ImportServiceError::Unavailable),
             },
             canonical_title: row.try_get("canonical_title").map_err(log_storage_error)?,
@@ -2159,6 +2179,19 @@ impl ImportService {
                 )
                 .await
             }
+            source_ref @ SourceRef::Lum { .. } => {
+                self.run_lum(
+                    job_id,
+                    claim_id,
+                    user_id,
+                    space_id,
+                    material_id,
+                    attempt,
+                    source_ref,
+                    Arc::clone(&cancellation),
+                )
+                .await
+            }
             source_ref @ SourceRef::WebPage { .. } => {
                 self.run_web(
                     job_id,
@@ -2380,6 +2413,98 @@ impl ImportService {
             }
             Err(error) => {
                 let cancelled = matches!(error, MarkdownImportError::Cancelled);
+                self.fail(
+                    job_id,
+                    claim_id,
+                    material_id,
+                    attempt,
+                    error.diagnostic(),
+                    cancelled,
+                )
+                .await
+            }
+        }
+    }
+
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "worker context is explicit across the source adapter boundary"
+    )]
+    async fn run_lum(
+        &self,
+        job_id: JobId,
+        claim_id: Uuid,
+        user_id: Uuid,
+        space_id: Uuid,
+        material_id: Uuid,
+        attempt: i32,
+        source_ref: SourceRef,
+        cancellation: Arc<AtomicBool>,
+    ) -> Result<(), ImportServiceError> {
+        let SourceRef::Lum {
+            blob_hash,
+            file_name,
+            ..
+        } = &source_ref
+        else {
+            return Err(ImportServiceError::Unavailable);
+        };
+        self.set_stage(job_id, claim_id, "validating_container")
+            .await?;
+        let source = match self.blobs.get(blob_hash).await {
+            Ok(source) => source,
+            Err(_) => {
+                return self
+                    .fail(
+                        job_id,
+                        claim_id,
+                        material_id,
+                        attempt,
+                        source_unavailable_diagnostic("lum"),
+                        false,
+                    )
+                    .await;
+            }
+        };
+        self.persist_blob_parts(blob_hash, LUM_SOURCE_MEDIA_TYPE, &source)
+            .await?;
+        self.set_stage(job_id, claim_id, "normalizing").await?;
+        let revision_id = Uuid::now_v7();
+        let source_name = file_name.clone();
+        let worker_cancellation = Arc::clone(&cancellation);
+        let imported = tokio::task::spawn_blocking(move || {
+            import_lum(
+                LumImportRequest {
+                    owner_id: user_id,
+                    material_id,
+                    revision_id,
+                    source_name: &source_name,
+                    source: &source,
+                },
+                LumLimits::web_v1(),
+                || worker_cancellation.load(Ordering::Acquire),
+            )
+        })
+        .await
+        .map_err(|_| ImportServiceError::Unavailable)?;
+        match imported {
+            Ok(imported) if !cancellation.load(Ordering::Acquire) => {
+                self.persist_success(job_id, claim_id, space_id, &source_ref, attempt, imported)
+                    .await
+            }
+            Ok(_) => {
+                self.fail(
+                    job_id,
+                    claim_id,
+                    material_id,
+                    attempt,
+                    LumImportError::Cancelled.diagnostic(),
+                    true,
+                )
+                .await
+            }
+            Err(error) => {
+                let cancelled = matches!(error, LumImportError::Cancelled);
                 self.fail(
                     job_id,
                     claim_id,
@@ -3665,6 +3790,12 @@ enum SourceRef {
         media_type: String,
         device_id: Uuid,
     },
+    Lum {
+        blob_hash: String,
+        file_name: String,
+        media_type: String,
+        device_id: Uuid,
+    },
     WebPage {
         url: String,
         snapshot_blob_hash: Option<String>,
@@ -3712,6 +3843,7 @@ impl SourceRef {
             Self::Epub { device_id, .. }
             | Self::Pdf { device_id, .. }
             | Self::Markdown { device_id, .. }
+            | Self::Lum { device_id, .. }
             | Self::WebPage { device_id, .. }
             | Self::TelegramText { device_id, .. }
             | Self::TelegramComposite { device_id, .. } => *device_id,
@@ -3722,7 +3854,8 @@ impl SourceRef {
         match self {
             Self::Epub { blob_hash, .. }
             | Self::Pdf { blob_hash, .. }
-            | Self::Markdown { blob_hash, .. } => Some(blob_hash),
+            | Self::Markdown { blob_hash, .. }
+            | Self::Lum { blob_hash, .. } => Some(blob_hash),
             Self::WebPage {
                 snapshot_blob_hash, ..
             } => snapshot_blob_hash.as_deref(),
@@ -3740,6 +3873,7 @@ impl SourceRef {
             Self::Epub { .. } => EPUB_SOURCE_MEDIA_TYPE,
             Self::Pdf { .. } => PDF_SOURCE_MEDIA_TYPE,
             Self::Markdown { .. } => MARKDOWN_SOURCE_MEDIA_TYPE,
+            Self::Lum { .. } => LUM_SOURCE_MEDIA_TYPE,
             Self::WebPage { .. } => "application/vnd.lumi.web-snapshot+json",
             Self::TelegramText { .. } => "application/vnd.lumi.telegram-message+json",
             Self::TelegramComposite { .. } => "application/vnd.lumi.telegram-envelope+json",
@@ -3751,6 +3885,7 @@ impl SourceRef {
             Self::Epub { .. } => "epub",
             Self::Pdf { .. } => "pdf",
             Self::Markdown { .. } => "markdown",
+            Self::Lum { .. } => "lum",
             Self::WebPage { .. } => "web_page",
             Self::TelegramText { .. } | Self::TelegramComposite { .. } => "telegram",
         }
@@ -3761,6 +3896,7 @@ impl SourceRef {
             Self::Epub { file_name, .. } => file_name.clone(),
             Self::Pdf { file_name, .. } => file_name.clone(),
             Self::Markdown { file_name, .. } => file_name.clone(),
+            Self::Lum { file_name, .. } => file_name.clone(),
             Self::WebPage { .. } => "snapshot.json".to_owned(),
             Self::TelegramText { .. } => "message.json".to_owned(),
             Self::TelegramComposite { .. } => "envelope.json".to_owned(),
@@ -4366,6 +4502,7 @@ fn library_entry_from_row(
             "web_page" => MaterialKind::WebPage,
             "telegram" => MaterialKind::Telegram,
             "markdown" => MaterialKind::Markdown,
+            "lum" => MaterialKind::Lum,
             _ => return Err(ImportServiceError::Unavailable),
         },
         canonical_title: row.try_get("canonical_title").map_err(log_storage_error)?,
@@ -4609,10 +4746,11 @@ fn safe_file_name(value: &str) -> Result<String, ImportServiceError> {
         || !(lowercase.ends_with(".epub")
             || lowercase.ends_with(".pdf")
             || lowercase.ends_with(".md")
-            || lowercase.ends_with(".markdown"))
+            || lowercase.ends_with(".markdown")
+            || lowercase.ends_with(".lum"))
     {
         Err(ImportServiceError::BadRequest(
-            "upload must have a non-empty .epub, .pdf, .md or .markdown file name",
+            "upload must have a non-empty .epub, .pdf, .md, .markdown or .lum file name",
         ))
     } else {
         Ok(name)
@@ -4629,6 +4767,8 @@ fn upload_title(file_name: &str) -> String {
         .or_else(|| file_name.strip_suffix(".MARKDOWN"))
         .or_else(|| file_name.strip_suffix(".md"))
         .or_else(|| file_name.strip_suffix(".MD"))
+        .or_else(|| file_name.strip_suffix(".lum"))
+        .or_else(|| file_name.strip_suffix(".LUM"))
         .unwrap_or(file_name)
         .to_owned()
 }
@@ -4670,6 +4810,16 @@ mod tests {
             FileUploadKind::detect("guide.markdown", source)?,
             FileUploadKind::Markdown
         );
+        Ok(())
+    }
+
+    #[test]
+    fn upload_kind_should_detect_lum_extension() -> Result<(), Box<dyn std::error::Error>> {
+        assert_eq!(
+            FileUploadKind::detect("guide.lum", b"PK\x03\x04")?,
+            FileUploadKind::Lum
+        );
+        assert_eq!(safe_file_name("C:\\fakepath\\guide.lum")?, "guide.lum");
         Ok(())
     }
 

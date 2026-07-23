@@ -1463,6 +1463,7 @@ fn internal_link(
             ReadingLinkKind::Internal
         },
         external_url: None,
+        source_target: None,
     })
 }
 

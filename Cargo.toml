@@ -52,6 +52,7 @@ sqlx-postgres = { version = "=0.8.6", default-features = false, features = [
 ] }
 thiserror = "2.0.18"
 time = { version = "0.3.44", features = ["serde"] }
+toml = "0.8.2"
 tokio = { version = "1.52.3", features = [
   "fs",
   "io-util",

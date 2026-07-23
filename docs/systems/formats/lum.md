@@ -2,6 +2,16 @@
 
 Status: accepted
 
+Implementation baseline: `s1.2026-07-23.lum-import-v1`.
+
+Реализован первый portable profile: Web/API upload `.lum`, constrained ZIP,
+строгий `lum.toml` версии `0.1`, multi-chapter spine через общий
+`compile_markdown`, chapter TOC, cross-file Markdown links, локальные
+JPEG/PNG/GIF/WebP resources, `LumSourceLocator`, durable jobs/source download и
+общий reader. Source-folder build/CLI, generated book graph, semantic roles и
+исполняемые interactive blocks пока остаются следующими additive slices;
+`lum:*` сохраняются как безопасные typed placeholders.
+
 ## Контекст
 
 `lum` - собственный формат Lumi для материалов, которые должны вести себя как

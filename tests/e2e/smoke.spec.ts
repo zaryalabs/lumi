@@ -68,6 +68,31 @@ function storedZip(files: Array<[string, string]>): Buffer {
   return Buffer.concat([...localRecords, centralDirectory, end]);
 }
 
+const supportedLum = storedZip([
+  ["mimetype", "application/vnd.lumi.lum+zip"],
+  [
+    "lum.toml",
+    readFileSync(
+      new URL("../fixtures/lum/supported/lum.toml", import.meta.url),
+      "utf8",
+    ),
+  ],
+  [
+    "content/intro.md",
+    readFileSync(
+      new URL("../fixtures/lum/supported/content/intro.md", import.meta.url),
+      "utf8",
+    ),
+  ],
+  [
+    "content/details.md",
+    readFileSync(
+      new URL("../fixtures/lum/supported/content/details.md", import.meta.url),
+      "utf8",
+    ),
+  ],
+]);
+
 function createReaderEpub(): Buffer {
   const firstChapter = "Первая глава проверяет постраничное чтение. ".repeat(
     160,
@@ -245,6 +270,53 @@ test("imports Markdown through the shared reflowable reader", async ({
   ).toHaveAttribute("rel", /noopener/);
 });
 
+test("imports a multi-chapter LUM package through the shared reader", async ({
+  page,
+}) => {
+  await page.goto("/");
+  await page
+    .getByRole("button", { name: "Сгенерировать recovery phrase" })
+    .click();
+  await page.getByText("Я сохранил(а) все 24 слова", { exact: false }).click();
+  await page.getByRole("button", { name: "Создать аккаунт" }).click();
+  await expect(
+    page.getByRole("region", { name: "Пустая библиотека" }),
+  ).toBeVisible();
+
+  await page
+    .getByRole("button", { name: "＋ Добавить материал", exact: true })
+    .click();
+  const uploadDialog = page.getByRole("dialog", {
+    name: "Добавить материал",
+  });
+  await uploadDialog.getByRole("tab", { name: "LUM" }).click();
+  await uploadDialog.getByLabel("Файл LUM").setInputFiles({
+    name: "guide.lum",
+    mimeType: "application/vnd.lumi.lum+zip",
+    buffer: supportedLum,
+  });
+  await uploadDialog
+    .getByRole("button", { name: "Добавить в библиотеку" })
+    .click();
+
+  const card = page.getByRole("article", { name: "Материал Книга LUM" });
+  await expect(card.getByText("LUM · книга", { exact: true })).toBeVisible();
+  await expect(card.getByText("Готово", { exact: true })).toBeVisible();
+  await card.getByRole("button", { name: "Читать" }).click();
+
+  const reader = page.getByRole("main", { name: "Чтение Книга LUM" });
+  await expect(reader.getByText("Первая глава LUM.")).toBeVisible();
+  await expect(
+    reader.getByRole("button", { name: "Перейти: Перейти к подробностям" }),
+  ).toBeVisible();
+  await reader
+    .getByRole("button", { name: "Перейти: Перейти к подробностям" })
+    .click();
+  await expect(
+    reader.getByText("Вторая глава подтверждает сшивку книги."),
+  ).toBeVisible();
+});
+
 test("imports and reads a PDF with selectable text and anchored highlights", async ({
   page,
 }) => {
@@ -360,10 +432,14 @@ test("persists an API-backed EPUB library lifecycle", async ({ page }) => {
     .click();
   uploadDialog = page.getByRole("dialog", { name: "Добавить материал" });
   const epubTab = uploadDialog.getByRole("tab", { name: "EPUB" });
+  const lumTab = uploadDialog.getByRole("tab", { name: "LUM" });
   const markdownTab = uploadDialog.getByRole("tab", { name: "Markdown" });
   const pdfTab = uploadDialog.getByRole("tab", { name: "PDF" });
   const webTab = uploadDialog.getByRole("tab", { name: "Web-ссылка" });
   await epubTab.focus();
+  await page.keyboard.press("ArrowRight");
+  await expect(lumTab).toHaveAttribute("aria-selected", "true");
+  await expect(lumTab).toBeFocused();
   await page.keyboard.press("ArrowRight");
   await expect(markdownTab).toHaveAttribute("aria-selected", "true");
   await expect(markdownTab).toBeFocused();
@@ -379,6 +455,9 @@ test("persists an API-backed EPUB library lifecycle", async ({ page }) => {
   await page.keyboard.press("ArrowLeft");
   await expect(markdownTab).toHaveAttribute("aria-selected", "true");
   await expect(markdownTab).toBeFocused();
+  await page.keyboard.press("ArrowLeft");
+  await expect(lumTab).toHaveAttribute("aria-selected", "true");
+  await expect(lumTab).toBeFocused();
   await page.keyboard.press("ArrowLeft");
   await expect(epubTab).toHaveAttribute("aria-selected", "true");
   await expect(epubTab).toBeFocused();

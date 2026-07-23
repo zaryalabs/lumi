@@ -90,6 +90,17 @@ pub struct CompiledMarkdown {
     pub navigation: Vec<NavigationItem>,
     /// Non-fatal compatibility and safety diagnostics.
     pub diagnostics: Vec<ImportDiagnostic>,
+    /// Image references awaiting package-level resource resolution.
+    pub resource_references: Vec<MarkdownResourceReference>,
+}
+
+/// Image reference discovered while compiling one Markdown source.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct MarkdownResourceReference {
+    /// Normalized block that represents the image.
+    pub block_id: String,
+    /// Source URL exactly as supplied by the Markdown AST.
+    pub source: String,
 }
 
 /// Identity and ownership supplied by the durable import service.
@@ -221,6 +232,7 @@ pub fn compile_markdown(
         heading_targets: &heading_targets,
         blocks: Vec::new(),
         diagnostics: Vec::new(),
+        resource_references: Vec::new(),
     };
     for child in root.children() {
         state.compile_block(child)?;
@@ -236,6 +248,7 @@ pub fn compile_markdown(
         blocks: state.blocks,
         navigation,
         diagnostics: state.diagnostics,
+        resource_references: state.resource_references,
     })
 }
 
@@ -540,6 +553,7 @@ struct CompileState<'a> {
     heading_targets: &'a HashMap<String, Vec<String>>,
     blocks: Vec<ContentBlock>,
     diagnostics: Vec<ImportDiagnostic>,
+    resource_references: Vec<MarkdownResourceReference>,
 }
 
 impl CompileState<'_> {
@@ -565,6 +579,10 @@ impl CompileState<'_> {
             NodeValue::Paragraph => {
                 if let Some(image) = only_image(node) {
                     let alt = inline_text(image);
+                    let source = match &image.data.borrow().value {
+                        NodeValue::Image(link) => link.url.clone(),
+                        _ => String::new(),
+                    };
                     self.push_block(
                         node,
                         ReadingNodeKind::Image,
@@ -572,6 +590,12 @@ impl CompileState<'_> {
                         self.next_block_path(),
                         None,
                     );
+                    if let Some(block) = self.blocks.last() {
+                        self.resource_references.push(MarkdownResourceReference {
+                            block_id: block.id.clone(),
+                            source,
+                        });
+                    }
                     self.diagnostics.push(ImportDiagnostic {
                         severity: DiagnosticSeverity::Warning,
                         code: "markdown_resource_not_embedded".to_owned(),
@@ -632,7 +656,7 @@ impl CompileState<'_> {
                     "mermaid" => Some("lumi.mermaid"),
                     "math" | "latex" => Some("lumi.math"),
                     "svg" => Some("lumi.svg"),
-                    value if value.starts_with("lumi:") => Some(value),
+                    value if value.starts_with("lumi:") || value.starts_with("lum:") => Some(value),
                     _ => None,
                 };
                 let kind = capability.map_or(ReadingNodeKind::CodeBlock, |capability| {
@@ -873,10 +897,11 @@ fn append_links<'a>(
                     target_path,
                     kind,
                     external_url,
+                    source_target: Some(link.url),
                 });
             }
         }
-        NodeValue::WikiLink(_) => {
+        NodeValue::WikiLink(link) => {
             let start = output.chars().count();
             for child in node.children() {
                 append_links(child, heading_targets, output, links);
@@ -889,6 +914,7 @@ fn append_links<'a>(
                     target_path: Vec::new(),
                     kind: ReadingLinkKind::Internal,
                     external_url: None,
+                    source_target: Some(link.url),
                 });
             }
         }
@@ -911,6 +937,7 @@ fn append_links<'a>(
                 target_path: Vec::new(),
                 kind: ReadingLinkKind::Footnote,
                 external_url: None,
+                source_target: None,
             });
         }
         NodeValue::Math(math) => output.push_str(&math.literal),
