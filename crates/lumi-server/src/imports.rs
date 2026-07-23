@@ -6,18 +6,18 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use lumi_core::{
-    content_hash, import_epub, import_telegram_composite, import_telegram_text,
+    content_hash, import_epub, import_markdown, import_telegram_composite, import_telegram_text,
     import_web_snapshot, normalize_pdf, AcceptedImport, Annotation, AnnotationExport,
     AnnotationKind, BlobManifest, BlobRef, BlobRole, ContinueReadingEntry, CreateAnnotationCommand,
     DeleteAnnotationCommand, DiagnosticSeverity, DocumentRevision, DocumentRevisionId,
     EpubImportError, EpubImportRequest, EpubLimits, FixedLayoutContentPackage, ImportDiagnostic,
     ImportStatusEntry, ImportedEpub, ImportedPdf, ImportedPublication, ImportedPublicationResource,
-    Job, JobId, JobKind, JobStage, JobStatus, LibraryEntry, LibraryState, Material, MaterialId,
-    MaterialImportStatus, MaterialKind, MoveReadingPositionCommand, NormalizedContentPackage,
-    PageFidelityDocument, PdfImportRequest, PdfLimits, ReaderSettings, ReadingDocument,
-    ReadingNode, ReadingNodeKind, ReadingProgress, RenderPlan, SourceIdentity,
-    TelegramCapturedImage, TelegramMessageSnapshot, TelegramPhotoDescriptor, TelegramUpdate,
-    TelegramWebSection, UpdateAnnotationCommand,
+    Job, JobId, JobKind, JobStage, JobStatus, LibraryEntry, LibraryState, MarkdownImportError,
+    MarkdownImportRequest, MarkdownLimits, Material, MaterialId, MaterialImportStatus,
+    MaterialKind, MoveReadingPositionCommand, NormalizedContentPackage, PageFidelityDocument,
+    PdfImportRequest, PdfLimits, ReaderSettings, ReadingDocument, ReadingNode, ReadingNodeKind,
+    ReadingProgress, RenderPlan, SourceIdentity, TelegramCapturedImage, TelegramMessageSnapshot,
+    TelegramPhotoDescriptor, TelegramUpdate, TelegramWebSection, UpdateAnnotationCommand,
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -45,6 +45,7 @@ mod sqlx {
 
 const EPUB_SOURCE_MEDIA_TYPE: &str = "application/epub+zip";
 const PDF_SOURCE_MEDIA_TYPE: &str = "application/pdf";
+const MARKDOWN_SOURCE_MEDIA_TYPE: &str = "text/markdown; charset=utf-8";
 const MAX_ACTIVE_IMPORT_WORKERS: usize = 8;
 const MAX_PENDING_IMPORTS_PER_ACCOUNT: i64 = 16;
 const MAX_CONCURRENT_DOCUMENT_UPLOADS: usize = 2;
@@ -54,7 +55,7 @@ const MAX_TELEGRAM_LINKS: usize = 8;
 const MAX_TELEGRAM_WEB_FETCHES: usize = 3;
 const WORKER_LEASE_SQL: &str = "30 minutes";
 const SOURCE_RESERVATION_LEASE_SQL: &str = "1 minute";
-const REQUIRED_MIGRATION_COUNT: i64 = 10;
+const REQUIRED_MIGRATION_COUNT: i64 = 11;
 #[cfg(not(test))]
 const HEARTBEAT_INTERVAL: std::time::Duration = std::time::Duration::from_secs(30);
 #[cfg(test)]
@@ -103,6 +104,7 @@ pub(crate) struct UploadAdmission {
 enum FileUploadKind {
     Epub,
     Pdf,
+    Markdown,
 }
 
 impl FileUploadKind {
@@ -115,9 +117,11 @@ impl FileUploadKind {
             Ok(Self::Pdf)
         } else if lowercase.ends_with(".epub") {
             Ok(Self::Epub)
+        } else if lowercase.ends_with(".md") || lowercase.ends_with(".markdown") {
+            Ok(Self::Markdown)
         } else {
             Err(ImportServiceError::BadRequest(
-                "file must be an EPUB or PDF document",
+                "file must be an EPUB, PDF or Markdown document",
             ))
         }
     }
@@ -126,6 +130,7 @@ impl FileUploadKind {
         match self {
             Self::Epub => "epub",
             Self::Pdf => "pdf",
+            Self::Markdown => "markdown",
         }
     }
 
@@ -133,6 +138,7 @@ impl FileUploadKind {
         match self {
             Self::Epub => EPUB_SOURCE_MEDIA_TYPE,
             Self::Pdf => PDF_SOURCE_MEDIA_TYPE,
+            Self::Markdown => MARKDOWN_SOURCE_MEDIA_TYPE,
         }
     }
 
@@ -140,6 +146,7 @@ impl FileUploadKind {
         match self {
             Self::Epub => EpubLimits::s1().source_bytes,
             Self::Pdf => PdfLimits::web_v1().source_bytes,
+            Self::Markdown => MarkdownLimits::web_v1().source_bytes,
         }
     }
 }
@@ -460,6 +467,12 @@ impl ImportService {
                 blob_hash: source_hash.clone(),
                 file_name: file_name.clone(),
                 media_type: PDF_SOURCE_MEDIA_TYPE.to_owned(),
+                device_id: session.device_id,
+            },
+            FileUploadKind::Markdown => SourceRef::Markdown {
+                blob_hash: source_hash.clone(),
+                file_name: file_name.clone(),
+                media_type: MARKDOWN_SOURCE_MEDIA_TYPE.to_owned(),
                 device_id: session.device_id,
             },
         };
@@ -1202,6 +1215,11 @@ impl ImportService {
                 media_type,
                 ..
             } => (file_name.clone(), media_type.clone()),
+            SourceRef::Markdown {
+                file_name,
+                media_type,
+                ..
+            } => (file_name.clone(), media_type.clone()),
             SourceRef::WebPage { .. } => (
                 "snapshot.json".to_owned(),
                 "application/vnd.lumi.web-snapshot+json".to_owned(),
@@ -1894,6 +1912,7 @@ impl ImportService {
                 "pdf" => MaterialKind::Pdf,
                 "web_page" => MaterialKind::WebPage,
                 "telegram" => MaterialKind::Telegram,
+                "markdown" => MaterialKind::Markdown,
                 _ => return Err(ImportServiceError::Unavailable),
             },
             canonical_title: row.try_get("canonical_title").map_err(log_storage_error)?,
@@ -2127,6 +2146,19 @@ impl ImportService {
                 )
                 .await
             }
+            source_ref @ SourceRef::Markdown { .. } => {
+                self.run_markdown(
+                    job_id,
+                    claim_id,
+                    user_id,
+                    space_id,
+                    material_id,
+                    attempt,
+                    source_ref,
+                    Arc::clone(&cancellation),
+                )
+                .await
+            }
             source_ref @ SourceRef::WebPage { .. } => {
                 self.run_web(
                     job_id,
@@ -2258,6 +2290,96 @@ impl ImportService {
             }
             Err(error) => {
                 let cancelled = matches!(error, EpubImportError::Cancelled);
+                self.fail(
+                    job_id,
+                    claim_id,
+                    material_id,
+                    attempt,
+                    error.diagnostic(),
+                    cancelled,
+                )
+                .await
+            }
+        }
+    }
+
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "worker context is explicit across the source adapter boundary"
+    )]
+    async fn run_markdown(
+        &self,
+        job_id: JobId,
+        claim_id: Uuid,
+        user_id: Uuid,
+        space_id: Uuid,
+        material_id: Uuid,
+        attempt: i32,
+        source_ref: SourceRef,
+        cancellation: Arc<AtomicBool>,
+    ) -> Result<(), ImportServiceError> {
+        let SourceRef::Markdown {
+            blob_hash,
+            file_name,
+            ..
+        } = &source_ref
+        else {
+            return Err(ImportServiceError::Unavailable);
+        };
+        self.set_stage(job_id, claim_id, "normalizing").await?;
+        let source = match self.blobs.get(blob_hash).await {
+            Ok(source) => source,
+            Err(_) => {
+                return self
+                    .fail(
+                        job_id,
+                        claim_id,
+                        material_id,
+                        attempt,
+                        source_unavailable_diagnostic("markdown"),
+                        false,
+                    )
+                    .await;
+            }
+        };
+        self.persist_blob_parts(blob_hash, MARKDOWN_SOURCE_MEDIA_TYPE, &source)
+            .await?;
+        let revision_id = Uuid::now_v7();
+        let source_name = file_name.clone();
+        let worker_cancellation = Arc::clone(&cancellation);
+        let imported = tokio::task::spawn_blocking(move || {
+            import_markdown(
+                MarkdownImportRequest {
+                    owner_id: user_id,
+                    material_id,
+                    revision_id,
+                    source_name: &source_name,
+                    source: &source,
+                },
+                MarkdownLimits::web_v1(),
+                || worker_cancellation.load(Ordering::Acquire),
+            )
+        })
+        .await
+        .map_err(|_| ImportServiceError::Unavailable)?;
+        match imported {
+            Ok(imported) if !cancellation.load(Ordering::Acquire) => {
+                self.persist_success(job_id, claim_id, space_id, &source_ref, attempt, imported)
+                    .await
+            }
+            Ok(_) => {
+                self.fail(
+                    job_id,
+                    claim_id,
+                    material_id,
+                    attempt,
+                    MarkdownImportError::Cancelled.diagnostic(),
+                    true,
+                )
+                .await
+            }
+            Err(error) => {
+                let cancelled = matches!(error, MarkdownImportError::Cancelled);
                 self.fail(
                     job_id,
                     claim_id,
@@ -3537,6 +3659,12 @@ enum SourceRef {
         media_type: String,
         device_id: Uuid,
     },
+    Markdown {
+        blob_hash: String,
+        file_name: String,
+        media_type: String,
+        device_id: Uuid,
+    },
     WebPage {
         url: String,
         snapshot_blob_hash: Option<String>,
@@ -3583,6 +3711,7 @@ impl SourceRef {
         match self {
             Self::Epub { device_id, .. }
             | Self::Pdf { device_id, .. }
+            | Self::Markdown { device_id, .. }
             | Self::WebPage { device_id, .. }
             | Self::TelegramText { device_id, .. }
             | Self::TelegramComposite { device_id, .. } => *device_id,
@@ -3591,7 +3720,9 @@ impl SourceRef {
 
     fn source_blob_hash(&self) -> Option<&str> {
         match self {
-            Self::Epub { blob_hash, .. } | Self::Pdf { blob_hash, .. } => Some(blob_hash),
+            Self::Epub { blob_hash, .. }
+            | Self::Pdf { blob_hash, .. }
+            | Self::Markdown { blob_hash, .. } => Some(blob_hash),
             Self::WebPage {
                 snapshot_blob_hash, ..
             } => snapshot_blob_hash.as_deref(),
@@ -3608,6 +3739,7 @@ impl SourceRef {
         match self {
             Self::Epub { .. } => EPUB_SOURCE_MEDIA_TYPE,
             Self::Pdf { .. } => PDF_SOURCE_MEDIA_TYPE,
+            Self::Markdown { .. } => MARKDOWN_SOURCE_MEDIA_TYPE,
             Self::WebPage { .. } => "application/vnd.lumi.web-snapshot+json",
             Self::TelegramText { .. } => "application/vnd.lumi.telegram-message+json",
             Self::TelegramComposite { .. } => "application/vnd.lumi.telegram-envelope+json",
@@ -3618,6 +3750,7 @@ impl SourceRef {
         match self {
             Self::Epub { .. } => "epub",
             Self::Pdf { .. } => "pdf",
+            Self::Markdown { .. } => "markdown",
             Self::WebPage { .. } => "web_page",
             Self::TelegramText { .. } | Self::TelegramComposite { .. } => "telegram",
         }
@@ -3627,6 +3760,7 @@ impl SourceRef {
         match self {
             Self::Epub { file_name, .. } => file_name.clone(),
             Self::Pdf { file_name, .. } => file_name.clone(),
+            Self::Markdown { file_name, .. } => file_name.clone(),
             Self::WebPage { .. } => "snapshot.json".to_owned(),
             Self::TelegramText { .. } => "message.json".to_owned(),
             Self::TelegramComposite { .. } => "envelope.json".to_owned(),
@@ -4231,6 +4365,7 @@ fn library_entry_from_row(
             "pdf" => MaterialKind::Pdf,
             "web_page" => MaterialKind::WebPage,
             "telegram" => MaterialKind::Telegram,
+            "markdown" => MaterialKind::Markdown,
             _ => return Err(ImportServiceError::Unavailable),
         },
         canonical_title: row.try_get("canonical_title").map_err(log_storage_error)?,
@@ -4470,9 +4605,14 @@ fn safe_file_name(value: &str) -> Result<String, ImportServiceError> {
         .take(240)
         .collect::<String>();
     let lowercase = name.to_ascii_lowercase();
-    if name.is_empty() || !(lowercase.ends_with(".epub") || lowercase.ends_with(".pdf")) {
+    if name.is_empty()
+        || !(lowercase.ends_with(".epub")
+            || lowercase.ends_with(".pdf")
+            || lowercase.ends_with(".md")
+            || lowercase.ends_with(".markdown"))
+    {
         Err(ImportServiceError::BadRequest(
-            "upload must have a non-empty .epub or .pdf file name",
+            "upload must have a non-empty .epub, .pdf, .md or .markdown file name",
         ))
     } else {
         Ok(name)
@@ -4485,6 +4625,10 @@ fn upload_title(file_name: &str) -> String {
         .or_else(|| file_name.strip_suffix(".EPUB"))
         .or_else(|| file_name.strip_suffix(".pdf"))
         .or_else(|| file_name.strip_suffix(".PDF"))
+        .or_else(|| file_name.strip_suffix(".markdown"))
+        .or_else(|| file_name.strip_suffix(".MARKDOWN"))
+        .or_else(|| file_name.strip_suffix(".md"))
+        .or_else(|| file_name.strip_suffix(".MD"))
         .unwrap_or(file_name)
         .to_owned()
 }
@@ -4519,9 +4663,21 @@ mod tests {
     }
 
     #[test]
-    fn safe_file_name_should_reject_non_epub_extension() -> Result<(), Box<dyn std::error::Error>> {
+    fn upload_kind_should_detect_markdown_extensions() -> Result<(), Box<dyn std::error::Error>> {
+        let source = include_bytes!("../../../tests/fixtures/markdown/supported.md");
+
+        assert_eq!(
+            FileUploadKind::detect("guide.markdown", source)?,
+            FileUploadKind::Markdown
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn safe_file_name_should_reject_unsupported_extension() -> Result<(), Box<dyn std::error::Error>>
+    {
         let Err(error) = safe_file_name("book.html") else {
-            return Err(std::io::Error::other("non-EPUB extension was accepted").into());
+            return Err(std::io::Error::other("unsupported extension was accepted").into());
         };
 
         assert!(matches!(error, ImportServiceError::BadRequest(_)));
@@ -4687,6 +4843,90 @@ mod tests {
         let (name, media_type, downloaded) = service.source(user_id, entry.id).await?;
         assert_eq!(name, "text-layer.pdf");
         assert_eq!(media_type, PDF_SOURCE_MEDIA_TYPE);
+        assert_eq!(downloaded, source);
+        let _ = tokio::fs::remove_dir_all(blob_root).await;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn postgres_markdown_import_publishes_reflowable_reader_and_source(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let Ok(database_url) = std::env::var("LUMI_TEST_DATABASE_URL") else {
+            return Ok(());
+        };
+        let source = include_bytes!("../../../tests/fixtures/markdown/supported.md");
+        crate::run_migrations(&database_url).await?;
+        let pool = sqlx_postgres::PgPoolOptions::new()
+            .max_connections(6)
+            .connect(&database_url)
+            .await?;
+        let user_id = Uuid::now_v7();
+        let device_id = Uuid::now_v7();
+        let space_id = Uuid::now_v7();
+        sqlx::query("INSERT INTO accounts (user_id, status) VALUES ($1, 'active')")
+            .bind(user_id)
+            .execute(&pool)
+            .await?;
+        sqlx::query("INSERT INTO sync_devices (device_id, user_id, name, kind) VALUES ($1, $2, 'Markdown test', 'web')")
+            .bind(device_id)
+            .bind(user_id)
+            .execute(&pool)
+            .await?;
+        sqlx::query(
+            "INSERT INTO sync_spaces (space_id, owner_user_id, kind) VALUES ($1, $2, 'personal')",
+        )
+        .bind(space_id)
+        .bind(user_id)
+        .execute(&pool)
+        .await?;
+        let blob_root = std::env::temp_dir().join(format!("lumi-markdown-test-{}", Uuid::now_v7()));
+        let service = Arc::new(ImportService::local(pool, blob_root.clone()));
+        let session = AuthenticatedSession {
+            user_id,
+            session_id: Uuid::now_v7(),
+            device_id,
+            csrf_hash: [0; 32],
+        };
+        let accepted = service
+            .accept(
+                &session,
+                "supported.md",
+                "markdown-import-integration",
+                source.to_vec(),
+            )
+            .await?;
+        let job = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            loop {
+                let job = service.job(user_id, accepted.job.id).await?;
+                if matches!(
+                    job.status,
+                    JobStatus::Succeeded | JobStatus::Failed | JobStatus::Cancelled
+                ) {
+                    return Ok::<Job, ImportServiceError>(job);
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+            }
+        })
+        .await??;
+        assert_eq!(job.status, JobStatus::Succeeded, "{:?}", job.diagnostics);
+        let revision_id = job
+            .revision_id
+            .ok_or_else(|| std::io::Error::other("Markdown revision is missing"))?;
+        let entry = service.material(user_id, accepted.material_id).await?;
+        assert_eq!(entry.kind, MaterialKind::Markdown);
+        assert_eq!(entry.canonical_title, "Руководство Lumi");
+        let document = service.reading_document(user_id, revision_id).await?;
+        assert!(document
+            .navigation
+            .iter()
+            .any(|item| item.label == "Детали"));
+        assert!(document.nodes[0]
+            .children
+            .iter()
+            .any(|node| matches!(node.kind, ReadingNodeKind::Table)));
+        let (name, media_type, downloaded) = service.source(user_id, entry.id).await?;
+        assert_eq!(name, "supported.md");
+        assert_eq!(media_type, MARKDOWN_SOURCE_MEDIA_TYPE);
         assert_eq!(downloaded, source);
         let _ = tokio::fs::remove_dir_all(blob_root).await;
         Ok(())

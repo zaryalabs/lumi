@@ -12,7 +12,9 @@ axum = { workspace = true, features = ["multipart"] }
 base64.workspace = true
 ed25519-dalek.workspace = true
 encoding_rs.workspace = true
-lumi-core = { version = "0.1.0", path = "../lumi-core" }
+lumi-core = { version = "0.1.0", path = "../lumi-core", features = [
+  "markdown-import",
+] }
 rand.workspace = true
 quick-xml.workspace = true
 reqwest.workspace = true

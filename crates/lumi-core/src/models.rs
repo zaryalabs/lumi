@@ -173,6 +173,13 @@ pub fn s1_schema_migrations() -> Vec<SchemaMigration> {
                 "PDF source imports, fixed-layout packages and page fidelity reader contracts."
                     .to_owned(),
         },
+        SchemaMigration {
+            id: "s1-0009-markdown-import".to_owned(),
+            schema_version: DOMAIN_SCHEMA_VERSION.to_owned(),
+            description:
+                "Markdown source locators, deterministic GFM compilation and durable imports."
+                    .to_owned(),
+        },
     ]);
     migrations
 }
@@ -289,6 +296,8 @@ pub enum MaterialKind {
     WebPage,
     /// Direct or forwarded Telegram text normalized into the common reader.
     Telegram,
+    /// UTF-8 Markdown document normalized through the common reflowable reader.
+    Markdown,
 }
 
 /// User-visible library state.
@@ -326,6 +335,8 @@ pub enum SourceFormat {
     WebPage,
     /// Telegram Bot API message snapshot.
     Telegram,
+    /// Standalone UTF-8 Markdown source.
+    Markdown,
 }
 
 /// Immutable result of one successful import.
@@ -986,11 +997,34 @@ pub enum SourceLocator {
     Web(WebSourceLocator),
     /// Telegram message provenance.
     Telegram(TelegramSourceLocator),
+    /// Markdown source range and generated heading provenance.
+    Markdown(MarkdownSourceLocator),
     /// Normalized package path when no source-specific locator exists.
     Normalized {
         /// Normalized node path.
         node_path: Vec<String>,
     },
+}
+
+/// Markdown-specific source locator retained alongside the shared anchor.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct MarkdownSourceLocator {
+    /// Logical source file name or package-relative path.
+    pub file_path: String,
+    /// Markdown dialect used for parsing.
+    pub dialect: String,
+    /// Inclusive byte offset of the source range start.
+    pub byte_start: usize,
+    /// Exclusive byte offset of the source range end.
+    pub byte_end: usize,
+    /// One-based line containing the source range start.
+    pub line_start: usize,
+    /// One-based line containing the source range end.
+    pub line_end: usize,
+    /// Heading labels above the located node.
+    pub heading_path: Vec<String>,
+    /// Deterministic heading id when the located node is a heading.
+    pub generated_heading_id: Option<String>,
 }
 
 /// Web-specific source locator retained alongside the shared anchor.
@@ -1679,6 +1713,6 @@ mod tests {
     fn migrations_cover_s1_contract_groups() {
         let migrations = s1_schema_migrations();
 
-        assert_eq!(migrations.len(), 12);
+        assert_eq!(migrations.len(), 13);
     }
 }

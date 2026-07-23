@@ -4,6 +4,9 @@ import { readFileSync } from "node:fs";
 const textLayerPdf = readFileSync(
   new URL("../fixtures/pdf/text-layer.pdf", import.meta.url),
 );
+const supportedMarkdown = readFileSync(
+  new URL("../fixtures/markdown/supported.md", import.meta.url),
+);
 
 const supportedEpub = Buffer.from(
   "UEsDBBQAAAAAAAAAIQBvYassFAAAABQAAAAIAAAAbWltZXR5cGVhcHBsaWNhdGlvbi9lcHViK3ppcFBLAwQUAAAACAD9eO1cHBxuKlQAAABrAAAAFgAAAE1FVEEtSU5GL2NvbnRhaW5lci54bWyzsa/IzVEoSy0qzszPs1Uy1DNQsrezSc7PK0nMzEstsrMpys8vScvMSS1GMBXSSnNydAsSSzJslVwDQp30CxKTsxPTU/XyC9KU9O1s9JH06COMAgBQSwMEFAAAAAgA/XjtXFlgKDfMAAAAbQEAABAAAABFUFVCL3BhY2thZ2Uub3BmjdA9bsMwDAXgqwhag0RxstIKEMBbhy49ACEzCVFJFiQmdW9f2c7f2E16JD48EA5j8OpGufAQW91stvpgIaH7xjO98n3NLQQS7FHQgrB4ssc8/BTKqvv8OoJZMnCZUIZsP66BVbfrwDwS8BjP1+paimCeHzAvN2DkExWxwEJBcd/qiDetLplO83MzXiR4rQL1jGv5TdRqTMmzQ6lNzTxejdNKykOiLExlQcwb6pqHKTSKcc3/XTMVftYsiSMtcOWqPaOVn9buQ3M/p/0DUEsDBBQAAAAIAP147Vxvj8P2PgAAAEgAAAAOAAAARVBVQi9uYXYueGh0bWyzySjJzbGzScpPqbSzyUsss7NJVMgoSk2zVSpJrSjRTzbUqwCpULJzzkgsKEktstFPtLPRByvUh2jSB5sAAFBLAwQUAAAACAD9eO1cT/i+nUcAAABNAAAAEgAAAEVQVUIvdGV4dC9jMS54aHRtbLPJKMnNsbNJyk+ptLPJMLRzzkgsKEktstEHsm0K7AJSi4ozi0tS80oUilITcxRcA0KdFDJzC/KLSvRs9AvsbPQhOvXBxgAAUEsBAhQDFAAAAAAAAAAhAG9hqywUAAAAFAAAAAgAAAAAAAAAAAAAAIABAAAAAG1pbWV0eXBlUEsBAhQDFAAAAAgA/XjtXBwcbipUAAAAawAAABYAAAAAAAAAAAAAAIABOgAAAE1FVEEtSU5GL2NvbnRhaW5lci54bWxQSwECFAMUAAAACAD9eO1cWWAoN8wAAABtAQAAEAAAAAAAAAAAAAAAgAHCAAAARVBVQi9wYWNrYWdlLm9wZlBLAQIUAxQAAAAIAP147Vxvj8P2PgAAAEgAAAAOAAAAAAAAAAAAAACAAbwBAABFUFVCL25hdi54aHRtbFBLAQIUAxQAAAAIAP147VxP+L6dRwAAAE0AAAASAAAAAAAAAAAAAACAASYCAABFUFVCL3RleHQvYzEueGh0bWxQSwUGAAAAAAUABQA0AQAAnQIAAAAA",
@@ -196,6 +199,52 @@ test("switches EPUB reader pages through user clicks", async ({ page }) => {
   ).toBeVisible();
 });
 
+test("imports Markdown through the shared reflowable reader", async ({
+  page,
+}) => {
+  await page.goto("/");
+  await page
+    .getByRole("button", { name: "Сгенерировать recovery phrase" })
+    .click();
+  await page.getByText("Я сохранил(а) все 24 слова", { exact: false }).click();
+  await page.getByRole("button", { name: "Создать аккаунт" }).click();
+  await expect(
+    page.getByRole("region", { name: "Пустая библиотека" }),
+  ).toBeVisible();
+
+  await page
+    .getByRole("button", { name: "＋ Добавить материал", exact: true })
+    .click();
+  const uploadDialog = page.getByRole("dialog", {
+    name: "Добавить материал",
+  });
+  await uploadDialog.getByRole("tab", { name: "Markdown" }).click();
+  await uploadDialog.getByLabel("Файл Markdown").setInputFiles({
+    name: "supported.md",
+    mimeType: "text/markdown",
+    buffer: supportedMarkdown,
+  });
+  await uploadDialog
+    .getByRole("button", { name: "Добавить в библиотеку" })
+    .click();
+
+  const card = page.getByRole("article", {
+    name: "Материал Руководство Lumi",
+  });
+  await expect(
+    card.getByText("Markdown · документ", { exact: true }),
+  ).toBeVisible();
+  await expect(card.getByText("Готово", { exact: true })).toBeVisible();
+  await card.getByRole("button", { name: "Читать" }).click();
+
+  const reader = page.getByRole("main", { name: "Чтение Руководство Lumi" });
+  await expect(reader.getByText("Введение", { exact: true })).toBeVisible();
+  await expect(reader.getByText(/Импортировать Markdown/)).toBeVisible();
+  await expect(
+    reader.getByRole("link", { name: "Открыть: официальный сайт" }),
+  ).toHaveAttribute("rel", /noopener/);
+});
+
 test("imports and reads a PDF with selectable text and anchored highlights", async ({
   page,
 }) => {
@@ -311,9 +360,13 @@ test("persists an API-backed EPUB library lifecycle", async ({ page }) => {
     .click();
   uploadDialog = page.getByRole("dialog", { name: "Добавить материал" });
   const epubTab = uploadDialog.getByRole("tab", { name: "EPUB" });
+  const markdownTab = uploadDialog.getByRole("tab", { name: "Markdown" });
   const pdfTab = uploadDialog.getByRole("tab", { name: "PDF" });
   const webTab = uploadDialog.getByRole("tab", { name: "Web-ссылка" });
   await epubTab.focus();
+  await page.keyboard.press("ArrowRight");
+  await expect(markdownTab).toHaveAttribute("aria-selected", "true");
+  await expect(markdownTab).toBeFocused();
   await page.keyboard.press("ArrowRight");
   await expect(pdfTab).toHaveAttribute("aria-selected", "true");
   await expect(pdfTab).toBeFocused();
@@ -323,6 +376,9 @@ test("persists an API-backed EPUB library lifecycle", async ({ page }) => {
   await page.keyboard.press("ArrowLeft");
   await expect(pdfTab).toHaveAttribute("aria-selected", "true");
   await expect(pdfTab).toBeFocused();
+  await page.keyboard.press("ArrowLeft");
+  await expect(markdownTab).toHaveAttribute("aria-selected", "true");
+  await expect(markdownTab).toBeFocused();
   await page.keyboard.press("ArrowLeft");
   await expect(epubTab).toHaveAttribute("aria-selected", "true");
   await expect(epubTab).toBeFocused();

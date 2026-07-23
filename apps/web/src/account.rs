@@ -467,6 +467,12 @@ fn LibraryApp(csrf_token: String, on_open_reader: EventHandler<Uuid>) -> Element
             .iter()
             .any(|feature| feature == "pdf-fixed-layout-import")
     });
+    let markdown_import_enabled = capabilities.read().as_ref().is_some_and(|value| {
+        value
+            .features
+            .iter()
+            .any(|feature| feature == "markdown-import")
+    });
     let telegram_enabled = capabilities.read().as_ref().is_some_and(|value| {
         value
             .features
@@ -484,7 +490,7 @@ fn LibraryApp(csrf_token: String, on_open_reader: EventHandler<Uuid>) -> Element
                 div {
                     p { class: "eyebrow", "Личное пространство" }
                     h1 { "Ваша библиотека" }
-                    p { class: "library-lead", "EPUB, web-статьи и составные материалы из Telegram в вашей облачной библиотеке." }
+                    p { class: "library-lead", "EPUB, Markdown, PDF, web-статьи и составные материалы из Telegram в вашей облачной библиотеке." }
                 }
                 button {
                     id: "add-material-button",
@@ -535,7 +541,7 @@ fn LibraryApp(csrf_token: String, on_open_reader: EventHandler<Uuid>) -> Element
                     div { class: "empty-glyph", aria_hidden: "true", "L" }
                     p { class: "eyebrow", "Первый материал" }
                     h2 { "Здесь пока тихо" }
-                    p { "Добавьте DRM-free EPUB или публичную web-статью — Lumi сохранит исходник и покажет честное состояние импорта." }
+                    p { "Добавьте DRM-free EPUB, Markdown, PDF или публичную web-статью — Lumi сохранит исходник и покажет честное состояние импорта." }
                     button { class: "primary-action", r#type: "button", onclick: move |_| add_open.set(true), "Добавить материал" }
                 }
             } else {
@@ -733,6 +739,7 @@ fn LibraryApp(csrf_token: String, on_open_reader: EventHandler<Uuid>) -> Element
                 csrf_token: csrf_token.clone(),
                 web_import_enabled,
                 pdf_import_enabled,
+                markdown_import_enabled,
                 capabilities_loaded,
                 on_close: move |_| {
                     add_open.set(false);
@@ -908,6 +915,7 @@ struct SelectedUpload {
 #[derive(Clone, Copy, Eq, PartialEq)]
 enum AddSourceMode {
     Epub,
+    Markdown,
     Pdf,
     Web,
 }
@@ -917,6 +925,7 @@ fn AddMaterialDialog(
     csrf_token: String,
     web_import_enabled: bool,
     pdf_import_enabled: bool,
+    markdown_import_enabled: bool,
     capabilities_loaded: bool,
     on_close: EventHandler<()>,
     on_accepted: EventHandler<AcceptedImport>,
@@ -940,8 +949,9 @@ fn AddMaterialDialog(
                 button { class: "icon-action", r#type: "button", aria_label: "Закрыть загрузку", disabled: busy(), onclick: move |_| on_close.call(()), "×" }
             }
             div { class: "source-tabs", role: "tablist", aria_label: "Тип источника",
-                button { id: "source-tab-epub", class: "secondary-action", r#type: "button", role: "tab", aria_selected: mode() == AddSourceMode::Epub, aria_controls: "source-panel-epub", tabindex: if mode() == AddSourceMode::Epub { "0" } else { "-1" }, onclick: move |_| { mode.set(AddSourceMode::Epub); selected.set(None); }, onkeydown: move |event| if event.key() == Key::ArrowRight && pdf_import_enabled { event.prevent_default(); mode.set(AddSourceMode::Pdf); selected.set(None); defer_account_focus("source-tab-pdf"); }, "EPUB" }
-                button { id: "source-tab-pdf", class: "secondary-action", r#type: "button", role: "tab", aria_selected: mode() == AddSourceMode::Pdf, aria_controls: "source-panel-pdf", aria_disabled: !pdf_import_enabled, disabled: !pdf_import_enabled, tabindex: if mode() == AddSourceMode::Pdf { "0" } else { "-1" }, onclick: move |_| { mode.set(AddSourceMode::Pdf); selected.set(None); }, onkeydown: move |event| if event.key() == Key::ArrowLeft { event.prevent_default(); mode.set(AddSourceMode::Epub); selected.set(None); defer_account_focus("source-tab-epub"); } else if event.key() == Key::ArrowRight && web_import_enabled { event.prevent_default(); mode.set(AddSourceMode::Web); selected.set(None); defer_account_focus("source-tab-web"); }, "PDF" }
+                button { id: "source-tab-epub", class: "secondary-action", r#type: "button", role: "tab", aria_selected: mode() == AddSourceMode::Epub, aria_controls: "source-panel-epub", tabindex: if mode() == AddSourceMode::Epub { "0" } else { "-1" }, onclick: move |_| { mode.set(AddSourceMode::Epub); selected.set(None); }, onkeydown: move |event| if event.key() == Key::ArrowRight && markdown_import_enabled { event.prevent_default(); mode.set(AddSourceMode::Markdown); selected.set(None); defer_account_focus("source-tab-markdown"); }, "EPUB" }
+                button { id: "source-tab-markdown", class: "secondary-action", r#type: "button", role: "tab", aria_selected: mode() == AddSourceMode::Markdown, aria_controls: "source-panel-markdown", aria_disabled: !markdown_import_enabled, disabled: !markdown_import_enabled, tabindex: if mode() == AddSourceMode::Markdown { "0" } else { "-1" }, onclick: move |_| { mode.set(AddSourceMode::Markdown); selected.set(None); }, onkeydown: move |event| if event.key() == Key::ArrowLeft { event.prevent_default(); mode.set(AddSourceMode::Epub); selected.set(None); defer_account_focus("source-tab-epub"); } else if event.key() == Key::ArrowRight && pdf_import_enabled { event.prevent_default(); mode.set(AddSourceMode::Pdf); selected.set(None); defer_account_focus("source-tab-pdf"); }, "Markdown" }
+                button { id: "source-tab-pdf", class: "secondary-action", r#type: "button", role: "tab", aria_selected: mode() == AddSourceMode::Pdf, aria_controls: "source-panel-pdf", aria_disabled: !pdf_import_enabled, disabled: !pdf_import_enabled, tabindex: if mode() == AddSourceMode::Pdf { "0" } else { "-1" }, onclick: move |_| { mode.set(AddSourceMode::Pdf); selected.set(None); }, onkeydown: move |event| if event.key() == Key::ArrowLeft && markdown_import_enabled { event.prevent_default(); mode.set(AddSourceMode::Markdown); selected.set(None); defer_account_focus("source-tab-markdown"); } else if event.key() == Key::ArrowRight && web_import_enabled { event.prevent_default(); mode.set(AddSourceMode::Web); selected.set(None); defer_account_focus("source-tab-web"); }, "PDF" }
                 button { id: "source-tab-web", class: "secondary-action", r#type: "button", role: "tab", aria_selected: mode() == AddSourceMode::Web, aria_controls: "source-panel-web", aria_disabled: !web_import_enabled, disabled: !web_import_enabled, tabindex: if mode() == AddSourceMode::Web { "0" } else { "-1" }, onclick: move |_| { mode.set(AddSourceMode::Web); selected.set(None); }, onkeydown: move |event| if event.key() == Key::ArrowLeft && pdf_import_enabled { event.prevent_default(); mode.set(AddSourceMode::Pdf); defer_account_focus("source-tab-pdf"); } else if event.key() == Key::ArrowRight { event.prevent_default(); mode.set(AddSourceMode::Epub); defer_account_focus("source-tab-epub"); }, "Web-ссылка" }
             }
             if !capabilities_loaded {
@@ -972,6 +982,39 @@ fn AddMaterialDialog(
                         },
                     }
                 }
+                }
+            } else if mode() == AddSourceMode::Markdown {
+                div { id: "source-panel-markdown", role: "tabpanel", aria_labelledby: "source-tab-markdown",
+                    p { "UTF-8 Markdown до 10 MiB. Поддерживаются CommonMark, GFM, оглавление, ссылки, таблицы, task lists и безопасные placeholders для расширенных блоков." }
+                    label { class: "upload-dropzone",
+                        span { class: "upload-icon", aria_hidden: "true", "＋" }
+                        strong { if let Some(upload) = selected.read().as_ref() { "{upload.name}" } else { "Выберите файл Markdown" } }
+                        small { if let Some(upload) = selected.read().as_ref() { "{upload.bytes.len()} байт" } else { ".md, .markdown · до 10 MiB" } }
+                        input {
+                            r#type: "file",
+                            name: "markdown_file",
+                            accept: ".md,.markdown,text/markdown,text/x-markdown",
+                            disabled: busy(),
+                            aria_label: "Файл Markdown",
+                            onchange: move |event| {
+                                let Some(file) = event.files().into_iter().next() else { return; };
+                                spawn(async move {
+                                    let name = file.name();
+                                    match file.read_bytes().await {
+                                        Ok(bytes) if bytes.len() <= lumi_core::MARKDOWN_WEB_SOURCE_BYTES as usize => {
+                                            error.set(String::new());
+                                            selected.set(Some(SelectedUpload { name, bytes: bytes.to_vec() }));
+                                        }
+                                        Ok(_) => {
+                                            selected.set(None);
+                                            error.set("Markdown превышает лимит 10 MiB.".to_owned());
+                                        }
+                                        Err(_) => error.set("Не удалось прочитать выбранный Markdown.".to_owned()),
+                                    }
+                                });
+                            },
+                        }
+                    }
                 }
             } else if mode() == AddSourceMode::Pdf {
                 div { id: "source-panel-pdf", role: "tabpanel", aria_labelledby: "source-tab-pdf",
@@ -1021,7 +1064,7 @@ fn AddMaterialDialog(
             }
             div { class: "dialog-actions",
                 button { class: "secondary-action", r#type: "button", disabled: busy(), onclick: move |_| on_close.call(()), "Отмена" }
-                button { class: "primary-action", r#type: "button", disabled: busy() || (matches!(mode(), AddSourceMode::Epub | AddSourceMode::Pdf) && selected.read().is_none()) || (mode() == AddSourceMode::Web && url().trim().is_empty()), onclick: move |_| {
+                button { class: "primary-action", r#type: "button", disabled: busy() || (matches!(mode(), AddSourceMode::Epub | AddSourceMode::Markdown | AddSourceMode::Pdf) && selected.read().is_none()) || (mode() == AddSourceMode::Web && url().trim().is_empty()), onclick: move |_| {
                     let selected_upload = selected.read().clone();
                     let source_url = url();
                     let source_mode = mode();
@@ -1035,6 +1078,10 @@ fn AddMaterialDialog(
                                 None => return,
                             },
                             AddSourceMode::Pdf => match selected_upload.as_ref() {
+                                Some(upload) => upload_document(&csrf, upload).await,
+                                None => return,
+                            },
+                            AddSourceMode::Markdown => match selected_upload.as_ref() {
                                 Some(upload) => upload_document(&csrf, upload).await,
                                 None => return,
                             },
@@ -1536,6 +1583,7 @@ fn material_format_short(kind: &MaterialKind) -> &'static str {
         MaterialKind::Pdf => "PDF",
         MaterialKind::WebPage => "WEB",
         MaterialKind::Telegram => "TG",
+        MaterialKind::Markdown => "MD",
     }
 }
 
@@ -1545,6 +1593,7 @@ fn material_format_label(kind: &MaterialKind) -> &'static str {
         MaterialKind::Pdf => "PDF · документ",
         MaterialKind::WebPage => "Web · статья",
         MaterialKind::Telegram => "Telegram · составной материал",
+        MaterialKind::Markdown => "Markdown · документ",
     }
 }
 
@@ -1554,6 +1603,7 @@ fn material_source_download_label(kind: &MaterialKind) -> &'static str {
         MaterialKind::Pdf => "Скачать исходный PDF",
         MaterialKind::WebPage => "Скачать snapshot",
         MaterialKind::Telegram => "Скачать исходное Telegram-сообщение",
+        MaterialKind::Markdown => "Скачать исходный Markdown",
     }
 }
 

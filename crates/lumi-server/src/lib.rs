@@ -33,11 +33,12 @@ use lumi_core::{
     ContinueReadingEntry, CreateAnnotationCommand, DeleteAnnotationCommand, DiagnosticSeverity,
     DocumentRevision, DocumentRevisionId, EpubFixture, EpubLimits, HealthResponse,
     ImportDiagnostic, ImportStatusEntry, ImportWebUrlRequest, ImportedFixture, Job, JobId, JobKind,
-    JobStage, JobStatus, LibraryEntry, LibraryState, Material, MaterialId, MaterialImportStatus,
-    MoveReadingPositionCommand, NormalizedContentPackage, PageFidelityDocument, PdfLimits,
-    ReaderSettings, ReadingDocument, ReadingProgress, SchemaMigration, ServiceCapabilities,
-    TelegramBotSettings, TelegramConnectionStatus, UpdateAnnotationCommand,
-    UpdateLibraryStateCommand, UpdateReaderSettingsCommand, UpdateTelegramBotTokenRequest, UserId,
+    JobStage, JobStatus, LibraryEntry, LibraryState, MarkdownLimits, Material, MaterialId,
+    MaterialImportStatus, MoveReadingPositionCommand, NormalizedContentPackage,
+    PageFidelityDocument, PdfLimits, ReaderSettings, ReadingDocument, ReadingProgress,
+    SchemaMigration, ServiceCapabilities, TelegramBotSettings, TelegramConnectionStatus,
+    UpdateAnnotationCommand, UpdateLibraryStateCommand, UpdateReaderSettingsCommand,
+    UpdateTelegramBotTokenRequest, UserId,
 };
 use serde::{Deserialize, Serialize};
 use tower_http::{
@@ -983,15 +984,13 @@ async fn upload_document(
             .file_name()
             .ok_or_else(|| AppError::BadRequest("document file name is required".to_owned()))?
             .to_owned();
+        let upload_limit = document_upload_limit(&file_name);
         let mut bytes = Vec::new();
         while let Some(chunk) = field
             .chunk()
             .await
             .map_err(|_| AppError::BadRequest("failed to read multipart upload".to_owned()))?
         {
-            let upload_limit = PdfLimits::web_v1()
-                .source_bytes
-                .max(EpubLimits::s1().source_bytes);
             if bytes.len().saturating_add(chunk.len()) > upload_limit as usize {
                 return Err(AppError::PayloadTooLarge);
             }
@@ -1006,6 +1005,17 @@ async fn upload_document(
         .await
         .map_err(map_import_error)?;
     Ok((StatusCode::ACCEPTED, Json(accepted)).into_response())
+}
+
+fn document_upload_limit(file_name: &str) -> u64 {
+    let lowercase = file_name.to_ascii_lowercase();
+    if lowercase.ends_with(".md") || lowercase.ends_with(".markdown") {
+        MarkdownLimits::web_v1().source_bytes
+    } else {
+        PdfLimits::web_v1()
+            .source_bytes
+            .max(EpubLimits::s1().source_bytes)
+    }
 }
 
 async fn import_web_url(
@@ -1901,6 +1911,15 @@ mod tests {
     }
 
     #[test]
+    fn markdown_upload_uses_its_smaller_streaming_limit() {
+        assert_eq!(
+            document_upload_limit("NOTES.MD"),
+            MarkdownLimits::web_v1().source_bytes
+        );
+        assert!(document_upload_limit("book.epub") > document_upload_limit("notes.md"));
+    }
+
+    #[test]
     fn deployment_security_rejects_public_host_local_bind() {
         let mut local = AppConfig::from_env();
         local.deployment_mode = "local".to_owned();
@@ -2035,6 +2054,10 @@ mod tests {
             .features
             .iter()
             .any(|feature| feature == "annotation-export"));
+        assert!(capabilities
+            .features
+            .iter()
+            .any(|feature| feature == "markdown-import"));
         assert!(!capabilities
             .features
             .iter()
@@ -2063,7 +2086,7 @@ mod tests {
         let migrations: Vec<SchemaMigration> =
             json_get(build_router(), "/api/v1/schema/migrations").await?;
 
-        assert_eq!(migrations.len(), 12);
+        assert_eq!(migrations.len(), 13);
         Ok(())
     }
 
