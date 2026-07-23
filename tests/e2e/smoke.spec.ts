@@ -177,6 +177,29 @@ test("retries a failed account bootstrap before offering sign-in", async ({
   ).toBeVisible();
 });
 
+test("keeps system settings out of a regular user session", async ({
+  page,
+}) => {
+  await page.goto("/");
+  await page
+    .getByRole("button", { name: "Сгенерировать recovery phrase" })
+    .click();
+  await page.getByText("Я сохранил(а) все 24 слова", { exact: false }).click();
+  await page.getByRole("button", { name: "Создать аккаунт" }).click();
+  await expect(
+    page.getByRole("region", { name: "Пустая библиотека" }),
+  ).toBeVisible();
+
+  await expect(page.getByRole("link", { name: "Управление" })).toHaveCount(0);
+  await page.goto("/#settings");
+  await expect(
+    page.getByRole("region", { name: "Пустая библиотека" }),
+  ).toBeVisible();
+  await expect(
+    page.getByRole("heading", { name: "Системные настройки" }),
+  ).toHaveCount(0);
+});
+
 test("switches EPUB reader pages through user clicks", async ({ page }) => {
   await page.goto("/");
   await page

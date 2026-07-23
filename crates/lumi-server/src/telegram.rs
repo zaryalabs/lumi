@@ -449,6 +449,7 @@ impl TelegramService {
             session_id: Uuid::nil(),
             device_id: identity.device_id,
             csrf_hash: [0; 32],
+            instance_role: lumi_core::InstanceRole::User,
         };
         if update.media_group_id.is_some() {
             self.accumulate_media_group(&identity, update).await?;
@@ -597,6 +598,7 @@ impl TelegramService {
             session_id: Uuid::nil(),
             device_id,
             csrf_hash: [0; 32],
+            instance_role: lumi_core::InstanceRole::User,
         };
         let idempotency_key = format!("telegram:{}:media-group:{group_id}", self.bot_scope);
         let accepted = match self
@@ -1095,6 +1097,7 @@ mod tests {
             session_id: Uuid::now_v7(),
             device_id,
             csrf_hash: [0; 32],
+            instance_role: lumi_core::InstanceRole::User,
         };
         Ok(Some((pool, service, session, scope)))
     }

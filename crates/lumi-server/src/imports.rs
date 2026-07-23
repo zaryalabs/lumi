@@ -4881,6 +4881,7 @@ mod tests {
             session_id: Uuid::now_v7(),
             device_id,
             csrf_hash: [0; 32],
+            instance_role: lumi_core::InstanceRole::User,
         };
         let accepted = service
             .accept(
@@ -5036,6 +5037,7 @@ mod tests {
             session_id: Uuid::now_v7(),
             device_id,
             csrf_hash: [0; 32],
+            instance_role: lumi_core::InstanceRole::User,
         };
         let accepted = service
             .accept(
@@ -5258,6 +5260,7 @@ mod tests {
             session_id: Uuid::now_v7(),
             device_id,
             csrf_hash: [0; 32],
+            instance_role: lumi_core::InstanceRole::User,
         };
         let plan = RenderPlan::from_document(&imported.reading_document);
         let block = plan
@@ -5528,6 +5531,7 @@ mod tests {
             session_id: Uuid::now_v7(),
             device_id,
             csrf_hash: [0; 32],
+            instance_role: lumi_core::InstanceRole::User,
         };
         assert!(matches!(
             service
@@ -5744,6 +5748,7 @@ mod tests {
             session_id: Uuid::now_v7(),
             device_id,
             csrf_hash: [0; 32],
+            instance_role: lumi_core::InstanceRole::User,
         };
         let lock_key = "nonblocking-idempotency";
         let mut lock_tx = pool.begin().await?;

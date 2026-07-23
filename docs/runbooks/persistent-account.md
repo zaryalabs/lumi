@@ -45,6 +45,34 @@ Login/recovery выполняется через `/api/v1/auth/challenges` и т
 подпись transcript `LUMI-AUTH-V1`. Challenge живёт не более пяти минут,
 ограничен числом попыток и атомарно потребляется после успешной проверки.
 
+## Bootstrap администратора
+
+Recovery phrase администратора нельзя записывать в `.env`. Локально получить
+из неё публичный lookup id можно через скрытый shell input:
+
+```sh
+IFS= read -r -s LUMI_ADMIN_PHRASE
+printf '\n'
+printf '%s\n' "$LUMI_ADMIN_PHRASE" | make admin-lookup-id
+unset LUMI_ADMIN_PHRASE
+```
+
+Полученное base64url-значение задать серверу:
+
+```sh
+make server-r LUMI_ADMIN_LOOKUP_IDS="<lookup-id>"
+
+# Для полного compose-стека сохраните публичный идентификатор в корневом .env:
+# LUMI_ADMIN_LOOKUP_IDS=<lookup-id>
+make up
+```
+
+Несколько администраторов задаются через запятую. Переменная может быть
+настроена до регистрации соответствующего аккаунта: после регистрации или
+login server сопоставит её с `auth_identities.lookup_id`. Без переменной все
+аккаунты получают роль `user`, а system settings отвечают `403 Forbidden`.
+Неверный lookup id блокирует запуск server с configuration error.
+
 Mutating account-owned routes требуют:
 
 - действующую `HttpOnly` session cookie;

@@ -70,6 +70,10 @@ are future full-copy replicas**.
 
 - Каждый вход создает `WebSession` и `SyncDevice`.
 - Session token хранится отдельно от seed phrase и может быть отозван.
+- Server вычисляет отдельную instance-wide роль `user | admin` по deployment
+  policy. Она не заменяет scoped roles внутри sync/shared spaces.
+- Admin bootstrap использует только публичный auth `lookup_id`; raw seed phrase
+  не передаётся server и не хранится в environment.
 - Device list нужен для sync status, revocation и диагностики.
 - Desktop/mobile могут подключаться через seed phrase login или future device
   pairing flow из уже авторизованного клиента.

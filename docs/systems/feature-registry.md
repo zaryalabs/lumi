@@ -48,6 +48,7 @@ Status: accepted
 | ACC-004 | Account profile: nickname/display metadata separated from auth identity | product | ACC-001 | `web-account.md`, `social.md` |
 | ACC-005 | Server-side `ImportInbox` for uploads, Telegram, web capture and providers | foundation | ACC-003, CORE-010 | `web-account.md`, `formats/telegram.md`, `formats/web-reader.md` |
 | ACC-006 | Account export and deletion workflows with retention/grace policy | product | ACC-003, CORE-010 | `web-account.md`, `sync.md`, `security-privacy.md` |
+| ACC-007 | Instance-wide `user/admin` access with deployment bootstrap through public auth lookup id | foundation | ACC-001, ACC-002 | `web-account.md`, `security-privacy.md` |
 | SYNC-001 | Sync spaces: personal, shared, system/provider and future private relay | foundation | ACC-002 | `sync.md`, `social.md` |
 | SYNC-002 | Change log, snapshots, cursors and deterministic reducers | foundation | SYNC-001 | `sync.md` |
 | SYNC-003 | Native local store, outbox/inbox and offline full-copy replicas | foundation | SYNC-002 | `sync.md`, `reader-architecture.md` |

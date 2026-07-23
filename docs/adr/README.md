@@ -17,6 +17,8 @@ plugin, AI, search and account/auth boundaries.
   durable media groups;
 - [`0014`](0014-pdf-fixed-layout-import-and-web-reader.md) — fixed-layout PDF
   import, page anchors и Web renderer.
+- [`0016`](0016-instance-admin-bootstrap.md) — instance-wide роль
+  администратора и безопасный bootstrap через публичный auth lookup id.
 
 ## Template
 

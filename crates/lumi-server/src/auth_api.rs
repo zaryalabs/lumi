@@ -10,7 +10,7 @@ use axum::{
 };
 use lumi_core::{
     decode_auth_bytes, AccountSummary, CompleteLoginRequest, CreateChallengeRequest, DeviceSummary,
-    RegisterAccountRequest, SessionBootstrap, UpdateAccountProfileRequest,
+    InstanceRole, RegisterAccountRequest, SessionBootstrap, UpdateAccountProfileRequest,
 };
 use uuid::Uuid;
 
@@ -112,12 +112,13 @@ async fn account_me(
     State(state): State<AppState>,
     Extension(session): Extension<AuthenticatedSession>,
 ) -> Result<Json<AccountSummary>, AppError> {
-    state
+    let mut account = state
         .accounts()
         .account(session.user_id)
         .await
-        .map(Json)
-        .map_err(map_auth_error)
+        .map_err(map_auth_error)?;
+    account.instance_role = session.instance_role;
+    Ok(Json(account))
 }
 
 async fn update_profile(
@@ -130,12 +131,23 @@ async fn update_profile(
             "idempotency_key must not be empty".to_owned(),
         ));
     }
-    state
+    let mut account = state
         .accounts()
         .update_profile(&session, &request)
         .await
-        .map(Json)
-        .map_err(map_auth_error)
+        .map_err(map_auth_error)?;
+    account.instance_role = session.instance_role;
+    Ok(Json(account))
+}
+
+pub(crate) fn require_instance_admin(session: &AuthenticatedSession) -> Result<(), AppError> {
+    if session.instance_role == InstanceRole::Admin {
+        Ok(())
+    } else {
+        Err(AppError::Forbidden(
+            "instance administrator access is required",
+        ))
+    }
 }
 
 async fn logout(

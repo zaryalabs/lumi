@@ -46,7 +46,7 @@ RUSTUP_PATH_ENV := $(if $(RUSTUP_TOOLCHAIN_BIN),PATH=$(RUSTUP_TOOLCHAIN_BIN):$$P
 
 .DEFAULT_GOAL := help
 
-.PHONY: help prepare build push release-manifest deploy ci-clean-images ops-config cicd-contract-test production-compose-smoke init fmt l dl t c pc docs-fmt docs-l rust-fmt rust-l rust-web-check rust-web-l rust-dl rust-t up logs down reset server-r telegram-r db-up db-down db-migrate pdfjs-assets web-r prototype-r prototype-e2e pagination-spike-r pagination-spike-e2e stage0-spikes web-build e2e-fmt e2e-fmt-check e2e-l e2e-dl web-e2e pg-t compatibility security performance staging-config staging-smoke backup restore-drill restore-attestation-test restore-attestation beta-local beta agent-inspect
+.PHONY: help prepare build push release-manifest deploy ci-clean-images ops-config cicd-contract-test production-compose-smoke init fmt l dl t c pc docs-fmt docs-l rust-fmt rust-l rust-web-check rust-web-l rust-dl rust-t up logs down reset server-r admin-lookup-id telegram-r db-up db-down db-migrate pdfjs-assets web-r prototype-r prototype-e2e pagination-spike-r pagination-spike-e2e stage0-spikes web-build e2e-fmt e2e-fmt-check e2e-l e2e-dl web-e2e pg-t compatibility security performance staging-config staging-smoke backup restore-drill restore-attestation-test restore-attestation beta-local beta agent-inspect
 
 help: ## Show available make targets
 	@awk 'BEGIN {FS = ":.*## "}; /^[a-zA-Z0-9_.-]+:.*## / {printf "  %-16s %s\n", $$1, $$2}' $(MAKEFILE_LIST)
@@ -206,7 +206,7 @@ rust-t: ## Run Rust tests for implemented crates
 		echo "No Cargo.toml found; skipping Rust tests"; \
 	fi
 
-up: ## Build and start the complete local stack
+up: ## Build and start the complete local stack, loading .env through Docker Compose
 	LUMI_SERVER_PORT=$(LUMI_SERVER_PORT) LUMI_WEB_PORT=$(LUMI_WEB_PORT) LUMI_POSTGRES_PORT=$(LUMI_POSTGRES_PORT) docker compose up -d --build --wait
 	@echo "Lumi is ready: http://127.0.0.1:$(LUMI_WEB_PORT)"
 	@echo "Logs: make logs | Stop: make down | Delete local data: make reset"
@@ -228,11 +228,14 @@ server-r: ## Run the local Axum server
 			echo "Then apply migrations with: make db-migrate"; \
 			exit 1; \
 		fi; \
-		DATABASE_URL=$(DATABASE_URL) LUMI_SERVER_BIND=$(LUMI_SERVER_BIND) $(CARGO) run -p lumi-server --bin lumi-server; \
+		DATABASE_URL=$(DATABASE_URL) LUMI_SERVER_BIND=$(LUMI_SERVER_BIND) LUMI_ADMIN_LOOKUP_IDS="$${LUMI_ADMIN_LOOKUP_IDS:-}" $(CARGO) run -p lumi-server --bin lumi-server; \
 	else \
 		echo "No Cargo.toml found; cannot run server"; \
 		exit 1; \
 	fi
+
+admin-lookup-id: ## Derive a public admin lookup id from a recovery phrase supplied through stdin
+	@$(CARGO) run --quiet -p lumi-server --bin lumi-admin-id
 
 db-up: ## Start the local PostgreSQL service
 	LUMI_POSTGRES_PORT=$(LUMI_POSTGRES_PORT) docker compose up -d --wait postgres

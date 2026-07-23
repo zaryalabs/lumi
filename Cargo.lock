@@ -3689,6 +3689,7 @@ dependencies = [
  "async-trait",
  "axum",
  "base64",
+ "bip39",
  "ed25519-dalek",
  "encoding_rs",
  "lumi-core",

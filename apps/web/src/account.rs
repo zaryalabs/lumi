@@ -6,8 +6,8 @@ use gloo_net::http::Request;
 use lumi_core::{
     decode_auth_bytes, encode_auth_bytes, AcceptedImport, AccountSummary, AuthChallenge,
     ChallengeResponse, CompleteLoginRequest, ContinueReadingEntry, CreateChallengeRequest,
-    DerivedAuthMaterial, ImportWebUrlRequest, Job, JobStatus, LibraryEntry, LibraryState,
-    MaterialImportStatus, MaterialKind, ReadingProgress, RegisterAccountRequest,
+    DerivedAuthMaterial, ImportWebUrlRequest, InstanceRole, Job, JobStatus, LibraryEntry,
+    LibraryState, MaterialImportStatus, MaterialKind, ReadingProgress, RegisterAccountRequest,
     ServiceCapabilities, SessionBootstrap, TelegramBotRuntimeStatus, TelegramBotSettings,
     TelegramConnectionStatus, TelegramPairingResponse, UpdateLibraryStateCommand,
     UpdateTelegramBotTokenRequest,
@@ -51,6 +51,12 @@ fn set_browser_route(route: AppRoute) {
     if let Some(window) = web_sys::window() {
         let _ = window.location().set_hash(&hash);
     }
+}
+
+fn browser_requests_system_settings() -> bool {
+    web_sys::window()
+        .and_then(|window| window.location().hash().ok())
+        .is_some_and(|hash| hash == "#settings")
 }
 
 #[derive(Clone)]
@@ -102,6 +108,12 @@ pub(crate) fn AccountGate() -> Element {
             match load_account().await {
                 Ok(account) => {
                     csrf.set(read_cookie("lumi_csrf").unwrap_or_default());
+                    if account.instance_role != InstanceRole::Admin
+                        && (route() == AppRoute::Settings || browser_requests_system_settings())
+                    {
+                        set_browser_route(AppRoute::Library);
+                        route.set(AppRoute::Library);
+                    }
                     state.set(AccountState::SignedIn(account));
                 }
                 Err(ApiError::Unauthorized) => state.set(AccountState::SignedOut),
@@ -122,6 +134,12 @@ pub(crate) fn AccountGate() -> Element {
             AccountEntry {
                 on_authenticated: move |session: SessionBootstrap| {
                     csrf.set(session.csrf_token.clone());
+                    if session.account.instance_role != InstanceRole::Admin
+                        && (route() == AppRoute::Settings || browser_requests_system_settings())
+                    {
+                        set_browser_route(AppRoute::Library);
+                        route.set(AppRoute::Library);
+                    }
                     state.set(AccountState::SignedIn(session.account));
                 }
             }
@@ -137,6 +155,7 @@ pub(crate) fn AccountGate() -> Element {
             }
         },
         AccountState::SignedIn(account) => {
+            let is_admin = account.instance_role == InstanceRole::Admin;
             let csrf_for_logout = csrf.read().clone();
             let account_label = account
                 .nickname
@@ -160,10 +179,12 @@ pub(crate) fn AccountGate() -> Element {
                                 set_browser_route(AppRoute::Library);
                                 route.set(AppRoute::Library);
                             }, "Библиотека" }
-                            a { href: "#settings", aria_current: if route() == AppRoute::Settings { "page" } else { "false" }, onclick: move |_| {
-                                set_browser_route(AppRoute::Settings);
-                                route.set(AppRoute::Settings);
-                            }, "Настройки" }
+                            if is_admin {
+                                a { href: "#settings", aria_current: if route() == AppRoute::Settings { "page" } else { "false" }, onclick: move |_| {
+                                    set_browser_route(AppRoute::Settings);
+                                    route.set(AppRoute::Settings);
+                                }, "Управление" }
+                            }
                         }
                         div { class: "account-session-bar", role: "region", aria_label: "Активная сессия",
                             span { "{account_label}" }
@@ -192,7 +213,7 @@ pub(crate) fn AccountGate() -> Element {
                                 route.set(AppRoute::Library);
                             }
                         }
-                    } else if route() == AppRoute::Settings {
+                    } else if route() == AppRoute::Settings && is_admin {
                         SettingsApp { csrf_token: csrf.read().clone() }
                     } else {
                         LibraryApp {
@@ -271,8 +292,8 @@ fn SettingsApp(csrf_token: String) -> Element {
             header { class: "library-hero",
                 div {
                     p { class: "eyebrow", "Конфигурация" }
-                    h1 { "Настройки" }
-                    p { class: "library-lead", "Подключения и параметры этого экземпляра Lumi." }
+                    h1 { "Системные настройки" }
+                    p { class: "library-lead", "Подключения и параметры этого экземпляра Lumi, доступные администратору." }
                 }
             }
 
@@ -294,7 +315,7 @@ fn SettingsApp(csrf_token: String) -> Element {
                 }
 
                 p { class: "settings-notice", role: "note",
-                    "Это глобальная настройка сервера. Пока в Lumi нет ролей, любой вошедший пользователь может заменить токен бота."
+                    "Это глобальная настройка сервера. Изменения применяются ко всем пользователям экземпляра Lumi."
                 }
 
                 if let Some(current) = settings_snapshot.as_ref() {

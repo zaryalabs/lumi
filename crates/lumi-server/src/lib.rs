@@ -14,7 +14,7 @@ mod telegram_media;
 mod telegram_runtime;
 mod web;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, RwLock, RwLockReadGuard, RwLockWriteGuard};
 use std::time::Duration;
 
@@ -28,17 +28,17 @@ use axum::{
     Extension, Json, Router,
 };
 use lumi_core::{
-    import_epub_fixture, rich_epub_fixture, s1_schema_migrations, simple_epub_fixture,
-    AcceptedImport, Annotation, AnnotationExport, AnnotationId, BlobManifest, BlobManifestId,
-    ContinueReadingEntry, CreateAnnotationCommand, DeleteAnnotationCommand, DiagnosticSeverity,
-    DocumentRevision, DocumentRevisionId, EpubFixture, EpubLimits, HealthResponse,
-    ImportDiagnostic, ImportStatusEntry, ImportWebUrlRequest, ImportedFixture, Job, JobId, JobKind,
-    JobStage, JobStatus, LibraryEntry, LibraryState, LumLimits, MarkdownLimits, Material,
-    MaterialId, MaterialImportStatus, MoveReadingPositionCommand, NormalizedContentPackage,
-    PageFidelityDocument, PdfLimits, ReaderSettings, ReadingDocument, ReadingProgress,
-    SchemaMigration, ServiceCapabilities, TelegramBotSettings, TelegramConnectionStatus,
-    UpdateAnnotationCommand, UpdateLibraryStateCommand, UpdateReaderSettingsCommand,
-    UpdateTelegramBotTokenRequest, UserId,
+    decode_auth_bytes, import_epub_fixture, rich_epub_fixture, s1_schema_migrations,
+    simple_epub_fixture, AcceptedImport, Annotation, AnnotationExport, AnnotationId, BlobManifest,
+    BlobManifestId, ContinueReadingEntry, CreateAnnotationCommand, DeleteAnnotationCommand,
+    DiagnosticSeverity, DocumentRevision, DocumentRevisionId, EpubFixture, EpubLimits,
+    HealthResponse, ImportDiagnostic, ImportStatusEntry, ImportWebUrlRequest, ImportedFixture,
+    InstanceRole, Job, JobId, JobKind, JobStage, JobStatus, LibraryEntry, LibraryState, LookupId,
+    LumLimits, MarkdownLimits, Material, MaterialId, MaterialImportStatus,
+    MoveReadingPositionCommand, NormalizedContentPackage, PageFidelityDocument, PdfLimits,
+    ReaderSettings, ReadingDocument, ReadingProgress, SchemaMigration, ServiceCapabilities,
+    TelegramBotSettings, TelegramConnectionStatus, UpdateAnnotationCommand,
+    UpdateLibraryStateCommand, UpdateReaderSettingsCommand, UpdateTelegramBotTokenRequest, UserId,
 };
 use serde::{Deserialize, Serialize};
 use tower_http::{
@@ -76,6 +76,7 @@ pub struct AppConfig {
     blob_root: std::path::PathBuf,
     secret_root: std::path::PathBuf,
     deployment_mode: String,
+    admin_lookup_ids_raw: String,
 }
 
 impl AppConfig {
@@ -101,6 +102,7 @@ impl AppConfig {
             .unwrap_or_else(|| std::path::PathBuf::from(DEFAULT_SECRET_ROOT));
         let deployment_mode =
             std::env::var("LUMI_DEPLOYMENT_MODE").unwrap_or_else(|_| "local".to_owned());
+        let admin_lookup_ids_raw = std::env::var("LUMI_ADMIN_LOOKUP_IDS").unwrap_or_default();
 
         Self {
             bind_address,
@@ -111,6 +113,7 @@ impl AppConfig {
             blob_root,
             secret_root,
             deployment_mode,
+            admin_lookup_ids_raw,
         }
     }
 
@@ -142,6 +145,23 @@ impl AppConfig {
     #[must_use]
     pub fn secret_root(&self) -> &std::path::Path {
         &self.secret_root
+    }
+
+    fn admin_lookup_ids(&self) -> anyhow::Result<HashSet<LookupId>> {
+        self.admin_lookup_ids_raw
+            .split(',')
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .enumerate()
+            .map(|(index, value)| {
+                decode_auth_bytes::<32>(value).map_err(|_| {
+                    anyhow::anyhow!(
+                        "LUMI_ADMIN_LOOKUP_IDS entry {} must be a 32-byte unpadded base64url value",
+                        index + 1
+                    )
+                })
+            })
+            .collect()
     }
 }
 
@@ -226,8 +246,13 @@ impl AppState {
     /// Build a state object seeded with the S1 rich EPUB fixture.
     #[must_use]
     pub fn seeded() -> Self {
+        Self::seeded_with_role(InstanceRole::Admin)
+    }
+
+    fn seeded_with_role(instance_role: InstanceRole) -> Self {
         let owner_id = UserId::now_v7();
-        let accounts: Arc<dyn AccountStore> = Arc::new(MemoryAccountStore::seeded(owner_id));
+        let accounts: Arc<dyn AccountStore> =
+            Arc::new(MemoryAccountStore::seeded(owner_id, instance_role));
         let fixture = rich_epub_fixture();
         match import_epub_fixture(owner_id, &fixture) {
             Ok(imported) => {
@@ -266,10 +291,11 @@ impl AppState {
         recover_imports: bool,
     ) -> anyhow::Result<Self> {
         validate_deployment_security(config)?;
+        let admin_lookup_ids = config.admin_lookup_ids()?;
         tokio::fs::create_dir_all(config.blob_root())
             .await
             .map_err(|error| anyhow::anyhow!("failed to prepare blob root: {error}"))?;
-        let accounts = PgAccountStore::connect(config.database_url())
+        let accounts = PgAccountStore::connect(config.database_url(), admin_lookup_ids)
             .await
             .map_err(|error| anyhow::anyhow!(error))?;
         let imports = Arc::new(ImportService::local(
@@ -559,7 +585,7 @@ fn validate_deployment_security(config: &AppConfig) -> anyhow::Result<()> {
 ///
 /// Returns an error when PostgreSQL is unavailable or a migration fails.
 pub async fn run_migrations(database_url: &str) -> anyhow::Result<()> {
-    let store = PgAccountStore::connect(database_url)
+    let store = PgAccountStore::connect(database_url, HashSet::new())
         .await
         .map_err(|error| anyhow::anyhow!(error))?;
     let migrations_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("migrations");
@@ -1153,7 +1179,9 @@ async fn retry_job(
 
 async fn get_telegram_bot_settings(
     State(state): State<AppState>,
+    Extension(session): Extension<AuthenticatedSession>,
 ) -> Result<Json<TelegramBotSettings>, AppError> {
+    auth_api::require_instance_admin(&session)?;
     state
         .telegram_runtime()?
         .settings()
@@ -1166,6 +1194,7 @@ async fn update_telegram_bot_token(
     Extension(session): Extension<AuthenticatedSession>,
     Json(mut request): Json<UpdateTelegramBotTokenRequest>,
 ) -> Result<Json<TelegramBotSettings>, AppError> {
+    auth_api::require_instance_admin(&session)?;
     let result = state
         .telegram_runtime()?
         .configure(&request.token, session.user_id)
@@ -1176,7 +1205,9 @@ async fn update_telegram_bot_token(
 
 async fn delete_telegram_bot_token(
     State(state): State<AppState>,
+    Extension(session): Extension<AuthenticatedSession>,
 ) -> Result<Json<TelegramBotSettings>, AppError> {
+    auth_api::require_instance_admin(&session)?;
     state
         .telegram_runtime()?
         .remove()
@@ -1913,6 +1944,27 @@ mod tests {
     }
 
     #[test]
+    fn admin_lookup_ids_accept_public_auth_identifiers() -> Result<(), Box<dyn std::error::Error>> {
+        let mut config = AppConfig::from_env();
+        let first = lumi_core::encode_auth_bytes(&[1; 32]);
+        let second = lumi_core::encode_auth_bytes(&[2; 32]);
+        config.admin_lookup_ids_raw = format!("{first}, {second}");
+
+        let lookup_ids = config.admin_lookup_ids()?;
+
+        assert_eq!(lookup_ids, HashSet::from([[1; 32], [2; 32]]));
+        Ok(())
+    }
+
+    #[test]
+    fn admin_lookup_ids_reject_malformed_values() {
+        let mut config = AppConfig::from_env();
+        config.admin_lookup_ids_raw = "not-base64url".to_owned();
+
+        assert!(config.admin_lookup_ids().is_err());
+    }
+
+    #[test]
     fn markdown_upload_uses_its_smaller_streaming_limit() {
         assert_eq!(
             document_upload_limit("NOTES.MD"),
@@ -2087,6 +2139,30 @@ mod tests {
             .await?;
 
         assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn telegram_settings_reject_a_regular_user() -> Result<(), Box<dyn std::error::Error>> {
+        let response = build_router_with_state(AppState::seeded_with_role(InstanceRole::User))
+            .oneshot(authenticated_request(
+                Request::builder()
+                    .uri("/api/v1/settings/telegram")
+                    .body(Body::empty())?,
+            ))
+            .await?;
+
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn account_summary_reports_the_server_assigned_instance_role(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let account: lumi_core::AccountSummary =
+            json_get(build_router(), "/api/v1/account/me").await?;
+
+        assert_eq!(account.instance_role, InstanceRole::Admin);
         Ok(())
     }
 
@@ -2498,22 +2574,32 @@ mod tests {
         config.secret_root = secret_root.clone();
         config.bind_address = DEFAULT_BIND_ADDRESS.to_owned();
         config.deployment_mode = "local".to_owned();
+        config.admin_lookup_ids_raw = lumi_core::encode_auth_bytes(&[0x82; 32]);
         let app = build_router_with_state(AppState::persistent(&config).await?);
         let owner = register_test_session(app.clone(), 0x81).await?;
         let foreign = register_test_session(app.clone(), 0x82).await?;
-        for session in [&owner, &foreign] {
-            let response = app
-                .clone()
-                .oneshot(
-                    session.apply(
-                        Request::builder()
-                            .uri("/api/v1/settings/telegram")
-                            .body(Body::empty())?,
-                    ),
-                )
-                .await?;
-            assert_eq!(response.status(), StatusCode::OK);
-        }
+        let owner_settings = app
+            .clone()
+            .oneshot(
+                owner.apply(
+                    Request::builder()
+                        .uri("/api/v1/settings/telegram")
+                        .body(Body::empty())?,
+                ),
+            )
+            .await?;
+        assert_eq!(owner_settings.status(), StatusCode::OK);
+        let foreign_settings = app
+            .clone()
+            .oneshot(
+                foreign.apply(
+                    Request::builder()
+                        .uri("/api/v1/settings/telegram")
+                        .body(Body::empty())?,
+                ),
+            )
+            .await?;
+        assert_eq!(foreign_settings.status(), StatusCode::FORBIDDEN);
         let imported: ImportFixtureResponse = request_json_with_session(
             app.clone(),
             Request::builder()

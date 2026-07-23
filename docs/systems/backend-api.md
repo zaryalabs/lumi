@@ -47,7 +47,8 @@ Responsibilities:
 - `search` - serious server-side web search and retrieval API.
 - `sync` - native full-copy sync, cursors, changes and snapshots.
 - `rooms/shares` - social/shared reading spaces and public/share objects.
-- `settings/telegram` - instance-wide bot configuration and listener status.
+- `settings/telegram` - admin-only instance-wide bot configuration and
+  listener status.
 - `providers/telegram` - account pairing over the embedded transport.
 - `mcp` - external agent integration with scoped tools.
 

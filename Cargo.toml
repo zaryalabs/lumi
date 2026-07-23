@@ -19,6 +19,7 @@ ammonia = "4.1.4"
 async-trait = "0.1.89"
 axum = "0.8.9"
 base64 = "0.22.1"
+bip39 = "2.2.0"
 comrak = { version = "0.54.0", default-features = false }
 ring = "0.17.14"
 dioxus = { version = "0.7.0", default-features = false }

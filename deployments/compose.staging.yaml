@@ -47,6 +47,7 @@ services:
       LUMI_DEPLOYMENT_MODE: staging
       LUMI_BLOB_ROOT: /var/lib/lumi/blobs
       LUMI_SECRET_ROOT: /var/lib/lumi/secrets
+      LUMI_ADMIN_LOOKUP_IDS: ${LUMI_ADMIN_LOOKUP_IDS:-}
       RUST_LOG: ${RUST_LOG:-info,tower_http=info}
     depends_on:
       migrate:
