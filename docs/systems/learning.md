@@ -20,12 +20,38 @@ Vision задает несколько ключевых сценариев:
 Learning не должен быть отдельным учебным приложением рядом с reader. Он должен
 работать поверх тех же материалов, anchors, заметок, поиска и ИИ-задач.
 
+## Продуктовые принципы
+
+- **Чтение важнее проверки.** Завершение главы или материала фиксируется до
+  предложения упражнений. Отказ, пропуск или ошибка learning-сессии не меняют
+  прогресс чтения.
+- **Одна сессия, независимые механики.** Сразу после чтения Lumi может
+  предложить быструю проверку, explain-back и будущие повторения, но пользователь
+  выбирает любую комбинацию, а не проходит обязательную линейную воронку.
+- **Сначала вспоминание, затем подсказка.** Ответ не показывается до первой
+  попытки или явного действия пользователя. Подсказки раскрываются постепенно и
+  учитываются при оценке попытки.
+- **Оценка помогает перечитать, а не выносит вердикт.** Feedback объясняет
+  пробел, ссылается на source anchors и предлагает следующее действие. Lumi не
+  делает выводов об интеллекте или способностях пользователя.
+- **Без ИИ остается полезный режим.** Готовые тесты, карточки, подсказки,
+  расписание и самопроверка работают без provider. Генерация, автоматическая
+  оценка открытого ответа и interactive explain-back требуют доступного ИИ.
+- **У пользователя остается контроль.** Автогенерация, голос, расписание и
+  напоминания являются разными настройками и включаются независимо.
+
 ## Пользовательские сценарии
 
-- Пользователь заканчивает главу и получает короткий тест по прочитанному.
-- Пользователь отвечает на вопрос текстом или голосом.
+- Пользователь заканчивает главу и получает необязательное предложение
+  проверить себя за несколько минут, продолжить чтение или закрыть reader.
+- Пользователь проходит короткий тест с вариантами либо отвечает на открытый
+  вопрос текстом или голосом.
 - Пользователь пропускает упражнение, чтобы не ломать поток чтения.
 - Пользователь включает повторение и получает карточки в нужные дни.
+- Пользователь раскрывает подсказки по одной, а после ответа переходит к
+  исходному фрагменту и возвращается в ту же learning-сессию.
+- Пользователь ставит повторения на паузу глобально или для материала, не теряя
+  созданные items и историю попыток.
 - Пользователь просит "сделай карточки по этой главе"; Lumi ставит AI task и
   позже показывает результат.
 - Пользователь запускает режим "объяснить своими словами": пишет или говорит
@@ -36,6 +62,39 @@ Learning не должен быть отдельным учебным прило
   API-ключа.
 
 ## Функциональные требования
+
+### Сессия после чтения
+
+Завершение главы, раздела или всего материала создает один idempotent
+`completion event`. Если для этого scope есть активные learning items, reader
+показывает компактное предложение:
+
+- `Проверить себя` - короткая immediate-recall сессия;
+- `Объяснить своими словами` - отдельный explain-back flow;
+- `Напомнить позже` - включить или подтвердить повторения для source;
+- `Не сейчас` - закрыть предложение без потери прогресса;
+- `Не предлагать для этого материала` - отключить автоматические предложения
+  для source, оставив ручной запуск доступным.
+
+Предложение не должно перекрывать последнюю страницу до завершения чтения и не
+должно появляться повторно при каждом открытии уже завершенной главы. Повторно
+запустить любую механику можно из карточки материала, reader и экрана
+`Челленджи`.
+
+Immediate-recall сессия по умолчанию:
+
+- занимает ориентировочно 3-5 минут;
+- содержит 3-7 заданий, если items достаточно;
+- покрывает разные ключевые понятия source, а не несколько формулировок одного
+  факта;
+- смешивает закрытые и открытые задания, когда оба типа доступны;
+- показывает итог только после ответов и дает переходы к источнику;
+- не создает автоматически расписание повторений без согласия пользователя.
+
+Если готовых items нет, Lumi честно предлагает создать их через ИИ или начать
+explain-back. Завершение чтения не должно ждать генерацию. Автогенерация до
+завершения source допустима только при явно включенной пользователем политике и
+с соблюдением AI context/privacy policy.
 
 ### Типы упражнений
 
@@ -73,6 +132,44 @@ Learning item может появиться из:
 Generated items start as drafts. Пользователь может принять, отредактировать,
 архивировать или regenerate.
 
+Для бесшовной post-reading сессии пользователь может отдельно разрешить
+автоактивацию личных AI-generated items после структурной и source-grounding
+валидации. По умолчанию generated items требуют просмотра; встроенные автором
+упражнения и вручную созданные пользователем items могут быть активны сразу.
+
+### Ответы и проверка теста
+
+- Для `single choice`, `multiple choice` и `true/false` authoritative answer
+  хранится в `answer_spec`; результат вычисляется детерминированно без ИИ.
+- Для открытого вопроса пользователь выбирает ввод текстом или голосом. После
+  transcription он может исправить распознанный текст до отправки на оценку.
+- Голосовой ответ на закрытый тест является accessibility shortcut: Lumi
+  распознает номер или текст варианта и просит подтвердить неоднозначный выбор.
+- Открытый ответ проверяется по rubric и expected concepts, а не по совпадению
+  строки с эталоном.
+- Пользователь всегда может выбрать `Показать ответ` или `Оценить себя`. Такая
+  попытка помечается как self-checked и не выдается за автоматически
+  проверенную.
+- После ответа UI показывает объяснение, использованные подсказки и source
+  anchors. Ошибка ИИ или transcription не должна превращаться в неправильный
+  ответ без возможности исправления.
+
+### Вопросы с подсказками
+
+`hinted_question` поддерживает упорядоченные уровни помощи:
+
+1. направление мысли или категория ответа;
+2. ключевое понятие, контекст или исключение;
+3. близкий к ответу фрагмент либо переход к source anchor;
+4. полный ответ с объяснением.
+
+Item может иметь меньше уровней, но порядок фиксируется в его revision.
+Раскрытая подсказка записывается в attempt. Верный ответ после подсказки
+остается полезным, однако снижает evidence самостоятельного вспоминания и
+влияет на следующее расписание. Пользователь может открыть источник в
+отдельном слое и затем вернуться к тому же вопросу; такое действие также
+записывается как помощь, а не как «чистое» вспоминание.
+
 ### Генерация через ИИ
 
 Reader/KB creates `AiTask`:
@@ -100,15 +197,40 @@ Learning layer validates structure and creates `LearningItem` drafts.
 Explain-back - отдельный interactive AI scenario:
 
 1. Lumi выбирает source scope: chapter/block/material.
-2. Пользователь объясняет своими словами text или voice.
-3. AI compares explanation against source context и expected concepts.
-4. AI returns:
+2. Перед началом Lumi показывает scope и короткую инструкцию объяснить материал
+   так, как пользователь объяснял бы его другому человеку.
+3. Пользователь объясняет своими словами text или voice.
+4. Для voice пользователь проверяет transcript до оценивания.
+5. AI compares explanation against source context, expected concepts и rubric.
+6. Каждая итерация оценивает отдельно:
+   - фактическую корректность;
+   - покрытие ключевых понятий;
+   - связи, причинность и ограничения, если они существенны для source;
+   - ясность, достаточную для понимания, но не стиль речи или грамотность сами
+     по себе.
+7. AI returns:
    - что верно;
    - что пропущено;
    - что искажено;
-   - уточняющий вопрос или next prompt.
-5. Loop continues until success criteria или user stops.
-6. Итог сохраняется как attempt, feedback и optional KB note.
+   - source citations для утверждений feedback;
+   - один наиболее полезный уточняющий вопрос или next prompt.
+8. Loop continues until success criteria, user chooses to finish или исчерпан
+   настроенный session limit.
+9. Итог сохраняется как attempt, structured feedback и optional KB note.
+
+Итоговые состояния не должны имитировать точную экзаменационную оценку:
+
+- `understood` - ключевые понятия раскрыты без существенных ошибок;
+- `partial` - основа верна, но есть заметные пробелы;
+- `needs_review` - есть существенное искажение или не раскрыта основная идея;
+- `not_evaluated` - пользователь завершил раньше, ИИ недоступен или feedback
+  нельзя надежно привязать к источнику.
+
+ИИ не должен снижать результат только за другую формулировку, акцент,
+неидеальную речь или отсутствие несущественных деталей. Если source context
+недостаточен или противоречив, результат становится `not_evaluated`, а не
+догадкой модели. Пользователь может оспорить feedback, открыть цитату,
+перезапустить оценку или сохранить попытку без оценки.
 
 Ограничение: внутри Lumi этот mode requires direct AI availability через
 user key/subscription, потому что он интерактивный и чувствителен к latency.
@@ -121,6 +243,10 @@ UI и возвращает final artifacts/attempt summary back to Lumi.
 - Audio is stored as voice note/learning attempt attachment.
 - Transcription is AI task.
 - Until transcript is available, attempt state is `pending_transcription`.
+- Transcript is editable before grading; original audio and edited transcript
+  retain provenance as different payloads.
+- Retention of original audio follows a separate privacy setting. User can
+  delete audio after transcription while keeping the accepted transcript.
 - Explain-back over voice requires transcription or multimodal provider.
 
 ### Scheduling
@@ -140,7 +266,25 @@ Decision:
 - Store enough fields to replace algorithm later.
 - Keep algorithm version in schedule records.
 
-User can disable spaced repetition entirely or per source.
+FSRS models estimated retention from actual attempts; UI may call this
+`повторение с учетом забывания`, but should not promise a universal fixed
+forgetting curve. A first exposure is not treated as a successful review until
+the user attempts recall.
+
+Controls:
+
+- enable/disable scheduling globally;
+- enable/disable or pause it for a material/folder;
+- snooze a session without grading all due items as failed;
+- choose a lightweight daily limit or review only on manual launch;
+- keep reminders off while scheduling remains enabled;
+- resume from stored schedule or restart a source schedule explicitly.
+
+Disabling or pausing repetition never deletes items, attempts or schedule
+history. Paused items do not become an ever-growing overdue counter and do not
+send reminders. They remain available for manual practice. On resume, scheduler
+recomputes the next actionable session from persisted state rather than
+presenting the entire accumulated queue at once.
 
 ### Attempts and mastery
 
@@ -171,6 +315,19 @@ Vision mentions "Челенджи". This surface should include:
 - progress by material/concept;
 - generated drafts waiting for approval.
 
+The default view prioritizes a bounded `Сегодня` session, not an unbounded
+backlog. It distinguishes:
+
+- `Закрепить сейчас` - immediate tests for recently completed scopes;
+- `Повторить` - due scheduled items;
+- `Объяснить` - optional explain-back prompts;
+- `Черновики` - generated items that still need review.
+
+User can filter by material and dismiss, snooze or pause a source directly from
+this screen. Streaks, leagues and punitive overdue counters are outside the
+baseline: the surface optimizes understanding and return to source, not daily
+engagement at any cost.
+
 ## Нефункциональные требования
 
 - **Optionality.** Learning should support reading flow, not block it.
@@ -181,6 +338,10 @@ Vision mentions "Челенджи". This surface should include:
   offline. New AI generation may wait for provider/agent.
 - **Explainability.** User should see why an answer is wrong and where to
   reread.
+- **Boundedness.** A learning session has a visible estimated size and can be
+  stopped without marking unanswered items wrong.
+- **Accessibility.** Voice is an alternative input, not a separate lower- or
+  higher-value exercise path.
 - **Privacy.** Learning attempts are private unless explicitly shared.
 - **Durability.** Attempts and schedule changes sync reliably and do not depend
   on transient UI state.
@@ -204,6 +365,7 @@ LearningSource
 - `LearningSchedule` - due/repetition state.
 - `LearningSession` - grouped challenge/test/explain-back session.
 - `LearningHint` - hints attached to item.
+- `LearningRubric` - expected concepts and evaluation criteria for open answer.
 - `LearningFeedback` - AI/manual feedback.
 - `MasteryState` - derived per concept/source status.
 - `LearningImportIssue` - invalid generated/imported item.
@@ -218,6 +380,7 @@ LearningItem {
   prompt
   answer_spec
   hints
+  rubric
   explanation
   difficulty
   status: draft | active | archived | rejected
@@ -238,7 +401,25 @@ LearningAttempt {
   score
   correctness
   hints_used
+  source_opened
+  evaluation_state
   feedback
+  started_at
+  finished_at
+}
+```
+
+Session:
+
+```text
+LearningSession {
+  id
+  source_ref
+  kind: immediate_recall | scheduled_review | explain_back | manual_practice
+  trigger: completion | due | manual
+  state: offered | in_progress | completed | dismissed | abandoned
+  item_ids
+  estimated_minutes
   started_at
   finished_at
 }
@@ -312,6 +493,10 @@ can exist as alternative plugins/adapters if they prove useful.
   Bad generated items damage trust and search quality.
 - `rejected`: implement explain-back as non-interactive queued artifact only.
   The core value is iterative correction.
+- `rejected`: treat skipped or unanswered post-reading exercises as failures.
+  Learning remains optional and must not rewrite reading completion.
+- `rejected`: show every paused review as overdue after resume. This turns an
+  opt-out into punishment and creates an unusable backlog.
 - `accepted`: FSRS as default scheduler through a replaceable `Scheduler` port.
 - `revisit`: Anki export/import. Useful for power users, but not core to
   first design pass.
@@ -320,6 +505,10 @@ can exist as alternative plugins/adapters if they prove useful.
 
 - What quality gates should generated questions pass before auto-activation?
 - How much reading timeline should affect due dates and mastery?
+- What default daily limit should the first Challenges UI offer after usability
+  testing?
+- Should a generated rubric be shown before an explain-back attempt, only after
+  it, or behind an explicit action?
 - Should learning results ever be shareable in shared folders, and at what
   privacy granularity?
 - What voice transcription provider path is acceptable for offline/mobile?
