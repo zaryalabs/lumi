@@ -122,7 +122,7 @@ User must approve dangerous capabilities, especially:
 - network;
 - external command;
 - access to personal notes/library;
-- social/shared folder access.
+- access to Community Space data and actions.
 
 ### Runtime model
 

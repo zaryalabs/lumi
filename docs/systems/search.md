@@ -11,7 +11,7 @@ Status: accepted
 - заметки, хайлайты, comments и margin notes;
 - база знаний;
 - summaries, карточки, вопросы и other accepted AI/learning artifacts;
-- shared folder comments и activity, к которым у пользователя есть access.
+- Community Space comments и activity, к которым у пользователя есть access.
 
 Поиск является не только UI-функцией. Он также дает retrieval layer для RAG-like
 ИИ-сценариев: собрать релевантный контекст из книг, заметок и artifacts,
@@ -29,7 +29,7 @@ cross-encoder rerankers и future hybrid search.
 - Пользователь ищет слово или фразу по всей библиотеке, заметкам и базе
   знаний.
 - Пользователь ограничивает поиск типом: книги, PDF, заметки, highlights,
-  shared folder, generated artifacts.
+  Community Space, generated artifacts.
 - Пользователь ищет внутри текущего материала из reader panel.
 - Пользователь открывает search result exactly at anchor: page, paragraph,
   note, highlight или KB heading.
@@ -57,7 +57,7 @@ cross-encoder rerankers и future hybrid search.
 - AI artifacts accepted or visible to the user.
 - Learning artifacts: flashcards/questions/explanations where search policy
   allows.
-- Shared comments/chat within accessible shared folders.
+- Shared comments/chat within accessible Community Spaces.
 
 Не индексируются по умолчанию:
 
@@ -71,9 +71,9 @@ cross-encoder rerankers и future hybrid search.
 - Global search page.
 - Library search/filter.
 - Reader in-document search.
-- Workspace search/filter over records, learning state and saved artifacts.
+- Desk search/filter over records, learning state and saved artifacts.
 - KB search.
-- Shared folder search.
+- Community Space search.
 - AI retrieval API.
 
 All surfaces should use common indexed chunks and result anchors, but can apply
@@ -133,7 +133,7 @@ Score fusion:
 - exact title/heading matches get boost;
 - personal notes/highlights may get boost for user-facing search;
 - current material gets boost for reader search;
-- recent/current shared folder context can boost social search;
+- recent/current Community Space context can boost social search;
 - AI retrieval should prioritize source diversity and citation quality, not
   just top repeated chunks.
 
@@ -161,9 +161,9 @@ itself.
 ### Permissions and privacy
 
 - Search only returns objects user can access.
-- Personal search and shared search must not leak private notes into shared
-  folder results.
-- Shared folder results for material-specific comments require material access
+- Personal search and Community Space search must not leak private notes into
+  social results.
+- Community Space results for material-specific comments require material access
   check described in [`social.md`](social.md).
 - External agent retrieval must receive only chunks explicitly included in task
   context policy.
@@ -261,7 +261,7 @@ Need prototype for fastText in Rust/native/server:
 ### Query pipeline
 
 1. Parse query string: terms, phrases, filters, tags, type qualifiers.
-2. Resolve scope: personal, material, KB, shared folder, AI context.
+2. Resolve scope: personal, material, KB, Community Space, AI context.
 3. Run BM25 top N.
 4. Compute query vector.
 5. Rerank candidate chunks by fused lexical + vector score.
@@ -296,8 +296,8 @@ Reindex when:
 
 - **Reader.** Search results open reader at `Anchor`. Reader search uses same
   text layers.
-- **Workspace.** Search может открыть конкретный Workspace item, material
-  workspace или сквозное представление с восстановимыми filters/query state.
+- **Desk.** Search может открыть конкретный Desk item, Desk материала или
+  сквозное представление с восстановимыми filters/query state.
 - **Форматы.** Importers provide normalized text and source maps.
 - **Синхронизация.** Index is derived local data. Sync delivers source objects;
   indexing rebuilds locally.
@@ -308,7 +308,7 @@ Reindex when:
 - **Learning.** Search can find learning items and supply retrieval context for
   generated questions.
 - **ИИ.** AI uses search retrieval, but search does not call LLM.
-- **Social.** Search respects shared folder permissions and material ownership
+- **Social.** Search respects Community Space permissions and material ownership
   checks.
 - **Плагины.** Plugins may provide text extractors or index fields through
   controlled extension points; they cannot bypass permission filters.

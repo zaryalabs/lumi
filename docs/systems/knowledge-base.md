@@ -19,9 +19,9 @@ backlinks, вложения, обратные ссылки на материал
 между заметками, материалами, понятиями и generated artifacts.
 
 База знаний не заменяет
-[`Рабочее пространство чтения`](reading-workspace.md). Workspace организован
+[`Desk`](desk.md). Desk организован
 вокруг материалов и истории работы с ними; KB организована вокруг идей и
-cross-source связей. Reader note может оставаться только в Workspace, а после
+cross-source связей. Reader note может оставаться только в Desk, а после
 преобразования в `KbNote` появиться в обеих поверхностях через source refs без
 физического дублирования.
 
@@ -316,9 +316,9 @@ quotes, links и source metadata.
 
 - **Reader.** Reader creates source refs and annotations that can become KB
   notes.
-- **Workspace.** Показывает reader-derived и source-linked KB notes вокруг
-  материалов. KB note с несколькими source refs может быть видима в нескольких
-  material workspaces как одна сущность.
+- **Desk.** Показывает reader-derived и source-linked KB notes вокруг
+  материалов. KB note с несколькими source refs может быть видима в
+  представлениях нескольких материалов в Desk как одна сущность.
 - **Синхронизация.** KB notes are sync objects with revision/conflict handling.
 - **Obsidian.** Поздняя Desktop-интеграция сможет читать и писать Markdown
   projection KB. Внутренние wikilinks, backlinks и graph работают без нее.

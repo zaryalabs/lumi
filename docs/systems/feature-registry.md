@@ -44,12 +44,12 @@ Status: accepted
 | --- | --- | --- | --- | --- |
 | ACC-001 | Seed phrase account creation and seed-derived auth without plaintext seed on server | foundation | API-001, SEC-001 | `web-account.md`, `security-privacy.md` |
 | ACC-002 | `WebSession`, `SyncDevice`, revocation and device list | foundation | ACC-001 | `web-account.md`, `sync.md` |
-| ACC-003 | Cloud-backed web personal space as authoritative web state | foundation | ACC-001, CORE-009 | `web-account.md`, `sync.md` |
-| ACC-004 | Account profile: nickname/display metadata separated from auth identity | product | ACC-001 | `web-account.md`, `social.md` |
+| ACC-003 | Cloud-backed web personal `SyncSpace` as authoritative web state | foundation | ACC-001, CORE-009 | `web-account.md`, `sync.md` |
+| ACC-004 | Account profile and 1:1 User Space identity separated from auth identity | product | ACC-001 | `web-account.md`, `social.md` |
 | ACC-005 | Server-side `ImportInbox` for uploads, Telegram, web capture and providers | foundation | ACC-003, CORE-010 | `web-account.md`, `formats/telegram.md`, `formats/web-reader.md` |
 | ACC-006 | Account export and deletion workflows with retention/grace policy | product | ACC-003, CORE-010 | `web-account.md`, `sync.md`, `security-privacy.md` |
 | ACC-007 | Instance-wide `user/admin` access with deployment bootstrap through public auth lookup id | foundation | ACC-001, ACC-002 | `web-account.md`, `security-privacy.md` |
-| SYNC-001 | Sync spaces: personal, shared, system/provider and future private relay | foundation | ACC-002 | `sync.md`, `social.md` |
+| SYNC-001 | `SyncSpace` namespaces: personal, community, system/provider and future private relay | foundation | ACC-002 | `sync.md`, `social.md` |
 | SYNC-002 | Change log, snapshots, cursors and deterministic reducers | foundation | SYNC-001 | `sync.md` |
 | SYNC-003 | Native local store, outbox/inbox and offline full-copy replicas | foundation | SYNC-002 | `sync.md`, `reader-architecture.md` |
 | SYNC-004 | Blob storage policy: metadata-only, full library, on-open, manual pin | product | CORE-009, SYNC-003 | `sync.md`, `web-account.md` |
@@ -74,15 +74,15 @@ Status: accepted
 | RD-011 | Reader task creation for AI/learning from selected context | foundation | RD-001, AI-002 | `reading-screen.md`, `ai.md`, `learning.md` |
 | RD-012 | Plugin block placeholders and first-party reader block routing | extension | PLG-001, RD-001 | `reader-architecture.md`, `plugins.md` |
 
-## Reading Workspace
+## Desk
 
 | ID | Функция | Тип | Зависит от | Документы |
 | --- | --- | --- | --- | --- |
-| WS-001 | Material-centered Workspace as a top-level Web surface and rebuildable projection | product | CORE-001, RD-006, SYNC-002 | `reading-workspace.md` |
-| WS-002 | Cross-material records views with grouping, filters, inline editing and source navigation | product | WS-001, CORE-006, RD-007 | `reading-workspace.md`, `reading-screen.md` |
-| WS-003 | Material learning view with items, attempts, due/missed/skipped/completed state and mastery summary | product | WS-001, LRN-001, LRN-005 | `reading-workspace.md`, `learning.md` |
-| WS-004 | Stable `LinkTarget` resolution behind readable taxonomy paths and wikilinks | foundation | WS-001, CORE-006, KB-002 | `reading-workspace.md`, `knowledge-base.md` |
-| WS-005 | Saved typed artifacts in Workspace while raw AI chat remains outside | product | WS-001, AI-003, AI-005 | `reading-workspace.md`, `ai-chat.md` |
+| DESK-001 | Material-centered Desk as a top-level Web surface and rebuildable projection | product | CORE-001, RD-006, SYNC-002 | `desk.md` |
+| DESK-002 | Cross-material records views with grouping, filters, inline editing and source navigation | product | DESK-001, CORE-006, RD-007 | `desk.md`, `reading-screen.md` |
+| DESK-003 | Material learning view with items, attempts, due/missed/skipped/completed state and mastery summary | product | DESK-001, LRN-001, LRN-005 | `desk.md`, `learning.md` |
+| DESK-004 | Stable `LinkTarget` resolution behind readable taxonomy paths and wikilinks | foundation | DESK-001, CORE-006, KB-002 | `desk.md`, `knowledge-base.md` |
+| DESK-005 | Saved typed artifacts in Desk while raw AI chat remains outside | product | DESK-001, AI-003, AI-005 | `desk.md`, `ai-chat.md` |
 
 ## Formats And Sources
 
@@ -131,9 +131,9 @@ Status: accepted
 | SEARCH-001 | Tantivy-style BM25 indexing over materials, notes and artifacts | foundation | CORE-003, SYNC-002 | `search.md` |
 | SEARCH-002 | fastText rerank for BM25 candidate tail | foundation | SEARCH-001 | `search.md` |
 | SEARCH-003 | Source-aware chunking with anchors, snippets and citation metadata | foundation | CORE-006, SEARCH-001 | `search.md`, `normalized-content.md` |
-| SEARCH-004 | Search surfaces: global, library, reader, Workspace, KB, shared folder and AI retrieval | product | SEARCH-001, RD-009, WS-001 | `search.md`, `reading-screen.md`, `reading-workspace.md` |
+| SEARCH-004 | Search surfaces: global, library, reader, Desk, KB, Community Space and AI retrieval | product | SEARCH-001, RD-009, DESK-001 | `search.md`, `reading-screen.md`, `desk.md` |
 | SEARCH-005 | Retrieval API for AI with context policy and citations | foundation | SEARCH-003, AI-001 | `search.md`, `ai.md` |
-| SEARCH-006 | Permission-aware search across personal and shared spaces | foundation | SEARCH-001, SOC-001 | `search.md`, `social.md` |
+| SEARCH-006 | Permission-aware search across personal data and Community Spaces | foundation | SEARCH-001, SOC-001 | `search.md`, `social.md` |
 
 ## Learning And AI
 
@@ -159,12 +159,13 @@ Status: accepted
 
 | ID | Функция | Тип | Зависит от | Документы |
 | --- | --- | --- | --- | --- |
-| SOC-001 | Shared folders with members, roles, comments, highlights, chat and activity | product | ACC-004, SYNC-001 | `social.md`, `sync.md` |
+| SOC-001 | User Space and Community Space product model, community links, membership, roles and unlisted link access | product | ACC-004, SYNC-001 | `social.md`, `sync.md` |
 | SOC-002 | Shared material identity and user material claims without distributing source blobs | foundation | SOC-001, CORE-008 | `social.md`, `normalized-content.md` |
 | SOC-003 | Content fingerprints for matching copies across EPUB/FB2/PDF/web materials | foundation | CORE-008, SOC-002 | `social.md`, `normalized-content.md` |
 | SOC-004 | Shared anchor mapping across users' local copies | product | SOC-002, CORE-007 | `social.md`, `reading-screen.md` |
-| SOC-005 | Shared comments/highlights separated from personal notes | product | SOC-001, RD-006 | `social.md`, `reading-screen.md` |
-| SOC-006 | Privacy, moderation, deletion and quote/copyright limits for shared spaces | foundation | SOC-001, SEC-001 | `social.md`, `security-privacy.md` |
+| SOC-005 | Community Space material comments, shared highlights and Space-level chat separated from personal notes | product | SOC-001, RD-006 | `social.md`, `reading-screen.md` |
+| SOC-006 | Privacy, moderation, deletion and quote/copyright limits for Community Spaces | foundation | SOC-001, SEC-001 | `social.md`, `security-privacy.md` |
+| SOC-007 | `Share material to Space` from personal material surfaces with deduplication and `UserMaterialClaim` | product | SOC-001, SOC-002, CORE-001 | `social.md`, `reading-screen.md` |
 | PLG-001 | Plugin manifest, activation events, commands, settings and capabilities | extension | SEC-001 | `plugins.md` |
 | PLG-002 | First-party reader block plugins: math, Mermaid, code, SVG, quiz and flashcard | extension | PLG-001, RD-012 | `plugins.md`, `formats/lum.md`, `reading-screen.md` |
 | PLG-003 | WASM processing plugin runtime for importers/extractors/post-processing | extension | PLG-001, SEC-002 | `plugins.md` |

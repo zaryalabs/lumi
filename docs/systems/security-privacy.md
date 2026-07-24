@@ -31,7 +31,7 @@ Lumi работает с личной библиотекой, заметками
 | Native private vault | local-only materials, notes, learning history | local by default; future private mode uses encrypted relay only |
 | Account metadata | user id, auth verifier/public material, sessions, devices | plaintext minimized server state |
 | Provider secrets | API keys, OAuth tokens, Telegram links | secret storage only; not ordinary sync plaintext |
-| Social/shared content | shared comments, visible highlights, room activity | visible according to room membership and room policy |
+| Community content | comments, visible highlights, chat, Space activity | visible according to Community Space membership and policy |
 | Public/share content | published cards, explicitly shared notes/quotes | plaintext by user intent |
 | Operational metadata | request/job timings, errors, quotas | redacted; no content bodies in logs |
 
@@ -96,7 +96,7 @@ who can access it:
 - Telegram linking/import;
 - web capture/browser extension upload;
 - public share;
-- shared room publish;
+- Community Space material/highlight/comment publish;
 - switching from cloud mode to private/decentralized mode.
 
 ## Открытые вопросы

@@ -9,7 +9,7 @@ Status: accepted
 - держать библиотеку, заметки, прогресс, базу знаний и generated artifacts
   согласованными между устройствами пользователя;
 - доставлять материалы, созданные server-side источниками вроде Telegram bot;
-- поддерживать совместное чтение и общие папки;
+- поддерживать совместное чтение и Community Spaces;
 - в долгосрочной перспективе дать native-клиентам режим максимальной
   приватности без cloud replica личной библиотеки.
 
@@ -26,11 +26,11 @@ Blobs могут скачиваться по storage policy, но пользов
 
 Future private/decentralized mode описывает следующий уровень: native clients
 могут отключить cloud replica private vault. Тогда сервер остается account,
-device registry, encrypted relay/key-envelope store, shared-room coordinator and
+device registry, encrypted relay/key-envelope store, Community Space coordinator and
 public/share host, но не хранит plaintext private vault content.
 
 Это не чистый P2P в смысле прямого соединения устройств. Для web, mobile, NAT,
-offline devices, Telegram ingestion and social rooms нужен серверный endpoint.
+offline devices, Telegram ingestion and Community Spaces нужен серверный endpoint.
 Но native/private модель должна быть P2P-like по свойствам:
 
 - клиенты являются полноценными репликами, а не тонкими терминалами;
@@ -56,8 +56,9 @@ offline devices, Telegram ingestion and social rooms нужен серверны
 - Пользователь добавляет большой PDF. Metadata и прогресс синхронизируются
   быстро, blob скачивается на клиент по storage policy, но пользователь может
   получить исходный файл.
-- Пользователь создает общую папку. Личные данные остаются в personal space,
-  shared comments и activity синхронизируются через shared space.
+- Пользователь создает Community Space. Личные данные остаются в personal
+  `SyncSpace`, shared comments, chat и activity синхронизируются через
+  community `SyncSpace`.
 - Пользователь экспортирует свою библиотеку или vault-like данные в файлы без
   обращения к закрытому серверному формату.
 - Пользователь в будущем включает private/decentralized mode. Private vault
@@ -84,21 +85,23 @@ offline devices, Telegram ingestion and social rooms нужен серверны
   plaintext cloud replica; он хранит только account/device/relay/social
   metadata and encrypted envelopes as required.
 
-### Sync spaces
+### SyncSpace namespaces
 
-Синхронизация делится на пространства:
+`SyncSpace` — инфраструктурный namespace синхронизации, а не продуктовая модель
+`UserSpace`/`CommunitySpace`. Синхронизация делится на namespaces:
 
-- **Personal space** - личная библиотека, заметки, прогресс, reader settings,
+- **Personal SyncSpace** - личная библиотека, заметки, прогресс, reader settings,
   knowledge base, learning state, AI artifacts.
-- **Shared folder space** - общие папки, membership, comments, shared
+- **Community SyncSpace** - Community Space identity, membership, comments, shared
   highlights, chat/activity и material match claims.
-- **System/provider space** - identities, device records, account import inbox,
+- **System/provider SyncSpace** - identities, device records, account import inbox,
   Telegram buffer/jobs, provider metadata and sync cursors.
-- **Private relay space** - future encrypted envelopes/key metadata for
+- **Private relay SyncSpace** - future encrypted envelopes/key metadata for
   decentralized native sync without cloud replica.
 
-Personal space принадлежит одному пользователю. Shared folder space имеет
-несколько участников и отдельные правила доступа.
+Personal SyncSpace принадлежит одному пользователю. Community SyncSpace
+обслуживает один Community Space, имеет несколько участников и отдельные
+правила доступа.
 
 ### Типы данных
 
@@ -145,7 +148,7 @@ Personal space принадлежит одному пользователю. Sha
 - Blob может быть загружен:
   - через клиентский import;
   - через server-side source provider;
-  - через shared folder claim, если это не нарушает access policy.
+  - через Community Space claim, если это не нарушает access policy.
 - Для каждого клиента хранится local blob state: missing, downloading,
   available, pinned, evicted.
 - Для user-facing модели важно не то, что каждый blob всегда физически скачан,
@@ -187,7 +190,7 @@ Personal space принадлежит одному пользователю. Sha
 Client local store
   -> outbox changes
   -> sync server append/validate
-  -> per-space change feed
+  -> per-SyncSpace change feed
   -> remote client inbox
   -> deterministic apply
 ```
@@ -211,14 +214,14 @@ long-term architecture requirement:
 - private vault content lives only on user's native devices and user-controlled
   exports/backups;
 - server may store account record, auth verifier/public material, device
-  registry, encrypted key envelopes, relay metadata, shared-room state and
+  registry, encrypted key envelopes, relay metadata, Community Space state and
   explicitly shared objects;
 - raw seed phrase never leaves the user;
 - hosted AI, server-side search and web private reader are disabled by default
   unless user explicitly sends selected context/content;
 - losing all devices without export/backup/recovery can mean losing the private
   vault; UX must state this honestly;
-- social/shared spaces use separate access rules and keys; publishing a
+- Community Spaces use separate access rules and keys; publishing a
   highlight/comment creates a shared representation, not a leak of private
   notes/source files.
 
@@ -233,7 +236,7 @@ long-term architecture requirement:
   Markdown, JSON, source blobs and attachments.
 - **Observability.** UI должен показывать sync status: synced, pending,
   conflicted, missing blobs, failed.
-- **Privacy.** Личные данные не отправляются в shared spaces или AI без явного
+- **Privacy.** Личные данные не отправляются в Community Spaces или AI без явного
   пользовательского действия или настройки.
 - **Performance.** Sync должен работать incrementally: курсоры, батчи,
   compressed payloads, lazy blob fetch and resumable upload/download.
@@ -254,7 +257,7 @@ Client
   -> LocalStore
   -> Outbox
   -> Inbox
-  -> SyncCursor per space
+  -> SyncCursor per SyncSpace
 ```
 
 Основные сущности:
@@ -262,7 +265,8 @@ Client
 - `SyncAccount` - sync-level представление учетной записи пользователя;
   web/auth/profile детали описаны в [`web-account.md`](web-account.md).
 - `SyncDevice` - зарегистрированный клиент: web session, desktop, mobile.
-- `SyncSpace` - personal или shared sync namespace.
+- `SyncSpace` - personal, community, system/provider или private relay sync
+  namespace.
 - `SyncObject` - доменная сущность, синхронизируемая по id and type.
 - `SyncChange` - операция или snapshot update над object.
 - `ObjectRevision` - версия object после применения change.
@@ -278,7 +282,7 @@ Client
 Минимальная PostgreSQL-форма, transactional append и migration policy приняты в
 [`../adr/0004-postgresql-sync-ready-schema.md`](../adr/0004-postgresql-sync-ready-schema.md).
 При глобальном PostgreSQL `change_seq` клиент всё равно хранит cursor отдельно
-для каждого space. HLC используется для deterministic ordering/tie-break, но не
+для каждого `SyncSpace`. HLC используется для deterministic ordering/tie-break, но не
 разрешает содержательные конфликты заметок через LWW.
 
 ```text
@@ -338,13 +342,13 @@ Backend responsibilities:
 - authentication/session for web account and device registration;
 - device registration;
 - cloud-backed web account state and command handlers;
-- validating change envelope and access to sync space;
+- validating change envelope and access to `SyncSpace`;
 - durable append to change log;
 - materialized latest object snapshots for faster bootstrap;
 - blob upload/download and deduplication;
 - web account cloud state and import inbox integration;
 - Telegram/server-side ingestion delivery;
-- shared folder membership and access enforcement;
+- Community Space membership and access enforcement;
 - sync cursors and batched delta API.
 
 Сервер не должен выполнять platform-specific reader rendering logic вроде
@@ -357,7 +361,7 @@ commands, server-side search, import jobs and optional AI/provider tasks.
 
 1. Авторизуется.
 2. Создает `SyncDevice`.
-3. Получает список доступных spaces.
+3. Получает список доступных `SyncSpace`.
 4. Загружает latest snapshots + remaining change log tail.
 5. Строит локальную базу.
 6. Планирует загрузку blobs по policy.
@@ -395,7 +399,7 @@ uses server APIs; it does not build a durable local Lumi vault.
   Sync delivers native records to other devices.
 - **Веб-аккаунт.** Account/auth/profile, seed phrase login, cloud account state
   and import inbox описаны в [`web-account.md`](web-account.md). Sync получает
-  от него `user_id`, devices, spaces and storage backend.
+  от него `user_id`, devices, `SyncSpace` records and storage backend.
 - **Форматы.** Importers создают immutable `DocumentRevision` and resources;
   sync распространяет их metadata and blobs.
 - **База знаний.** KB Markdown documents are sync objects with text revisions
@@ -406,8 +410,8 @@ uses server APIs; it does not build a durable local Lumi vault.
   search is primary for web cloud state; desktop/mobile local indexes remain
   primary for offline/full-copy modes.
 - **Learning.** Attempts and schedules должны sync-иться как user-private state.
-- **Social.** Shared folders являются отдельными spaces with membership and
-  material access checks.
+- **Social.** Каждый Community Space обслуживается отдельным community
+  `SyncSpace` с membership and material access checks.
 - **ИИ.** AI tasks and artifacts sync-ятся как обычные objects. Secrets and
   provider keys не sync-ятся plaintext.
 - **Плагины.** Plugin-owned objects sync-ятся только после capability grant and
@@ -421,7 +425,7 @@ uses server APIs; it does not build a durable local Lumi vault.
   конфликтует с native full-copy, offline reading, exportability and future
   private/decentralized mode.
 - `rejected`: direct P2P only without server. Web/mobile/offline/Telegram and
-  shared folders требуют durable rendezvous and mailbox.
+  Community Spaces требуют durable rendezvous and mailbox.
 - `rejected`: синхронизировать только metadata без content access. Это ломает
   требование полного доступа пользователя к материалам и экспорту.
 - `rejected`: хранить пользовательские изменения как произвольные SQL dumps.
@@ -429,15 +433,15 @@ uses server APIs; it does not build a durable local Lumi vault.
 - `revisit`: CRDT для всех изменяемых документов. Может быть правильным для
   KB/editor layer, но усложняет `v01`; сначала нужен typed domain log and
   conflict objects.
-- `revisit`: end-to-end encryption для personal space. Важно для приватности,
-  но влияет на web search, AI, shared folders and server-side ingestion.
+- `revisit`: end-to-end encryption для personal `SyncSpace`. Важно для приватности,
+  но влияет на web search, AI, Community Spaces and server-side ingestion.
 - `revisit`: private/decentralized mode without cloud replica. Это целевое
   долгосрочное свойство после mature native clients, но не требование первого
   web target.
 
 ## Открытые вопросы
 
-- Нужна ли E2EE для personal space в native/private mode, если часть AI/search/server-side
+- Нужна ли E2EE для personal `SyncSpace` в native/private mode, если часть AI/search/server-side
   сценариев требует content access?
 - Где проходит граница physical full copy vs logical full copy для mobile при
   больших PDF and media?
@@ -445,4 +449,4 @@ uses server APIs; it does not build a durable local Lumi vault.
   Obsidian editing станет важным ранним сценарием?
 - Как долго хранить server-side change log до compaction snapshots?
 - Какой exact UX нужен для перехода из cloud-backed режима в private mode:
-  deletion flow, export/backup checks, device quorum and social-room effects?
+  deletion flow, export/backup checks, device quorum and Community Space effects?

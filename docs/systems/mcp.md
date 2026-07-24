@@ -164,14 +164,14 @@ delete_annotation(annotation_id, expected_revision)
 
 `scope` поддерживает один material или весь доступный personal account.
 Межматериальная группировка, learning state и сохраненные artifacts доступны
-через Workspace operations:
+через Desk operations:
 
 ```text
-list_workspace_materials(filters, cursor)
-get_material_workspace(material_id)
-list_workspace_items(scope, filters, cursor)
-get_workspace_item(object_type, object_id)
-resolve_workspace_link(text, context)
+list_desk_materials(filters, cursor)
+get_material_desk(material_id)
+list_desk_items(scope, filters, cursor)
+get_desk_item(object_type, object_id)
+resolve_desk_link(text, context)
 ```
 
 Target использует общую anchor model. Агент сохраняет quote/source refs и не
@@ -208,13 +208,20 @@ list_learning_items
 create_flashcard_task
 submit_learning_answer
 
+list_community_spaces
+get_community_space
+share_material_to_space
 list_shared_comments
 create_shared_comment
 update_shared_comment
 delete_shared_comment
+list_space_chat_messages
+create_space_chat_message
 ```
 
-Social tools всегда используют обычные ACL. Создание shared comment является
+Social tools всегда используют обычные ACL и membership. Команда
+`share_material_to_space` публикует shared material identity/claim, но не
+передает source blob или private annotations. Создание shared comment является
 явным действием и не заменяет private note.
 
 ## AI task queue

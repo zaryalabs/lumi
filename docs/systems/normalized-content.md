@@ -22,8 +22,8 @@ Markdown и `lum`. Reader, поиск, обучение, ИИ, социальн�
   версию материала и пытается перенести anchors без потери старых заметок.
 - Пользователь экспортирует материал и заметки. Экспорт содержит source
   provenance, quote, anchor и readable metadata.
-- Участники shared room используют разные копии одной книги. Lumi сопоставляет
-  версии через fingerprints и пытается перенести shared anchors.
+- Участники Community Space используют разные копии одной книги. Lumi
+  сопоставляет версии через fingerprints и пытается перенести shared anchors.
 
 ## Функциональные требования
 
@@ -147,7 +147,7 @@ Resolver проходит ступени:
 - importer id/version;
 - source URL/message id/file name/API response id where applicable;
 - normalized package hash;
-- content fingerprints for matching and shared rooms;
+- content fingerprints for matching and Community Spaces;
 - structured import diagnostics.
 
 Diagnostics являются частью revision audit trail, но не пользовательским
@@ -210,7 +210,7 @@ Material
 - `ResourceManifest` - content-addressed local/cloud resources.
 - `SourceMap` - mapping from normalized blocks to source locators.
 - `ImportDiagnostic` - structured warning/error/info.
-- `ContentFingerprint` - matching signal for versions and social rooms.
+- `ContentFingerprint` - matching signal for versions and Community Spaces.
 
 ## Реализация
 

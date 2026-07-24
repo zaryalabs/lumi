@@ -1,27 +1,31 @@
-# Рабочее пространство чтения
+# Desk
 
 Status: accepted
 
 ## Контекст
 
-Рабочее пространство чтения (`Workspace`) — отдельная верхнеуровневая
-поверхность Lumi для возвращения к результатам чтения и обучения. Оно собирает
-в одном месте записи, хайлайты, голосовые заметки, сохраненные производные
-артефакты, задания и результаты обучения, группируя их прежде всего вокруг
-материалов.
+Desk — отдельная верхнеуровневая поверхность User Space для возвращения к
+результатам чтения и обучения. Она собирает в одном месте записи, хайлайты,
+голосовые заметки, сохраненные производные артефакты, задания и результаты
+обучения, группируя их прежде всего вокруг материалов.
 
-Workspace не является расширенной боковой панелью reader. Контекстная панель
+Desk не является расширенной боковой панелью reader. Контекстная панель
 reader показывает данные текущего материала и помогает не прерывать чтение.
-Workspace работает между материалами: позволяет обозревать накопленное,
+Desk работает между материалами: позволяет обозревать накопленное,
 редактировать записи, видеть состояние обучения и возвращаться к точному месту
 в источнике.
 
-Workspace также не заменяет:
+Desk также не заменяет:
 
 - единый поиск, который начинается с пользовательского запроса;
 - базу знаний, организованную вокруг идей и связей между источниками;
 - глобальный ИИ-чат, который является процессом диалога;
 - библиотеку, которая управляет самими материалами и импортом.
+
+Desk не является Space. User Space обозначает персональную страницу и опыт Lumi
+целиком, а Desk — одну рабочую поверхность этого опыта. Community Space
+использует собственную collaborative surface, название которой пока не
+фиксируется.
 
 Базовый цикл:
 
@@ -29,15 +33,15 @@ Workspace также не заменяет:
 Материал
   -> чтение и обучение
   -> записи / хайлайты / попытки / сохраненные артефакты
-  -> Workspace по материалу
+  -> Desk по материалу
   -> возврат к anchor, редактирование, повторение или перенос в базу знаний
 ```
 
 ## Принципы
 
 - **Material-centered navigation.** Материал является основной верхней
-  группировкой и source context для Workspace.
-- **Grouping is not ownership.** Workspace является проекцией над доменными
+  группировкой и source context для Desk.
+- **Grouping is not ownership.** Desk является проекцией над доменными
   объектами. Не каждая показанная сущность обязана физически принадлежать
   одному материалу: KB note или accepted artifact может ссылаться на несколько
   источников.
@@ -46,22 +50,22 @@ Workspace также не заменяет:
 - **Stable links, readable paths.** Пользователь видит таксономический путь, но
   ссылка разрешается в стабильные ids, а не зависит от изменяемых названий.
 - **Saved state, not conversation log.** Raw AI chat messages не входят в
-  Workspace. Явно сохраненные результаты чата могут стать note, explanation,
+  Desk. Явно сохраненные результаты чата могут стать note, explanation,
   summary, cards или другим типизированным артефактом и после этого появиться в
-  Workspace.
+  Desk.
 - **Meaningful state, not telemetry.** Сырые `ReadingEvent` не показываются как
-  пользовательские записи. Workspace использует агрегаты: прогресс, последнее
+  пользовательские записи. Desk использует агрегаты: прогресс, последнее
   чтение, завершенные разделы и learning state.
 
 ## Пользовательские сценарии
 
-- Пользователь открывает Workspace и видит материалы, по которым у него есть
+- Пользователь открывает Desk и видит материалы, по которым у него есть
   записи, результаты обучения или сохраненные артефакты.
-- Пользователь открывает material workspace и получает обзор прогресса,
+- Пользователь открывает Desk материала и получает обзор прогресса,
   последних записей, незавершенных заданий и состояния повторения.
 - Пользователь просматривает все хайлайты, текстовые и голосовые заметки по
   материалу, сгруппированные по главам, разделам или страницам.
-- Пользователь редактирует заметку непосредственно в Workspace, не открывая
+- Пользователь редактирует заметку непосредственно в Desk, не открывая
   reader для простого изменения текста, тегов или статуса.
 - Пользователь открывает запись в reader точно на исходном anchor и может
   переходить к соседним записям того же материала.
@@ -76,13 +80,13 @@ Workspace также не заменяет:
 - Пользователь превращает reader note или highlight в KB note, не теряя source
   refs и обратную ссылку.
 - Пользователь сохраняет полезный ответ ИИ как типизированный артефакт; только
-  после этого он появляется в Workspace.
+  после этого он появляется в Desk.
 
 ## Функциональные требования
 
 ### Верхнеуровневые поверхности
 
-Workspace должен поддерживать два взаимодополняющих входа:
+Desk должен поддерживать два взаимодополняющих входа:
 
 1. **Все материалы.** Список или дерево материалов с количеством записей,
    состоянием обучения, последней активностью и доступными фильтрами.
@@ -90,7 +94,7 @@ Workspace должен поддерживать два взаимодополн�
    незавершенные задания, сохраненные summaries и другие типовые срезы,
    сгруппированные по материалам.
 
-Открытие материала дает material workspace:
+Открытие материала дает Desk материала:
 
 ```text
 Материал
@@ -137,7 +141,7 @@ Workspace должен поддерживать два взаимодополн�
 - внутри структурной группы по anchor order;
 - для записей без точного anchor — по material-level group.
 
-Workspace должен уметь отличать:
+Desk должен уметь отличать:
 
 - highlight без комментария;
 - highlight с note;
@@ -148,7 +152,7 @@ Workspace должен уметь отличать:
 
 ### Обучение
 
-В material workspace входят устойчивые learning objects и результаты:
+В Desk материала входят устойчивые learning objects и результаты:
 
 - quizzes, open questions, flashcards, cloze и hinted questions;
 - chapter/material tests;
@@ -158,7 +162,7 @@ Workspace должен уметь отличать:
 - mastery и scheduling summary;
 - вручную созданные и принятые generated learning items.
 
-Workspace не заменяет специализированный challenge/review flow. Он показывает
+Desk не заменяет специализированный challenge/review flow. Он показывает
 историю и состояние обучения вокруг материала, а активную сессию запускает в
 learning surface.
 
@@ -175,11 +179,11 @@ learning surface.
 
 Rejected drafts и промежуточные результаты задач не показываются по умолчанию.
 Queued/running/failed task state относится к task queue, кроме случаев, когда
-пользователю нужно исправить конкретный Workspace item.
+пользователю нужно исправить конкретный Desk item.
 
 ### Редактирование и действия
 
-Workspace поддерживает:
+Desk поддерживает:
 
 - редактирование note body, title, tags, status и manual classification;
 - изменение highlight style/category;
@@ -190,10 +194,10 @@ Workspace поддерживает:
 - создание или удаление links;
 - преобразование записи в KB note или вставку в существующую KB note;
 - запуск повторения или новой learning attempt;
-- экспорт выбранной записи, группы или material workspace.
+- экспорт выбранной записи, группы или Desk материала.
 
 Изменения используют те же domain commands, revisions, idempotency и conflict
-handling, что reader, KB и learning surfaces. Workspace не создает отдельные
+handling, что reader, KB и learning surfaces. Desk не создает отдельные
 копии объектов для редактирования.
 
 ### Маршрутизация
@@ -201,20 +205,20 @@ handling, что reader, KB и learning surfaces. Workspace не создает 
 Клиентская маршрутизация должна поддерживать прямые ссылки как минимум на:
 
 ```text
-/workspace
-/workspace/records
-/workspace/learning
-/workspace/material/:material_id
-/workspace/material/:material_id/records
-/workspace/material/:material_id/learning
-/workspace/item/:object_type/:object_id
+/desk
+/desk/records
+/desk/learning
+/desk/material/:material_id
+/desk/material/:material_id/records
+/desk/material/:material_id/learning
+/desk/item/:object_type/:object_id
 ```
 
 Exact URL shape является adapter detail, но route state должен быть
 восстанавливаемым после reload и пригодным для browser history.
 
 Переход к source использует `material_id + anchor` и открывает reader на
-актуальной `DocumentRevision`. Если anchor unresolved, Workspace сохраняет
+актуальной `DocumentRevision`. Если anchor unresolved, Desk сохраняет
 запись доступной и показывает recovery state вместо потери объекта.
 
 ### Таксономия и внутренние ссылки
@@ -283,7 +287,7 @@ front matter и optional deep links.
 - created time;
 - material title;
 - learning due time;
-- relevance when Workspace is opened from search.
+- relevance when Desk is opened from search.
 
 Выбранные фильтры должны быть отражены в route/query state, чтобы view можно
 было восстановить или передать между клиентскими поверхностями.
@@ -291,7 +295,7 @@ front matter и optional deep links.
 ### Граница с ИИ-чатом
 
 Raw `AiChat`, `AiChatMessage` и незакрепленный selection context не входят в
-Workspace.
+Desk.
 
 Явное действие пользователя может преобразовать результат чата в:
 
@@ -304,20 +308,20 @@ Workspace.
 - другой принятый типизированный artifact.
 
 После сохранения объект получает provenance, source refs и появляется в
-соответствующем разделе Workspace. Ссылка на исходный chat может сохраняться
-как provenance, но Workspace не становится вторым интерфейсом истории чата.
+соответствующем разделе Desk. Ссылка на исходный chat может сохраняться
+как provenance, но Desk не становится вторым интерфейсом истории чата.
 
 ### Граница с базой знаний
 
-Workspace организован вокруг источников и истории работы с ними. База знаний
+Desk организован вокруг источников и истории работы с ними. База знаний
 организована вокруг идей и связей между несколькими источниками.
 
 Один объект может быть видим в обеих поверхностях через projection:
 
-- reader note видна в material workspace;
+- reader note видна в представлении соответствующего материала в Desk;
 - после преобразования в KB note она также видна в KB;
 - KB note с несколькими `KbSourceRef` может показываться как связанный объект
-  в нескольких material workspaces;
+  в представлениях нескольких материалов в Desk;
 - физическое дублирование текста для этого не требуется.
 
 ## Нефункциональные требования
@@ -325,24 +329,24 @@ Workspace организован вокруг источников и истор
 - **Навигационная устойчивость.** Direct routes восстанавливаются после reload,
   а stable target links переживают переименование display paths.
 - **Производительность.** Списки должны использовать pagination/cursors,
-  агрегированные counters и виртуализацию; открытие Workspace не должно
+  агрегированные counters и виртуализацию; открытие Desk не должно
   загружать полный текст всех материалов.
-- **Консистентность.** Reader, Workspace, KB и learning surfaces редактируют
+- **Консистентность.** Reader, Desk, KB и learning surfaces редактируют
   одни и те же domain objects и revision history.
 - **Source fidelity.** Любой source-backed item сохраняет provenance и anchor,
   даже если anchor временно unresolved.
 - **Доступность.** Группы, фильтры, счетчики и действия доступны через
   семантические headings, labels, lists и keyboard navigation.
-- **Privacy.** Workspace соблюдает personal/shared scopes; private notes не
-  появляются в shared material views без явной публикации.
-- **Rebuildability.** Workspace counters, groups и navigation projections
+- **Privacy.** Desk работает с personal scope. Private notes не появляются в
+  Community Space или shared material views без явной публикации.
+- **Rebuildability.** Desk counters, groups и navigation projections
   являются derived data и перестраиваются из primary domain state.
 - **Cross-platform.** Web является первым target. Desktop/mobile позже
   используют тот же query/link contract поверх full-copy replicas.
 
 ## Модель данных
 
-Workspace по умолчанию не вводит новый aggregate root. Он строит read models
+Desk по умолчанию не вводит новый aggregate root. Он строит read models
 над существующими объектами:
 
 ```text
@@ -352,14 +356,14 @@ Material
   <- AcceptedArtifact / Summary / Transcript
   <- KbSourceRef / linked KbNote
   <- ReadingProgress aggregates
-  -> WorkspaceMaterialProjection
-  -> WorkspaceItemProjection[]
+  -> DeskMaterialProjection
+  -> DeskItemProjection[]
 ```
 
 Предварительные projection contracts:
 
 ```text
-WorkspaceMaterialProjection {
+DeskMaterialProjection {
   material_id
   title
   source_type
@@ -373,7 +377,7 @@ WorkspaceMaterialProjection {
   attention_states
 }
 
-WorkspaceItemProjection {
+DeskItemProjection {
   object_type
   object_id
   material_refs[]
@@ -402,11 +406,11 @@ Backend/application layer должен предоставлять material-cente
 не связывая их с конкретной UI-компоновкой:
 
 ```text
-list_workspace_materials(filters, sort, cursor)
-get_material_workspace(material_id)
-list_workspace_items(scope, filters, sort, cursor)
-get_workspace_item(object_type, object_id)
-resolve_workspace_link(text, context)
+list_desk_materials(filters, sort, cursor)
+get_material_desk(material_id)
+list_desk_items(scope, filters, sort, cursor)
+get_desk_item(object_type, object_id)
+resolve_desk_link(text, context)
 ```
 
 Web использует server-side projections над account state. Будущие native
@@ -425,7 +429,7 @@ Projection/counters обновляются после изменений:
 - deletion/tombstone/conflict state.
 
 Projection должна допускать полный rebuild. Primary notes, attempts и artifacts
-не хранятся только внутри Workspace index.
+не хранятся только внутри Desk index.
 
 ### Link resolution
 
@@ -441,23 +445,23 @@ Link resolver:
 
 ## Интеграции и зависимости
 
-- **Reader.** Контекстная панель остается material-local; Workspace дает
+- **Reader.** Контекстная панель остается material-local; Desk дает
   межматериальный обзор и открывает reader на source anchor.
 - **Библиотека.** `Material` metadata и lifecycle задают верхнюю группировку,
-  но наличие материала в библиотеке не означает наличие Workspace activity.
-- **Обучение.** Workspace показывает persistent learning state и историю;
+  но наличие материала в библиотеке не означает наличие Desk activity.
+- **Обучение.** Desk показывает persistent learning state и историю;
   challenge/review surface проводит активную сессию.
 - **База знаний.** KB notes связываются через source refs и могут отображаться
-  в нескольких material workspaces без дублирования.
-- **Поиск.** Search может открыть Workspace с query/filter state или сразу
-  перейти к Workspace item/source anchor.
-- **ИИ.** Только сохраненные typed artifacts входят в Workspace; raw chat и
+  в представлениях нескольких материалов в Desk без дублирования.
+- **Поиск.** Search может открыть Desk с query/filter state или сразу
+  перейти к Desk item/source anchor.
+- **ИИ.** Только сохраненные typed artifacts входят в Desk; raw chat и
   промежуточный dialogue state исключены.
-- **Синхронизация.** Primary objects синхронизируются; Workspace projection
+- **Синхронизация.** Primary objects синхронизируются; Desk projection
   перестраивается локально или на сервере.
-- **Obsidian.** Не является зависимостью Workspace. Поздняя Desktop-интеграция
+- **Obsidian.** Не является зависимостью Desk. Поздняя Desktop-интеграция
   экспортирует внутренние links и source refs в Markdown projection.
-- **MCP.** Внешние агенты должны уметь перечислять Workspace items по account,
+- **MCP.** Внешние агенты должны уметь перечислять Desk items по account,
   material и type scopes, не ограничиваясь одним `material_id`.
 
 ## Альтернативы
@@ -468,22 +472,22 @@ Link resolver:
 - `rejected`: использовать единый поиск как единственный способ возвращения к
   записям. Search требует запроса и не дает material-centered overview,
   editing и learning state.
-- `rejected`: объединить Workspace и базу знаний. У них разные primary axes:
+- `rejected`: объединить Desk и базу знаний. У них разные primary axes:
   источник и история работы против идей и cross-source связей.
 - `rejected`: включить raw AI chat history. Это смешивает процесс диалога с
   устойчивыми пользовательскими результатами и создает шум.
 - `rejected`: использовать display taxonomy path как primary id. Rename и
   reclassification ломали бы ссылки.
-- `accepted`: Workspace как rebuildable material-centered projection над
+- `accepted`: Desk как rebuildable material-centered projection над
   annotations, learning state, accepted artifacts и source-linked KB objects.
 
 ## Открытые вопросы
 
 - Нужны ли bookmarks в разделе «Записи» по умолчанию или только через фильтр?
-- Какой default view лучше для `/workspace`: материалы, последние записи или
+- Какой default view лучше для `/desk`: материалы, последние записи или
   состояния, требующие внимания?
 - Какие learning aggregates достаточно полезны для material overview без
-  превращения Workspace в аналитический dashboard?
+  превращения Desk в аналитический dashboard?
 - Нужна ли отдельная user-managed taxonomy сверх material/type/tags?
 - Какие типы записей допускают inline editing на mobile, а какие должны
   открываться на отдельном экране?

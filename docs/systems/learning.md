@@ -477,14 +477,14 @@ can exist as alternative plugins/adapters if they prove useful.
 ## Интеграции и зависимости
 
 - **Reader.** Reader shows inline exercises and records reading events.
-- **Workspace.** Показывает persistent learning items, attempts,
+- **Desk.** Показывает persistent learning items, attempts,
   due/missed/skipped/completed states и material-level mastery summary.
   Активная challenge/review session остается в learning surface.
 - **Синхронизация.** Items, attempts and schedules are personal sync objects.
 - **Поиск.** Retrieval supplies source context; learning artifacts are indexed.
 - **База знаний.** Cards/questions can link to KB notes and concepts.
 - **ИИ.** AI generates items, evaluates open answers and powers explain-back.
-- **Social.** Shared folders can later share challenge templates/results, but
+- **Social.** Community Spaces can later share challenge templates/results, but
   personal attempts remain private by default.
 - **Плагины.** Plugins can add exercise types, import/export formats and
   scheduler algorithms with explicit capabilities.
@@ -512,6 +512,6 @@ can exist as alternative plugins/adapters if they prove useful.
   testing?
 - Should a generated rubric be shown before an explain-back attempt, only after
   it, or behind an explicit action?
-- Should learning results ever be shareable in shared folders, and at what
+- Should learning results ever be shareable in Community Spaces, and at what
   privacy granularity?
 - What voice transcription provider path is acceptable for offline/mobile?

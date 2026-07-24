@@ -52,14 +52,17 @@
 - **Draft-to-accepted flow.** AI, generated learning items, KB drafts and
   social publication не становятся сильными knowledge/search/social объектами
   без принятия пользователем или явной policy.
-- **Material-centered Workspace.** Записи, learning state и сохраненные
+- **Material-centered Desk.** Записи, learning state и сохраненные
   артефакты доступны через отдельную межматериальную поверхность. Она строится
   как projection над primary domain objects, а не хранит их отдельные копии.
+- **Spaces as social subjects.** User Space представляет персональную страницу
+  и опыт одного account, Community Space — страницу сообщества с несколькими
+  участниками. Space не является разделом навигации, Desk или `SyncSpace`.
 - **Cloud-backed web, full-copy native later.** Первый web target хранит
   состояние в облачной реплике аккаунта. Desktop/mobile проектируются как
   будущие full-copy replicas, а private/decentralized mode остается
   долгосрочным accepted requirement.
-- **Shared spaces do not distribute private files.** Социальные функции
+- **Community Spaces do not distribute private files.** Социальные функции
   синхронизируют comments, highlights, activity and material claims, но не
   раздают source blobs участникам без их собственной копии/прав.
 - **One Job engine.** Imports, indexing, AI, transcription, exports, deletion
@@ -93,7 +96,7 @@ docs/systems/
   feature-registry.md
   normalized-content.md
   reading-screen.md
-  reading-workspace.md
+  desk.md
   reader-architecture.md
   backend-api.md
   security-privacy.md
@@ -129,7 +132,7 @@ docs/systems/
 | Регистр функций | `feature-registry.md` | `accepted` |
 | Нормализованный контент | `normalized-content.md` | `accepted` |
 | Экран чтения | `reading-screen.md` | `accepted` |
-| Рабочее пространство чтения | `reading-workspace.md` | `accepted` |
+| Desk | `desk.md` | `accepted` |
 | Архитектура экрана чтения | `reader-architecture.md` | `accepted` |
 | Backend и API boundaries | `backend-api.md` | `accepted` |
 | Security и privacy | `security-privacy.md` | `accepted` |
@@ -175,9 +178,9 @@ design docs.
   anchors and API boundaries.
 - **Reading layer.** Library/import, reader, annotations, navigation,
   page/fidelity surfaces and reader timeline.
-- **Knowledge layer.** Workspace, search, KB, learning and AI artifacts, all
+- **Knowledge layer.** Desk, search, KB, learning and AI artifacts, all
   tied back to source refs.
-- **Coordination/extension layer.** Social shared spaces, Obsidian projection,
+- **Coordination/extension layer.** Community Spaces, Obsidian projection,
   plugins, external agents and future private/decentralized mode.
 
 При выборе первого или следующего среза лучше брать вертикальный пользовательский
@@ -240,9 +243,12 @@ Status: draft
 - Reader должен иметь унифицированную внутреннюю модель отображения, чтобы
   заметки, хайлайты, поиск, обучение и ИИ-функции работали поверх разных
   исходных форматов одинаково.
-- Workspace является отдельной material-centered поверхностью над записями,
+- Desk является отдельной material-centered поверхностью над записями,
   learning state и сохраненными artifacts. Reader side panel остается
   контекстным представлением текущего материала.
+- User Space представляет текущий персональный опыт Lumi целиком, а Community
+  Space — страницу сообщества. Это product-level subjects, а не варианты Desk
+  или инфраструктурного `SyncSpace`.
 - Все импортеры должны создавать immutable `DocumentRevision` и внутренний
   Normalized Content Package. `ReadingDocument` и `PageFidelityDocument` являются
   reader-facing view models поверх этого пакета, а не исходным форматом

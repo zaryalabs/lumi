@@ -5,12 +5,31 @@ Status: accepted
 ## Контекст
 
 Социальная часть Lumi нужна не как публичная лента, а как способ читать и
-обсуждать материалы вместе. Основная модель - общие папки: пользователь
-создает пространство, добавляет участников, а внутри появляются comments,
-shared highlights, activity и chat вокруг материалов.
+обсуждать материалы вместе. Для нее вводится продуктовая модель `Space`: это
+не раздел навигации и не технический sync namespace, а страница и среда
+конкретного субъекта в Lumi.
+
+- `UserSpace` связан с одним аккаунтом и представляет текущий персональный опыт
+  Lumi целиком.
+- `CommunitySpace` представляет сообщество, клуб, группу или канал и объединяет
+  нескольких пользователей вокруг материалов и совместной активности.
+
+Reader и Desk являются отдельными рабочими поверхностями, а не видами Space.
+Desk — material-centered поверхность записей и обучения внутри персонального
+опыта. У Community Space есть собственная основная поверхность с материалами и
+коллаборативной активностью; ее пользовательское название пока не фиксируется.
+Общие material, Reader, anchor, search и UI-контракты можно переиспользовать
+между персональным и community-контекстом, но Community Space не моделируется
+как User Space с флагом: ownership, permissions и набор функций со временем
+могут расходиться.
+
+Первый Community Space является полупубличным: он не обнаруживается через
+глобальный каталог, но доступен по ссылке. Внутри есть материалы, comments,
+shared highlights, activity и общий chat. В User Space находится компактный
+блок `Community` со ссылками на пространства, в которых пользователь состоит.
 
 Ключевое ограничение: совместное чтение не должно превращаться в
-распространение чужих файлов. Если в общей папке обсуждается книга, участник
+распространение чужих файлов. Если в Community Space обсуждается книга, участник
 видит социальные слои только для тех документов, которые он сам загрузил или
 которые Lumi считает близко совпадающими с его собственной копией. Совпадение
 не обязано быть byte-identical: разные электронные экземпляры одной книги
@@ -18,8 +37,17 @@ shared highlights, activity и chat вокруг материалов.
 
 ## Пользовательские сценарии
 
-- Пользователь создает shared folder для книжного клуба.
-- Пользователь приглашает участников и назначает roles.
+- Пользователь открывает блок `Community` в своем User Space и переходит в одно
+  из пространств, в которых участвует.
+- Пользователь создает Community Space для книжного клуба и делится ссылкой на
+  него.
+- Другой пользователь переходит по ссылке в не опубликованный в каталоге
+  Community Space.
+- Владелец назначает roles и управляет участниками.
+- Пользователь нажимает `Share` на материале в своем User Space и выбирает
+  Community Space, куда может добавлять материалы.
+- Если такой материал уже есть в Community Space, Lumi связывает с ним личную
+  копию пользователя вместо создания дубликата.
 - Участники видят общий список обсуждаемых материалов, но открыть конкретную
   книгу могут только после загрузки своей копии или совпадающего материала.
 - Два участника купили одну и ту же книгу в разных электронных магазинах. Lumi
@@ -28,15 +56,18 @@ shared highlights, activity и chat вокруг материалов.
   shell, но не получает content file и не может прочитать private copy.
 - Участники оставляют comments к anchor, главе, странице или whole material.
 - Участники видят shared highlights, если автор сделал их visible.
-- В shared folder есть общий chat/activity stream.
-- Пользователь может держать личные notes private даже inside shared folder.
+- В Community Space есть общий chat; activity отражает системные события и не
+  заменяет chat или material comments.
+- Пользователь может держать личные notes private даже inside Community Space.
 
 ## Функциональные требования
 
-### Shared folders
+### Community Spaces
 
-Shared folder содержит:
+Community Space содержит:
 
+- identity: name, slug/link, description, avatar/cover;
+- link access policy и lifecycle ссылки;
 - members и roles;
 - shared material identities;
 - comments и threads;
@@ -63,6 +94,7 @@ User-facing attribution:
 
 Permissions:
 
+- open/join Space by link according to access policy;
 - invite/remove members;
 - create shared material identity;
 - comment;
@@ -70,13 +102,54 @@ Permissions:
 - share highlight;
 - view activity.
 
+### Доступ по ссылке
+
+Первый Community Space использует полупубличную модель:
+
+```text
+discoverability: unlisted
+entry: by_link
+```
+
+Space не обязан отображаться в глобальном каталоге или поиске сообществ, но
+человек со ссылкой может открыть его и пройти предусмотренный flow входа.
+Ссылка должна быть отзывной и перевыпускаемой. Точная граница между guest view,
+автоматическим вступлением и подтверждением вступления остается отдельным
+продуктовым решением; право комментировать, писать в chat и добавлять материалы
+требует membership и проверяется сервером.
+
+Доступ по ссылке не дает доступа к приватным source blobs, личным notes,
+прогрессу или learning state участников.
+
+### Share материала из User Space
+
+Карточка материала, его detail surface и Reader должны предоставлять действие
+`Share`. Оно открывает выбор Community Spaces, в которых пользователь состоит и
+имеет право добавлять материалы.
+
+Операция:
+
+1. Пользователь выбирает один Community Space.
+2. Lumi ищет существующий `SharedMaterialIdentity` по metadata и fingerprints.
+3. Если identity уже существует, личная копия связывается с ней через
+   `UserMaterialClaim`.
+4. Если identity отсутствует, Lumi создает ее из разрешенных metadata,
+   fingerprints и source descriptors.
+5. Source blob, private annotations и другие данные User Space в Community
+   Space не копируются.
+
+Один материал можно последовательно добавить в несколько Community Spaces.
+Удаление материала из Space или выход пользователя не удаляет его личный
+`Material`. `Share material to Space` является базовой операцией первого
+социального среза и не означает рекомендацию или публикацию файла.
+
 ### Material access и matching
 
-Shared folder по умолчанию не распространяет source material blobs.
+Community Space по умолчанию не распространяет source material blobs.
 
 Для каждого shared material:
 
-1. Folder stores `SharedMaterialIdentity`: title, creators, normalized metadata,
+1. Space stores `SharedMaterialIdentity`: title, creators, normalized metadata,
    fingerprints и optional source descriptors.
 2. Each user can create `UserMaterialClaim`, связывая свой local `Material`.
 3. Lumi computes similarity/match between local material и shared identity.
@@ -124,21 +197,29 @@ Social entities:
 - anchor-level comments;
 - threaded replies;
 - shared highlights;
-- chat messages inside folder;
+- Space-level chat messages;
 - activity events: joined, added material identity, completed chapter, started
   discussion, etc.
 
 Personal notes are not social comments. User can convert/share selected note или
 highlight explicitly.
 
+Chat и comments имеют разные контексты:
+
+- comment является устойчивым обсуждением материала, главы или anchor;
+- chat является общей коммуникацией Community Space без обязательной привязки
+  к материалу;
+- activity содержит системные события и не является третьей пользовательской
+  лентой сообщений.
+
 ### Privacy controls
 
 - Default notes/highlights are private.
-- Sharing a highlight requires explicit action or per-folder setting.
+- Sharing a highlight requires explicit action or per-Space setting.
 - Reading progress visibility is opt-in.
 - Learning attempts are private by default.
 - AI-generated summaries can be shared only after user accepts/shares them.
-- Shared folder search returns only shared content and user's own matched
+- Community Space search returns only shared content and user's own matched
   material snippets, not other users' private files.
 
 ### Moderation and deletion
@@ -160,13 +241,17 @@ highlight explicitly.
   synced.
 - **Transparency.** UI should clearly distinguish private notes from shared
   comments.
-- **Moderation.** Shared spaces need enough controls to remove bad content.
+- **Moderation.** Community Spaces need enough controls to remove bad content.
 
 ## Модель данных
 
 ```text
-SharedFolder
-  -> SharedFolderMember[]
+UserSpace
+  -> CommunityMembershipRef[]
+
+CommunitySpace
+  -> CommunitySpaceMember[]
+  -> CommunitySpaceAccessLink[]
   -> SharedMaterialIdentity[]
   -> UserMaterialClaim[]
   -> SharedCommentThread[]
@@ -176,20 +261,52 @@ SharedFolder
 
 Основные сущности:
 
-- `SharedFolder` - collaborative space.
-- `SharedFolderMember` - user, role, status.
+- `UserSpace` - продуктовая страница и персональная среда одного account; не
+  заменяет account aggregate и не переносит все личные объекты под новый
+  ownership root.
+- `CommunityMembershipRef` - projection для блока `Community` в User Space.
+- `CommunitySpace` - страница и collaborative environment сообщества.
+- `CommunitySpaceMember` - user, role, status.
+- `CommunitySpaceAccessLink` - отзываемый link access token/policy.
 - `AccountProfileRef` - display metadata пользователя для подписи comments and
   activity, связанная со stable `user_id`.
-- `SharedMaterialIdentity` - abstract material in shared folder.
+- `SharedMaterialIdentity` - abstract material in Community Space.
 - `MaterialFingerprint` - normalized metadata and content fingerprints.
 - `UserMaterialClaim` - user's local material matched to shared identity.
 - `SharedAnchor` - portable social anchor with quote/context/mapping data.
 - `SharedCommentThread` - comments around material/anchor.
 - `SharedComment` - threaded message.
 - `SharedHighlight` - user-visible highlight.
-- `SharedChatMessage` - folder-level chat.
+- `SharedChatMessage` - Community Space-level chat.
 - `SharedActivityEvent` - event stream.
 - `ModerationAction` - delete/hide/warn/etc.
+
+Community Space:
+
+```text
+CommunitySpace {
+  id
+  slug
+  name
+  description?
+  avatar_ref?
+  cover_ref?
+  discoverability: unlisted
+  entry: by_link
+  created_by_user_id
+  created_at
+}
+
+CommunitySpaceAccessLink {
+  id
+  community_space_id
+  token_hash
+  status: active | revoked
+  created_by_user_id
+  created_at
+  expires_at?
+}
+```
 
 Material claim:
 
@@ -231,22 +348,26 @@ SharedAnchor {
 
 1. Importer creates normalized text layer.
 2. Fingerprint job computes metadata fingerprint and text shingles.
-3. Shared folder claim compares local fingerprint to shared identity.
+3. Community Space claim compares local fingerprint to shared identity.
 4. Server stores match score/status, not necessarily raw full text.
 5. Client maps shared anchors to local document revision.
 
 Open privacy choice: exact fingerprint payload must be designed so it is useful
 for matching but does not become a practical substitute for the text.
 
-### Shared space sync
+### Community Space sync
 
-Shared folder is a `SyncSpace`:
+Community Space is a `SyncSpace`:
 
 - membership and permissions stored server-side;
 - shared comments/chat/activity sync to members;
-- personal copies of materials remain in personal space;
-- shared folder references personal `UserMaterialClaim`, but does not own the
+- personal copies of materials remain in personal `SyncSpace`;
+- Community Space references personal `UserMaterialClaim`, but does not own the
   material blob.
+
+Продуктовый `UserSpace`/`CommunitySpace` и инфраструктурный `SyncSpace` не
+являются одной сущностью. `SyncSpace` задает namespace доставки и access
+control; продуктовый Space задает страницу, identity и социальное поведение.
 
 ### Posting comment
 
@@ -257,42 +378,76 @@ Shared folder is a `SyncSpace`:
 5. Server validates membership and matched claim.
 6. Other clients receive comment and map anchor to their local copy.
 
-### Shared material creation
+### Share material to Space
 
 Options:
 
-- user creates shared material from local `Material`;
+- основная операция: user вызывает `Share` для local `Material` и выбирает
+  Community Space;
 - user creates metadata-only shared material manually;
-- invite link includes shared material identity but no content file.
+- повторный `Share` на существующую identity создает или обновляет
+  `UserMaterialClaim`, а не дубликат материала.
 
-When created from local material, server may store metadata/fingerprints, not
-the source blob for other users.
+Команда должна быть permission-checked и idempotent. When created from local
+material, server may store metadata/fingerprints, not the source blob for other
+users.
+
+Application command:
+
+```text
+share_material_to_space(
+  material_id,
+  community_space_id,
+  idempotency_key
+) -> SharedMaterialIdentity + UserMaterialClaim
+```
+
+### Будущие community-разделы
+
+В будущем Community Space может получить самостоятельные разделы:
+
+- blog/publications;
+- forum/topics;
+- marketplace;
+- material recommendations and discovery;
+- shared knowledge or другие community-механики.
+
+Это список возможных направлений, а не target contract текущего среза. Их
+точный состав, data models, permissions и UX не фиксируются и могут быть
+пересмотрены. В первый срез из коммуникационных поверхностей входят только
+material comments и общий chat.
 
 ## Интеграции и зависимости
 
 - **Reader.** Displays shared comments/highlights as separate overlay layer.
-- **Синхронизация.** Shared folders are shared sync spaces with access control.
+- **User Space.** Показывает блок `Community` и предоставляет `Share` на
+  material surfaces.
+- **Синхронизация.** Community Spaces are shared sync spaces with access control.
 - **Веб-аккаунт.** `user_id` and `AccountProfile.nickname` приходят из
   [`web-account.md`](web-account.md); nickname используется только как
   display-подпись.
-- **Поиск.** Search respects folder membership and material claim status.
+- **Поиск.** Search respects Space membership and material claim status.
 - **База знаний.** Users may turn shared comments into private KB notes; this
   should not expose other users' private content.
 - **Learning.** Shared challenges/milestones can be added later; attempts stay
   private by default.
 - **ИИ.** AI can summarize shared discussion only over content user can access
   plus shared comments.
-- **Плагины.** Plugins can add shared folder widgets/actions only with social
+- **Плагины.** Plugins can add Community Space widgets/actions only with social
   capabilities and access checks.
 
 ## Альтернативы
 
-- `rejected`: shared folder distributes uploaded book file to all members. This
+- `rejected`: Community Space distributes uploaded book file to all members. This
   creates copyright and trust problems.
 - `rejected`: require byte-identical files for collaboration. Too brittle for
   normal ebook/PDF variations.
 - `rejected`: public social feed as primary social surface. It distracts from
   reading and increases moderation scope.
+- `accepted`: first slice Community Space is unlisted and accessible by link,
+  without a global public directory.
+- `deferred`: blog, forum, marketplace, recommendations and other community
+  sections. They remain future ideas without current contracts.
 - `revisit`: server-side full-text matching over uploaded content. Better
   matching, but privacy/legal tradeoffs need review.
 - `revisit`: real-time collaborative annotations. Useful later; async comments
@@ -306,4 +461,5 @@ the source blob for other users.
   matching local copy, or only invite them to import?
 - How should quoted snippets in comments be limited to avoid reconstructing a
   book through many comments?
-- Do shared folders need public links or only explicit invites?
+- Does opening an unlisted link create membership immediately, show a guest
+  preview or require an explicit join confirmation?
