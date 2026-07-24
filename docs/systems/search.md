@@ -71,6 +71,7 @@ cross-encoder rerankers и future hybrid search.
 - Global search page.
 - Library search/filter.
 - Reader in-document search.
+- Workspace search/filter over records, learning state and saved artifacts.
 - KB search.
 - Shared folder search.
 - AI retrieval API.
@@ -295,6 +296,8 @@ Reindex when:
 
 - **Reader.** Search results open reader at `Anchor`. Reader search uses same
   text layers.
+- **Workspace.** Search может открыть конкретный Workspace item, material
+  workspace или сквозное представление с восстановимыми filters/query state.
 - **Форматы.** Importers provide normalized text and source maps.
 - **Синхронизация.** Index is derived local data. Sync delivers source objects;
   indexing rebuilds locally.

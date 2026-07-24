@@ -1,6 +1,6 @@
 # Интеграция с Obsidian
 
-Status: accepted
+Status: deferred
 
 ## Контекст
 
@@ -9,6 +9,17 @@ Obsidian важен для Lumi по двум причинам:
 - многие пользователи уже ведут личную базу знаний в Markdown vault;
 - Vision явно требует links в стиле Obsidian, backlinks, graph и интеграцию с
   Obsidian.
+
+Этот документ фиксирует поздний target design, а не текущий scope. Реализация
+интеграции начинается после появления desktop-клиента и после того, как в Web
+реализована большая часть основной функциональности reader, Workspace,
+learning, KB и search. Текущие Web-срезы не должны зависеть от Obsidian,
+filesystem projection или vault sync.
+
+Внутренние wikilinks, backlinks и стабильные `LinkTarget` нужны Lumi раньше и
+не являются интеграцией с Obsidian. Они проектируются как собственный
+платформенно-независимый контракт; будущая интеграция только проецирует его в
+Obsidian-compatible Markdown.
 
 Базовая интеграция должна идти через файловую систему: Markdown files, assets,
 front matter и stable ids. Это лучше соответствует переносимости и не требует
@@ -45,9 +56,9 @@ Primary modes:
 - **Manual import/export** - user imports vault folder/zip or exports KB as
   Markdown bundle.
 
-Default для ранней реализации: one-way export + manual import. Two-way sync
-нужен, но должен включаться явно, потому что conflicts и deletion semantics
-сложнее.
+Первый срез поздней Desktop-интеграции: one-way export + manual import.
+Two-way sync идет после него и должен включаться явно, потому что conflicts и
+deletion semantics сложнее.
 
 ### Filesystem projection
 
@@ -234,7 +245,7 @@ Desktop integration:
 
 ### Web path
 
-Web integration options:
+Web fallback options после появления основной Desktop-интеграции:
 
 - File System Access API for supported browsers with explicit directory
   permission;
@@ -242,8 +253,9 @@ Web integration options:
 - manual import from folder/zip;
 - no background watch unless browser supports it safely.
 
-Web should not pretend to have continuous Obsidian sync if browser permissions
-do not allow it.
+Текущая Web-версия не реализует эти options и не зависит от них. Если такой
+fallback появится позднее, Web не должен притворяться, что поддерживает
+continuous Obsidian sync при отсутствии надежных browser permissions.
 
 ### Companion plugin
 
@@ -264,7 +276,8 @@ Costs:
 - dependency on Obsidian API;
 - larger maintenance surface.
 
-For `v01` filesystem integration gives most value with less coupling.
+Для позднего Desktop-среза filesystem integration дает большую часть ценности
+с меньшей связанностью.
 
 ### Export templates
 
@@ -313,7 +326,7 @@ Templates must be data-only/configurable, not arbitrary code execution.
 - Какой exact default folder layout удобнее для Obsidian users?
 - Делать ли one-file-per-highlight или grouped chapter/material notes by
   default?
-- Нужен ли custom URI scheme `lumi://` in `v01`?
+- Нужен ли custom URI scheme `lumi://` в первом Desktop integration slice?
 - Как глубоко поддерживать Obsidian-specific syntax beyond wikilinks, embeds
   and callouts?
 - Когда стоит писать companion plugin?

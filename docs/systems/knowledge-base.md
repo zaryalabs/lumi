@@ -18,6 +18,13 @@ backlinks, вложения, обратные ссылки на материал
 заимствованная из Obsidian идея - graph: пользователь должен видеть связи
 между заметками, материалами, понятиями и generated artifacts.
 
+База знаний не заменяет
+[`Рабочее пространство чтения`](reading-workspace.md). Workspace организован
+вокруг материалов и истории работы с ними; KB организована вокруг идей и
+cross-source связей. Reader note может оставаться только в Workspace, а после
+преобразования в `KbNote` появиться в обеих поверхностях через source refs без
+физического дублирования.
+
 ## Пользовательские сценарии
 
 - Пользователь создает заметку в базе знаний как обычный Markdown документ.
@@ -309,8 +316,12 @@ quotes, links и source metadata.
 
 - **Reader.** Reader creates source refs and annotations that can become KB
   notes.
+- **Workspace.** Показывает reader-derived и source-linked KB notes вокруг
+  материалов. KB note с несколькими source refs может быть видима в нескольких
+  material workspaces как одна сущность.
 - **Синхронизация.** KB notes are sync objects with revision/conflict handling.
-- **Obsidian.** Obsidian integration reads/writes Markdown projection of KB.
+- **Obsidian.** Поздняя Desktop-интеграция сможет читать и писать Markdown
+  projection KB. Внутренние wikilinks, backlinks и graph работают без нее.
 - **Поиск.** KB notes, source refs, tags and graph edges are indexed in unified
   search.
 - **Learning.** Flashcards/questions can link to KB notes; mastered concepts

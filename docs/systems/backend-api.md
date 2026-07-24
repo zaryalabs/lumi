@@ -27,6 +27,7 @@ Dioxus Fullstack/server functions можно использовать для UI-
 /api/v1/imports/*
 /api/v1/jobs/*
 /api/v1/search/*
+/api/v1/workspace/*
 /api/v1/sync/*
 /api/v1/rooms/*
 /api/v1/shares/*
@@ -45,6 +46,8 @@ Responsibilities:
 - `blobs` - upload/download, resumable transfer, checksums, object storage.
 - `imports/jobs` - durable work state for imports, AI, indexing, export/delete.
 - `search` - serious server-side web search and retrieval API.
+- `workspace` - account/material-centered read projections, filters and stable
+  navigation targets over records, learning state and saved artifacts.
 - `sync` - native full-copy sync, cursors, changes and snapshots.
 - `rooms/shares` - social/shared reading spaces and public/share objects.
 - `settings/telegram` - admin-only instance-wide bot configuration and

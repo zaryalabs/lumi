@@ -69,10 +69,20 @@ Status: accepted
 | RD-006 | Highlights with style/category/privacy | product | CORE-006, SYNC-002 | `reading-screen.md`, `sync.md` |
 | RD-007 | Text notes, margin notes and Obsidian-style links inside notes | product | RD-006, KB-001 | `reading-screen.md`, `knowledge-base.md` |
 | RD-008 | Voice notes attached to anchors with later transcription | product | RD-007, AI-006 | `reading-screen.md`, `ai.md`, `learning.md` |
-| RD-009 | Reader panels for notes, search, AI, learning and social layers | product | RD-001 | `reading-screen.md` |
+| RD-009 | Contextual reader panels for current-material notes, search, AI, learning and social layers | product | RD-001 | `reading-screen.md` |
 | RD-010 | Reading progress and timeline events for learning analytics | foundation | RD-001, SYNC-002 | `reading-screen.md`, `learning.md` |
 | RD-011 | Reader task creation for AI/learning from selected context | foundation | RD-001, AI-002 | `reading-screen.md`, `ai.md`, `learning.md` |
 | RD-012 | Plugin block placeholders and first-party reader block routing | extension | PLG-001, RD-001 | `reader-architecture.md`, `plugins.md` |
+
+## Reading Workspace
+
+| ID | Функция | Тип | Зависит от | Документы |
+| --- | --- | --- | --- | --- |
+| WS-001 | Material-centered Workspace as a top-level Web surface and rebuildable projection | product | CORE-001, RD-006, SYNC-002 | `reading-workspace.md` |
+| WS-002 | Cross-material records views with grouping, filters, inline editing and source navigation | product | WS-001, CORE-006, RD-007 | `reading-workspace.md`, `reading-screen.md` |
+| WS-003 | Material learning view with items, attempts, due/missed/skipped/completed state and mastery summary | product | WS-001, LRN-001, LRN-005 | `reading-workspace.md`, `learning.md` |
+| WS-004 | Stable `LinkTarget` resolution behind readable taxonomy paths and wikilinks | foundation | WS-001, CORE-006, KB-002 | `reading-workspace.md`, `knowledge-base.md` |
+| WS-005 | Saved typed artifacts in Workspace while raw AI chat remains outside | product | WS-001, AI-003, AI-005 | `reading-workspace.md`, `ai-chat.md` |
 
 ## Formats And Sources
 
@@ -106,7 +116,7 @@ Status: accepted
 | FMT-LUM-003 | `lum:<block_type>` interactive blocks mapped to first-party plugins | extension | FMT-LUM-002, PLG-002, LRN-002 | `formats/lum.md`, `plugins.md`, `learning.md` |
 | FMT-LUM-004 | `lum validate`, `lum pack` and `lum inspect` build/validation tools | quality | FMT-LUM-001, QUAL-001 | `formats/lum.md`, `quality.md` |
 
-## Knowledge, Search And Obsidian
+## Knowledge, Search And Deferred Obsidian
 
 | ID | Функция | Тип | Зависит от | Документы |
 | --- | --- | --- | --- | --- |
@@ -115,13 +125,13 @@ Status: accepted
 | KB-003 | Backlinks and graph index across notes, materials, annotations and accepted artifacts | product | KB-001, SEARCH-001 | `knowledge-base.md`, `search.md` |
 | KB-004 | Reader action to create KB note or insert block from highlight/note | product | RD-007, KB-001 | `knowledge-base.md`, `reading-screen.md` |
 | KB-005 | Generated artifacts as drafts until accepted into KB/search graph | foundation | AI-003, KB-001 | `knowledge-base.md`, `ai.md` |
-| OBS-001 | One-way Obsidian Markdown export with Lumi namespace/front matter | integration | KB-001, CORE-011 | `obsidian.md`, `knowledge-base.md` |
-| OBS-002 | Manual Obsidian import/export bundle for web and portable workflows | integration | OBS-001, FMT-MD-001 | `obsidian.md` |
-| OBS-003 | Explicit two-way desktop folder sync with conflict objects | extension | OBS-001, SYNC-006 | `obsidian.md`, `sync.md` |
+| OBS-001 | Deferred Desktop: one-way Obsidian Markdown export with Lumi namespace/front matter | integration | KB-001, CORE-011, SYNC-003 | `obsidian.md`, `knowledge-base.md` |
+| OBS-002 | Deferred portable fallback: manual Obsidian import/export bundle after the Desktop integration | integration | OBS-001, FMT-MD-001 | `obsidian.md` |
+| OBS-003 | Deferred Desktop: explicit two-way folder sync with conflict objects | extension | OBS-001, SYNC-006 | `obsidian.md`, `sync.md` |
 | SEARCH-001 | Tantivy-style BM25 indexing over materials, notes and artifacts | foundation | CORE-003, SYNC-002 | `search.md` |
 | SEARCH-002 | fastText rerank for BM25 candidate tail | foundation | SEARCH-001 | `search.md` |
 | SEARCH-003 | Source-aware chunking with anchors, snippets and citation metadata | foundation | CORE-006, SEARCH-001 | `search.md`, `normalized-content.md` |
-| SEARCH-004 | Search surfaces: global, library, reader, KB, shared folder and AI retrieval | product | SEARCH-001, RD-009 | `search.md`, `reading-screen.md` |
+| SEARCH-004 | Search surfaces: global, library, reader, Workspace, KB, shared folder and AI retrieval | product | SEARCH-001, RD-009, WS-001 | `search.md`, `reading-screen.md`, `reading-workspace.md` |
 | SEARCH-005 | Retrieval API for AI with context policy and citations | foundation | SEARCH-003, AI-001 | `search.md`, `ai.md` |
 | SEARCH-006 | Permission-aware search across personal and shared spaces | foundation | SEARCH-001, SOC-001 | `search.md`, `social.md` |
 

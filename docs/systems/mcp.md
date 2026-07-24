@@ -153,13 +153,25 @@ source-backed chunks с pagination, anchors и metadata.
 Целевые операции:
 
 ```text
-list_annotations(material_id, filters, cursor)
+list_annotations(scope, filters, cursor)
 create_highlight(target, style, idempotency_key)
 create_note(target, body, idempotency_key)
 create_margin_note(target, body, idempotency_key)
 create_bookmark(target, idempotency_key)
 update_annotation(annotation_id, changes, expected_revision)
 delete_annotation(annotation_id, expected_revision)
+```
+
+`scope` поддерживает один material или весь доступный personal account.
+Межматериальная группировка, learning state и сохраненные artifacts доступны
+через Workspace operations:
+
+```text
+list_workspace_materials(filters, cursor)
+get_material_workspace(material_id)
+list_workspace_items(scope, filters, cursor)
+get_workspace_item(object_type, object_id)
+resolve_workspace_link(text, context)
 ```
 
 Target использует общую anchor model. Агент сохраняет quote/source refs и не

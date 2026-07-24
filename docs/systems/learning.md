@@ -477,6 +477,9 @@ can exist as alternative plugins/adapters if they prove useful.
 ## Интеграции и зависимости
 
 - **Reader.** Reader shows inline exercises and records reading events.
+- **Workspace.** Показывает persistent learning items, attempts,
+  due/missed/skipped/completed states и material-level mastery summary.
+  Активная challenge/review session остается в learning surface.
 - **Синхронизация.** Items, attempts and schedules are personal sync objects.
 - **Поиск.** Retrieval supplies source context; learning artifacts are indexed.
 - **База знаний.** Cards/questions can link to KB notes and concepts.

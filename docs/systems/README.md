@@ -52,6 +52,9 @@
 - **Draft-to-accepted flow.** AI, generated learning items, KB drafts and
   social publication не становятся сильными knowledge/search/social объектами
   без принятия пользователем или явной policy.
+- **Material-centered Workspace.** Записи, learning state и сохраненные
+  артефакты доступны через отдельную межматериальную поверхность. Она строится
+  как projection над primary domain objects, а не хранит их отдельные копии.
 - **Cloud-backed web, full-copy native later.** Первый web target хранит
   состояние в облачной реплике аккаунта. Desktop/mobile проектируются как
   будущие full-copy replicas, а private/decentralized mode остается
@@ -72,6 +75,8 @@
 - `draft` - первичная гипотеза, требует обсуждения;
 - `accepted` - целевое решение принято для `v01`; открытые вопросы внутри
   документа остаются implementation/prototype questions;
+- `deferred` - target design зафиксирован, но реализация сознательно вынесена
+  за текущую платформу/основной продуктовый scope;
 - `revisit` - решение временно принято, но требует возврата после проработки
   связанных подсистем;
 - `rejected` - вариант рассмотрен и отклонен с указанием причины;
@@ -88,6 +93,7 @@ docs/systems/
   feature-registry.md
   normalized-content.md
   reading-screen.md
+  reading-workspace.md
   reader-architecture.md
   backend-api.md
   security-privacy.md
@@ -123,6 +129,7 @@ docs/systems/
 | Регистр функций | `feature-registry.md` | `accepted` |
 | Нормализованный контент | `normalized-content.md` | `accepted` |
 | Экран чтения | `reading-screen.md` | `accepted` |
+| Рабочее пространство чтения | `reading-workspace.md` | `accepted` |
 | Архитектура экрана чтения | `reader-architecture.md` | `accepted` |
 | Backend и API boundaries | `backend-api.md` | `accepted` |
 | Security и privacy | `security-privacy.md` | `accepted` |
@@ -138,7 +145,7 @@ docs/systems/
 | Веб-аккаунт и облачная реплика | `web-account.md` | `accepted` |
 | Синхронизация | `sync.md` | `accepted` |
 | База знаний | `knowledge-base.md` | `accepted` |
-| Интеграция с Obsidian | `obsidian.md` | `accepted` |
+| Интеграция с Obsidian | `obsidian.md` | `deferred` |
 | Поиск | `search.md` | `accepted` |
 | Механики обучения | `learning.md` | `accepted` |
 | Социальные функции | `social.md` | `accepted` |
@@ -168,8 +175,8 @@ design docs.
   anchors and API boundaries.
 - **Reading layer.** Library/import, reader, annotations, navigation,
   page/fidelity surfaces and reader timeline.
-- **Knowledge layer.** Search, KB, learning and AI artifacts, all tied back to
-  source refs.
+- **Knowledge layer.** Workspace, search, KB, learning and AI artifacts, all
+  tied back to source refs.
 - **Coordination/extension layer.** Social shared spaces, Obsidian projection,
   plugins, external agents and future private/decentralized mode.
 
@@ -233,6 +240,9 @@ Status: draft
 - Reader должен иметь унифицированную внутреннюю модель отображения, чтобы
   заметки, хайлайты, поиск, обучение и ИИ-функции работали поверх разных
   исходных форматов одинаково.
+- Workspace является отдельной material-centered поверхностью над записями,
+  learning state и сохраненными artifacts. Reader side panel остается
+  контекстным представлением текущего материала.
 - Все импортеры должны создавать immutable `DocumentRevision` и внутренний
   Normalized Content Package. `ReadingDocument` и `PageFidelityDocument` являются
   reader-facing view models поверх этого пакета, а не исходным форматом

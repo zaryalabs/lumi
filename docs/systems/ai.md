@@ -446,6 +446,8 @@ This makes generated artifacts auditable and reproducible enough for debugging.
 - **Search.** Supplies retrieval chunks for chat/tasks.
 - **Learning.** Receives question/card drafts and explain-back feedback.
 - **База знаний.** Receives accepted summaries, concepts, note drafts and links.
+- **Workspace.** Показывает сохраненные typed artifacts вокруг материалов.
+  Raw chat messages и промежуточный dialogue state туда не входят.
 - **Синхронизация.** Tasks/artifacts/conversations sync as user data; secrets do
   not sync plaintext.
 - **Веб-аккаунт.** Web sessions, account-scoped server workers and secret
