@@ -7,7 +7,6 @@
 Текущие документы:
 
 - [`vision.md`](vision.md) - продуктовый vision.
-- [`early-slices.md`](early-slices.md) - первые реализационные срезы.
 - [`systems/`](systems/) - принятое устройство систем Lumi для `v01`.
 - [`adr/`](adr/) - долговечные архитектурные решения.
 - [`runbooks/local-dev.md`](runbooks/local-dev.md) - локальный workflow

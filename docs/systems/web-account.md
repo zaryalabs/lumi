@@ -327,8 +327,10 @@ desktop/mobile replica/export exists, web data is gone.
   annotations/progress/notes through server-side commands.
 - **Поиск.** Web uses serious server-side search over cloud account state.
   Desktop/mobile later keep local indexes for offline/full-copy modes.
-- **ИИ.** BYOK secrets for web sessions need secure storage policy. Server-side
-  AI/subscription mode can use cloud replica only with explicit context policy.
+- **ИИ.** В первом web AI-срезе BYOK secrets хранятся в защищенном server-side
+  secret storage. Будущий native mode может хранить ключ только на клиенте.
+  Server-side AI может использовать cloud replica только по явной context
+  policy; встроенная подписка остается вне текущего scope.
 - **Социальные функции.** Social ACL uses `user_id`; nickname is display-only.
 - **Плагины.** Web plugins cannot assume filesystem/process access and must use
   account-scoped capabilities.

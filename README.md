@@ -18,8 +18,7 @@ Lumi — open-source приложение для вдумчивого чтени
 - Playwright E2E coverage в `tests/e2e`;
 - цели `make` и pre-commit hooks для локальных quality gates.
 
-Текущая цель реализации — срез S1 Web Reader из
-[docs/early-slices.md](docs/early-slices.md). EPUB остаётся полным эталонным
+Текущая реализованная основа — S1 Web Reader. EPUB остаётся полным эталонным
 импортёром, а публичные web URL и приём текста/ссылок через Telegram-бота входят
 как намеренно узкие baseline-источники. Реализованы постоянные аккаунты,
 durable-импорт реальных EPUB, Markdown и portable `.lum` packages, полностью

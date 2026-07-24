@@ -18,7 +18,8 @@ Status: accepted
 ИИ-слой должен быть заменяемым. Пользователь может:
 
 - добавить свой API key;
-- использовать встроенную подписку/серверный provider позже;
+- в будущем использовать встроенную подписку/серверный provider; подписка не
+  входит в текущий scope реализации;
 - отключить ИИ;
 - подключить внешнего агента, который будет обрабатывать очередь задач.
 
@@ -30,16 +31,19 @@ contract.
 ## Пользовательские сценарии
 
 - Пользователь выделяет абзац и спрашивает "объясни проще".
-- Пользователь задает вопрос в чате по книге, главе или всей библиотеке.
+- Пользователь открывает глобальный сворачиваемый чат с любого экрана, создает
+  отдельные чаты и ведет обычный многошаговый диалог с моделью.
+- Пользователь передает в чат выделение, главу, материал или другой явно
+  выбранный контекст и задает по нему вопрос.
 - Пользователь запускает "сделай карточки по главе"; задача попадает в очередь,
   а результат появляется позже.
 - Пользователь не добавил API key. External agent читает очередь и записывает
   summaries/questions обратно как artifacts.
-- Пользователь работает в web-клиенте. BYOK key может быть session-local или
-  stored через web-account secret policy; server-side subscription mode может
-  читать облачную реплику только по явной context policy.
+- Пользователь работает в web-клиенте. На первом этапе BYOK key хранится в
+  защищенном server-side secret storage. В будущем native-клиенты смогут
+  выбрать client-local хранение и выполнение без передачи ключа серверу.
 - Пользователь запускает explain-back внутри Lumi. Это работает только при
-  direct AI provider/key/subscription.
+  direct AI provider с настроенным ключом.
 - Пользователь просит external agent провести explain-back. Agent открывает
   собственный UI и возвращает final artifact/attempt summary to Lumi.
 - Пользователь выбирает, какие AI artifacts принять в KB/learning.
@@ -47,6 +51,9 @@ contract.
 ## Функциональные требования
 
 ### AI task queue
+
+Полный рамочный контракт очереди, immediate execution, bulk actions и MCP
+описан в [`ai-task-queue.md`](ai-task-queue.md).
 
 Все неинтерактивные AI сценарии оформляются как durable tasks:
 
@@ -79,18 +86,35 @@ diagnostics используются для import, indexing, transcription, exp
 anchor repair. Это не должна быть отдельная несовместимая очередь только для
 AI.
 
+Пользователь может оставить task в очереди либо выбрать `Выполнить сейчас`,
+чтобы тот же `AiTask` сразу попытался claim внутренний server worker с
+настроенным BYOK. Внешний агент получает queued tasks через MCP.
+
 ### Interactive chat
 
-Chat differs from background tasks:
+Глобальный чат — полноценная пользовательская поверхность ИИ, доступная с
+любого экрана и сворачиваемая на всех клиентах. Рамочный продуктовый контракт
+описан отдельно в [`ai-chat.md`](ai-chat.md).
+
+Chat отличается от background tasks и не создает `AiTask`:
 
 - user expects streaming/low-latency response;
-- context may be selected from current material, library search, KB or explicit
-  attachments;
+- пользователь может создавать, переименовывать, переключать и удалять чаты;
+- поддерживается полный цикл ответа модели: отправка, streaming, остановка,
+  повтор ответа, продолжение диалога и обработка ошибки;
+- context may be transferred explicitly from the current selection, chapter,
+  material, library search, KB or attachments;
 - conversation history is stored as `AiConversation`;
+- состояние открытого или свернутого чата и активный разговор сохраняются при
+  переходе между экранами;
 - user can choose to save an answer as KB note or artifact.
 
-Chat inside Lumi requires available provider. External agent may implement its
-own chat UI, but Lumi cannot display live turns without provider integration.
+Chat inside Lumi requires available direct provider. MCP integration относится
+к внешней работе агента с Lumi и не является способом встроить agent UI или
+agent conversation внутрь чата Lumi. Если provider недоступен или chat response
+не решил задачу пользователя, Lumi не превращает запрос в queued task
+автоматически. Пользователь может отдельно запустить соответствующее фоновое
+действие.
 
 ### Selection actions
 
@@ -111,6 +135,34 @@ Reader creates context with:
 - material metadata;
 - user instruction;
 - selected output type.
+
+В первом срезе объяснение или краткое содержание выделенного фрагмента
+передается в глобальный чат. Reader открывает чат, прикрепляет selection context
+и либо подставляет выбранную быструю команду, либо оставляет пользователю поле
+для собственного вопроса. Отдельный сохраненный artifact для краткого саммари
+выделения на этом этапе не обязателен.
+
+### Summary forms
+
+Рамочный продуктовый контракт саммари описан отдельно в
+[`ai-summaries.md`](ai-summaries.md).
+
+Саммари не является одним универсальным output type:
+
+- `brief` — короткое содержание в нескольких тезисах;
+- `outline` — структурированный конспект;
+- `chapter_summary` — сохраненное саммари главы или раздела;
+- `material_summary` — сохраненное саммари всего материала;
+- `abridged_material` — отдельный сокращенный производный `.lum`-материал,
+  который можно открыть и читать в обычном reader.
+
+Саммари выделенного фрагмента в первом срезе остается ответом в чате. Саммари
+главы или материала создается отдельным reader/material action и сохраняется
+как `SummaryArtifact`. Для каждого source scope существует одно активное
+саммари без параллельных именованных вариантов. `abridged_material` входит в
+scope как отдельный durable workflow: он собирает `.lum` package и публикует
+отдельный производный `Material` со ссылками на исходный `Material`,
+`DocumentRevision` и использованные source anchors.
 
 ### Retrieval context
 
@@ -142,16 +194,24 @@ Provider interface:
 
 Secrets:
 
-- API keys are stored in secure local/server secret storage.
+- В первом web-срезе API keys хранятся в secure server-side secret storage.
+- Будущий native mode может хранить ключ только на клиенте и выполнять запросы
+  локально.
 - Keys are not synced as plaintext.
 - External agent credentials stay outside ordinary sync.
 
 ### External agent integration
 
-Primary design: queue is exposed through MCP-like interface and optional CLI
-worker fallback.
+Primary design: внешний агент подключается к Lumi через MCP interface.
+MCP не встраивает интерфейс или чат агента в Lumi. Для AI-задач агент использует
+ту же durable queue, что direct providers; optional CLI worker остается
+fallback для простой автоматизации.
 
-Agent capabilities:
+Полный account-scoped MCP contract и покрытие пользовательских application
+commands описаны в [`mcp.md`](mcp.md). AI queue tools являются одной частью
+этого внешнего интерфейса.
+
+Для первого AI-среза agent capabilities включают:
 
 - list tasks;
 - claim task;
@@ -159,6 +219,18 @@ Agent capabilities:
 - write artifact/result;
 - mark failed with reason;
 - attach files if needed.
+
+Целевое направление шире AI queue: MCP должен покрывать product operations,
+которые доступны пользователю через приложение — работу с библиотекой,
+материалами, reader state, annotations, search, KB, learning и social.
+Агент действует от имени подключившего его пользователя и проходит те же
+проверки доступа и доменные команды, а MCP tools остаются внешним интерфейсом к
+существующим application services, а не параллельной бизнес-логикой.
+
+На рамочном этапе не вводятся отдельные сложные подсистемы аудита или
+версионирования MCP schemas. Достаточно account-scoped подключения, обычной
+авторизации, понятных ошибок и безопасной обработки повторных команд. Более
+строгие механизмы добавляются только при подтвержденной потребности.
 
 MCP advantages:
 
@@ -198,8 +270,8 @@ Without direct provider:
 - agent conducts conversation in its own UI;
 - agent returns final summary, score, missing concepts and optional KB note.
 
-This preserves the learning value without pretending Lumi can host live agent UI
-without model access.
+This preserves the learning value while keeping the external agent interaction
+outside Lumi.
 
 ### Artifacts
 
@@ -228,7 +300,7 @@ Only accepted artifacts should affect KB graph/search strongly by default.
 - **User control.** User decides provider/key and can disable AI.
 - **Replaceability.** Providers and agents implement contracts, not UI-specific
   hacks.
-- **Privacy.** Context inclusion is explicit and logged.
+- **Privacy.** Context inclusion is explicit and visible to the user.
 - **Durability.** Background tasks survive reload/offline/retry.
 - **Citation.** Source-backed answers should cite chunks/anchors where possible.
 - **Cost control.** Tasks need estimates/limits and cancellation.
@@ -318,7 +390,9 @@ stay in `provider_options`, not in core task schema.
 Workers:
 
 - local client worker for BYOK desktop/native session;
-- server worker for app subscription/server-side mode later;
+- server worker using the user's server-stored BYOK key;
+- server worker for app subscription/server-side mode later, outside current
+  scope;
 - external agent worker via MCP/CLI.
 
 Worker steps:
@@ -346,7 +420,9 @@ Potential MCP tools:
 - `lumi_search_context`;
 - `lumi_create_kb_note`;
 
-Exact tool schema will be designed when implementing external agent bridge.
+Это начальный AI-oriented subset общего MCP surface из [`mcp.md`](mcp.md).
+Остальные tools открывают product user operations через те же application
+commands.
 
 ### Prompt and schema management
 
@@ -363,6 +439,10 @@ This makes generated artifacts auditable and reproducible enough for debugging.
 ## Интеграции и зависимости
 
 - **Reader.** Creates AI tasks/actions from selected text and current context.
+- **Очередь задач.** Background task UX, internal execution и MCP claims
+  описаны в [`ai-task-queue.md`](ai-task-queue.md).
+- **Саммари.** Summary artifacts, chapter actions and generated `.lum`
+  materials описаны в [`ai-summaries.md`](ai-summaries.md).
 - **Search.** Supplies retrieval chunks for chat/tasks.
 - **Learning.** Receives question/card drafts and explain-back feedback.
 - **База знаний.** Receives accepted summaries, concepts, note drafts and links.
@@ -373,6 +453,8 @@ This makes generated artifacts auditable and reproducible enough for debugging.
   может быть источником AI context только через явную context policy.
 - **Backend/jobs.** AI execution uses the common `Job` infrastructure from
   [`backend-api.md`](backend-api.md), not a separate queue implementation.
+- **MCP.** External agent user operations and queue worker tools описаны в
+  [`mcp.md`](mcp.md).
 - **Security/privacy.** Context policy and data visibility follow
   [`security-privacy.md`](security-privacy.md).
 - **Social.** AI can operate on shared content only where permissions allow.
@@ -385,7 +467,15 @@ This makes generated artifacts auditable and reproducible enough for debugging.
 - `accepted`: durable AI task queue for noninteractive work.
 - `accepted`: common `Job` engine for AI execution, import, indexing,
   transcription and repair.
-- `accepted`: MCP-like external agent bridge with CLI fallback.
+- `accepted`: MCP external agent interface with CLI fallback for simple worker
+  automation.
+- `accepted`: MCP is an external automation surface with target parity for
+  product user operations, кроме admin, credentials/security, chat runtime и
+  account deletion.
+- `accepted`: server-side secret storage for BYOK in the first web AI slice;
+  optional client-local storage remains future native work.
+- `accepted`: built-in Lumi subscription is future work outside the current
+  implementation scope.
 - `rejected`: hardwire one LLM provider into reader UI. This breaks user
   control and replaceability.
 - `rejected`: send whole library to AI by default. Too expensive and bad for
@@ -397,9 +487,7 @@ This makes generated artifacts auditable and reproducible enough for debugging.
 
 ## Открытые вопросы
 
-- Store BYOK credentials only locally or allow encrypted server-side storage for
-  web sessions?
 - Which OpenRouter model should be default per task type?
-- How strict should context logging be for privacy/audit?
-- What exact MCP schema should external agents use?
 - Should AI conversations be indexed by default, or only saved answers/artifacts?
+- How should an accepted `abridged_material` relate to source revisions and
+  later source updates?

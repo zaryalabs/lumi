@@ -136,13 +136,14 @@ Status: accepted
 | LRN-005 | Attempts, mastery state and source-backed feedback | product | LRN-001, LRN-004 | `learning.md` |
 | LRN-006 | Explain-back learning mechanic with iterative AI feedback | product | AI-005, SEARCH-005 | `learning.md`, `ai.md` |
 | AI-001 | AI provider abstraction with OpenRouter/OpenAI-compatible first provider target | foundation | SEC-003 | `ai.md` |
-| AI-002 | Durable `AiTask` queue using common `Job` engine | foundation | CORE-010, AI-001 | `ai.md`, `backend-api.md` |
+| AI-002 | Durable `AiTask` queue, immediate internal execution, web bulk actions and MCP claims using common `Job` engine | foundation | CORE-010, AI-001 | `ai-task-queue.md`, `ai.md`, `backend-api.md` |
 | AI-003 | Typed AI artifacts: summary, questions, flashcards, entity graph, note draft, transcript | product | AI-002 | `ai.md`, `knowledge-base.md`, `learning.md` |
 | AI-004 | Reader selection actions: explain, summarize, ask, create cards, find related notes | product | RD-011, SEARCH-005 | `ai.md`, `reading-screen.md` |
-| AI-005 | Interactive chat and in-Lumi explain-back with streaming provider | product | AI-001, SEARCH-005 | `ai.md`, `learning.md` |
+| AI-005 | Глобальный сворачиваемый ИИ-чат: управление чатами, многошаговый streaming-диалог и передача контекста из Lumi | product | AI-001 | `ai.md`, `ai-chat.md` |
 | AI-006 | Voice transcription as AI/background task | extension | RD-008, AI-002 | `ai.md`, `learning.md` |
-| AI-007 | External agent bridge through MCP-like tools and CLI fallback | extension | AI-002, API-001 | `ai.md`, `plugins.md` |
-| AI-008 | Context policy, cost controls, audit and source citations | foundation | AI-001, SEARCH-005, SEC-001 | `ai.md`, `security-privacy.md` |
+| AI-007 | Account-scoped MCP interface with target parity for product user operations and AI queue worker tools | extension | AI-002, API-001 | `mcp.md`, `ai.md`, `backend-api.md` |
+| AI-008 | Context policy, cost controls, user-visible context and source citations | foundation | AI-001, SEARCH-005, SEC-001 | `ai.md`, `security-privacy.md` |
+| AI-009 | Один active summary на главу/материал и отдельный сокращенный `.lum`-материал со связью с источником | product | AI-003, CORE-002, FMT-LUM-001 | `ai-summaries.md`, `ai.md`, `formats/lum.md` |
 
 ## Social And Plugins
 

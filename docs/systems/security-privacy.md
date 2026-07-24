@@ -69,8 +69,12 @@ Native clients can disable cloud replica for private vault:
   with DNS and redirect rechecks.
 - API keys and OAuth tokens stored via secure local/server secret storage, not
   sync plaintext.
-- Plugins and MCP agents use explicit capabilities, scoped tools, audit and
-  approval for writes.
+- MCP agent подключается к аккаунту извне, действует с пользовательскими
+  product permissions через отдельный revocable account token и проходит
+  обычные проверки доступа application commands. Admin, credentials, security
+  control plane, chat runtime и account deletion не открываются. Отдельные
+  сложные audit/versioning подсистемы для первого MCP-среза не требуются; полный
+  contract описан в [`mcp.md`](mcp.md).
 - Public sharing uses preview, quote/source limits and revocation where
   possible.
 - Destructive migrations require backup/snapshot strategy.

@@ -51,7 +51,8 @@ Responsibilities:
   listener status.
 - `settings/telegram` одновременно определяет администратора-владельца
   embedded transport; отдельного provider pairing API нет.
-- `mcp` - external agent integration with scoped tools.
+- `mcp` - account-scoped external agent integration с покрытием product user
+  application commands и AI task queue по контракту [`mcp.md`](mcp.md).
 
 ### Contract rules
 

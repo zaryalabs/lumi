@@ -71,6 +71,9 @@ Package, reader строит единый `ReadingDocument`, `PageMap` и пок
   привязкой к главе, блоку или фрагменту.
 - Lumi использует `lum` metadata для поиска, базы знаний, обучения и ИИ-задач,
   не смешивая исходный контент с личными заметками пользователя.
+- ИИ может создать сокращенную версию существующего материала как отдельный
+  производный `.lum`-материал со своим spine и ссылками на source
+  material/revision/anchors.
 
 ## Функциональные требования
 
@@ -647,7 +650,10 @@ Examples:
 - **Search.** Index строится по compiled `ReadingDocument`, plus manifest
   metadata, concepts, glossary and headings.
 - **ИИ.** Manifest/chapter metadata can provide AI context and permissions, но
-  ИИ-задачи запускаются reader/AI layer, not importer.
+  ИИ-задачи запускаются reader/AI layer, not importer. Abridgement workflow из
+  [`../ai-summaries.md`](../ai-summaries.md) собирает новый `.lum` package и
+  передает его в обычный validation/import pipeline как отдельный derived
+  material.
 - **Sync.** Синхронизируются package/source identity, `DocumentRevision`,
   resources metadata, progress, annotations and exercise answers. Сам source
   package может sync-иться как blob/content-addressed asset.

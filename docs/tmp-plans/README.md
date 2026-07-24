@@ -22,7 +22,7 @@ coordination document.
   decision, that decision must be promoted into the canonical documentation
   under `docs/`.
 - Do not use this section as the final roadmap. Long-lived sequencing should
-  stay in `docs/early-slices.md` or the relevant canonical systems documents.
+  stay in the relevant canonical product or systems documents.
 - After a slice ships or is superseded, archive, replace or delete its
   temporary plan.
 
