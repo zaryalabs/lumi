@@ -4,5 +4,10 @@
 account-scoped vertical slice. Snapshot использует Streamable HTTP,
 JSON-RPC 2.0 и MCP protocol version `2025-06-18`.
 
+`tool-registry.json` является frozen allowlist с отдельными version ids
+input/output schemas. AI worker mutations обязаны использовать общий набор
+`task_id + run_id + claim_id + fence + task_revision`; complete дополнительно
+требует idempotency key и typed result.
+
 Tokens, verifier hashes и private content в fixtures запрещены. Claim examples
 содержат обязательные `run_id`, `claim_id`, `fence`, lease и task revision.

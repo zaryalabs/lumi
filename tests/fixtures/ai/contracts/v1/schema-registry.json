@@ -1,0 +1,42 @@
+{
+  "contract_version": "ai.contract.v1",
+  "prompts": [
+    {
+      "version": "summary.chapter.brief.v1",
+      "task_kind": "summary",
+      "scope_kind": "chapter",
+      "form": "brief"
+    },
+    {
+      "version": "summary.chapter.outline.v1",
+      "task_kind": "summary",
+      "scope_kind": "chapter",
+      "form": "outline"
+    },
+    {
+      "version": "summary.material.brief.v1",
+      "task_kind": "summary",
+      "scope_kind": "material",
+      "form": "brief"
+    },
+    {
+      "version": "summary.material.outline.v1",
+      "task_kind": "summary",
+      "scope_kind": "material",
+      "form": "outline"
+    }
+  ],
+  "outputs": [
+    {
+      "version": "summary-artifact.v1",
+      "artifact_kind": "summary_artifact",
+      "max_payload_bytes": 262144,
+      "required": [
+        "schema_version",
+        "content",
+        "citation_ids"
+      ],
+      "additional_properties": false
+    }
+  ]
+}

@@ -118,6 +118,7 @@ docs/systems/
   learning.md
   social.md
   ai.md
+  ai-contracts.md
   ai-chat.md
   ai-summaries.md
   ai-task-queue.md
@@ -154,6 +155,7 @@ docs/systems/
 | Механики обучения | `learning.md` | `accepted` |
 | Социальные функции | `social.md` | `accepted` |
 | ИИ-функционал | `ai.md` | `accepted` |
+| AI/MCP Contract Freeze 1 | `ai-contracts.md` | `accepted` |
 | Глобальный ИИ-чат | `ai-chat.md` | `accepted` |
 | ИИ-саммари и сокращенные материалы | `ai-summaries.md` | `accepted` |
 | Очередь ИИ-задач | `ai-task-queue.md` | `accepted` |

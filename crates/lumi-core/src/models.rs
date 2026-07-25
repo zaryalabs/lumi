@@ -186,6 +186,13 @@ pub fn s1_schema_migrations() -> Vec<SchemaMigration> {
             description: "Portable LUM packages, chapter source locators and durable import jobs."
                 .to_owned(),
         },
+        SchemaMigration {
+            id: "s1-0011-ai-contract-freeze-v1".to_owned(),
+            schema_version: DOMAIN_SCHEMA_VERSION.to_owned(),
+            description:
+                "Versioned AI task, context, artifact, provider event and MCP claim contracts."
+                    .to_owned(),
+        },
     ]);
     migrations
 }
@@ -1729,6 +1736,9 @@ mod tests {
     fn migrations_cover_s1_contract_groups() {
         let migrations = s1_schema_migrations();
 
-        assert_eq!(migrations.len(), 14);
+        assert_eq!(migrations.len(), 15);
+        assert!(migrations
+            .iter()
+            .any(|migration| migration.id == "s1-0011-ai-contract-freeze-v1"));
     }
 }

@@ -5,9 +5,12 @@
 //! added later for narrow UI calls, but durable system contracts belong here.
 
 mod account;
+pub mod ai;
+mod api_routes;
 mod auth_api;
 mod blob;
 mod imports;
+mod mcp;
 mod pdf_engine;
 mod telegram;
 mod telegram_media;
@@ -20,11 +23,9 @@ use std::time::Duration;
 
 use axum::{
     body::Body,
-    extract::{DefaultBodyLimit, Multipart, Path, State},
+    extract::{Multipart, Path, State},
     http::{header, HeaderMap, HeaderValue, Method, StatusCode},
-    middleware,
     response::{IntoResponse, Response},
-    routing::{get, patch, post, put},
     Extension, Json, Router,
 };
 use lumi_core::{
@@ -377,101 +378,10 @@ pub fn build_router() -> Router {
 
 /// Build the Axum router with an explicit state object.
 pub fn build_router_with_state(state: AppState) -> Router {
-    let public = Router::new()
-        .route("/health", get(health))
-        .route("/ready", get(readiness))
-        .route("/capabilities", get(capabilities))
-        .route("/schema/migrations", get(schema_migrations))
-        .merge(auth_api::public_routes());
-    let protected = Router::new()
-        .merge(auth_api::protected_account_routes())
-        .route("/materials", get(list_materials))
-        .route("/materials/continue-reading", get(continue_reading))
-        .route(
-            "/materials/{material_id}",
-            get(get_material).delete(delete_material),
-        )
-        .route(
-            "/materials/{material_id}/library-state",
-            patch(update_library_state).layer(DefaultBodyLimit::max(64 * 1024)),
-        )
-        .route(
-            "/materials/{material_id}/source",
-            get(download_source_document),
-        )
-        .route(
-            "/materials/{material_id}/annotations",
-            get(list_annotations)
-                .post(create_annotation)
-                .layer(DefaultBodyLimit::max(512 * 1024)),
-        )
-        .route(
-            "/materials/{material_id}/annotations/export",
-            get(export_annotations),
-        )
-        .route(
-            "/materials/{material_id}/annotations/{annotation_id}",
-            put(update_annotation)
-                .delete(delete_annotation)
-                .layer(DefaultBodyLimit::max(512 * 1024)),
-        )
-        .route(
-            "/materials/{material_id}/progress",
-            get(get_progress)
-                .put(move_reading_position)
-                .layer(DefaultBodyLimit::max(256 * 1024)),
-        )
-        .route(
-            "/reader/settings",
-            get(get_reader_settings)
-                .put(update_reader_settings)
-                .layer(DefaultBodyLimit::max(64 * 1024)),
-        )
-        .route("/settings/telegram", get(get_telegram_bot_settings))
-        .route(
-            "/settings/telegram/token",
-            put(update_telegram_bot_token)
-                .delete(delete_telegram_bot_token)
-                .layer(DefaultBodyLimit::max(1024)),
-        )
-        .route("/revisions/{revision_id}", get(get_revision))
-        .route(
-            "/revisions/{revision_id}/package",
-            get(get_normalized_package),
-        )
-        .route(
-            "/revisions/{revision_id}/reading-document",
-            get(get_reading_document),
-        )
-        .route(
-            "/revisions/{revision_id}/page-fidelity-document",
-            get(get_page_fidelity_document),
-        )
-        .route(
-            "/revisions/{revision_id}/resources/{content_hash}",
-            get(get_revision_resource),
-        )
-        .route("/blobs/{manifest_id}", get(get_blob_manifest))
-        .route(
-            "/imports/fixtures/{fixture_slug}",
-            post(import_fixture_material),
-        )
-        .route("/imports", get(list_imports).post(upload_document))
-        .route(
-            "/imports/url",
-            post(import_web_url).layer(DefaultBodyLimit::max(16 * 1024)),
-        )
-        .route("/jobs/{job_id}", get(get_job))
-        .route("/jobs/{job_id}/diagnostics", get(get_job_diagnostics))
-        .route("/jobs/{job_id}/cancel", post(cancel_job))
-        .route("/jobs/{job_id}/retry", post(retry_job));
-    let protected = protected
-        .layer(DefaultBodyLimit::max(201 * 1024 * 1024))
-        .route_layer(middleware::from_fn_with_state(
-            state.clone(),
-            auth_api::require_session,
-        ));
-    let api = public.merge(protected).with_state(state.clone());
+    let api = api_routes::public_routes()
+        .merge(api_routes::protected_routes(&state))
+        .with_state(state.clone());
+    let mcp_transport = mcp::transport_routes().with_state(state.clone());
     let allowed_origin = state
         .security()
         .allowed_origin()
@@ -480,6 +390,7 @@ pub fn build_router_with_state(state: AppState) -> Router {
 
     Router::new()
         .nest("/api/v1", api)
+        .merge(mcp_transport)
         .layer(
             CorsLayer::new()
                 .allow_origin(AllowOrigin::exact(allowed_origin))
@@ -2088,7 +1999,7 @@ mod tests {
         let migrations: Vec<SchemaMigration> =
             json_get(build_router(), "/api/v1/schema/migrations").await?;
 
-        assert_eq!(migrations.len(), 14);
+        assert_eq!(migrations.len(), 15);
         Ok(())
     }
 

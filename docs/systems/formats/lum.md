@@ -2,7 +2,9 @@
 
 Status: accepted
 
-Implementation baseline: `s1.2026-07-23.lum-import-v1`.
+Importer baseline: `s1.2026-07-23.lum-import-v1`. Текущий общий domain marker
+после AI Contract Freeze 1 — `s1.2026-07-25.ai-contract-v1`; формат `.lum`
+этим не изменен.
 
 Реализован первый portable profile: Web/API upload `.lum`, constrained ZIP,
 строгий `lum.toml` версии `0.1`, multi-chapter spine через общий

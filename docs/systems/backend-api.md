@@ -28,16 +28,15 @@ Dioxus Fullstack/server functions можно использовать для UI-
 /api/v1/jobs/*
 /api/v1/search/*
 /api/v1/desk/*
-/api/v1/ai/providers/*
+/api/v1/providers/*
 /api/v1/ai/conversations/*
 /api/v1/ai/tasks/*
 /api/v1/ai/artifacts/*
 /api/v1/ai/summaries/*
-/api/v1/mcp-connections/*
+/api/v1/mcp/connections/*
 /api/v1/sync/*
 /api/v1/spaces/*
 /api/v1/shares/*
-/api/v1/providers/*
 /api/v1/settings/telegram
 /api/v1/exports/*
 /mcp/*
@@ -56,13 +55,13 @@ Responsibilities:
 - `search` - serious server-side web search and retrieval API.
 - `desk` - account/material-centered read projections, filters and stable
   navigation targets over records, learning state and saved artifacts.
-- `ai/providers` - account-scoped provider state и write-only credential
+- `providers` - account-scoped AI provider state и write-only credential
   lifecycle; secret value не возвращается.
 - `ai/conversations` - chat history, messages, generations, streaming,
   cancellation и reconnect.
 - `ai/tasks/artifacts/summaries` - durable background operations, typed
   results, summary slots и derived-material workflows.
-- `mcp-connections` - authenticated Web management revocable MCP connections;
+- `mcp/connections` - authenticated Web management revocable MCP connections;
   сам agent transport остается на `/mcp`.
 - `sync` - native full-copy sync, cursors, changes and snapshots.
 - `spaces/shares` - User Space social projection, Community Spaces, membership,

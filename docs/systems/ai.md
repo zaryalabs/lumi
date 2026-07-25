@@ -54,7 +54,8 @@ artifact становится downstream object.
 
 Durable implementation decisions закреплены в ADR
 [0019](../adr/0019-ai-task-run-artifact-schema.md)–[0024](../adr/0024-derived-material-provenance.md),
-а security gates — в [`ai-threat-review.md`](ai-threat-review.md).
+frozen DTO/schema/ownership — в [`ai-contracts.md`](ai-contracts.md), а
+security gates — в [`ai-threat-review.md`](ai-threat-review.md).
 
 ## Пользовательские сценарии
 

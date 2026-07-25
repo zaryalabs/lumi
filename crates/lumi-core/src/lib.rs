@@ -5,6 +5,7 @@
 //! the server and web adapter one shared model for materials, revisions,
 //! normalized content, reading documents, anchors, annotations and jobs.
 
+mod ai;
 mod auth;
 mod epub;
 mod fixtures;
@@ -12,11 +13,13 @@ mod fixtures;
 mod lum;
 #[cfg(feature = "markdown-import")]
 mod markdown;
+mod mcp;
 mod models;
 mod pdf;
 mod reader;
 mod sources;
 
+pub use ai::*;
 pub use auth::*;
 pub use epub::*;
 pub use fixtures::{
@@ -27,6 +30,7 @@ pub use fixtures::{
 pub use lum::*;
 #[cfg(feature = "markdown-import")]
 pub use markdown::*;
+pub use mcp::*;
 pub use models::*;
 pub use pdf::*;
 pub use reader::*;
@@ -37,8 +41,8 @@ use serde::{Deserialize, Serialize};
 /// Current public API version used by the local Axum scaffold.
 pub const API_VERSION: &str = "v1";
 
-/// Current domain schema marker for the S1 contracts.
-pub const DOMAIN_SCHEMA_VERSION: &str = "s1.2026-07-23.lum-import-v1";
+/// Current domain schema marker for the frozen `0.2.0` AI contracts.
+pub const DOMAIN_SCHEMA_VERSION: &str = "s1.2026-07-25.ai-contract-v1";
 
 /// Current normalized content package marker for reflowable S1 documents.
 pub const NORMALIZED_PACKAGE_VERSION: &str = "normalized.reflowable.s1";
