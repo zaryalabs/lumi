@@ -86,6 +86,9 @@ Native clients can disable cloud replica for private vault:
 - Readiness проверяет migration compatibility и bounded blob
   write/rename/read/delete sentinel; backup связывает quiesced PostgreSQL и blob
   artifacts manifest/checksums и проверяется disposable restore drill.
+- Threat review AI/MCP `0.2.0`, включая prompt injection, stale claims,
+  provider SSRF, output limits и log redaction, зафиксирован отдельно в
+  [`ai-threat-review.md`](ai-threat-review.md).
 
 ## Privacy UX
 

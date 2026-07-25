@@ -3721,14 +3721,21 @@ name = "lumi-stage0-spikes"
 version = "0.1.0"
 dependencies = [
  "ammonia",
+ "axum",
  "ed25519-dalek",
  "flate2",
  "hkdf",
+ "lumi-core",
  "quick-xml",
  "scraper",
+ "serde",
+ "serde_json",
  "sha2",
  "thiserror 2.0.18",
+ "tokio",
+ "tower",
  "url",
+ "uuid",
  "zeroize",
  "zip",
 ]

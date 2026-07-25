@@ -245,6 +245,14 @@ Normalized Content Package должен поддерживать детерми�
 retrieval. Индексированный retrieval строится поверх того же chunk/citation
 contract позднее и остаётся отдельной ответственностью search subsystem.
 
+Для `0.2.0` scope сужен до `selection | chapter | material` и всегда содержит
+exact `material_id + revision_id`. Immutable `AiContextPack` хранит фактически
+переданные fragments, hashes, permission snapshot и citation ids; permission
+повторно проверяется при чтении и публикации. Hard ceiling pack — 256 KiB UTF-8,
+одного fragment — 16 KiB. Default selection/chapter/material profiles и exact
+citation DTO закреплены в
+[ADR 0022](../adr/0022-explicit-source-context.md).
+
 ## Интеграции и зависимости
 
 - **Reader.** Builds `ReadingDocument` or `PageFidelityDocument` from package.

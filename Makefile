@@ -13,6 +13,9 @@ WEB_PACKAGE := $(WEB_DIR)/Cargo.toml
 E2E_DIR := tests/e2e
 E2E_PACKAGE := $(E2E_DIR)/package.json
 E2E_NODE_MODULES := $(E2E_DIR)/node_modules
+AI_WEB_SPIKE_DIR := spikes/ai-web
+AI_WEB_SPIKE_PACKAGE := $(AI_WEB_SPIKE_DIR)/package.json
+AI_WEB_SPIKE_NODE_MODULES := $(AI_WEB_SPIKE_DIR)/node_modules
 WEB_NODE_MODULES := $(WEB_DIR)/node_modules
 WASM_TARGET_DIR := target/wasm
 OPS_DIR := ops
@@ -46,7 +49,7 @@ RUSTUP_PATH_ENV := $(if $(RUSTUP_TOOLCHAIN_BIN),PATH=$(RUSTUP_TOOLCHAIN_BIN):$$P
 
 .DEFAULT_GOAL := help
 
-.PHONY: help prepare build push release-manifest deploy ci-clean-images ops-config cicd-contract-test production-compose-smoke init fmt l dl t c pc docs-fmt docs-l rust-fmt rust-l rust-web-check rust-web-l rust-dl rust-t up logs down reset server-r admin-lookup-id telegram-r db-up db-down db-migrate pdfjs-assets web-r prototype-r prototype-e2e pagination-spike-r pagination-spike-e2e stage0-spikes web-build e2e-fmt e2e-fmt-check e2e-l e2e-dl web-e2e pg-t compatibility security performance staging-config staging-smoke backup restore-drill restore-attestation-test restore-attestation beta-local beta agent-inspect
+.PHONY: help prepare build push release-manifest deploy ci-clean-images ops-config cicd-contract-test production-compose-smoke init fmt l dl t c pc docs-fmt docs-l rust-fmt rust-l rust-web-check rust-web-l rust-dl rust-t up logs down reset server-r admin-lookup-id telegram-r db-up db-down db-migrate pdfjs-assets web-r prototype-r prototype-e2e pagination-spike-r pagination-spike-e2e ai-chat-spike-e2e stage0-spikes web-build e2e-fmt e2e-fmt-check e2e-l e2e-dl web-e2e pg-t compatibility security performance staging-config staging-smoke backup restore-drill restore-attestation-test restore-attestation beta-local beta agent-inspect
 
 help: ## Show available make targets
 	@awk 'BEGIN {FS = ":.*## "}; /^[a-zA-Z0-9_.-]+:.*## / {printf "  %-16s %s\n", $$1, $$2}' $(MAKEFILE_LIST)
@@ -113,6 +116,11 @@ init: ## Install hooks and local dependencies when tools are available
 		$(NPM) --prefix $(E2E_DIR) install; \
 	else \
 		echo "No $(E2E_PACKAGE) found; skipping Playwright dependency install"; \
+	fi
+	@if [ -f "$(AI_WEB_SPIKE_PACKAGE)" ]; then \
+		$(NPM) --prefix $(AI_WEB_SPIKE_DIR) install; \
+	else \
+		echo "No $(AI_WEB_SPIKE_PACKAGE) found; skipping AI Web spike dependency install"; \
 	fi
 	@if command -v $(DX) >/dev/null 2>&1; then \
 		$(DX) doctor; \
@@ -285,9 +293,18 @@ pagination-spike-e2e: ## Run Stage 0 pagination browser checks
 		exit 1; \
 	fi
 
-stage0-spikes: ## Run executable auth, EPUB and pagination spikes
+ai-chat-spike-e2e: ## Run the Stage 0 Deep Chat browser checks
+	@if [ -f "$(E2E_PACKAGE)" ] && [ -f "$(AI_WEB_SPIKE_PACKAGE)" ]; then \
+		if [ -d "$(E2E_NODE_MODULES)" ] && [ -d "$(AI_WEB_SPIKE_NODE_MODULES)" ]; then $(NPM) --prefix $(E2E_DIR) run test:ai-stage0-spike; else echo "Spike dependencies are not installed; run make init"; exit 1; fi; \
+	else \
+		echo "AI Web spike packages are missing"; \
+		exit 1; \
+	fi
+
+stage0-spikes: ## Run executable architecture risk spikes
 	$(CARGO) test -p $(STAGE0_SPIKE_PACKAGE)
 	$(MAKE) pagination-spike-e2e
+	$(MAKE) ai-chat-spike-e2e
 
 web-build: pdfjs-assets ## Build the Dioxus web app when dx is available
 	@if [ -f "$(WEB_PACKAGE)" ]; then \
@@ -392,4 +409,4 @@ clean: ## Remove common local build and cache artifacts
 	rm -rf $(WEB_DIR)/dist $(WEB_DIR)/target
 	rm -rf $(E2E_DIR)/test-results $(E2E_DIR)/playwright-report
 
-.PHONY: help init fmt l dl t c pc docs-fmt docs-l rust-fmt rust-l rust-web-check rust-web-l rust-dl rust-t up logs down reset db-up db-down db-migrate server-r web-r prototype-r prototype-e2e pagination-spike-r pagination-spike-e2e stage0-spikes web-build e2e-fmt e2e-l e2e-dl web-e2e agent-inspect clean
+.PHONY: help init fmt l dl t c pc docs-fmt docs-l rust-fmt rust-l rust-web-check rust-web-l rust-dl rust-t up logs down reset db-up db-down db-migrate server-r web-r prototype-r prototype-e2e pagination-spike-r pagination-spike-e2e ai-chat-spike-e2e stage0-spikes web-build e2e-fmt e2e-l e2e-dl web-e2e agent-inspect clean

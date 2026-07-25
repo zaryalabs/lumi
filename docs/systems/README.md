@@ -121,6 +121,7 @@ docs/systems/
   ai-chat.md
   ai-summaries.md
   ai-task-queue.md
+  ai-threat-review.md
   mcp.md
   plugins.md
 ```
@@ -153,10 +154,11 @@ docs/systems/
 | Механики обучения | `learning.md` | `accepted` |
 | Социальные функции | `social.md` | `accepted` |
 | ИИ-функционал | `ai.md` | `accepted` |
-| Глобальный ИИ-чат | `ai-chat.md` | `draft` |
-| ИИ-саммари и сокращенные материалы | `ai-summaries.md` | `draft` |
-| Очередь ИИ-задач | `ai-task-queue.md` | `draft` |
-| MCP-интерфейс для внешних агентов | `mcp.md` | `draft` |
+| Глобальный ИИ-чат | `ai-chat.md` | `accepted` |
+| ИИ-саммари и сокращенные материалы | `ai-summaries.md` | `accepted` |
+| Очередь ИИ-задач | `ai-task-queue.md` | `accepted` |
+| Threat review AI/MCP `0.2.0` | `ai-threat-review.md` | `accepted` |
+| MCP-интерфейс для внешних агентов | `mcp.md` | `accepted` |
 | Плагины | `plugins.md` | `accepted` |
 
 ## Регистр функций

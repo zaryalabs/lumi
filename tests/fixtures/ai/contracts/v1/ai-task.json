@@ -1,0 +1,21 @@
+{
+  "contract_version": "ai.contract.v1",
+  "task_id": "00000000-0000-7000-8000-000000000001",
+  "owner_id": "00000000-0000-7000-8000-000000000010",
+  "kind": "summary",
+  "result_kind": "summary_artifact",
+  "source_scope": {
+    "kind": "chapter",
+    "material_id": "00000000-0000-7000-8000-000000000020",
+    "revision_id": "00000000-0000-7000-8000-000000000021",
+    "scope_ref": "chapter-1"
+  },
+  "parameters": {
+    "form": "brief"
+  },
+  "prompt_version": "summary.chapter.brief.v1",
+  "output_schema_version": "summary-artifact.v1",
+  "status": "queued",
+  "dedupe_key": "summary-fixture-dedupe-v1",
+  "object_revision": 1
+}

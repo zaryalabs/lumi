@@ -1,6 +1,6 @@
 # ИИ-саммари и сокращенные материалы
 
-Status: draft
+Status: accepted
 
 ## Контекст
 
@@ -285,10 +285,23 @@ content и export.
 - `rejected`: считать сокращенную версию новой revision оригинального
   материала.
 
-## Открытые вопросы
+## Принятый профиль `0.2.0`
 
-- Должен ли `brief` или `outline` быть default для главы и целого материала?
-- Какой progress показывать для многошаговой генерации больших книг?
-- Как сравнивать candidate с отредактированным пользователем summary?
-- Где разместить material-level summary action кроме конца чтения?
-- Какой generated provenance добавить в `.lum` manifest и export metadata?
+- Default form: `brief` для главы и `outline` для материала. Пользователь может
+  явно выбрать вторую поддерживаемую form до создания task.
+- Иерархический progress показывает стабильные стадии:
+  `context`, `section_summaries`, `synthesis`, `coverage_check`,
+  `artifact_validation`; abridgement дополнительно показывает
+  `package_assembly`, `package_validation`, `import`, `publication`.
+- Если active summary содержит ручную правку, regeneration всегда создает
+  candidate. UI показывает candidate рядом с active и дает принять/отклонить;
+  автоматический text merge и silent overwrite не выполняются.
+- Material-level action доступно из details/card material и в конце чтения.
+  Chapter action остается в конце главы.
+- Authoritative derived relationship хранится в Lumi schema, а portable
+  provenance generated package — в
+  `META-INF/lumi/provenance.json` версии
+  `lumi.generated-provenance.v1`. `lum.toml` profile `0.1` не расширяется.
+
+Schema и provenance закреплены в [ADR 0019](../adr/0019-ai-task-run-artifact-schema.md)
+и [ADR 0024](../adr/0024-derived-material-provenance.md).

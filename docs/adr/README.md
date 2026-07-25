@@ -25,6 +25,18 @@ plugin, AI, search and account/auth boundaries.
   администратору без одноразового pairing token;
 - [`0018`](0018-markdown-import-compiler.md) — Markdown compiler, extension
   lowering и source locators.
+- [`0019`](0019-ai-task-run-artifact-schema.md) — AI task/run/artifact schema,
+  claims, idempotency и summary slots;
+- [`0020`](0020-common-job-runtime.md) — общий Job Runtime с безопасным
+  import-adapter переходом;
+- [`0021`](0021-provider-secret-store.md) — account-scoped provider secrets,
+  encryption и rotation;
+- [`0022`](0022-explicit-source-context.md) — bounded explicit context packs и
+  source citations;
+- [`0023`](0023-mcp-streamable-http-auth-tools.md) — MCP Streamable HTTP,
+  revocable auth, tool schemas и claim fencing;
+- [`0024`](0024-derived-material-provenance.md) — provenance производных
+  `.lum`-материалов.
 
 ## Template
 

@@ -1,0 +1,17 @@
+[
+  {
+    "case": "keep_alive_and_done",
+    "fixture": ": OPENROUTER PROCESSING\n\ndata: {\"choices\":[{\"delta\":{\"content\":\"ok\"}}]}\n\ndata: [DONE]\n\n",
+    "expected": "completed"
+  },
+  {
+    "case": "mid_stream_error",
+    "fixture": "data: {\"error\":{\"code\":429,\"metadata\":{\"error_type\":\"rate_limit_exceeded\"}},\"choices\":[{\"delta\":{\"content\":\"\"},\"finish_reason\":\"error\"}]}\n\n",
+    "expected": "rate_limited"
+  },
+  {
+    "case": "malformed_json",
+    "fixture": "data: {not-json}\n\n",
+    "expected": "malformed_provider_frame"
+  }
+]

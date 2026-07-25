@@ -9,6 +9,7 @@
     "lint": "node ./node_modules/typescript/bin/tsc --noEmit",
     "typecheck": "node ./node_modules/typescript/bin/tsc --noEmit",
     "test": "node ./node_modules/@playwright/test/cli.js test",
+    "test:ai-stage0-spike": "node ./node_modules/@playwright/test/cli.js test --config ai-stage0-spike.playwright.config.ts",
     "test:pagination-spike": "node ./node_modules/@playwright/test/cli.js test --config pagination-spike.playwright.config.ts",
     "test:prototype": "node ./node_modules/@playwright/test/cli.js test --config prototype.playwright.config.ts",
     "install-browsers": "node ./node_modules/@playwright/test/cli.js install chromium"

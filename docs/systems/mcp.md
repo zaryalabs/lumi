@@ -1,6 +1,6 @@
 # MCP-интерфейс для внешних агентов
 
-Status: draft
+Status: accepted
 
 ## Контекст
 
@@ -392,11 +392,22 @@ KB, learning, social и export tools добавляются вместе с со
   account deletion.
 - `rejected`: один универсальный untyped `execute_action`.
 
-## Открытые вопросы
+## Принятый профиль `0.2.0`
 
-- Какой transport/deployment profile использовать для local и hosted
-  подключений?
-- Нужен ли read-only token после первого full-access среза?
-- Как передавать большие upload/download blobs без раздувания MCP messages?
-- Какие publication actions кроме permanent delete требуют двухшагового flow?
-- Нужен ли отдельный MCP connection list с last-used metadata?
+- Hosted/self-hosted transport — stateless MCP Streamable HTTP на `POST /mcp`,
+  JSON-RPC 2.0, protocol snapshot `2025-06-18`. Optional GET/SSE session и
+  local stdio bridge остаются additive adapters.
+- Первый token дает account-scoped product-user access. Read-only и per-tool
+  grants откладываются до подтвержденного сценария и не ослабляют текущие
+  исключения admin/credentials/chat/account deletion.
+- Большие upload/download/result blobs передаются через short-lived bounded
+  refs с owner, checksum, media type, size, purpose и expiry; bytes не
+  встраиваются в обычный tool response.
+- Двухшаговый flow обязателен для permanent delete, массового необратимого
+  удаления и публикации private content в shared/public surface. Archive,
+  restore и private draft creation остаются одношаговыми idempotent commands.
+- Settings показывает connection list с name, token prefix, created,
+  last-used и revoked state. Полный token повторно не показывается.
+
+Transport, auth, limits и claim fencing закреплены в
+[ADR 0023](../adr/0023-mcp-streamable-http-auth-tools.md).

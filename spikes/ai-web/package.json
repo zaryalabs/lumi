@@ -1,0 +1,9 @@
+{
+  "name": "@lumi/ai-stage0-web-spike",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "deep-chat": "2.5.0"
+  }
+}

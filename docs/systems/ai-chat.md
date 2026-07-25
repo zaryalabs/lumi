@@ -1,6 +1,6 @@
 # Глобальный ИИ-чат
 
-Status: draft
+Status: accepted
 
 ## Контекст
 
@@ -262,14 +262,31 @@ surface. Замена Deep Chat не должна менять `AiConversation`,
 - `revisit`: полностью Dioxus-native message surface после стабилизации
   доменных контрактов и проверки ограничений Deep Chat.
 
-## Открытые вопросы для детального прохода
+## Принятый профиль `0.2.0`
 
-- Информационная архитектура списка чатов и развернутой поверхности на каждой
-  платформе.
-- Семантика редактирования сообщения, regeneration и будущего branching.
-- Выбор provider/model на уровне настроек, чата или отдельного запроса.
-- UI цитат, context attachments, retrieval progress и provider/tool errors.
-- Правила хранения незавершенного streaming-ответа после disconnect.
-- Нужно ли индексировать историю разговоров или только явно сохраненные ответы.
-- Какие части Deep Chat можно безопасно кастомизировать без зависимости от его
-  внутренних Shadow DOM details?
+- Web использует глобальную сворачиваемую панель и отдельный список разговоров.
+  На узком viewport панель занимает доступную ширину; native layouts остаются
+  следующими platform adapters.
+- Редактирование сообщений, branching и произвольный request-level provider
+  override не входят в `0.2.0`. Retry/regenerate создает новую
+  `AiGeneration`, сохраняя предыдущую попытку.
+- Account settings выбирают один active OpenRouter credential и default
+  compatible model. Conversation может закрепить model id; отдельное сообщение
+  его не меняет.
+- Context attachment preview/removal, source citations, provider errors и
+  переход к anchors принадлежат Dioxus shell и Lumi DTO. Они не зависят от
+  внутренних Shadow DOM classes Deep Chat.
+- Незавершенная generation хранит checkpoint/sequence и состояние
+  `streaming | interrupted | cancelled | failed`; reconnect продолжает чтение
+  server stream либо reconciles terminal state. Partial text не становится
+  завершенным assistant message.
+- Raw conversations/messages не индексируются. В search/Desk попадает только
+  явно сохраненная note или typed artifact.
+- Spike Deep Chat 2.5.0 принят как `adapt`: streaming, stop, history reload,
+  focus и mobile width работоспособны через public handler/events API.
+  Attachment/citation controls остаются снаружи component. Если accessibility,
+  reconnect или replaceability regression не проходит browser gates,
+  используется Dioxus-native message surface без изменения domain/API.
+
+Результат spike зафиксирован в
+[`../tmp-plans/0.2.0-stage0-spikes.md`](../tmp-plans/0.2.0-stage0-spikes.md).

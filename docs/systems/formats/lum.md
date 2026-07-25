@@ -653,7 +653,10 @@ Examples:
   ИИ-задачи запускаются reader/AI layer, not importer. Abridgement workflow из
   [`../ai-summaries.md`](../ai-summaries.md) собирает новый `.lum` package и
   передает его в обычный validation/import pipeline как отдельный derived
-  material.
+  material. Portable provenance такого package хранится в
+  `META-INF/lumi/provenance.json`; `lum.toml` strict profile `0.1` не
+  расширяется. Authoritative relation и atomic publication закреплены в
+  [ADR 0024](../../adr/0024-derived-material-provenance.md).
 - **Sync.** Синхронизируются package/source identity, `DocumentRevision`,
   resources metadata, progress, annotations and exercise answers. Сам source
   package может sync-иться как blob/content-addressed asset.

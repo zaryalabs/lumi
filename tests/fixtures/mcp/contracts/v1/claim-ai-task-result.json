@@ -1,0 +1,11 @@
+{
+  "task_id": "00000000-0000-7000-8000-000000000001",
+  "run_id": "00000000-0000-7000-8000-000000000041",
+  "claim_id": "00000000-0000-7000-8000-000000000050",
+  "fence": 7,
+  "lease_expires_at": "2026-07-25T12:05:00Z",
+  "task_revision": 3,
+  "result_kind": "summary_artifact",
+  "result_schema_version": "summary-artifact.v1",
+  "context_pack_id": "00000000-0000-7000-8000-000000000030"
+}

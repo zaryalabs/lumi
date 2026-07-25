@@ -1,0 +1,25 @@
+{
+  "name": "get_lumi_capabilities",
+  "description": "Return enabled Lumi instance and account capabilities.",
+  "inputSchema": {
+    "type": "object",
+    "properties": {},
+    "additionalProperties": false
+  },
+  "outputSchema": {
+    "type": "object",
+    "required": [
+      "instance",
+      "account"
+    ],
+    "properties": {
+      "instance": {
+        "type": "object"
+      },
+      "account": {
+        "type": "object"
+      }
+    },
+    "additionalProperties": false
+  }
+}

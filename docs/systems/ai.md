@@ -28,6 +28,34 @@ Status: accepted
 локальные модели и external agents должны использовать тот же task/artifact
 contract.
 
+## Release profile `0.2.0`
+
+Первый AI release фиксирован как cloud-backed Web slice:
+
+- BYOK OpenRouter через server-side account credential и provider abstraction;
+- global server-backed chat с несколькими conversations, streaming,
+  stop/reconnect и explicit selection/chapter/material attachments;
+- reader selection actions «Спросить», «Объясни проще» и
+  «Кратко перескажи»;
+- durable chapter/material summary `brief | outline`, очередь, bulk execute,
+  cancel/retry/recovery и typed artifacts;
+- account-scoped MCP Streamable HTTP с revocable token, product operations,
+  AI worker claim/fencing и bounded upload refs;
+- abridged derived `.lum`, собранный и опубликованный только через обычный
+  validation/import pipeline;
+- capability/entitlement boundaries без встроенной подписки.
+
+В `0.2.0` не входят Lumi-hosted key/subscription/billing, local/client
+execution, дополнительные provider adapters, voice/cards/questions/graph,
+search index и library-wide retrieval, native UI, agent UI внутри chat,
+per-tool MCP grants и автоматическая регенерация при новой source revision.
+Raw chat не индексируется и не попадает в Desk; только явно сохраненный typed
+artifact становится downstream object.
+
+Durable implementation decisions закреплены в ADR
+[0019](../adr/0019-ai-task-run-artifact-schema.md)–[0024](../adr/0024-derived-material-provenance.md),
+а security gates — в [`ai-threat-review.md`](ai-threat-review.md).
+
 ## Пользовательские сценарии
 
 - Пользователь выделяет абзац и спрашивает "объясни проще".
@@ -507,9 +535,14 @@ This makes generated artifacts auditable and reproducible enough for debugging.
 - `revisit`: local models. Desirable, but model distribution/runtime is
   separate from core AI task contract.
 
-## Открытые вопросы
+## Решения `0.2.0` по прежним открытым вопросам
 
-- Which OpenRouter model should be default per task type?
-- Should AI conversations be indexed by default, or only saved answers/artifacts?
-- How should an accepted `abridged_material` relate to source revisions and
-  later source updates?
+- Конкретный default OpenRouter model не является schema/API contract:
+  пользователь выбирает model из актуального capability catalog, а Lumi может
+  рекомендовать совместимый вариант без hardcoded durable id.
+- AI conversations не индексируются по умолчанию; индексируются только явно
+  сохраненные notes/typed artifacts.
+- `abridged_material` является отдельным derived material, связанным с exact
+  source revision; новая source revision дает `source_changed` без
+  автоматической регенерации по
+  [ADR 0024](../adr/0024-derived-material-provenance.md).

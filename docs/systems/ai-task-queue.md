@@ -1,6 +1,6 @@
 # Очередь ИИ-задач
 
-Status: draft
+Status: accepted
 
 ## Контекст
 
@@ -260,11 +260,24 @@ Mobile client не входит в текущий scope queue UI. При буд�
 - `rejected`: показывать внутренние workflow units как отдельные
   пользовательские задачи.
 
-## Открытые вопросы
+## Принятый профиль `0.2.0`
 
-- Как долго хранить завершенные и failed tasks в истории?
-- Нужны ли priority и ручное изменение порядка в первой версии?
-- Требует ли bulk execution предварительного token/cost estimate?
-- Когда expired lease автоматически retry, а когда требует решения
-  пользователя?
-- Нужен ли отдельный режим просмотра completed history или достаточно filters?
+- Terminal task metadata сохраняется как пользовательская история и может быть
+  скрыта из рабочего списка. Run transport diagnostics по умолчанию хранятся
+  30 дней; artifact/derived material и их provenance живут по своей lifecycle
+  policy. Автоматического удаления пользовательского результата вместе с task
+  нет.
+- Priority определяется task kind и admission policy. Ручное изменение порядка
+  и drag-and-drop не входят в первый срез.
+- Bulk execute ограничено 50 tasks и показывает доступный provider/model,
+  количество задач и известные hard limits. Точный token/cost estimate не
+  является gate, пока provider не дает надежную оценку.
+- Expired claim requeue-ится только для retryable failure при оставшемся retry
+  budget и отсутствии cancellation. Exhausted/non-retryable attempt переводит
+  task в `failed`.
+- Основная таблица имеет filters, включая terminal statuses, и toggle
+  «Показывать завершенные»; отдельная history surface не нужна в `0.2.0`.
+
+Точная граница task/run/claim закреплена в
+[ADR 0019](../adr/0019-ai-task-run-artifact-schema.md), общий execution runtime
+— в [ADR 0020](../adr/0020-common-job-runtime.md).

@@ -1,0 +1,62 @@
+<!doctype html>
+<html lang="ru">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Lumi AI Stage 0</title>
+    <style>
+      :root {
+        color-scheme: light dark;
+        font-family: system-ui, sans-serif;
+        background: #f3efe4;
+        color: #26332b;
+      }
+
+      body {
+        margin: 0;
+      }
+
+      main {
+        box-sizing: border-box;
+        display: grid;
+        grid-template-rows: auto minmax(0, 1fr);
+        gap: 12px;
+        min-height: 100dvh;
+        padding: 16px;
+      }
+
+      h1 {
+        margin: 0;
+        font-size: 1rem;
+      }
+
+      deep-chat {
+        width: min(100%, 760px);
+        height: calc(100dvh - 68px);
+        margin-inline: auto;
+        border: 1px solid #8c9a8b;
+        border-radius: 16px;
+        background: #fffdf7;
+      }
+
+      @media (max-width: 480px) {
+        main {
+          padding: 8px;
+        }
+
+        deep-chat {
+          width: 100%;
+          height: calc(100dvh - 52px);
+          border-radius: 10px;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <main>
+      <h1>Изолированный Deep Chat spike</h1>
+      <deep-chat id="chat" aria-label="ИИ-чат Lumi"></deep-chat>
+    </main>
+    <script type="module" src="./spike.js"></script>
+  </body>
+</html>
