@@ -37,6 +37,8 @@ plugin, AI, search and account/auth boundaries.
   revocable auth, tool schemas и claim fencing;
 - [`0024`](0024-derived-material-provenance.md) — provenance производных
   `.lum`-материалов.
+- [`0025`](0025-openai-whisper-transcription.md) — встроенная транскрибация
+  через OpenAI Audio Transcriptions API и модель `whisper-1`.
 
 ## Template
 

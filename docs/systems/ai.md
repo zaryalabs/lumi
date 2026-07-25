@@ -28,6 +28,12 @@ Status: accepted
 локальные модели и external agents должны использовать тот же task/artifact
 contract.
 
+Исключение для встроенной транскрибации зафиксировано отдельно: `AI-006`
+использует OpenAI Audio Transcriptions API и модель Whisper с model id
+`whisper-1`. Это отдельный OpenAI adapter и отдельный account-scoped OpenAI API
+credential; OpenRouter key не переиспользуется. Решение и границы описаны в
+[ADR 0025](../adr/0025-openai-whisper-transcription.md).
+
 ## Release profile `0.2.0`
 
 Первый AI release фиксирован как cloud-backed Web slice:
@@ -231,6 +237,8 @@ retrieval объявляет capability `ai-retrieval`; explicit context дос�
 Provider interface:
 
 - OpenAI-compatible chat/completions for OpenRouter first.
+- OpenAI Audio Transcriptions API with `whisper-1` for built-in
+  transcription.
 - Structured output where possible for questions/cards/entities.
 - Streaming for chat and explain-back.
 - Batch/background calls for tasks.
@@ -244,6 +252,13 @@ Secrets:
   локально.
 - Keys are not synced as plaintext.
 - External agent credentials stay outside ordinary sync.
+
+Встроенный transcription worker всегда вызывает OpenAI server-side. Browser
+передает Lumi только общий `AudioAttachment` reference и не получает OpenAI
+credential. Если отдельный OpenAI credential не настроен, немедленное
+исполнение недоступно, а task остается в очереди или переходит в
+`needs_input`. Вызов и результат фиксируют provider `openai`, model
+`whisper-1` и source attachment provenance.
 
 ### External agent integration
 
@@ -427,8 +442,12 @@ AiProviderClient {
 }
 ```
 
-OpenRouter implementation uses OpenAI-compatible API. Provider-specific fields
-stay in `provider_options`, not in core task schema.
+OpenRouter implementation uses OpenAI-compatible API для chat/structured
+completion. Отдельный OpenAI transcription adapter вызывает
+`POST /v1/audio/transcriptions` с model `whisper-1`; он не маршрутизируется
+через OpenRouter. Provider-specific fields stay in `provider_options`, not in
+core task schema, а фактические provider/model записываются в `AiRun` и
+`TranscriptArtifact` provenance.
 
 ### Queue worker
 

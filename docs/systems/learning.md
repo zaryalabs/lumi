@@ -246,7 +246,10 @@ UI и возвращает final artifacts/attempt summary back to Lumi.
 - Reader/learning UI can record audio answer.
 - Audio сохраняется как общий `AudioAttachment`, которым владеет personal
   scope; learning attempt хранит только stable attachment reference.
-- Transcription is AI task.
+- Transcription is durable AI task. Встроенный server-side worker использует
+  OpenAI Audio Transcriptions API с моделью `whisper-1` и отдельным
+  account-scoped OpenAI API credential согласно
+  [ADR 0025](../adr/0025-openai-whisper-transcription.md).
 - Until transcript is available, attempt state is `pending_transcription`.
 - Transcription produces a versioned `TranscriptArtifact`. Original transcript
   и accepted edited transcript сохраняют provenance как разные revisions,
@@ -527,4 +530,5 @@ can exist as alternative plugins/adapters if they prove useful.
   it, or behind an explicit action?
 - Should learning results ever be shareable in Community Spaces, and at what
   privacy granularity?
-- What voice transcription provider path is acceptable for offline/mobile?
+- Нужен ли будущему offline/mobile profile локальный Whisper runtime или
+  достаточно отложенной server-side транскрибации через OpenAI?

@@ -11,6 +11,8 @@
 - [`adr/`](adr/) - долговечные архитектурные решения.
 - [`runbooks/local-dev.md`](runbooks/local-dev.md) - локальный workflow
   разработки.
+- [`runbooks/codex-plan-runner.md`](runbooks/codex-plan-runner.md) -
+  изолированный последовательный запуск этапов через Codex CLI.
 - [`visuals/`](visuals/) - статический UI/UX-прототип и связанные визуальные
   решения.
 

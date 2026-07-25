@@ -1,0 +1,40 @@
+services:
+  workspace:
+    build:
+      context: ..
+      dockerfile: .devcontainer/Dockerfile
+    command: sleep infinity
+    depends_on:
+      docker:
+        condition: service_healthy
+    environment:
+      DOCKER_HOST: tcp://127.0.0.1:2375
+      LUMI_CODEX_CONTAINER: "1"
+      PLAYWRIGHT_BROWSERS_PATH: /ms-playwright
+    init: true
+    network_mode: service:docker
+    volumes:
+      - ..:/workspaces/lumi:cached
+      - codex-home:/home/vscode/.codex
+
+  docker:
+    image: docker:27.5.1-dind
+    command:
+      - --host=tcp://0.0.0.0:2375
+      - --host=unix:///var/run/docker.sock
+      - --tls=false
+    environment:
+      DOCKER_TLS_CERTDIR: ""
+    healthcheck:
+      test: ["CMD", "docker", "info"]
+      interval: 2s
+      timeout: 5s
+      retries: 30
+    privileged: true
+    volumes:
+      - ..:/workspaces/lumi:cached
+      - docker-data:/var/lib/docker
+
+volumes:
+  codex-home:
+  docker-data:

@@ -96,6 +96,7 @@ Before these actions, UI must explain what data leaves the device/account and
 who can access it:
 
 - AI task/chat/explain-back;
+- транскрибация аудио через OpenAI Whisper API;
 - Telegram linking/import;
 - web capture/browser extension upload;
 - public share;

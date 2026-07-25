@@ -21,12 +21,18 @@ coordination document.
 - If a temporary plan records a durable product, architecture or process
   decision, that decision must be promoted into the canonical documentation
   under `docs/`.
-- Do not use this section as the final roadmap. Long-lived sequencing should
-  stay in the relevant canonical product or systems documents.
+- [`ROADMAP.md`](ROADMAP.md) is the temporary execution order for the active
+  plans. It must not introduce product or architecture decisions; long-lived
+  sequencing stays in the relevant canonical product or systems documents.
+- Work is sequential: only one stage from `ROADMAP.md` may be active. The next
+  stage starts only after the current stage gate is recorded as passed.
 - After a slice ships or is superseded, archive, replace or delete its
   temporary plan.
 
 ## Current Plans
+
+- [`ROADMAP.md`](ROADMAP.md) — единая последовательность работ от текущего
+  состояния до завершения `0.5.0`.
 
 - [`0.2.0-ai-plan.md`](0.2.0-ai-plan.md) — реализация BYOK, глобального
   ИИ-чата, саммари, durable AI task queue и MCP-интеграции для внешних агентов.

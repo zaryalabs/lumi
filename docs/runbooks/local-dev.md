@@ -5,6 +5,9 @@
 Этот runbook описывает основной Docker-first запуск полного локального стека и
 расширенный host-native workflow для разработки Rust, Dioxus и Playwright.
 
+Изолированный автономный запуск этапов плана через Codex CLI описан отдельно в
+[`codex-plan-runner.md`](codex-plan-runner.md).
+
 ## Основной Docker-first запуск
 
 Для обычного запуска нужен только Docker с Compose:

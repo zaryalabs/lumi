@@ -155,7 +155,7 @@ Status: accepted
 | AI-003 | Versioned typed AI artifact registry and schema validation | foundation | AI-002 | `ai.md`, `knowledge-base.md`, `learning.md` |
 | AI-004 | Reader selection actions for ask, explain and summarize over explicit context | product | RD-011, CORE-013 | `ai.md`, `reading-screen.md` |
 | AI-005 | Глобальный сворачиваемый ИИ-чат: управление чатами, многошаговый streaming-диалог и передача контекста из Lumi | product | AI-001 | `ai.md`, `ai-chat.md` |
-| AI-006 | Voice transcription as AI/background task over reusable audio attachments | extension | CORE-014, AI-002 | `ai.md`, `learning.md` |
+| AI-006 | Voice transcription through OpenAI Audio Transcriptions API (`whisper-1`) as AI/background task over reusable audio attachments | extension | CORE-014, AI-002 | `ai.md`, `learning.md`, `../adr/0025-openai-whisper-transcription.md` |
 | AI-007 | Account-scoped MCP interface with target parity for product user operations and AI queue worker tools | extension | AI-002, API-001 | `mcp.md`, `ai.md`, `backend-api.md` |
 | AI-008 | Context policy, cost controls, user-visible context and source citations | foundation | AI-001, CORE-013, SEC-001 | `ai.md`, `security-privacy.md` |
 | AI-009 | Один active summary на главу/материал и отдельный сокращенный `.lum`-материал со связью с источником | product | AI-003, CORE-002, FMT-LUM-001 | `ai-summaries.md`, `ai.md`, `formats/lum.md` |

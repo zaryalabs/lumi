@@ -81,6 +81,9 @@ make web-e2e
 
 Подробности — в [docs/runbooks/local-dev.md](docs/runbooks/local-dev.md).
 
+Изолированный последовательный запуск этапов через Codex CLI описан в
+[docs/runbooks/codex-plan-runner.md](docs/runbooks/codex-plan-runner.md).
+
 ## Работа с документацией
 
 В репозитории временно используется единое русскоязычное дерево документации:
