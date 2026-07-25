@@ -77,6 +77,10 @@ placeholder или escaped text, как в Markdown importer.
 
 ### Links and graph
 
+KB расширяет общий stable `LinkTarget`, уже используемый для material,
+annotation и anchor links. Тип `kb_note` добавляется поверх этого контракта;
+KB не вводит второй несовместимый resolver или формат stable target.
+
 Поддерживаемые связи:
 
 - `[[note]]` - note link.

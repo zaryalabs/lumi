@@ -11,12 +11,20 @@ Status: accepted
 - заметки, хайлайты, comments и margin notes;
 - база знаний;
 - summaries, карточки, вопросы и other accepted AI/learning artifacts;
-- Community Space comments и activity, к которым у пользователя есть access.
+- Community Space comments и chat messages, к которым у пользователя есть
+  access.
 
 Поиск является не только UI-функцией. Он также дает retrieval layer для RAG-like
 ИИ-сценариев: собрать релевантный контекст из книг, заметок и artifacts,
 после чего другой слой может использовать его в чате, объяснении или генерации
 упражнений.
+
+До появления serious search ИИ и learning могут работать только с явно
+выбранным bounded source scope: selection, anchor, chapter или material
+revision. Такой контекст строит общий `SourceContextResolver` непосредственно
+из нормализованного документа и source-backed anchors. Он не выполняет
+ранжирование по библиотеке, не объявляет capability `ai-retrieval` и не
+является скрытым вторым поисковым движком.
 
 Базовый retrieval approach для `v01`: **BM25 candidate generation + fastText
 rerank**. BM25 дает большой хвост кандидатов по точному лексическому совпадению,
@@ -54,7 +62,7 @@ cross-encoder rerankers и future hybrid search.
 - Markdown and `lum` chapters, headings, concepts and glossary.
 - Annotations, highlights, notes, voice note transcripts when available.
 - KB notes, front matter, wikilinks, tags and attachments text where extracted.
-- AI artifacts accepted or visible to the user.
+- Saved/accepted typed AI artifacts visible to the user.
 - Learning artifacts: flashcards/questions/explanations where search policy
   allows.
 - Shared comments/chat within accessible Community Spaces.
@@ -68,16 +76,20 @@ cross-encoder rerankers и future hybrid search.
 
 ### Search surfaces
 
+Первый personal search slice:
+
 - Global search page.
 - Library search/filter.
 - Reader in-document search.
-- Desk search/filter over records, learning state and saved artifacts.
-- KB search.
-- Community Space search.
+- Desk search/filter over records, поддержанные текущим release scope.
 - AI retrieval API.
 
-All surfaces should use common indexed chunks and result anchors, but can apply
-different filters, boosts and presentation.
+KB search и Community Space search являются отдельными последующими
+поверхностями над тем же index/query contract. Их отсутствие не делает
+personal search slice частично реализованным.
+
+Все подключенные поверхности используют общие indexed chunks и result anchors,
+но могут применять разные filters, boosts и presentation.
 
 ### Chunking
 
@@ -157,6 +169,12 @@ Each `RetrievedChunk` includes:
 
 AI layer decides how to pack context into prompts. Search should not call LLM
 itself.
+
+`retrieve` применяется для открытого запроса по material/library/record scope.
+Selection, chapter и whole-material workflows с детерминированным обходом
+могут использовать `SourceContextResolver` без search index. Оба пути
+возвращают совместимые source refs и citations, но только indexed path
+объявляет `SEARCH-005`/`ai-retrieval`.
 
 ### Permissions and privacy
 
@@ -308,6 +326,8 @@ Reindex when:
 - **Learning.** Search can find learning items and supply retrieval context for
   generated questions.
 - **ИИ.** AI uses search retrieval, but search does not call LLM.
+- **MCP.** Search and Desk query tools reuse the same permission filters,
+  cursor contracts, status and bounded context APIs as Web.
 - **Social.** Search respects Community Space permissions and material ownership
   checks.
 - **Плагины.** Plugins may provide text extractors or index fields through

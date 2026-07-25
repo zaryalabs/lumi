@@ -27,3 +27,24 @@ coordination document.
   temporary plan.
 
 ## Current Plans
+
+- [`0.2.0-ai-plan.md`](0.2.0-ai-plan.md) — реализация BYOK, глобального
+  ИИ-чата, саммари, durable AI task queue и MCP-интеграции для внешних агентов.
+
+- [`0.3.0-learn-plan.md`](0.3.0-learn-plan.md) — реализация обучения после
+  чтения: post-reading tests, FSRS reviews, подсказки, voice answers и
+  explain-back.
+
+- [`0.4.0-notes-and-desk-plan.md`](0.4.0-notes-and-desk-plan.md) — богатые
+  записи по чтению, Desk, BM25 + fastText поиск и RAG по записям.
+
+- [`0.5.0-social-plan.md`](0.5.0-social-plan.md) — Community Spaces,
+  совместное чтение, comments, shared highlights и chat.
+
+Допустимые status для планов:
+
+- `draft` — scope и durable решения ещё обсуждаются;
+- `planned` — зависимости и release scope согласованы, реализация не завершена;
+- `active` — по плану идёт production-реализация;
+- `completed` — release evidence закрыт, durable решения перенесены в
+  канонические документы.

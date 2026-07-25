@@ -192,6 +192,10 @@ Learning layer validates structure and creates `LearningItem` drafts.
 Если API-ключа нет, task остается в очереди и может быть обработан внешним
 агентом. Агент создает artifacts, которые Lumi импортирует как generated drafts.
 
+В release обучения generation ограничена явно выбранным material/chapter/anchor
+scope и использует общий `SourceContextResolver`. Полный search index и
+library-wide retrieval для этого не требуются.
+
 ### Explain-back mechanic
 
 Explain-back - отдельный interactive AI scenario:
@@ -240,14 +244,20 @@ UI и возвращает final artifacts/attempt summary back to Lumi.
 ### Voice answers
 
 - Reader/learning UI can record audio answer.
-- Audio is stored as voice note/learning attempt attachment.
+- Audio сохраняется как общий `AudioAttachment`, которым владеет personal
+  scope; learning attempt хранит только stable attachment reference.
 - Transcription is AI task.
 - Until transcript is available, attempt state is `pending_transcription`.
-- Transcript is editable before grading; original audio and edited transcript
-  retain provenance as different payloads.
+- Transcription produces a versioned `TranscriptArtifact`. Original transcript
+  и accepted edited transcript сохраняют provenance как разные revisions,
+  а не встраиваются в learning attempt или voice-note payload.
 - Retention of original audio follows a separate privacy setting. User can
   delete audio after transcription while keeping the accepted transcript.
 - Explain-back over voice requires transcription or multimodal provider.
+
+Upload/download authorization, MIME/size limits, checksum, retention и
+refcount/GC принадлежат общему audio attachment contract. Learning не создает
+отдельный uploader или blob lifecycle.
 
 ### Scheduling
 
@@ -484,6 +494,9 @@ can exist as alternative plugins/adapters if they prove useful.
 - **Поиск.** Retrieval supplies source context; learning artifacts are indexed.
 - **База знаний.** Cards/questions can link to KB notes and concepts.
 - **ИИ.** AI generates items, evaluates open answers and powers explain-back.
+- **MCP.** Account-scoped tools list learning items, create supported
+  generation tasks and submit answers through the same application services,
+  permissions and idempotency rules as Web.
 - **Social.** Community Spaces can later share challenge templates/results, but
   personal attempts remain private by default.
 - **Плагины.** Plugins can add exercise types, import/export formats and

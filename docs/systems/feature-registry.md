@@ -29,9 +29,12 @@ Status: accepted
 | CORE-007 | Anchor recovery и unresolved anchor state после reimport | foundation | CORE-006 | `normalized-content.md`, `reading-screen.md`, `sync.md` |
 | CORE-008 | Source provenance и structured import diagnostics | foundation | CORE-002 | `normalized-content.md`, `quality.md` |
 | CORE-009 | Content-addressed `Blob`/`BlobManifest` abstraction | foundation | ACC-003, SYNC-001 | `web-account.md`, `sync.md` |
-| CORE-010 | Durable `Job` engine для import, indexing, AI, transcription, export/delete | foundation | API-001 | `backend-api.md`, `ai.md`, `web-account.md` |
+| CORE-010 | Durable `Job` engine для import, indexing, AI, transcription, fingerprinting, export/delete | foundation | API-001 | `backend-api.md`, `ai.md`, `web-account.md` |
 | CORE-011 | Export/download личных материалов, notes, blobs and JSON/Markdown bundles | product | CORE-001, CORE-009 | `web-account.md`, `sync.md`, `knowledge-base.md` |
 | CORE-012 | Derived data rebuild policy for indexes, caches, page maps and graph | foundation | CORE-003, SYNC-001 | `README.md`, `quality.md`, `search.md` |
+| CORE-013 | Bounded explicit source context and citations for material/revision/anchor scopes without a search index | foundation | CORE-006 | `ai.md`, `normalized-content.md` |
+| CORE-014 | Reusable audio attachment upload, authorization, retention and transcript references | foundation | CORE-009, CORE-010 | `learning.md`, `reading-screen.md`, `web-account.md` |
+| CORE-015 | Stable internal `LinkTarget` for materials, annotations, anchors and future object types | foundation | CORE-006, SYNC-002 | `desk.md`, `knowledge-base.md` |
 | API-001 | Versioned Axum API boundaries and route groups | foundation | - | `backend-api.md` |
 | API-002 | Idempotent commands for web mutations, imports, jobs and webhooks | foundation | API-001, CORE-010 | `backend-api.md`, `sync.md` |
 | SEC-001 | Data classification and privacy modes | foundation | - | `security-privacy.md` |
@@ -67,8 +70,8 @@ Status: accepted
 | RD-004 | Reader settings: theme, typography, width, spacing and page/scroll mode | product | RD-001 | `reading-screen.md` |
 | RD-005 | Navigation: TOC, headings, links, footnotes, bookmarks and history | product | RD-001, CORE-006 | `reading-screen.md`, `reader-architecture.md` |
 | RD-006 | Highlights with style/category/privacy | product | CORE-006, SYNC-002 | `reading-screen.md`, `sync.md` |
-| RD-007 | Text notes, margin notes and Obsidian-style links inside notes | product | RD-006, KB-001 | `reading-screen.md`, `knowledge-base.md` |
-| RD-008 | Voice notes attached to anchors with later transcription | product | RD-007, AI-006 | `reading-screen.md`, `ai.md`, `learning.md` |
+| RD-007 | Text notes, margin notes and stable links to materials, annotations and anchors | product | RD-006, CORE-015 | `reading-screen.md`, `desk.md` |
+| RD-008 | Voice notes attached to anchors with optional later transcription | product | RD-007, CORE-014 | `reading-screen.md`, `ai.md`, `learning.md` |
 | RD-009 | Contextual reader panels for current-material notes, search, AI, learning and social layers | product | RD-001 | `reading-screen.md` |
 | RD-010 | Reading progress and timeline events for learning analytics | foundation | RD-001, SYNC-002 | `reading-screen.md`, `learning.md` |
 | RD-011 | Reader task creation for AI/learning from selected context | foundation | RD-001, AI-002 | `reading-screen.md`, `ai.md`, `learning.md` |
@@ -81,7 +84,7 @@ Status: accepted
 | DESK-001 | Material-centered Desk as a top-level Web surface and rebuildable projection | product | CORE-001, RD-006, SYNC-002 | `desk.md` |
 | DESK-002 | Cross-material records views with grouping, filters, inline editing and source navigation | product | DESK-001, CORE-006, RD-007 | `desk.md`, `reading-screen.md` |
 | DESK-003 | Material learning view with items, attempts, due/missed/skipped/completed state and mastery summary | product | DESK-001, LRN-001, LRN-005 | `desk.md`, `learning.md` |
-| DESK-004 | Stable `LinkTarget` resolution behind readable taxonomy paths and wikilinks | foundation | DESK-001, CORE-006, KB-002 | `desk.md`, `knowledge-base.md` |
+| DESK-004 | Stable `LinkTarget` resolution behind readable taxonomy paths and record links | foundation | DESK-001, CORE-015 | `desk.md`, `knowledge-base.md` |
 | DESK-005 | Saved typed artifacts in Desk while raw AI chat remains outside | product | DESK-001, AI-003, AI-005 | `desk.md`, `ai-chat.md` |
 
 ## Formats And Sources
@@ -121,19 +124,21 @@ Status: accepted
 | ID | Функция | Тип | Зависит от | Документы |
 | --- | --- | --- | --- | --- |
 | KB-001 | Personal Knowledge Base as Markdown notes with stable internal ids | product | SYNC-002, FMT-MD-001 | `knowledge-base.md` |
-| KB-002 | Wikilinks, material links, anchor links, tags and unresolved links | product | KB-001, CORE-006 | `knowledge-base.md`, `formats/markdown.md` |
+| KB-002 | KB-note wikilinks, material links, anchor links, tags and unresolved links | product | KB-001, CORE-015 | `knowledge-base.md`, `formats/markdown.md` |
 | KB-003 | Backlinks and graph index across notes, materials, annotations and accepted artifacts | product | KB-001, SEARCH-001 | `knowledge-base.md`, `search.md` |
 | KB-004 | Reader action to create KB note or insert block from highlight/note | product | RD-007, KB-001 | `knowledge-base.md`, `reading-screen.md` |
 | KB-005 | Generated artifacts as drafts until accepted into KB/search graph | foundation | AI-003, KB-001 | `knowledge-base.md`, `ai.md` |
 | OBS-001 | Deferred Desktop: one-way Obsidian Markdown export with Lumi namespace/front matter | integration | KB-001, CORE-011, SYNC-003 | `obsidian.md`, `knowledge-base.md` |
 | OBS-002 | Deferred portable fallback: manual Obsidian import/export bundle after the Desktop integration | integration | OBS-001, FMT-MD-001 | `obsidian.md` |
 | OBS-003 | Deferred Desktop: explicit two-way folder sync with conflict objects | extension | OBS-001, SYNC-006 | `obsidian.md`, `sync.md` |
-| SEARCH-001 | Tantivy-style BM25 indexing over materials, notes and artifacts | foundation | CORE-003, SYNC-002 | `search.md` |
+| SEARCH-001 | Tantivy-style BM25 index, versioned extractor contract and rebuild pipeline | foundation | CORE-003, SYNC-002 | `search.md` |
 | SEARCH-002 | fastText rerank for BM25 candidate tail | foundation | SEARCH-001 | `search.md` |
-| SEARCH-003 | Source-aware chunking with anchors, snippets and citation metadata | foundation | CORE-006, SEARCH-001 | `search.md`, `normalized-content.md` |
-| SEARCH-004 | Search surfaces: global, library, reader, Desk, KB, Community Space and AI retrieval | product | SEARCH-001, RD-009, DESK-001 | `search.md`, `reading-screen.md`, `desk.md` |
+| SEARCH-003 | Indexed source-aware chunking with anchors, snippets and citation metadata | foundation | CORE-013, SEARCH-001 | `search.md`, `normalized-content.md` |
+| SEARCH-004 | Personal search surfaces: global, library, reader and Desk | product | SEARCH-001, RD-009, DESK-001 | `search.md`, `reading-screen.md`, `desk.md` |
 | SEARCH-005 | Retrieval API for AI with context policy and citations | foundation | SEARCH-003, AI-001 | `search.md`, `ai.md` |
 | SEARCH-006 | Permission-aware search across personal data and Community Spaces | foundation | SEARCH-001, SOC-001 | `search.md`, `social.md` |
+| SEARCH-007 | Knowledge Base search surface and graph-aware filters | product | SEARCH-004, KB-001 | `search.md`, `knowledge-base.md` |
+| SEARCH-008 | Community Space search surface over shared content | product | SEARCH-006, SOC-001 | `search.md`, `social.md` |
 
 ## Learning And AI
 
@@ -141,18 +146,18 @@ Status: accepted
 | --- | --- | --- | --- | --- |
 | LRN-001 | Learning items: quiz, open question, flashcard, cloze, hinted question and reflection | product | CORE-006, SYNC-002 | `learning.md` |
 | LRN-002 | Embedded `lum` exercises compiled into learning item templates | product | FMT-LUM-003, LRN-001 | `learning.md`, `formats/lum.md` |
-| LRN-003 | Challenges screen for due reviews, chapter tests, missed exercises and drafts | product | LRN-001, LRN-004 | `learning.md`, `VISION.md` |
+| LRN-003 | Challenges screen for due reviews, chapter tests, missed exercises and drafts | product | LRN-001, LRN-004 | `learning.md`, `../vision.md` |
 | LRN-004 | FSRS scheduler behind replaceable `Scheduler` port | foundation | LRN-001 | `learning.md` |
 | LRN-005 | Attempts, mastery state and source-backed feedback | product | LRN-001, LRN-004 | `learning.md` |
-| LRN-006 | Explain-back learning mechanic with iterative AI feedback | product | AI-005, SEARCH-005 | `learning.md`, `ai.md` |
+| LRN-006 | Explain-back learning mechanic with iterative AI feedback over an explicit source scope | product | AI-005, CORE-013 | `learning.md`, `ai.md` |
 | AI-001 | AI provider abstraction with OpenRouter/OpenAI-compatible first provider target | foundation | SEC-003 | `ai.md` |
 | AI-002 | Durable `AiTask` queue, immediate internal execution, web bulk actions and MCP claims using common `Job` engine | foundation | CORE-010, AI-001 | `ai-task-queue.md`, `ai.md`, `backend-api.md` |
-| AI-003 | Typed AI artifacts: summary, questions, flashcards, entity graph, note draft, transcript | product | AI-002 | `ai.md`, `knowledge-base.md`, `learning.md` |
-| AI-004 | Reader selection actions: explain, summarize, ask, create cards, find related notes | product | RD-011, SEARCH-005 | `ai.md`, `reading-screen.md` |
+| AI-003 | Versioned typed AI artifact registry and schema validation | foundation | AI-002 | `ai.md`, `knowledge-base.md`, `learning.md` |
+| AI-004 | Reader selection actions for ask, explain and summarize over explicit context | product | RD-011, CORE-013 | `ai.md`, `reading-screen.md` |
 | AI-005 | Глобальный сворачиваемый ИИ-чат: управление чатами, многошаговый streaming-диалог и передача контекста из Lumi | product | AI-001 | `ai.md`, `ai-chat.md` |
-| AI-006 | Voice transcription as AI/background task | extension | RD-008, AI-002 | `ai.md`, `learning.md` |
+| AI-006 | Voice transcription as AI/background task over reusable audio attachments | extension | CORE-014, AI-002 | `ai.md`, `learning.md` |
 | AI-007 | Account-scoped MCP interface with target parity for product user operations and AI queue worker tools | extension | AI-002, API-001 | `mcp.md`, `ai.md`, `backend-api.md` |
-| AI-008 | Context policy, cost controls, user-visible context and source citations | foundation | AI-001, SEARCH-005, SEC-001 | `ai.md`, `security-privacy.md` |
+| AI-008 | Context policy, cost controls, user-visible context and source citations | foundation | AI-001, CORE-013, SEC-001 | `ai.md`, `security-privacy.md` |
 | AI-009 | Один active summary на главу/материал и отдельный сокращенный `.lum`-материал со связью с источником | product | AI-003, CORE-002, FMT-LUM-001 | `ai-summaries.md`, `ai.md`, `formats/lum.md` |
 
 ## Social And Plugins
@@ -161,7 +166,7 @@ Status: accepted
 | --- | --- | --- | --- | --- |
 | SOC-001 | User Space and Community Space product model, community links, membership, roles and unlisted link access | product | ACC-004, SYNC-001 | `social.md`, `sync.md` |
 | SOC-002 | Shared material identity and user material claims without distributing source blobs | foundation | SOC-001, CORE-008 | `social.md`, `normalized-content.md` |
-| SOC-003 | Content fingerprints for matching copies across EPUB/FB2/PDF/web materials | foundation | CORE-008, SOC-002 | `social.md`, `normalized-content.md` |
+| SOC-003 | Versioned content fingerprints for matching copies across supported normalized-text and PDF formats | foundation | CORE-008, SOC-002 | `social.md`, `normalized-content.md` |
 | SOC-004 | Shared anchor mapping across users' local copies | product | SOC-002, CORE-007 | `social.md`, `reading-screen.md` |
 | SOC-005 | Community Space material comments, shared highlights and Space-level chat separated from personal notes | product | SOC-001, RD-006 | `social.md`, `reading-screen.md` |
 | SOC-006 | Privacy, moderation, deletion and quote/copyright limits for Community Spaces | foundation | SOC-001, SEC-001 | `social.md`, `security-privacy.md` |

@@ -8,19 +8,23 @@ plugin, AI, search and account/auth boundaries.
 Текущие source/reader decisions:
 
 - [`0009`](0009-source-backed-anchor-v2.md) — source-backed anchors;
-- [`0010`](0010-web-telegram-source-baseline.md) — общий Web/Telegram baseline.
+- [`0010`](0010-web-telegram-source-baseline.md) — общий Web/Telegram baseline;
 - [`0011`](0011-beta-operations-and-telegram-webhook.md) — beta operations и
   историческая webhook boundary;
 - [`0012`](0012-embedded-telegram-bot-settings.md) — встроенный Telegram
-  listener и настройка bot token через UI.
+  listener и настройка bot token через UI;
 - [`0013`](0013-telegram-composite-import.md) — составной Telegram source и
   durable media groups;
 - [`0014`](0014-pdf-fixed-layout-import-and-web-reader.md) — fixed-layout PDF
-  import, page anchors и Web renderer.
+  import, page anchors и Web renderer;
+- [`0015`](0015-lum-portable-package-import.md) — portable `.lum` package
+  import и compatibility profile;
 - [`0016`](0016-instance-admin-bootstrap.md) — instance-wide роль
-  администратора и безопасный bootstrap через публичный auth lookup id.
+  администратора и безопасный bootstrap через публичный auth lookup id;
 - [`0017`](0017-telegram-admin-auto-link.md) — автопривязка Telegram-бота к
-  администратору без одноразового pairing token.
+  администратору без одноразового pairing token;
+- [`0018`](0018-markdown-import-compiler.md) — Markdown compiler, extension
+  lowering и source locators.
 
 ## Template
 

@@ -165,7 +165,9 @@ Matching signals:
 - chapter/heading sequence;
 - MinHash/SimHash shingles;
 - PDF page text fingerprints;
-- EPUB/FB2 normalized text fingerprints;
+- normalized-text fingerprints для каждого фактически поддержанного importer
+  family, включая EPUB, Web, Telegram, Markdown, `.lum` и FB2 после выпуска
+  соответствующего importer;
 - source URL for web materials.
 
 Byte identity is sufficient but not required. Similarity threshold must be
@@ -423,6 +425,9 @@ material comments и общий chat.
 - **User Space.** Показывает блок `Community` и предоставляет `Share` на
   material surfaces.
 - **Синхронизация.** Community Spaces are shared sync spaces with access control.
+- **Blobs.** Avatar/cover используют общий blob/attachment contract с
+  Space-scoped authorization, validation, retention и GC; social не вводит
+  отдельный uploader.
 - **Веб-аккаунт.** `user_id` and `AccountProfile.nickname` приходят из
   [`web-account.md`](web-account.md); nickname используется только как
   display-подпись.
@@ -433,6 +438,8 @@ material comments и общий chat.
   private by default.
 - **ИИ.** AI can summarize shared discussion only over content user can access
   plus shared comments.
+- **MCP.** Space, sharing, comment and chat tools use the same
+  membership/claim/moderation checks and application services as Web.
 - **Плагины.** Plugins can add Community Space widgets/actions only with social
   capabilities and access checks.
 

@@ -227,6 +227,24 @@ Schema versions:
 
 Any breaking change must include compatibility fixtures and migration strategy.
 
+### Явный source context без поискового индекса
+
+Normalized Content Package должен поддерживать детерминированное извлечение
+ограниченного контекста для ИИ и Learning до появления полнотекстового индекса.
+`SourceContextResolver` принимает явный scope (`material`, `revision`,
+`content unit`, `block` или anchor) и возвращает упорядоченные source-backed
+фрагменты с:
+
+- stable block/unit ids и revision id;
+- source refs и цитатами, пригодными для перехода к исходному месту;
+- явными лимитами размера и правилами соседнего context window;
+- diagnostics для unresolved anchor, отсутствующего text layer или превышения
+  лимита.
+
+Этот resolver не выполняет library-wide поиск, ranking, BM25 или semantic
+retrieval. Индексированный retrieval строится поверх того же chunk/citation
+contract позднее и остаётся отдельной ответственностью search subsystem.
+
 ## Интеграции и зависимости
 
 - **Reader.** Builds `ReadingDocument` or `PageFidelityDocument` from package.

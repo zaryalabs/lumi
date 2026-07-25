@@ -43,8 +43,10 @@ Responsibilities:
 
 - `auth/account/devices` - seed-derived auth flow, sessions, profile, devices.
 - `materials/revisions` - cloud-backed web material state and revision metadata.
-- `blobs` - upload/download, resumable transfer, checksums, object storage.
-- `imports/jobs` - durable work state for imports, AI, indexing, export/delete.
+- `blobs` - generic upload/download, resumable transfer, checksums, object
+  storage and reusable attachment references.
+- `imports/jobs` - one durable execution runtime for imports, AI, indexing,
+  transcription, fingerprints, export/delete and other typed job kinds.
 - `search` - serious server-side web search and retrieval API.
 - `desk` - account/material-centered read projections, filters and stable
   navigation targets over records, learning state and saved artifacts.
@@ -89,6 +91,12 @@ ExportAccount(options)
 Native clients can execute analogous commands locally, then sync changes. Web
 command success means server durable commit. Native command success means local
 durable commit and later sync.
+
+Domain requests such as `AiTask`, `IndexRequest`, `TranscriptionRequest` and
+`FingerprintRequest` may have their own payload/status tables, but leases,
+claim fencing, retry, cancellation, progress and recovery use one common
+`Job` engine. A feature must not introduce a second execution lifecycle under
+the name `index_jobs`, `fingerprint_jobs` or `transcription_jobs`.
 
 ## Нефункциональные требования
 

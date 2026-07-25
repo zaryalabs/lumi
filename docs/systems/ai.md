@@ -118,11 +118,14 @@ agent conversation внутрь чата Lumi. Если provider недосту�
 
 ### Selection actions
 
-Reader actions:
+Первый selection slice:
 
 - explain selected text;
 - summarize section;
 - ask about selection;
+
+Последующие actions поверх learning/search/KB:
+
 - turn highlight into note;
 - create questions/cards;
 - find related notes/materials.
@@ -141,6 +144,12 @@ Reader creates context with:
 и либо подставляет выбранную быструю команду, либо оставляет пользователю поле
 для собственного вопроса. Отдельный сохраненный artifact для краткого саммари
 выделения на этом этапе не обязателен.
+
+Selection, chapter и material context строятся через общий
+`SourceContextResolver`. Он разрешает только явно выбранный revision-bound
+scope, возвращает bounded source refs/citations и не требует search index.
+Действия `create questions/cards` и `find related notes/materials` включаются
+отдельными capabilities после готовности learning и indexed retrieval.
 
 ### Summary forms
 
@@ -166,20 +175,27 @@ scope как отдельный durable workflow: он собирает `.lum` p
 
 ### Retrieval context
 
-ИИ не должен получать entire library by default. AI layer вызывает search
-retrieval:
+ИИ не должен получать entire library by default. Существуют два совместимых
+пути получения контекста:
+
+1. `SourceContextResolver` для selection/chapter/material scope с
+   детерминированным обходом source;
+2. `search.retrieve` для открытого material/library/record query после
+   появления serious search.
 
 ```text
 AiRequest
   -> scope/context policy
-  -> search.retrieve(...)
+  -> SourceContextResolver | search.retrieve(...)
   -> context pack
   -> provider/agent
   -> artifact/conversation response
 ```
 
-Context pack stores citations и hashes, чтобы results могли ссылаться на
-sources.
+Оба пути возвращают совместимые source refs/citations. Context pack stores
+citations и hashes, чтобы results могли ссылаться на sources. Только indexed
+retrieval объявляет capability `ai-retrieval`; explicit context доступен через
+отдельную capability `ai-explicit-context`.
 
 ### Provider model
 
@@ -398,7 +414,8 @@ Workers:
 Worker steps:
 
 1. Claim task with lease.
-2. Build context pack through search/retrieval and source permissions.
+2. Build context pack through explicit source context or indexed retrieval and
+   source permissions.
 3. Call provider or agent-specific execution.
 4. Validate structured output.
 5. Write artifact and derived draft objects.
@@ -443,7 +460,10 @@ This makes generated artifacts auditable and reproducible enough for debugging.
   описаны в [`ai-task-queue.md`](ai-task-queue.md).
 - **Саммари.** Summary artifacts, chapter actions and generated `.lum`
   materials описаны в [`ai-summaries.md`](ai-summaries.md).
-- **Search.** Supplies retrieval chunks for chat/tasks.
+- **Нормализованный контент.** Supplies bounded explicit source context for
+  selection/chapter/material workflows.
+- **Search.** Supplies ranked retrieval chunks for open material/library/record
+  queries after `SEARCH-005` is available.
 - **Learning.** Receives question/card drafts and explain-back feedback.
 - **База знаний.** Receives accepted summaries, concepts, note drafts and links.
 - **Desk.** Показывает сохраненные typed artifacts вокруг материалов.

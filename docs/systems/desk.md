@@ -252,10 +252,11 @@ LinkTarget {
 }
 ```
 
-Поддерживаемые target types должны включать material, anchor, annotation,
-learning item, attempt, saved artifact и KB note. Переименование материала,
-записи или раздела обновляет отображаемый путь, но не ломает разрешенную
-ссылку.
+Базовый record-link contract поддерживает material, anchor и annotation.
+Learning item, attempt, saved artifact и KB note добавляются как новые target
+types соответствующими подсистемами без изменения существующих ids.
+Переименование материала, записи или раздела обновляет отображаемый путь, но
+не ломает разрешенную ссылку.
 
 Если цель пока не найдена или неоднозначна, ссылка хранится как unresolved
 reference с исходным текстом. Autocomplete и picker должны предпочитать
