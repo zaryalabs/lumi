@@ -255,6 +255,7 @@ pub struct AppState {
     imports: Option<Arc<ImportService>>,
     telegram: Option<Arc<TelegramRuntime>>,
     ai: Option<Arc<ai::AiRuntime>>,
+    mcp: Arc<mcp::McpRuntime>,
     ai_capabilities: ai::AiCapabilityReadiness,
 }
 
@@ -291,6 +292,7 @@ impl AppState {
             imports: None,
             telegram: None,
             ai: None,
+            mcp: Arc::new(mcp::McpRuntime::memory()),
             ai_capabilities: ai::AiCapabilityReadiness::default(),
         }
     }
@@ -344,6 +346,7 @@ impl AppState {
         )
         .await
         .map_err(|error| anyhow::anyhow!(error))?;
+        let mcp = Arc::new(mcp::McpRuntime::postgres(accounts.pool().clone()));
         Ok(Self {
             repository: Arc::new(RwLock::new(Repository::default())),
             accounts: Arc::new(accounts),
@@ -351,7 +354,8 @@ impl AppState {
             imports: Some(imports),
             telegram: Some(telegram),
             ai: Some(Arc::new(ai)),
-            ai_capabilities: ai::AiCapabilityReadiness::e2_tasks_and_summaries(),
+            mcp,
+            ai_capabilities: ai::AiCapabilityReadiness::e3_external_agents(),
         })
     }
 
@@ -370,6 +374,7 @@ impl AppState {
             imports: None,
             telegram: None,
             ai: None,
+            mcp: Arc::new(mcp::McpRuntime::memory()),
             ai_capabilities: ai::AiCapabilityReadiness::default(),
         }
     }
@@ -396,6 +401,10 @@ impl AppState {
 
     fn ai_runtime(&self) -> Result<&Arc<ai::AiRuntime>, AppError> {
         self.ai.as_ref().ok_or(AppError::Unavailable("AI runtime"))
+    }
+
+    fn mcp_runtime(&self) -> &mcp::McpRuntime {
+        self.mcp.as_ref()
     }
 
     /// Run the embedded Telegram listener until `cancellation` is triggered.
@@ -427,7 +436,7 @@ pub fn build_router_with_state(state: AppState) -> Router {
     let api = api_routes::public_routes()
         .merge(api_routes::protected_routes(&state))
         .with_state(state.clone());
-    let mcp_transport = mcp::transport_routes().with_state(state.clone());
+    let mcp_transport = mcp::transport_routes(&state).with_state(state.clone());
     let allowed_origin = state
         .security()
         .allowed_origin()
@@ -2048,7 +2057,7 @@ mod tests {
         let migrations: Vec<SchemaMigration> =
             json_get(build_router(), "/api/v1/schema/migrations").await?;
 
-        assert_eq!(migrations.len(), 18);
+        assert_eq!(migrations.len(), 19);
         Ok(())
     }
 

@@ -48,8 +48,11 @@ chapter/material summaries и manual-edit candidate policy. Операционн
 [docs/runbooks/ai-persistence.md](docs/runbooks/ai-persistence.md) и
 [docs/runbooks/personal-ai-assistant.md](docs/runbooks/personal-ai-assistant.md),
 [docs/runbooks/ai-task-queue.md](docs/runbooks/ai-task-queue.md).
-MCP и производные `.lum` остаются следующими эпиками и не рекламируются
-capabilities преждевременно.
+Реализован `0.2.0/E3`: revocable account-scoped MCP Streamable HTTP,
+product tools и fenced external AI worker поверх общих application services.
+Производные `.lum` остаются следующим эпиком и не рекламируются capabilities
+преждевременно. Настройка агента описана в
+[`docs/runbooks/mcp-external-agents.md`](docs/runbooks/mcp-external-agents.md).
 
 ## Локальный запуск
 

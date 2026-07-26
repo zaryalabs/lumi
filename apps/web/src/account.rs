@@ -4,12 +4,13 @@ use bip39::{Language, Mnemonic};
 use dioxus::prelude::*;
 use gloo_net::http::Request;
 use lumi_core::{
-    decode_auth_bytes, encode_auth_bytes, AcceptedImport, AccountSummary, AuthChallenge,
+    decode_auth_bytes, encode_auth_bytes, AcceptedImport, AccountSummary, AiPage, AuthChallenge,
     ChallengeResponse, CompleteLoginRequest, ContinueReadingEntry, CreateChallengeRequest,
-    DerivedAuthMaterial, ImportWebUrlRequest, InstanceRole, Job, JobStatus, LibraryEntry,
-    LibraryState, MaterialImportStatus, MaterialKind, ReadingProgress, RegisterAccountRequest,
-    ServiceCapabilities, SessionBootstrap, TelegramBotRuntimeStatus, TelegramBotSettings,
-    UpdateLibraryStateCommand, UpdateTelegramBotTokenRequest,
+    CreateMcpConnectionRequest, DerivedAuthMaterial, ImportWebUrlRequest, InstanceRole, Job,
+    JobStatus, LibraryEntry, LibraryState, MaterialImportStatus, MaterialKind, McpConnection,
+    McpConnectionStatus, McpConnectionTokenResponse, ReadingProgress, RegisterAccountRequest,
+    RevokeMcpConnectionRequest, ServiceCapabilities, SessionBootstrap, TelegramBotRuntimeStatus,
+    TelegramBotSettings, UpdateLibraryStateCommand, UpdateTelegramBotTokenRequest,
 };
 use uuid::Uuid;
 use wasm_bindgen::closure::Closure;
@@ -254,7 +255,7 @@ pub(crate) fn AccountGate() -> Element {
                             }
                         }
                     } else if route() == AppRoute::Connections {
-                        ConnectionsApp {}
+                        ConnectionsApp { csrf_token: csrf.read().clone() }
                     } else if route() == AppRoute::AiQueue {
                         crate::ai::AiQueuePage { csrf_token: csrf.read().clone() }
                     } else if route() == AppRoute::Settings && is_admin {
@@ -502,9 +503,13 @@ fn SettingsApp(csrf_token: String) -> Element {
 }
 
 #[component]
-fn ConnectionsApp() -> Element {
+fn ConnectionsApp(csrf_token: String) -> Element {
     let mut error = use_signal(String::new);
     let mut capabilities = use_signal(|| Option::<ServiceCapabilities>::None);
+    let mut mcp_connections = use_signal(|| Option::<AiPage<McpConnection>>::None);
+    let mut connection_name = use_signal(String::new);
+    let mut one_time_token = use_signal(|| Option::<McpConnectionTokenResponse>::None);
+    let mut busy = use_signal(|| false);
 
     use_effect(move || {
         spawn(async move {
@@ -513,6 +518,12 @@ fn ConnectionsApp() -> Element {
                 Err(api_error) => error.set(format!(
                     "Не удалось проверить возможности сервера: {api_error}"
                 )),
+            }
+            match load_mcp_connections().await {
+                Ok(value) => mcp_connections.set(Some(value)),
+                Err(api_error) => {
+                    error.set(format!("Не удалось загрузить MCP-подключения: {api_error}"))
+                }
             }
         });
     });
@@ -527,6 +538,18 @@ fn ConnectionsApp() -> Element {
                 .iter()
                 .any(|feature| feature == "telegram-admin-auto-link")
     });
+    let mcp_enabled = capabilities.read().as_ref().is_some_and(|value| {
+        value
+            .features
+            .iter()
+            .any(|feature| feature == "mcp-account-agent")
+    });
+    let connections = mcp_connections
+        .read()
+        .as_ref()
+        .map(|page| page.items.clone())
+        .unwrap_or_default();
+    let create_csrf = csrf_token.clone();
 
     rsx! {
         main { id: "main-content", class: "library-view connections-view", aria_label: "Личные подключения",
@@ -575,6 +598,161 @@ fn ConnectionsApp() -> Element {
                                 }
                             });
                         }, "Повторить" }
+                    }
+                }
+            }
+
+            section { class: "library-section", aria_label: "Подключения внешних агентов MCP",
+                div { class: "section-heading",
+                    div {
+                        p { class: "eyebrow", "Внешние агенты" }
+                        h2 { "MCP" }
+                    }
+                    span {
+                        if !capabilities_loaded {
+                            "Проверяем…"
+                        } else if mcp_enabled {
+                            "{connections.iter().filter(|item| item.status == McpConnectionStatus::Active).count()} активно"
+                        } else {
+                            "Недоступен"
+                        }
+                    }
+                }
+                p { "Создайте отдельный отзываемый токен для Codex или другого MCP-клиента. Агент получит доступ только к продуктовым данным этого аккаунта — без ключей провайдера, администрирования и внутреннего чата." }
+
+                if let Some(created) = one_time_token.read().as_ref() {
+                    div { class: "library-alert", role: "status", aria_label: "Новый MCP-токен",
+                        div {
+                            strong { "Скопируйте токен сейчас — повторно он не показывается." }
+                            p { "Endpoint: {created.endpoint}" }
+                            code { "{created.token}" }
+                        }
+                        button { r#type: "button", onclick: move |_| one_time_token.set(None), "Скрыть" }
+                    }
+                }
+
+                if mcp_enabled {
+                    div { class: "material-actions",
+                        label { class: "account-field",
+                            span { "Название подключения" }
+                            input {
+                                r#type: "text",
+                                name: "mcp_connection_name",
+                                maxlength: "120",
+                                placeholder: "Например, Codex на ноутбуке",
+                                value: "{connection_name}",
+                                oninput: move |event| connection_name.set(event.value()),
+                            }
+                        }
+                        button {
+                            class: "primary-action",
+                            r#type: "button",
+                            disabled: busy() || connection_name().trim().is_empty(),
+                            onclick: move |_| {
+                                let name = connection_name.read().clone();
+                                let csrf = create_csrf.clone();
+                                busy.set(true);
+                                error.set(String::new());
+                                spawn(async move {
+                                    match create_mcp_connection(&csrf, &name).await {
+                                        Ok(created) => {
+                                            one_time_token.set(Some(created));
+                                            connection_name.set(String::new());
+                                            match load_mcp_connections().await {
+                                                Ok(value) => mcp_connections.set(Some(value)),
+                                                Err(api_error) => error.set(api_error.to_string()),
+                                            }
+                                        }
+                                        Err(api_error) => error.set(api_error.to_string()),
+                                    }
+                                    busy.set(false);
+                                });
+                            },
+                            if busy() { "Создаём…" } else { "Создать подключение" }
+                        }
+                    }
+                }
+
+                if mcp_connections.read().is_none() {
+                    p { class: "capability-note", role: "status", "Загружаем подключения…" }
+                } else if connections.is_empty() {
+                    p { class: "capability-note", "MCP-подключений пока нет." }
+                } else {
+                    div { class: "material-grid", aria_label: "Список MCP-подключений",
+                        for connection in connections {
+                            article { class: "material-card", key: "{connection.id}",
+                                div { class: "material-card-body",
+                                    p { class: "format-label", "MCP · {connection.token_fingerprint}" }
+                                    h3 { "{connection.name}" }
+                                    p {
+                                        if connection.status == McpConnectionStatus::Active {
+                                            "Активно"
+                                        } else {
+                                            "Отозвано"
+                                        }
+                                    }
+                                }
+                                div { class: "material-actions",
+                                    button {
+                                        class: "secondary-action",
+                                        r#type: "button",
+                                        disabled: busy(),
+                                        onclick: {
+                                            let csrf = csrf_token.clone();
+                                            let connection = connection.clone();
+                                            move |_| {
+                                                let csrf = csrf.clone();
+                                                let connection = connection.clone();
+                                                busy.set(true);
+                                                error.set(String::new());
+                                                spawn(async move {
+                                                    match rotate_mcp_connection(&csrf, &connection).await {
+                                                        Ok(created) => {
+                                                            one_time_token.set(Some(created));
+                                                            if let Ok(value) = load_mcp_connections().await {
+                                                                mcp_connections.set(Some(value));
+                                                            }
+                                                        }
+                                                        Err(api_error) => error.set(api_error.to_string()),
+                                                    }
+                                                    busy.set(false);
+                                                });
+                                            }
+                                        },
+                                        "Ротировать токен"
+                                    }
+                                    if connection.status == McpConnectionStatus::Active {
+                                        button {
+                                            class: "danger-action",
+                                            r#type: "button",
+                                            disabled: busy(),
+                                            onclick: {
+                                                let csrf = csrf_token.clone();
+                                                let connection = connection.clone();
+                                                move |_| {
+                                                    let csrf = csrf.clone();
+                                                    let connection = connection.clone();
+                                                    busy.set(true);
+                                                    error.set(String::new());
+                                                    spawn(async move {
+                                                        match revoke_mcp_connection(&csrf, &connection).await {
+                                                            Ok(()) => {
+                                                                if let Ok(value) = load_mcp_connections().await {
+                                                                    mcp_connections.set(Some(value));
+                                                                }
+                                                            }
+                                                            Err(api_error) => error.set(api_error.to_string()),
+                                                        }
+                                                        busy.set(false);
+                                                    });
+                                                }
+                                            },
+                                            "Отозвать"
+                                        }
+                                    }
+                                }
+                            }
+                        }
                     }
                 }
             }
@@ -1425,6 +1603,68 @@ async fn load_capabilities() -> Result<ServiceCapabilities, ApiError> {
         .await
         .map_err(network_error)?;
     parse_json(response).await
+}
+
+async fn load_mcp_connections() -> Result<AiPage<McpConnection>, ApiError> {
+    let response = Request::get(&format!("{API_BASE}/mcp/connections"))
+        .credentials(RequestCredentials::Include)
+        .send()
+        .await
+        .map_err(network_error)?;
+    parse_json(response).await
+}
+
+async fn create_mcp_connection(
+    csrf: &str,
+    name: &str,
+) -> Result<McpConnectionTokenResponse, ApiError> {
+    let request = CreateMcpConnectionRequest {
+        name: name.trim().to_owned(),
+        idempotency_key: Uuid::now_v7().to_string(),
+    };
+    let request = Request::post(&format!("{API_BASE}/mcp/connections"))
+        .credentials(RequestCredentials::Include)
+        .header("X-Lumi-CSRF", csrf)
+        .json(&request)
+        .map_err(network_error)?;
+    parse_json(request.send().await.map_err(network_error)?).await
+}
+
+async fn rotate_mcp_connection(
+    csrf: &str,
+    connection: &McpConnection,
+) -> Result<McpConnectionTokenResponse, ApiError> {
+    let request = RevokeMcpConnectionRequest {
+        expected_revision: connection.object_revision,
+        idempotency_key: Uuid::now_v7().to_string(),
+    };
+    let request = Request::post(&format!(
+        "{API_BASE}/mcp/connections/{}/rotate",
+        connection.id
+    ))
+    .credentials(RequestCredentials::Include)
+    .header("X-Lumi-CSRF", csrf)
+    .json(&request)
+    .map_err(network_error)?;
+    parse_json(request.send().await.map_err(network_error)?).await
+}
+
+async fn revoke_mcp_connection(csrf: &str, connection: &McpConnection) -> Result<(), ApiError> {
+    let request = RevokeMcpConnectionRequest {
+        expected_revision: connection.object_revision,
+        idempotency_key: Uuid::now_v7().to_string(),
+    };
+    let request = Request::delete(&format!("{API_BASE}/mcp/connections/{}", connection.id))
+        .credentials(RequestCredentials::Include)
+        .header("X-Lumi-CSRF", csrf)
+        .json(&request)
+        .map_err(network_error)?;
+    let response = request.send().await.map_err(network_error)?;
+    if response.ok() {
+        Ok(())
+    } else {
+        Err(api_response_error(&response))
+    }
 }
 
 async fn register(phrase: &str, nickname: &str) -> Result<SessionBootstrap, ApiError> {

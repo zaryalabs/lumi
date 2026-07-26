@@ -54,7 +54,7 @@ Knowledge Base, native full-copy replicas, Obsidian, plugin platform, будущ
 
 Ещё не готово:
 
-- MCP transport/tools и abridged `.lum`;
+- abridged `.lum`;
 - production learning, Desk/search/RAG и Community Spaces.
 
 Persistent server публикует capabilities `ai-provider-openrouter`,
@@ -62,7 +62,7 @@ Persistent server публикует capabilities `ai-provider-openrouter`,
 и `ai-summary`. Незавершённые MCP и abridgement capabilities остаются
 выключенными.
 
-После перехода на новую шкалу выполнено `2/18` продуктовых эпиков. Stage 0,
+После перехода на новую шкалу выполнено `3/18` продуктовых эпиков. Stage 0,
 Contract Freeze 1 и A1 остаются закрытыми prerequisites.
 
 В прежней шкале это соответствовало `3/57` закрытым checkpoint roadmap, но
@@ -70,7 +70,7 @@ Contract Freeze 1 и A1 остаются закрытыми prerequisites.
 готовность. Поэтому новая шкала начинается с нуля завершённых end-to-end
 эпиков и отдельно сохраняет перечень уже готового foundation выше.
 
-Текущий следующий эпик — `0.2.0/E3: Внешние агенты через MCP`.
+Текущий следующий эпик — `0.2.0/E4: Производные материалы и выпуск`.
 
 ## Последовательность
 
@@ -85,7 +85,7 @@ Contract Freeze 1 и A1 остаются закрытыми prerequisites.
 2. [x] **E2 — AI-задачи и саммари.** Durable queue/internal worker,
    chapter/material summaries, Reader actions, Queue UX, retry/cancel/bulk и
    manual-edit policy.
-3. [ ] **E3 — Внешние агенты через MCP.** Revocable connections, transport,
+3. [x] **E3 — Внешние агенты через MCP.** Revocable connections, transport,
    account-scoped product tools, task claim/complete и Web/MCP parity.
 4. [ ] **E4 — Производные материалы и выпуск.** Abridged `.lum`, provenance,
    internal/MCP executor parity, atomic publication и полный release hardening.

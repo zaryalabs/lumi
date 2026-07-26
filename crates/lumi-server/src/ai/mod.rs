@@ -193,6 +193,24 @@ impl AiCapabilityReadiness {
         }
     }
 
+    /// Readiness after `0.2.0/E3`: revocable MCP transport and worker tools.
+    #[must_use]
+    pub const fn e3_external_agents() -> Self {
+        Self {
+            persistence: true,
+            common_jobs: true,
+            secret_store: true,
+            provider_delivery: true,
+            explicit_context_delivery: true,
+            task_queue_delivery: true,
+            summary_delivery: true,
+            chat_delivery: true,
+            abridgement_delivery: false,
+            mcp_delivery: true,
+            mcp_worker_delivery: true,
+        }
+    }
+
     /// Return only product feature ids whose complete vertical prerequisites
     /// are present.
     #[must_use]
@@ -283,6 +301,23 @@ mod capability_tests {
                 "ai-global-chat",
                 "ai-task-queue",
                 "ai-summary-artifacts",
+            ]
+        );
+    }
+
+    #[test]
+    fn e3_advertises_external_agent_without_abridgement() {
+        assert_eq!(
+            AiCapabilityReadiness::e3_external_agents().advertised_feature_ids(),
+            vec![
+                "ai-provider-openrouter",
+                "ai-provider-byok",
+                "ai-explicit-context",
+                "ai-global-chat",
+                "ai-task-queue",
+                "ai-summary-artifacts",
+                "mcp-account-agent",
+                "mcp-ai-worker",
             ]
         );
     }

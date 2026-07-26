@@ -411,3 +411,18 @@ KB, learning, social и export tools добавляются вместе с со
 
 Transport, auth, limits и claim fencing закреплены в
 [ADR 0023](../adr/0023-mcp-streamable-http-auth-tools.md).
+
+## Реализованный срез `0.2.0/E3`
+
+Production server реализует stateless `POST /mcp`, bearer auth с актуальной
+проверкой revoke на каждом запросе, connection management в личных Web
+настройках и capability-filtered `tools/list`. Material, reader, import,
+annotation и AI worker tools вызывают те же owner-scoped application services,
+что HTTP/Web. Queue mutations используют общий claim/fence/lease и
+transactional artifact publication.
+
+Large generated `.lum` upload reference и abridgement tools остаются частью
+`E4/C3`; до их реализации они отсутствуют в `tools/list`.
+
+Операторский smoke и пример клиентской конфигурации:
+[`../runbooks/mcp-external-agents.md`](../runbooks/mcp-external-agents.md).

@@ -280,6 +280,17 @@ async fn create_summary_task(
     Path(material_id): Path<Uuid>,
     Json(request): Json<CreateSummaryTaskRequest>,
 ) -> Result<Json<AiTask>, AppError> {
+    create_summary_task_for_owner(&state, session.user_id, material_id, request)
+        .await
+        .map(Json)
+}
+
+pub(crate) async fn create_summary_task_for_owner(
+    state: &AppState,
+    owner_id: Uuid,
+    material_id: Uuid,
+    request: CreateSummaryTaskRequest,
+) -> Result<AiTask, AppError> {
     if request.scope_ref.trim().is_empty() || request.idempotency_key.trim().is_empty() {
         return Err(AppError::BadRequest(
             "summary scope and idempotency key are required".to_owned(),
@@ -310,10 +321,10 @@ async fn create_summary_task(
             "Создай сохранённое саммари всего материала. Верни только проверяемый JSON.",
         ),
     };
-    let repository = repository(&state)?;
+    let repository = repository(state)?;
     let mut task = repository
         .create_task(
-            session.user_id,
+            owner_id,
             CreateAiTaskCommand {
                 kind: "summary".to_owned(),
                 source_scope,
@@ -330,7 +341,7 @@ async fn create_summary_task(
     {
         task = repository
             .request_execute(
-                session.user_id,
+                owner_id,
                 task.id,
                 &TaskMutationRequest {
                     expected_revision: task.object_revision,
@@ -340,7 +351,7 @@ async fn create_summary_task(
             .await
             .map_err(map_repository_error)?;
     }
-    Ok(Json(task))
+    Ok(task)
 }
 
 async fn update_summary(

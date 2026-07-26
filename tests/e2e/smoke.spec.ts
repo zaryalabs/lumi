@@ -200,6 +200,26 @@ test("keeps system settings out of a regular user session", async ({
   await expect(
     page.getByRole("main", { name: "Личные подключения" }),
   ).toBeVisible();
+  const mcpRegion = page.getByRole("region", {
+    name: "Подключения внешних агентов MCP",
+  });
+  await expect(mcpRegion).toBeVisible();
+  await mcpRegion.getByLabel("Название подключения").fill("Playwright agent");
+  await mcpRegion.getByRole("button", { name: "Создать подключение" }).click();
+  await expect(
+    mcpRegion.getByRole("status", { name: "Новый MCP-токен" }),
+  ).toContainText("lumi_mcp_");
+  const connectionCard = mcpRegion.getByRole("article").filter({
+    hasText: "Playwright agent",
+  });
+  await connectionCard
+    .getByRole("button", { name: "Ротировать токен" })
+    .click();
+  await expect(
+    mcpRegion.getByRole("status", { name: "Новый MCP-токен" }),
+  ).toContainText("lumi_mcp_");
+  await connectionCard.getByRole("button", { name: "Отозвать" }).click();
+  await expect(connectionCard).toContainText("Отозвано");
   await page.goBack();
   await expect(
     page.getByRole("region", { name: "Пустая библиотека" }),
