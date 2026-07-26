@@ -7,15 +7,17 @@ use axum::{
     Extension, Json, Router,
 };
 use lumi_core::{
-    ClaimSharedMaterialRequest, CommunityAccessLink, CommunityAccessLinkId, CommunityLinkPreview,
-    CommunityMembership, CommunitySpace, CommunitySpaceDetail, CommunitySpaceId,
-    CreateCommunityAccessLinkRequest, CreateCommunitySpaceRequest, CreateSharedCommentRequest,
-    CreateSharedThreadRequest, CreatedCommunityAccessLink, DeleteSharedCommentRequest,
+    ClaimSharedMaterialRequest, CommunityAccessLink, CommunityAccessLinkId, CommunityActivityPage,
+    CommunityLinkPreview, CommunityMembership, CommunitySpace, CommunitySpaceDetail,
+    CommunitySpaceId, CreateCommunityAccessLinkRequest, CreateCommunitySpaceRequest,
+    CreateSharedChatMessageRequest, CreateSharedCommentRequest, CreateSharedThreadRequest,
+    CreatedCommunityAccessLink, DeleteSharedChatMessageRequest, DeleteSharedCommentRequest,
     JoinCommunityLinkRequest, ModerateSocialContentRequest, ModerationAction,
-    PreviewCommunityLinkRequest, ShareMaterialRequest, SharedComment, SharedCommentId,
-    SharedCommentThread, SharedCommentThreadId, SharedDiscussionPage, SharedMaterial,
-    SharedMaterialId, UpdateCommunityMemberRequest, UpdateCommunitySpaceRequest,
-    UpdateSharedCommentRequest, UserId, UserMaterialClaim,
+    PreviewCommunityLinkRequest, ShareMaterialRequest, SharedChatMessage, SharedChatMessageId,
+    SharedChatPage, SharedComment, SharedCommentId, SharedCommentThread, SharedCommentThreadId,
+    SharedDiscussionPage, SharedMaterial, SharedMaterialId, UpdateCommunityMemberRequest,
+    UpdateCommunitySpaceRequest, UpdateSharedChatMessageRequest, UpdateSharedCommentRequest,
+    UserId, UserMaterialClaim,
 };
 use serde::Deserialize;
 
@@ -84,6 +86,15 @@ pub(crate) fn protected_routes() -> Router<AppState> {
             "/spaces/{space_id}/moderation/actions",
             post(moderate_content),
         )
+        .route(
+            "/spaces/{space_id}/chat",
+            get(list_chat).post(create_chat_message),
+        )
+        .route(
+            "/spaces/{space_id}/chat/{message_id}",
+            patch(update_chat_message).delete(delete_chat_message),
+        )
+        .route("/spaces/{space_id}/activity", get(list_activity))
         .route("/shares/community-link/join", post(join_link))
         .layer(DefaultBodyLimit::max(64 * 1024))
 }
@@ -93,6 +104,8 @@ struct DiscussionQuery {
     after: Option<String>,
     limit: Option<u16>,
 }
+
+type CommunicationsQuery = DiscussionQuery;
 
 async fn preview_link(
     State(state): State<AppState>,
@@ -617,6 +630,196 @@ async fn moderate_content(
         .await
         .map(Json)
         .map_err(map_social_error)
+}
+
+async fn list_chat(
+    State(state): State<AppState>,
+    Extension(session): Extension<AuthenticatedSession>,
+    Path(space_id): Path<CommunitySpaceId>,
+    Query(query): Query<CommunicationsQuery>,
+) -> Result<Json<SharedChatPage>, AppError> {
+    let result = state
+        .social_runtime()
+        .list_chat(
+            session.user_id,
+            space_id,
+            query.after.as_deref(),
+            query.limit.unwrap_or(50),
+        )
+        .await;
+    if let Err(error) = &result {
+        trace_communications_error(
+            "community.chat.list",
+            session.user_id,
+            space_id,
+            None,
+            error,
+        );
+    }
+    result.map(Json).map_err(map_social_error)
+}
+
+async fn create_chat_message(
+    State(state): State<AppState>,
+    Extension(session): Extension<AuthenticatedSession>,
+    Path(space_id): Path<CommunitySpaceId>,
+    headers: HeaderMap,
+    Json(request): Json<CreateSharedChatMessageRequest>,
+) -> Result<(StatusCode, Json<SharedChatMessage>), AppError> {
+    let idempotency_key = required_idempotency_key(&headers)?;
+    let result = state
+        .social_runtime()
+        .create_chat_message(
+            session.user_id,
+            session.device_id,
+            space_id,
+            idempotency_key,
+            request,
+        )
+        .await;
+    if let Err(error) = &result {
+        trace_communications_error(
+            "community.chat.create",
+            session.user_id,
+            space_id,
+            None,
+            error,
+        );
+    }
+    let message = result.map_err(map_social_error)?;
+    tracing::info!(
+        operation = "community.chat.create",
+        actor_user_id = %session.user_id,
+        %space_id,
+        chat_message_id = %message.id,
+        result = "created",
+        "Community chat command completed"
+    );
+    Ok((StatusCode::CREATED, Json(message)))
+}
+
+async fn update_chat_message(
+    State(state): State<AppState>,
+    Extension(session): Extension<AuthenticatedSession>,
+    Path((space_id, message_id)): Path<(CommunitySpaceId, SharedChatMessageId)>,
+    headers: HeaderMap,
+    Json(request): Json<UpdateSharedChatMessageRequest>,
+) -> Result<Json<SharedChatMessage>, AppError> {
+    let idempotency_key = required_idempotency_key(&headers)?;
+    let result = state
+        .social_runtime()
+        .update_chat_message(
+            session.user_id,
+            session.device_id,
+            space_id,
+            message_id,
+            idempotency_key,
+            request,
+        )
+        .await;
+    if let Err(error) = &result {
+        trace_communications_error(
+            "community.chat.update",
+            session.user_id,
+            space_id,
+            Some(message_id),
+            error,
+        );
+    }
+    let message = result.map_err(map_social_error)?;
+    tracing::info!(
+        operation = "community.chat.update",
+        actor_user_id = %session.user_id,
+        %space_id,
+        %message_id,
+        result = "updated",
+        "Community chat command completed"
+    );
+    Ok(Json(message))
+}
+
+async fn delete_chat_message(
+    State(state): State<AppState>,
+    Extension(session): Extension<AuthenticatedSession>,
+    Path((space_id, message_id)): Path<(CommunitySpaceId, SharedChatMessageId)>,
+    headers: HeaderMap,
+    Json(request): Json<DeleteSharedChatMessageRequest>,
+) -> Result<Json<SharedChatMessage>, AppError> {
+    let idempotency_key = required_idempotency_key(&headers)?;
+    let result = state
+        .social_runtime()
+        .delete_chat_message(
+            session.user_id,
+            session.device_id,
+            space_id,
+            message_id,
+            idempotency_key,
+            request,
+        )
+        .await;
+    if let Err(error) = &result {
+        trace_communications_error(
+            "community.chat.delete",
+            session.user_id,
+            space_id,
+            Some(message_id),
+            error,
+        );
+    }
+    let message = result.map_err(map_social_error)?;
+    tracing::info!(
+        operation = "community.chat.delete",
+        actor_user_id = %session.user_id,
+        %space_id,
+        %message_id,
+        result = "deleted",
+        "Community chat command completed"
+    );
+    Ok(Json(message))
+}
+
+async fn list_activity(
+    State(state): State<AppState>,
+    Extension(session): Extension<AuthenticatedSession>,
+    Path(space_id): Path<CommunitySpaceId>,
+    Query(query): Query<CommunicationsQuery>,
+) -> Result<Json<CommunityActivityPage>, AppError> {
+    let result = state
+        .social_runtime()
+        .list_activity(
+            session.user_id,
+            space_id,
+            query.after.as_deref(),
+            query.limit.unwrap_or(50),
+        )
+        .await;
+    if let Err(error) = &result {
+        trace_communications_error(
+            "community.activity.list",
+            session.user_id,
+            space_id,
+            None,
+            error,
+        );
+    }
+    result.map(Json).map_err(map_social_error)
+}
+
+fn trace_communications_error(
+    operation: &'static str,
+    actor_user_id: UserId,
+    space_id: CommunitySpaceId,
+    object_id: Option<uuid::Uuid>,
+    error: &SocialStoreError,
+) {
+    tracing::warn!(
+        operation,
+        %actor_user_id,
+        %space_id,
+        ?object_id,
+        result = error.code(),
+        "Community communications request failed"
+    );
 }
 
 fn map_social_error(error: SocialStoreError) -> AppError {

@@ -15,12 +15,13 @@ use axum::{
 use lumi_core::{
     mcp_tool_schema_contracts, AiExecutorKind, AiPage, AiTaskClaim, AiTaskClaimFence,
     CompleteAiTaskRequest, CreateFlashcardTaskRequest, CreateMcpConnectionRequest,
-    GenerateLearningItemsRequest, ListLearningItemsRequest, McpAiTaskProgressRequest,
-    McpConnection, McpConnectionId, McpConnectionStatus, McpConnectionTokenResponse,
-    RevokeMcpConnectionRequest, RotateMcpConnectionRequest, SubmitLearningAnswerRequest,
-    SubmitLearningAttemptCommand, UserId, MCP_CONTROL_REQUEST_MAX_BYTES,
-    MCP_INLINE_RESULT_MAX_BYTES, MCP_LIST_PAGE_MAX_ITEMS, MCP_PROTOCOL_VERSION,
-    MCP_TOOL_CONTRACT_VERSION,
+    CreateSharedChatMessageRequest, CreateSharedCommentRequest, CreateSharedThreadRequest,
+    DeleteSharedCommentRequest, GenerateLearningItemsRequest, ListLearningItemsRequest,
+    McpAiTaskProgressRequest, McpConnection, McpConnectionId, McpConnectionStatus,
+    McpConnectionTokenResponse, RevokeMcpConnectionRequest, RotateMcpConnectionRequest,
+    ShareMaterialRequest, SubmitLearningAnswerRequest, SubmitLearningAttemptCommand,
+    UpdateSharedCommentRequest, UserId, MCP_CONTROL_REQUEST_MAX_BYTES, MCP_INLINE_RESULT_MAX_BYTES,
+    MCP_LIST_PAGE_MAX_ITEMS, MCP_PROTOCOL_VERSION, MCP_TOOL_CONTRACT_VERSION,
 };
 use rand::{rngs::OsRng, RngCore};
 use serde::{Deserialize, Serialize};
@@ -498,6 +499,62 @@ struct CreateAnnotationToolArgs {
     style: Option<lumi_core::HighlightStyle>,
 }
 
+#[derive(Deserialize)]
+struct SocialPageToolArgs {
+    space_id: Uuid,
+    cursor: Option<String>,
+    limit: Option<u16>,
+}
+
+#[derive(Deserialize)]
+struct SharedDiscussionPageToolArgs {
+    space_id: Uuid,
+    shared_material_id: Uuid,
+    cursor: Option<String>,
+    limit: Option<u16>,
+}
+
+#[derive(Deserialize)]
+struct ShareMaterialToolArgs {
+    space_id: Uuid,
+    material_id: Uuid,
+    idempotency_key: String,
+}
+
+#[derive(Deserialize)]
+struct CreateSharedCommentToolArgs {
+    space_id: Uuid,
+    shared_material_id: Option<Uuid>,
+    thread_id: Option<Uuid>,
+    parent_comment_id: Option<Uuid>,
+    body_markdown: String,
+    idempotency_key: String,
+}
+
+#[derive(Deserialize)]
+struct UpdateSharedCommentToolArgs {
+    space_id: Uuid,
+    comment_id: Uuid,
+    body_markdown: String,
+    expected_revision: u64,
+    idempotency_key: String,
+}
+
+#[derive(Deserialize)]
+struct DeleteSharedCommentToolArgs {
+    space_id: Uuid,
+    comment_id: Uuid,
+    expected_revision: u64,
+    idempotency_key: String,
+}
+
+#[derive(Deserialize)]
+struct CreateSpaceChatMessageToolArgs {
+    space_id: Uuid,
+    body_markdown: String,
+    idempotency_key: String,
+}
+
 /// Return authenticated MCP connection-management routes under `/api/v1`.
 pub(crate) fn management_routes() -> Router<AppState> {
     Router::new()
@@ -790,6 +847,13 @@ fn enabled_tools(state: &AppState) -> Vec<Value> {
 }
 
 fn tool_enabled(state: &AppState, name: &str) -> bool {
+    let capabilities = crate::service_capabilities(state);
+    let has_feature = |feature: &str| {
+        capabilities
+            .features
+            .iter()
+            .any(|candidate| candidate == feature)
+    };
     match name {
         "get_lumi_capabilities"
         | "list_materials"
@@ -821,12 +885,15 @@ fn tool_enabled(state: &AppState, name: &str) -> bool {
         | "fail_ai_task"
         | "release_ai_task"
         | "get_ai_artifact" => state.ai.is_some(),
-        "create_flashcard_task" => {
-            state.ai.is_some()
-                && crate::service_capabilities(state)
-                    .features
-                    .iter()
-                    .any(|feature| feature == "learning-ai")
+        "create_flashcard_task" => state.ai.is_some() && has_feature("learning-ai"),
+        "list_community_spaces" | "get_community_space" => has_feature("community-spaces"),
+        "share_material_to_space" => has_feature("material-sharing"),
+        "list_shared_comments"
+        | "create_shared_comment"
+        | "update_shared_comment"
+        | "delete_shared_comment" => has_feature("material-discussions"),
+        "list_space_chat_messages" | "create_space_chat_message" => {
+            has_feature("community-communications")
         }
         _ => false,
     }
@@ -1475,6 +1542,192 @@ async fn call_tool(
                 .map_err(map_learning_tool)?;
             Ok(json!(attempt))
         }
+        "list_community_spaces" => {
+            let mut spaces = state
+                .social_runtime()
+                .list(principal.user_id)
+                .await
+                .map_err(map_social_tool)?;
+            let limit = page_limit(&arguments)?;
+            let cursor = arguments
+                .get("cursor")
+                .and_then(Value::as_str)
+                .and_then(|value| Uuid::parse_str(value).ok());
+            spaces.sort_by_key(|space| space.id);
+            if let Some(cursor) = cursor {
+                spaces.retain(|space| space.id > cursor);
+            }
+            let next_cursor = (spaces.len() > limit)
+                .then(|| {
+                    spaces
+                        .get(limit.saturating_sub(1))
+                        .map(|space| space.id.to_string())
+                })
+                .flatten();
+            spaces.truncate(limit);
+            Ok(json!(AiPage {
+                items: spaces,
+                next_cursor
+            }))
+        }
+        "get_community_space" => {
+            let space_id = uuid_arg(&arguments, "space_id")?;
+            let detail = state
+                .social_runtime()
+                .detail(principal.user_id, space_id)
+                .await
+                .map_err(map_social_tool)?;
+            Ok(json!(detail))
+        }
+        "share_material_to_space" => {
+            let input: ShareMaterialToolArgs =
+                serde_json::from_value(arguments).map_err(|_| ToolError::Invalid)?;
+            let shared = state
+                .social_runtime()
+                .share_material(
+                    principal.user_id,
+                    principal.device_id,
+                    input.space_id,
+                    &input.idempotency_key,
+                    ShareMaterialRequest {
+                        material_id: input.material_id,
+                    },
+                )
+                .await
+                .map_err(map_social_tool)?;
+            Ok(json!(shared))
+        }
+        "list_shared_comments" => {
+            let input: SharedDiscussionPageToolArgs =
+                serde_json::from_value(arguments).map_err(|_| ToolError::Invalid)?;
+            let page = state
+                .social_runtime()
+                .list_discussions(
+                    principal.user_id,
+                    input.space_id,
+                    input.shared_material_id,
+                    input.cursor.as_deref(),
+                    input.limit.unwrap_or(DEFAULT_PAGE_SIZE as u16),
+                )
+                .await
+                .map_err(map_social_tool)?;
+            Ok(json!(page))
+        }
+        "create_shared_comment" => {
+            let input: CreateSharedCommentToolArgs =
+                serde_json::from_value(arguments).map_err(|_| ToolError::Invalid)?;
+            let response = match (input.shared_material_id, input.thread_id) {
+                (Some(shared_material_id), None) if input.parent_comment_id.is_none() => {
+                    let thread = state
+                        .social_runtime()
+                        .create_thread(
+                            principal.user_id,
+                            principal.device_id,
+                            input.space_id,
+                            shared_material_id,
+                            &input.idempotency_key,
+                            CreateSharedThreadRequest {
+                                body_markdown: input.body_markdown,
+                            },
+                        )
+                        .await
+                        .map_err(map_social_tool)?;
+                    json!({"thread": thread})
+                }
+                (None, Some(thread_id)) => {
+                    let comment = state
+                        .social_runtime()
+                        .add_comment(
+                            principal.user_id,
+                            principal.device_id,
+                            input.space_id,
+                            thread_id,
+                            &input.idempotency_key,
+                            CreateSharedCommentRequest {
+                                parent_comment_id: input.parent_comment_id,
+                                body_markdown: input.body_markdown,
+                            },
+                        )
+                        .await
+                        .map_err(map_social_tool)?;
+                    json!({"comment": comment})
+                }
+                _ => return Err(ToolError::Invalid),
+            };
+            Ok(response)
+        }
+        "update_shared_comment" => {
+            let input: UpdateSharedCommentToolArgs =
+                serde_json::from_value(arguments).map_err(|_| ToolError::Invalid)?;
+            let comment = state
+                .social_runtime()
+                .update_comment(
+                    principal.user_id,
+                    principal.device_id,
+                    input.space_id,
+                    input.comment_id,
+                    &input.idempotency_key,
+                    UpdateSharedCommentRequest {
+                        body_markdown: input.body_markdown,
+                        expected_revision: input.expected_revision,
+                    },
+                )
+                .await
+                .map_err(map_social_tool)?;
+            Ok(json!(comment))
+        }
+        "delete_shared_comment" => {
+            let input: DeleteSharedCommentToolArgs =
+                serde_json::from_value(arguments).map_err(|_| ToolError::Invalid)?;
+            let comment = state
+                .social_runtime()
+                .delete_comment(
+                    principal.user_id,
+                    principal.device_id,
+                    input.space_id,
+                    input.comment_id,
+                    &input.idempotency_key,
+                    DeleteSharedCommentRequest {
+                        expected_revision: input.expected_revision,
+                    },
+                )
+                .await
+                .map_err(map_social_tool)?;
+            Ok(json!(comment))
+        }
+        "list_space_chat_messages" => {
+            let input: SocialPageToolArgs =
+                serde_json::from_value(arguments).map_err(|_| ToolError::Invalid)?;
+            let page = state
+                .social_runtime()
+                .list_chat(
+                    principal.user_id,
+                    input.space_id,
+                    input.cursor.as_deref(),
+                    input.limit.unwrap_or(DEFAULT_PAGE_SIZE as u16),
+                )
+                .await
+                .map_err(map_social_tool)?;
+            Ok(json!(page))
+        }
+        "create_space_chat_message" => {
+            let input: CreateSpaceChatMessageToolArgs =
+                serde_json::from_value(arguments).map_err(|_| ToolError::Invalid)?;
+            let message = state
+                .social_runtime()
+                .create_chat_message(
+                    principal.user_id,
+                    principal.device_id,
+                    input.space_id,
+                    &input.idempotency_key,
+                    CreateSharedChatMessageRequest {
+                        body_markdown: input.body_markdown,
+                    },
+                )
+                .await
+                .map_err(map_social_tool)?;
+            Ok(json!(message))
+        }
         _ => Err(ToolError::NotFound),
     }
 }
@@ -1604,6 +1857,18 @@ fn map_learning_generation_tool(
         crate::learning::generation::LearningGenerationError::Conflict => ToolError::Conflict,
         crate::learning::generation::LearningGenerationError::Unavailable => ToolError::Unavailable,
         crate::learning::generation::LearningGenerationError::Limited => ToolError::RateLimited,
+    }
+}
+
+fn map_social_tool(error: crate::social::SocialStoreError) -> ToolError {
+    match error {
+        crate::social::SocialStoreError::NotFound | crate::social::SocialStoreError::Forbidden => {
+            ToolError::NotFound
+        }
+        crate::social::SocialStoreError::Conflict => ToolError::Conflict,
+        crate::social::SocialStoreError::Invalid(_) => ToolError::Invalid,
+        crate::social::SocialStoreError::RateLimited => ToolError::RateLimited,
+        crate::social::SocialStoreError::Unavailable => ToolError::Unavailable,
     }
 }
 
@@ -1789,16 +2054,15 @@ mod tests {
     }
 
     #[test]
-    fn tool_catalog_does_not_expose_credentials_or_chat() {
+    fn tool_catalog_does_not_expose_credentials_or_personal_ai_chat() {
         let state = AppState::seeded();
         let names = enabled_tools(&state)
             .into_iter()
             .filter_map(|tool| tool["name"].as_str().map(ToOwned::to_owned))
             .collect::<Vec<_>>();
 
-        assert!(!names
-            .iter()
-            .any(|name| name.contains("credential") || name.contains("chat")));
+        assert!(!names.iter().any(|name| name.contains("credential")));
+        assert!(!names.iter().any(|name| name == "read_ai_chat"));
     }
 
     #[test]
@@ -1812,6 +2076,74 @@ mod tests {
         assert!(names.iter().any(|name| name == "list_learning_items"));
         assert!(names.iter().any(|name| name == "submit_learning_answer"));
         assert!(!names.iter().any(|name| name == "create_flashcard_task"));
+    }
+
+    #[test]
+    fn social_tool_catalog_fails_closed_by_capability_slice() {
+        let state = AppState::seeded();
+        let names = enabled_tools(&state)
+            .into_iter()
+            .filter_map(|tool| tool["name"].as_str().map(ToOwned::to_owned))
+            .collect::<Vec<_>>();
+
+        assert!(names.iter().any(|name| name == "list_community_spaces"));
+        assert!(names.iter().any(|name| name == "get_community_space"));
+        assert!(!names.iter().any(|name| name == "share_material_to_space"));
+        assert!(!names.iter().any(|name| name == "list_shared_comments"));
+        assert!(!names.iter().any(|name| name == "list_space_chat_messages"));
+    }
+
+    #[test]
+    fn social_forbidden_is_indistinguishable_from_missing_resource() {
+        assert!(matches!(
+            map_social_tool(crate::social::SocialStoreError::Forbidden),
+            ToolError::NotFound
+        ));
+    }
+
+    #[tokio::test]
+    async fn community_list_and_detail_tools_reuse_social_runtime(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let state = AppState::seeded();
+        let owner_id = Uuid::now_v7();
+        let principal = McpPrincipal {
+            connection_id: Uuid::now_v7(),
+            user_id: owner_id,
+            device_id: Uuid::now_v7(),
+        };
+        let created = state
+            .social_runtime()
+            .create(
+                owner_id,
+                principal.device_id,
+                "mcp-community-create",
+                lumi_core::CreateCommunitySpaceRequest {
+                    name: "MCP клуб".to_owned(),
+                    description: None,
+                },
+            )
+            .await?;
+
+        let page = call_tool(
+            &state,
+            principal,
+            "list_community_spaces",
+            json!({"limit": 50}),
+        )
+        .await
+        .map_err(|_| std::io::Error::other("community list tool failed"))?;
+        let detail = call_tool(
+            &state,
+            principal,
+            "get_community_space",
+            json!({"space_id": created.space.id}),
+        )
+        .await
+        .map_err(|_| std::io::Error::other("community detail tool failed"))?;
+
+        assert_eq!(page["items"][0]["id"], json!(created.space.id));
+        assert_eq!(detail["space"]["id"], json!(created.space.id));
+        Ok(())
     }
 
     #[tokio::test]

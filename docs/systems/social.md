@@ -244,6 +244,19 @@ Chat и comments имеют разные контексты:
 - activity содержит системные события и не является третьей пользовательской
   лентой сообщений.
 
+Capability `community-communications` фиксирует первый release contract:
+
+- chat CRUD использует active membership, author-only edit/delete,
+  `expected_revision`, idempotency и общие moderation tombstones;
+- activity является append-only projection и возвращает только allowlisted
+  kinds/subjects без body, source metadata и fingerprint payload;
+- chat/activity имеют cursor pages до 100 объектов и Web polling с паузой в
+  hidden tab, backoff после ошибки и ручным retry;
+- account-scoped MCP adapters используют те же `SocialRuntime` services и
+  маскируют forbidden cross-Space resource как not found;
+- решение и границы описаны в
+  [`ADR 0033`](../adr/0033-community-chat-activity-and-mcp.md).
+
 ### Privacy controls
 
 - Default notes/highlights are private.

@@ -78,14 +78,17 @@ Knowledge Base, native full-copy replicas, Obsidian, plugin platform, будущ
 - `0.5.0 / E3 independent slice`: material-level threads/replies, author CRUD,
   moderation tombstones, bounded cursor API и Community discussion Web surface
   без anchor/quote/private-record данных;
+- `0.5.0 / E4 independent slice`: Space chat, append-only activity,
+  author/moderator tombstones, bounded polling, social MCP registry
+  `mcp-tools.v3`, community backup/restore evidence и performance dataset;
 - release evidence A1 зафиксирован commit trailer
   `Lumi-Plan-Stage: 0.2.0/A1`.
 
 Ещё не готово:
 
 - Desk/search/RAG;
-- завершение совместного чтения (shared anchors/highlights/Reader overlay),
-  коммуникации и выпуск.
+- завершение совместного чтения (shared anchors/highlights/Reader overlay) и
+  permission-aware social search.
   Lifecycle-интеграции E2 и зависимости social от ещё не
   завершённого `0.4.0` перечислены в
   [`0.5.0-deferred-until-0.4.0.md`](0.5.0-deferred-until-0.4.0.md).
@@ -98,9 +101,10 @@ Persistent server публикует capabilities `ai-provider-openrouter`,
 `learning-core`, `learning-scheduling`, `learning-ai`,
 `learning-explain-back`, `learning-audio-attachments`, `learning-voice` и
 `learning-mcp`, а также `community-spaces`, `community-link-access`,
-`material-sharing` и `material-discussions` при готовых prerequisites.
+`material-sharing`, `material-discussions` и `community-communications` при
+готовых prerequisites.
 
-После перехода на новую шкалу выполнено `11/18` продуктовых эпиков. Stage 0,
+После перехода на новую шкалу выполнено `12/18` продуктовых эпиков. Stage 0,
 Contract Freeze 1 и A1 остаются закрытыми prerequisites.
 
 Repository-side gates `make c`, PostgreSQL/compatibility/security/performance,
@@ -200,9 +204,11 @@ record-scoped RAG без второго контура данных.
 3. [ ] **E3 — Совместное чтение.** Независимые material-level discussions и
    moderation готовы; Shared anchors, explicit published highlights, Reader
    social layer и unresolved mapping отложены до готовности `0.4.0`.
-4. [ ] **E4 — Коммуникации и выпуск.** Space chat, activity, social search
+4. [x] **E4 — Коммуникации и выпуск.** Space chat, activity, social search
    events, MCP parity, polling, backup/restore и multi-account release
-   acceptance.
+   acceptance. Permission-aware social search events отложены до общего
+   runtime `0.4.0/E3–E5`; независимый release slice не публикует
+   `social-search-index`.
 
 Результат: два аккаунта проходят полный закрытый Community Space flow без
 раскрытия source-файлов и личных записей.

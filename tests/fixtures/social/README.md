@@ -11,6 +11,10 @@ package, protected fingerprint, private annotation или progress.
 material-level threads/replies, masked moderation projection и отсутствие
 anchor/quote/private-record полей.
 
+`contracts/v1/community-communications.json` фиксирует отдельные E4
+chat/activity pages; activity не содержит message body или произвольный
+payload.
+
 Расширенный cross-revision backfill, shared highlights и anchor corpus появятся после
 prerequisites, перечисленных в
 `docs/tmp-plans/0.5.0-deferred-until-0.4.0.md`.

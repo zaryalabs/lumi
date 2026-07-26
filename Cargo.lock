@@ -3660,7 +3660,7 @@ checksum = "112b39cec0b298b6c1999fee3e31427f74f676e4cb9879ed1a121b43661a4154"
 
 [[package]]
 name = "lumi-core"
-version = "0.3.0"
+version = "0.5.0"
 dependencies = [
  "ammonia",
  "base64",
@@ -3683,7 +3683,7 @@ dependencies = [
 
 [[package]]
 name = "lumi-server"
-version = "0.3.0"
+version = "0.5.0"
 dependencies = [
  "anyhow",
  "async-stream",
@@ -3720,7 +3720,7 @@ dependencies = [
 
 [[package]]
 name = "lumi-stage0-spikes"
-version = "0.3.0"
+version = "0.5.0"
 dependencies = [
  "ammonia",
  "axum",
@@ -3744,7 +3744,7 @@ dependencies = [
 
 [[package]]
 name = "lumi-web"
-version = "0.3.0"
+version = "0.5.0"
 dependencies = [
  "bip39",
  "console_error_panic_hook",

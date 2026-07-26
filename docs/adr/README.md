@@ -52,6 +52,10 @@ plugin, AI, search and account/auth boundaries.
   CommunitySpace/SyncSpace, membership, roles и безопасные link invitations.
 - [`0031`](0031-material-fingerprints-and-community-claims.md) —
   privacy-protected fingerprints и conservative claims личных копий.
+- [`0032`](0032-material-discussions-and-moderation.md) — material-level
+  discussions, author CRUD и moderation tombstones.
+- [`0033`](0033-community-chat-activity-and-mcp.md) — Space chat, append-only
+  activity, bounded polling и social MCP parity.
 
 ## Template
 

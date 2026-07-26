@@ -5,13 +5,15 @@ use std::time::{Duration, Instant};
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
 use lumi_core::{
     ClaimSharedMaterialRequest, CommunityAccessLink, CommunityAccessLinkId, CommunityAction,
-    CommunityLinkPreview, CommunityMembership, CommunityRole, CommunitySpace, CommunitySpaceDetail,
-    CommunitySpaceId, CreateCommunityAccessLinkRequest, CreateCommunitySpaceRequest,
-    CreateSharedCommentRequest, CreateSharedThreadRequest, CreatedCommunityAccessLink,
+    CommunityActivityPage, CommunityLinkPreview, CommunityMembership, CommunityRole,
+    CommunitySpace, CommunitySpaceDetail, CommunitySpaceId, CreateCommunityAccessLinkRequest,
+    CreateCommunitySpaceRequest, CreateSharedChatMessageRequest, CreateSharedCommentRequest,
+    CreateSharedThreadRequest, CreatedCommunityAccessLink, DeleteSharedChatMessageRequest,
     DeleteSharedCommentRequest, JoinCommunityLinkRequest, ModerateSocialContentRequest,
-    ModerationAction, PreviewCommunityLinkRequest, ShareMaterialRequest, SharedComment,
-    SharedCommentId, SharedCommentThread, SharedCommentThreadId, SharedDiscussionPage,
-    SharedMaterial, SharedMaterialId, UpdateCommunityMemberRequest, UpdateCommunitySpaceRequest,
+    ModerationAction, PreviewCommunityLinkRequest, ShareMaterialRequest, SharedChatMessage,
+    SharedChatMessageId, SharedChatPage, SharedComment, SharedCommentId, SharedCommentThread,
+    SharedCommentThreadId, SharedDiscussionPage, SharedMaterial, SharedMaterialId,
+    UpdateCommunityMemberRequest, UpdateCommunitySpaceRequest, UpdateSharedChatMessageRequest,
     UpdateSharedCommentRequest, UserId,
 };
 use rand::{rngs::OsRng, RngCore};
@@ -28,6 +30,7 @@ use super::store::PgSocialStore;
 const RATE_WINDOW: Duration = Duration::from_secs(60);
 const PREVIEW_LIMIT: u32 = 30;
 const JOIN_LIMIT: u32 = 12;
+const SOCIAL_PUBLISH_LIMIT: u32 = 60;
 
 /// Failure returned by the scoped Community application service.
 #[derive(Debug, Error)]
@@ -44,6 +47,19 @@ pub(crate) enum SocialStoreError {
     RateLimited,
     #[error("community storage is unavailable")]
     Unavailable,
+}
+
+impl SocialStoreError {
+    pub(crate) fn code(&self) -> &'static str {
+        match self {
+            Self::NotFound => "not_found",
+            Self::Forbidden => "forbidden",
+            Self::Conflict => "conflict",
+            Self::Invalid(_) => "invalid",
+            Self::RateLimited => "rate_limited",
+            Self::Unavailable => "unavailable",
+        }
+    }
 }
 
 #[derive(Default)]
@@ -97,6 +113,10 @@ impl SocialRuntime {
     }
 
     pub(crate) fn supports_material_discussions(&self) -> bool {
+        matches!(self.backend, SocialBackend::Postgres(_))
+    }
+
+    pub(crate) fn supports_communications(&self) -> bool {
         matches!(self.backend, SocialBackend::Postgres(_))
     }
 
@@ -580,6 +600,11 @@ impl SocialRuntime {
         request: ShareMaterialRequest,
     ) -> Result<SharedMaterial, SocialStoreError> {
         validate_key(idempotency_key)?;
+        self.check_rate(
+            hash_space_actor_key(user_id, space_id),
+            "share-material",
+            SOCIAL_PUBLISH_LIMIT,
+        )?;
         match &self.backend {
             SocialBackend::Memory(_) => Err(SocialStoreError::Unavailable),
             SocialBackend::Postgres(store) => {
@@ -697,6 +722,11 @@ impl SocialRuntime {
         request: CreateSharedThreadRequest,
     ) -> Result<SharedCommentThread, SocialStoreError> {
         validate_key(idempotency_key)?;
+        self.check_rate(
+            hash_space_actor_key(user_id, space_id),
+            "create-thread",
+            SOCIAL_PUBLISH_LIMIT,
+        )?;
         let request = request
             .normalized()
             .map_err(|error| SocialStoreError::Invalid(error.to_string()))?;
@@ -727,6 +757,11 @@ impl SocialRuntime {
         request: CreateSharedCommentRequest,
     ) -> Result<SharedComment, SocialStoreError> {
         validate_key(idempotency_key)?;
+        self.check_rate(
+            hash_space_actor_key(user_id, space_id),
+            "add-comment",
+            SOCIAL_PUBLISH_LIMIT,
+        )?;
         let request = request
             .normalized()
             .map_err(|error| SocialStoreError::Invalid(error.to_string()))?;
@@ -825,6 +860,127 @@ impl SocialRuntime {
                 store
                     .moderate_content(user_id, device_id, space_id, idempotency_key, &request)
                     .await
+            }
+        }
+    }
+
+    pub(crate) async fn list_chat(
+        &self,
+        user_id: UserId,
+        space_id: CommunitySpaceId,
+        after: Option<&str>,
+        limit: u16,
+    ) -> Result<SharedChatPage, SocialStoreError> {
+        let limit = lumi_core::validate_community_feed_page_limit(limit)
+            .map_err(|error| SocialStoreError::Invalid(error.to_string()))?;
+        match &self.backend {
+            SocialBackend::Memory(_) => Err(SocialStoreError::Unavailable),
+            SocialBackend::Postgres(store) => {
+                store.list_chat(user_id, space_id, after, limit).await
+            }
+        }
+    }
+
+    pub(crate) async fn create_chat_message(
+        &self,
+        user_id: UserId,
+        device_id: Uuid,
+        space_id: CommunitySpaceId,
+        idempotency_key: &str,
+        request: CreateSharedChatMessageRequest,
+    ) -> Result<SharedChatMessage, SocialStoreError> {
+        validate_key(idempotency_key)?;
+        self.check_rate(
+            hash_space_actor_key(user_id, space_id),
+            "create-chat-message",
+            SOCIAL_PUBLISH_LIMIT,
+        )?;
+        let request = request
+            .normalized()
+            .map_err(|error| SocialStoreError::Invalid(error.to_string()))?;
+        match &self.backend {
+            SocialBackend::Memory(_) => Err(SocialStoreError::Unavailable),
+            SocialBackend::Postgres(store) => {
+                store
+                    .create_chat_message(user_id, device_id, space_id, idempotency_key, &request)
+                    .await
+            }
+        }
+    }
+
+    pub(crate) async fn update_chat_message(
+        &self,
+        user_id: UserId,
+        device_id: Uuid,
+        space_id: CommunitySpaceId,
+        message_id: SharedChatMessageId,
+        idempotency_key: &str,
+        request: UpdateSharedChatMessageRequest,
+    ) -> Result<SharedChatMessage, SocialStoreError> {
+        validate_key(idempotency_key)?;
+        let request = request
+            .normalized()
+            .map_err(|error| SocialStoreError::Invalid(error.to_string()))?;
+        match &self.backend {
+            SocialBackend::Memory(_) => Err(SocialStoreError::Unavailable),
+            SocialBackend::Postgres(store) => {
+                store
+                    .update_chat_message(
+                        user_id,
+                        device_id,
+                        space_id,
+                        message_id,
+                        idempotency_key,
+                        &request,
+                    )
+                    .await
+            }
+        }
+    }
+
+    pub(crate) async fn delete_chat_message(
+        &self,
+        user_id: UserId,
+        device_id: Uuid,
+        space_id: CommunitySpaceId,
+        message_id: SharedChatMessageId,
+        idempotency_key: &str,
+        request: DeleteSharedChatMessageRequest,
+    ) -> Result<SharedChatMessage, SocialStoreError> {
+        validate_key(idempotency_key)?;
+        let request = request
+            .validate()
+            .map_err(|error| SocialStoreError::Invalid(error.to_string()))?;
+        match &self.backend {
+            SocialBackend::Memory(_) => Err(SocialStoreError::Unavailable),
+            SocialBackend::Postgres(store) => {
+                store
+                    .delete_chat_message(
+                        user_id,
+                        device_id,
+                        space_id,
+                        message_id,
+                        idempotency_key,
+                        request,
+                    )
+                    .await
+            }
+        }
+    }
+
+    pub(crate) async fn list_activity(
+        &self,
+        user_id: UserId,
+        space_id: CommunitySpaceId,
+        after: Option<&str>,
+        limit: u16,
+    ) -> Result<CommunityActivityPage, SocialStoreError> {
+        let limit = lumi_core::validate_community_feed_page_limit(limit)
+            .map_err(|error| SocialStoreError::Invalid(error.to_string()))?;
+        match &self.backend {
+            SocialBackend::Memory(_) => Err(SocialStoreError::Unavailable),
+            SocialBackend::Postgres(store) => {
+                store.list_activity(user_id, space_id, after, limit).await
             }
         }
     }
@@ -997,6 +1153,13 @@ fn hash_join_key(user_id: UserId, token_hash: [u8; 32]) -> [u8; 32] {
     let mut digest = Sha256::new();
     digest.update(user_id.as_bytes());
     digest.update(token_hash);
+    digest.finalize().into()
+}
+
+fn hash_space_actor_key(user_id: UserId, space_id: CommunitySpaceId) -> [u8; 32] {
+    let mut digest = Sha256::new();
+    digest.update(user_id.as_bytes());
+    digest.update(space_id.as_bytes());
     digest.finalize().into()
 }
 

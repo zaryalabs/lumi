@@ -166,6 +166,7 @@ pub(crate) fn AccountGate() -> Element {
     let mut community_available = use_signal(|| false);
     let mut material_sharing_available = use_signal(|| false);
     let mut material_discussions_available = use_signal(|| false);
+    let mut community_communications_available = use_signal(|| false);
     let mut capability_error = use_signal(String::new);
     use_effect(move || {
         let Some(window) = web_sys::window() else {
@@ -238,12 +239,19 @@ pub(crate) fn AccountGate() -> Element {
                                     .iter()
                                     .any(|feature| feature == "material-discussions"),
                             );
+                            community_communications_available.set(
+                                capabilities
+                                    .features
+                                    .iter()
+                                    .any(|feature| feature == "community-communications"),
+                            );
                             capability_error.set(String::new());
                         }
                         Err(api_error) => {
                             community_available.set(false);
                             material_sharing_available.set(false);
                             material_discussions_available.set(false);
+                            community_communications_available.set(false);
                             capability_error.set(format!(
                                 "Не удалось проверить возможности сервера: {api_error}"
                             ));
@@ -296,12 +304,19 @@ pub(crate) fn AccountGate() -> Element {
                                         .iter()
                                         .any(|feature| feature == "material-discussions"),
                                 );
+                                community_communications_available.set(
+                                    capabilities
+                                        .features
+                                        .iter()
+                                        .any(|feature| feature == "community-communications"),
+                                );
                                 capability_error.set(String::new());
                             }
                             Err(api_error) => {
                                 community_available.set(false);
                                 material_sharing_available.set(false);
                                 material_discussions_available.set(false);
+                                community_communications_available.set(false);
                                 capability_error.set(format!(
                                     "Не удалось проверить возможности сервера: {api_error}"
                                 ));
@@ -422,6 +437,12 @@ pub(crate) fn AccountGate() -> Element {
                                                     .iter()
                                                     .any(|feature| feature == "material-discussions"),
                                             );
+                                            community_communications_available.set(
+                                                capabilities
+                                                    .features
+                                                    .iter()
+                                                    .any(|feature| feature == "community-communications"),
+                                            );
                                         }
                                         Err(api_error) => capability_error.set(format!(
                                             "Не удалось проверить возможности сервера: {api_error}"
@@ -488,6 +509,7 @@ pub(crate) fn AccountGate() -> Element {
                             available: community_available(),
                             material_sharing_available: material_sharing_available(),
                             material_discussions_available: material_discussions_available(),
+                            community_communications_available: community_communications_available(),
                             on_open_space: move |space_id| {
                                 let next = AppRoute::CommunitySpace(space_id);
                                 set_browser_route(next);

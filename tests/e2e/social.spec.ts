@@ -250,19 +250,10 @@ test("shares metadata and matches only each participant's own copy", async ({
     memberDiscussion.getByText("Теперь лучше вижу связь между двумя тезисами."),
   ).toBeVisible();
 
-  await owner.reload();
-  const reloadedOwnerMaterial = owner.getByRole("article", {
-    name: "Материал сообщества Клубная книга",
-  });
-  await reloadedOwnerMaterial
-    .getByRole("button", { name: "Открыть обсуждение" })
-    .click();
-  const reloadedOwnerDiscussion = reloadedOwnerMaterial.getByRole("region", {
-    name: "Обсуждение материала Клубная книга",
-  });
-  const memberReply = reloadedOwnerDiscussion
+  const memberReply = ownerDiscussion
     .getByText("Теперь лучше вижу связь между двумя тезисами.")
     .locator("..");
+  await expect(memberReply).toBeVisible({ timeout: 12_000 });
   await memberReply
     .getByRole("button", { name: "Скрыть", exact: true })
     .click();
@@ -276,6 +267,43 @@ test("shares metadata and matches only each participant's own copy", async ({
     .click();
   await expect(
     reloadedMemberMaterial.getByText("Содержимое скрыто модератором."),
+  ).toBeVisible();
+
+  const memberCommunications = member.getByRole("region", {
+    name: "Чат и активность сообщества",
+  });
+  await memberCommunications
+    .getByLabel("Новое сообщение")
+    .fill("Встречаемся обсудить главу вечером.");
+  await memberCommunications.getByRole("button", { name: "Отправить" }).click();
+  await expect(
+    memberCommunications.getByText("Встречаемся обсудить главу вечером."),
+  ).toBeVisible();
+
+  const ownerCommunications = owner.getByRole("region", {
+    name: "Чат и активность сообщества",
+  });
+  const memberMessage = ownerCommunications.getByRole("article", {
+    name: "Сообщение участника",
+  });
+  await expect(
+    memberMessage.getByText("Встречаемся обсудить главу вечером."),
+  ).toBeVisible({ timeout: 12_000 });
+  await memberMessage.getByRole("button", { name: "Скрыть" }).click();
+  await expect(
+    ownerCommunications.getByText("Содержимое скрыто модератором."),
+  ).toBeVisible();
+  await expect(
+    ownerCommunications
+      .getByRole("region", { name: "Активность сообщества" })
+      .getByText("написал(а) в чат", { exact: false }),
+  ).toBeVisible();
+
+  await member.reload();
+  await expect(
+    member
+      .getByRole("region", { name: "Чат сообщества" })
+      .getByText("Содержимое скрыто модератором."),
   ).toBeVisible();
 
   const reviewer = await register(reviewerContext);

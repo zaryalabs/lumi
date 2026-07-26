@@ -270,6 +270,13 @@ pub fn s1_schema_migrations() -> Vec<SchemaMigration> {
                 "Material-level Community threads, replies, tombstones and append-only moderation actions."
                     .to_owned(),
         },
+        SchemaMigration {
+            id: "s1-0024-community-chat-activity".to_owned(),
+            schema_version: DOMAIN_SCHEMA_VERSION.to_owned(),
+            description:
+                "Member-only Space chat, cursor activity delivery and chat moderation tombstones."
+                    .to_owned(),
+        },
     ]);
     migrations
 }
@@ -1835,7 +1842,7 @@ mod tests {
     fn migrations_cover_s1_contract_groups() {
         let migrations = s1_schema_migrations();
 
-        assert_eq!(migrations.len(), 26);
+        assert_eq!(migrations.len(), 27);
         assert!(migrations
             .iter()
             .any(|migration| migration.id == "s1-0011-ai-contract-freeze-v1"));
@@ -1872,5 +1879,8 @@ mod tests {
         assert!(migrations
             .iter()
             .any(|migration| migration.id == "s1-0023-material-discussions"));
+        assert!(migrations
+            .iter()
+            .any(|migration| migration.id == "s1-0024-community-chat-activity"));
     }
 }

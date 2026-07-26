@@ -2,11 +2,11 @@
 
 ## Назначение
 
-Runbook описывает локальную проверку `0.5.0/E1–E3 independent`: закрытые Community Spaces,
+Runbook описывает локальную проверку `0.5.0/E1–E4 independent`: закрытые Community Spaces,
 membership/roles, доступ по отзывной ссылке, публикацию безопасной material
-identity, привязку собственной копии и material-level discussions. Shared
-anchors/highlights, Social Reader overlay, chat и social search пока не входят
-в опубликованные capabilities.
+identity, привязку собственной копии, material-level discussions, Space chat,
+activity и MCP parity. Shared anchors/highlights, Social Reader overlay и
+social search пока не входят в опубликованные capabilities.
 
 ## Capabilities
 
@@ -17,7 +17,8 @@ PostgreSQL projection, normalized packages и versioned feature key. Web
 показывает действия публикации только после получения этой capability.
 Persistent server также публикует `material-discussions`: material-level
 threads не требуют claim и не содержат quote/source body. Capability
-`shared-reading` остаётся выключенной.
+`community-communications` включает chat/activity REST, Web polling и social
+MCP tools. `shared-reading` и `social-search-index` остаются выключенными.
 
 ## Ручной сценарий
 
@@ -44,6 +45,13 @@ threads не требуют claim и не содержат quote/source body. Ca
 11. Owner/admin скрывает reply: B видит tombstone-like placeholder без body.
     Restore возвращает body, delete очищает его необратимо и сохраняет
     moderation audit.
+12. B пишет в отдельный Space chat. A видит сообщение, скрывает и
+    восстанавливает его; activity отдельно показывает allowlisted событие без
+    body.
+13. Открыть Space в двух вкладках: polling обновляет chat/activity, прекращает
+    запросы в hidden tab, после ошибки использует backoff и ручной retry.
+14. Через MCP проверить `list_community_spaces`, comment и chat tools. После
+    удаления membership следующий вызов с прежним cursor возвращает not found.
 
 Invitation передаётся как `#join/{token}`. Fragment не отправляется серверу
 браузером; Web передаёт token только в preview/join API и очищает route после
@@ -63,6 +71,9 @@ PostgreSQL integration tests ожидают чистую мигрированн�
 `LUMI_TEST_DATABASE_URL`. E2E использует изолированные browser contexts и
 проверяет create → preview → join → revoke/remove, а также
 share → no-copy → exact match/manual-review.
+Вторая часть social E2E проверяет chat/activity, moderation и two-context
+delivery. `make performance` создаёт 50 000 chat messages и 100 000 activity
+events и проверяет first-page budget 300 мс.
 
 ## Security и observability
 
@@ -82,7 +93,21 @@ share → no-copy → exact match/manual-review.
   маскируется для member; delete очищает body и оставляет tombstone.
 - Discussion mutations требуют idempotency и expected revision; moderation
   разрешена только owner/admin и записывается append-only.
+- Chat использует отдельные rows/DTO; delete очищает body, hide маскирует его
+  для member. Activity не возвращает payload и никогда не является ACL source.
+- Structured chat traces содержат только operation, actor/Space/object id и
+  result.
+- Vendor-neutral alert `lumi-community-communications-failures` отслеживает
+  устойчивые `rate_limited`/`unavailable` результаты без content bodies.
 - Rate limit возвращает `429`, invalid mutation — `422`.
+
+## Backup/restore
+
+`scripts/backup.sh` и `scripts/restore-drill.sh` сверяют community row counts:
+Spaces, memberships, все access links и отдельное число revoked links,
+shared materials/comments/chat/activity/moderation. PostgreSQL custom dump
+остаётся authoritative snapshot, поэтому chat и activity восстанавливаются
+согласованно с membership state.
 
 ## Отложенные зависимости
 

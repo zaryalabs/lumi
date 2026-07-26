@@ -1,0 +1,34 @@
+{
+  "contract_version": "community-communications.v1",
+  "chat_page": {
+    "messages": [
+      {
+        "id": "0198a100-0000-7000-8000-000000000001",
+        "community_space_id": "0198a000-0000-7000-8000-000000000001",
+        "author_user_id": "01989000-0000-7000-8000-000000000002",
+        "author_nickname": "Участник",
+        "body_markdown": "Обсудим главу вечером.",
+        "state": "visible",
+        "object_revision": 1,
+        "created_at": 1785038400000,
+        "updated_at": 1785038400000
+      }
+    ],
+    "next_cursor": "MTc4NTAzODQwMDAwMDowMTk4YTEwMC0wMDAwLTcwMDAtODAwMC0wMDAwMDAwMDAwMDE"
+  },
+  "activity_page": {
+    "events": [
+      {
+        "id": "0198a200-0000-7000-8000-000000000001",
+        "community_space_id": "0198a000-0000-7000-8000-000000000001",
+        "actor_user_id": "01989000-0000-7000-8000-000000000002",
+        "actor_nickname": "Участник",
+        "kind": "chat_message_created",
+        "subject_type": "chat_message",
+        "subject_id": "0198a100-0000-7000-8000-000000000001",
+        "created_at": 1785038400000
+      }
+    ],
+    "next_cursor": "MTc4NTAzODQwMDAwMDowMTk4YTIwMC0wMDAwLTcwMDAtODAwMC0wMDAwMDAwMDAwMDE"
+  }
+}

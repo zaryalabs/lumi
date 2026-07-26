@@ -722,6 +722,11 @@ pub(crate) fn service_capabilities(state: &AppState) -> ServiceCapabilities {
             .features
             .push("material-discussions".to_owned());
     }
+    if state.social_runtime().supports_communications() {
+        capabilities
+            .features
+            .push("community-communications".to_owned());
+    }
     capabilities
 }
 
@@ -2221,7 +2226,7 @@ mod tests {
         let migrations: Vec<SchemaMigration> =
             json_get(build_router(), "/api/v1/schema/migrations").await?;
 
-        assert_eq!(migrations.len(), 26);
+        assert_eq!(migrations.len(), 27);
         assert!(migrations
             .iter()
             .any(|migration| migration.id == "s1-0017-learning-core"));
@@ -2243,6 +2248,9 @@ mod tests {
         assert!(migrations
             .iter()
             .any(|migration| migration.id == "s1-0023-material-discussions"));
+        assert!(migrations
+            .iter()
+            .any(|migration| migration.id == "s1-0024-community-chat-activity"));
         Ok(())
     }
 
@@ -2769,8 +2777,8 @@ mod tests {
         config.bind_address = DEFAULT_BIND_ADDRESS.to_owned();
         config.deployment_mode = "local".to_owned();
         let app = build_router_with_state(AppState::persistent(&config).await?);
-        let owner = register_test_session(app.clone(), 0x81).await?;
-        let member = register_test_session(app.clone(), 0x91).await?;
+        let owner = register_unique_test_session(app.clone()).await?;
+        let member = register_unique_test_session(app.clone()).await?;
 
         let create_response = app
             .clone()
@@ -2905,6 +2913,7 @@ mod tests {
             .await?;
         assert_eq!(remove_response.status(), StatusCode::NO_CONTENT);
         let hidden_after_remove = app
+            .clone()
             .oneshot(
                 member.apply(
                     Request::builder()
@@ -2914,6 +2923,27 @@ mod tests {
             )
             .await?;
         assert_eq!(hidden_after_remove.status(), StatusCode::NOT_FOUND);
+        let chat_after_remove = app
+            .clone()
+            .oneshot(
+                member.apply(
+                    Request::builder()
+                        .uri(format!("/api/v1/spaces/{}/chat", created.space.id))
+                        .body(Body::empty())?,
+                ),
+            )
+            .await?;
+        assert_eq!(chat_after_remove.status(), StatusCode::NOT_FOUND);
+        let activity_after_remove = app
+            .oneshot(
+                member.apply(
+                    Request::builder()
+                        .uri(format!("/api/v1/spaces/{}/activity", created.space.id))
+                        .body(Body::empty())?,
+                ),
+            )
+            .await?;
+        assert_eq!(activity_after_remove.status(), StatusCode::NOT_FOUND);
 
         let audit_store = PgAccountStore::connect(&database_url, HashSet::new()).await?;
         let stored_response: serde_json::Value = sqlx_core::query::query(
@@ -2949,9 +2979,9 @@ mod tests {
         config.bind_address = DEFAULT_BIND_ADDRESS.to_owned();
         config.deployment_mode = "local".to_owned();
         let app = build_router_with_state(AppState::persistent(&config).await?);
-        let owner = register_test_session(app.clone(), 0xa1).await?;
-        let member = register_test_session(app.clone(), 0xb1).await?;
-        let reviewer = register_test_session(app.clone(), 0xc1).await?;
+        let owner = register_unique_test_session(app.clone()).await?;
+        let member = register_unique_test_session(app.clone()).await?;
+        let reviewer = register_unique_test_session(app.clone()).await?;
         let owner_material = persist_social_fixture(&database_url, owner.user_id, None).await?;
         let member_material = persist_social_fixture(&database_url, member.user_id, None).await?;
         let reviewer_material = persist_social_fixture(
@@ -3196,7 +3226,7 @@ mod tests {
         )
         .await?;
         let discussions: lumi_core::SharedDiscussionPage = request_json_with_session(
-            app,
+            app.clone(),
             Request::builder()
                 .uri(format!(
                     "/api/v1/spaces/{}/materials/{}/threads?limit=50",
@@ -3220,6 +3250,89 @@ mod tests {
             (hidden_reply.state, hidden_reply.body_markdown.as_deref()),
             (lumi_core::SocialContentState::Hidden, None)
         );
+
+        let message: lumi_core::SharedChatMessage = request_json_with_session_status(
+            app.clone(),
+            Request::builder()
+                .method("POST")
+                .uri(format!("/api/v1/spaces/{}/chat", created.space.id))
+                .header(header::CONTENT_TYPE, "application/json")
+                .header("idempotency-key", "space-chat-create")
+                .body(json_body(&lumi_core::CreateSharedChatMessageRequest {
+                    body_markdown: "Сообщение участника".to_owned(),
+                })?)?,
+            &member,
+            StatusCode::CREATED,
+        )
+        .await?;
+        let replayed: lumi_core::SharedChatMessage = request_json_with_session_status(
+            app.clone(),
+            Request::builder()
+                .method("POST")
+                .uri(format!("/api/v1/spaces/{}/chat", created.space.id))
+                .header(header::CONTENT_TYPE, "application/json")
+                .header("idempotency-key", "space-chat-create")
+                .body(json_body(&lumi_core::CreateSharedChatMessageRequest {
+                    body_markdown: "Сообщение участника".to_owned(),
+                })?)?,
+            &member,
+            StatusCode::CREATED,
+        )
+        .await?;
+        assert_eq!(message.id, replayed.id);
+
+        let _: lumi_core::ModerationAction = request_json_with_session(
+            app.clone(),
+            Request::builder()
+                .method("POST")
+                .uri(format!(
+                    "/api/v1/spaces/{}/moderation/actions",
+                    created.space.id
+                ))
+                .header(header::CONTENT_TYPE, "application/json")
+                .header("idempotency-key", "space-chat-hide")
+                .body(json_body(&lumi_core::ModerateSocialContentRequest {
+                    target_type: lumi_core::ModerationTargetType::ChatMessage,
+                    target_id: message.id,
+                    action: lumi_core::ModerationActionKind::Hide,
+                    expected_revision: message.object_revision,
+                    reason: None,
+                })?)?,
+            &owner,
+        )
+        .await?;
+        let chat: lumi_core::SharedChatPage = request_json_with_session(
+            app.clone(),
+            Request::builder()
+                .uri(format!("/api/v1/spaces/{}/chat", created.space.id))
+                .body(Body::empty())?,
+            &member,
+        )
+        .await?;
+        let hidden_message = chat
+            .messages
+            .iter()
+            .find(|candidate| candidate.id == message.id)
+            .ok_or_else(|| std::io::Error::other("hidden chat message missing"))?;
+        assert_eq!(
+            (
+                hidden_message.state,
+                hidden_message.body_markdown.as_deref()
+            ),
+            (lumi_core::SocialContentState::Hidden, None)
+        );
+        let activity: lumi_core::CommunityActivityPage = request_json_with_session(
+            app,
+            Request::builder()
+                .uri(format!("/api/v1/spaces/{}/activity", created.space.id))
+                .body(Body::empty())?,
+            &member,
+        )
+        .await?;
+        assert!(activity.events.iter().any(|event| {
+            event.kind == lumi_core::CommunityActivityKind::ChatMessageCreated
+                && event.subject_id == message.id
+        }));
         Ok(())
     }
 
@@ -3823,6 +3936,17 @@ mod tests {
         seed: u8,
     ) -> Result<TestSession, Box<dyn std::error::Error>> {
         register_test_session_with_credentials(app, [seed; 32], [seed.wrapping_add(1); 32]).await
+    }
+
+    async fn register_unique_test_session(
+        app: Router,
+    ) -> Result<TestSession, Box<dyn std::error::Error>> {
+        register_test_session_with_credentials(
+            app,
+            unique_test_auth_bytes(),
+            unique_test_auth_bytes(),
+        )
+        .await
     }
 
     async fn register_test_session_with_credentials(

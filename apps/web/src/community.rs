@@ -4,17 +4,21 @@ use dioxus::prelude::*;
 use gloo_net::http::Request;
 use lumi_core::{
     ClaimSharedMaterialRequest, CommunityAccessLink, CommunityAccessLinkStatus,
-    CommunityLinkPreview, CommunityMembership, CommunityMembershipStatus, CommunityRole,
-    CommunitySpace, CommunitySpaceDetail, CreateCommunityAccessLinkRequest,
-    CreateCommunitySpaceRequest, CreateSharedCommentRequest, CreateSharedThreadRequest,
-    CreatedCommunityAccessLink, DeleteSharedCommentRequest, JoinCommunityLinkRequest, LibraryEntry,
-    MaterialImportStatus, ModerateSocialContentRequest, ModerationAction, ModerationActionKind,
-    ModerationTargetType, PreviewCommunityLinkRequest, ShareMaterialRequest, SharedComment,
-    SharedCommentThread, SharedDiscussionPage, SharedMaterial, SocialContentState,
-    UpdateCommunityMemberRequest, UpdateCommunitySpaceRequest, UpdateSharedCommentRequest,
+    CommunityActivityEvent, CommunityActivityKind, CommunityActivityPage, CommunityLinkPreview,
+    CommunityMembership, CommunityMembershipStatus, CommunityRole, CommunitySpace,
+    CommunitySpaceDetail, CreateCommunityAccessLinkRequest, CreateCommunitySpaceRequest,
+    CreateSharedChatMessageRequest, CreateSharedCommentRequest, CreateSharedThreadRequest,
+    CreatedCommunityAccessLink, DeleteSharedChatMessageRequest, DeleteSharedCommentRequest,
+    JoinCommunityLinkRequest, LibraryEntry, MaterialImportStatus, ModerateSocialContentRequest,
+    ModerationAction, ModerationActionKind, ModerationTargetType, PreviewCommunityLinkRequest,
+    ShareMaterialRequest, SharedChatMessage, SharedChatPage, SharedComment, SharedCommentThread,
+    SharedDiscussionPage, SharedMaterial, SocialContentState, UpdateCommunityMemberRequest,
+    UpdateCommunitySpaceRequest, UpdateSharedChatMessageRequest, UpdateSharedCommentRequest,
     UserMaterialClaimStatus,
 };
 use uuid::Uuid;
+#[cfg(target_arch = "wasm32")]
+use wasm_bindgen::{closure::Closure, JsCast};
 use web_sys::RequestCredentials;
 
 use crate::account::{api_response_error, network_error, parse_json, ApiError, API_BASE};
@@ -28,6 +32,7 @@ pub(crate) fn CommunityPage(
     available: bool,
     material_sharing_available: bool,
     material_discussions_available: bool,
+    community_communications_available: bool,
     on_open_space: EventHandler<Uuid>,
     on_open_list: EventHandler<()>,
 ) -> Element {
@@ -60,6 +65,7 @@ pub(crate) fn CommunityPage(
                 space_id,
                 material_sharing_available,
                 material_discussions_available,
+                community_communications_available,
                 on_close: move |_| on_open_list.call(()),
             }
         };
@@ -256,6 +262,7 @@ fn CommunityDetail(
     space_id: Uuid,
     material_sharing_available: bool,
     material_discussions_available: bool,
+    community_communications_available: bool,
     on_close: EventHandler<()>,
 ) -> Element {
     let csrf_token = use_signal(|| csrf_token);
@@ -487,11 +494,16 @@ fn CommunityDetail(
                         } else {
                             p { "Обсуждения материалов пока не включены capability-флагом." }
                         }
-                        p { "Общий чат относится к следующему социальному этапу." }
-                    }
-                    article { class: "library-section",
-                        h2 { "Активность" }
-                        p { "Системные события сохраняются отдельно от будущего чата." }
+                        if community_communications_available {
+                            SpaceCommunications {
+                                space_id,
+                                csrf_token: csrf_token(),
+                                current_user_id,
+                                can_moderate: matches!(current.membership.role, CommunityRole::Owner | CommunityRole::Admin),
+                            }
+                        } else {
+                            p { "Чат и лента активности не включены capability-флагом." }
+                        }
                     }
                 }
                 if current.membership.role != CommunityRole::Owner {
@@ -513,6 +525,288 @@ fn CommunityDetail(
             } else if error().is_empty() {
                 p { role: "status", "Загружаем пространство…" }
             }
+        }
+    }
+}
+
+#[component]
+fn SpaceCommunications(
+    space_id: Uuid,
+    csrf_token: String,
+    current_user_id: Uuid,
+    can_moderate: bool,
+) -> Element {
+    let mut chat = use_signal(|| Option::<SharedChatPage>::None);
+    let mut activity = use_signal(|| Option::<CommunityActivityPage>::None);
+    let mut body = use_signal(String::new);
+    let mut error = use_signal(String::new);
+    let mut busy = use_signal(|| false);
+    let mut generation = use_signal(|| 0_u64);
+    let mut poll_ticket = use_signal(|| 0_u64);
+    use_effect(move || {
+        let _ = generation();
+        let next_ticket = poll_ticket.peek().saturating_add(1);
+        poll_ticket.set(next_ticket);
+        spawn(async move {
+            let chat_result = load_space_chat(space_id, None).await;
+            let activity_result = load_space_activity(space_id, None).await;
+            match (chat_result, activity_result) {
+                (Ok(messages), Ok(events)) => {
+                    let current_chat = chat.peek().clone();
+                    let current_activity = activity.peek().clone();
+                    chat.set(Some(merge_chat_pages(current_chat, messages, true)));
+                    activity.set(Some(merge_activity_pages(current_activity, events, true)));
+                    error.set(String::new());
+                    schedule_visible_refresh(generation, poll_ticket, 5_000);
+                }
+                (Err(load_error), _) | (_, Err(load_error)) => {
+                    error.set(load_error.to_string());
+                    schedule_visible_refresh(generation, poll_ticket, 15_000);
+                }
+            }
+        });
+    });
+    let chat_next_cursor = chat
+        .read()
+        .as_ref()
+        .and_then(|page| page.next_cursor.clone());
+    let activity_next_cursor = activity
+        .read()
+        .as_ref()
+        .and_then(|page| page.next_cursor.clone());
+    rsx! {
+        section { class: "community-communications", aria_label: "Чат и активность сообщества",
+            if !error().is_empty() {
+                div { class: "library-alert", role: "alert",
+                    p { "{error}" }
+                    button { r#type: "button", onclick: move |_| generation += 1, "Повторить" }
+                }
+            }
+            section { class: "community-chat", aria_label: "Чат сообщества",
+                h3 { "Чат" }
+                form {
+                    class: "community-comment-form compact",
+                    onsubmit: move |event| {
+                        event.prevent_default();
+                        if body().trim().is_empty() || busy() {
+                            return;
+                        }
+                        let csrf = csrf_token.clone();
+                        let message_body = body();
+                        busy.set(true);
+                        spawn(async move {
+                            match create_space_chat_message(&csrf, space_id, &message_body).await {
+                                Ok(_) => {
+                                    body.set(String::new());
+                                    generation += 1;
+                                }
+                                Err(send_error) => error.set(send_error.to_string()),
+                            }
+                            busy.set(false);
+                        });
+                    },
+                    label { "Новое сообщение"
+                        textarea {
+                            value: "{body}",
+                            maxlength: "16384",
+                            oninput: move |event| body.set(event.value()),
+                        }
+                    }
+                    button { r#type: "submit", disabled: busy() || body().trim().is_empty(), "Отправить" }
+                }
+                match chat.read().clone() {
+                    None => rsx! { p { role: "status", "Загружаем чат…" } },
+                    Some(page) if page.messages.is_empty() => rsx! { p { "Сообщений пока нет." } },
+                    Some(page) => rsx! {
+                        ul { class: "community-chat-list",
+                            for message in page.messages {
+                                li {
+                                    SpaceChatMessageView {
+                                        message,
+                                        space_id,
+                                        csrf_token: csrf_token.clone(),
+                                        current_user_id,
+                                        can_moderate,
+                                        on_changed: move |_| generation += 1,
+                                    }
+                                }
+                            }
+                        }
+                    },
+                }
+                if let Some(cursor) = chat_next_cursor {
+                    button {
+                        class: "secondary-action compact-action",
+                        r#type: "button",
+                        disabled: busy(),
+                        onclick: move |_| {
+                            busy.set(true);
+                            let cursor = cursor.clone();
+                            spawn(async move {
+                                match load_space_chat(space_id, Some(&cursor)).await {
+                                    Ok(next_page) => {
+                                        let current = chat.peek().clone();
+                                        chat.set(Some(merge_chat_pages(current, next_page, false)));
+                                    }
+                                    Err(load_error) => error.set(load_error.to_string()),
+                                }
+                                busy.set(false);
+                            });
+                        },
+                        "Загрузить ещё сообщения"
+                    }
+                }
+            }
+            section { class: "community-activity", aria_label: "Активность сообщества",
+                h3 { "Активность" }
+                match activity.read().clone() {
+                    None => rsx! { p { role: "status", "Загружаем активность…" } },
+                    Some(page) if page.events.is_empty() => rsx! { p { "Событий пока нет." } },
+                    Some(page) => rsx! {
+                        ol { class: "community-activity-list",
+                            for event in page.events {
+                                li {
+                                    strong { "{event.actor_nickname.as_deref().unwrap_or(\"Система\")}" }
+                                    span { " {activity_label(&event)}" }
+                                }
+                            }
+                        }
+                    },
+                }
+                if let Some(cursor) = activity_next_cursor {
+                    button {
+                        class: "secondary-action compact-action",
+                        r#type: "button",
+                        onclick: move |_| {
+                            let cursor = cursor.clone();
+                            spawn(async move {
+                                match load_space_activity(space_id, Some(&cursor)).await {
+                                    Ok(next_page) => {
+                                        let current = activity.peek().clone();
+                                        activity.set(Some(merge_activity_pages(
+                                            current, next_page, false,
+                                        )));
+                                    }
+                                    Err(load_error) => error.set(load_error.to_string()),
+                                }
+                            });
+                        },
+                        "Загрузить ещё события"
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[component]
+fn SpaceChatMessageView(
+    message: SharedChatMessage,
+    space_id: Uuid,
+    csrf_token: String,
+    current_user_id: Uuid,
+    can_moderate: bool,
+    on_changed: EventHandler<()>,
+) -> Element {
+    let mut editing = use_signal(|| false);
+    let mut edit_body = use_signal(|| message.body_markdown.clone().unwrap_or_default());
+    let mut error = use_signal(String::new);
+    let is_author = message.author_user_id == current_user_id;
+    let edit_csrf = csrf_token.clone();
+    let delete_csrf = csrf_token.clone();
+    let moderation_csrf = csrf_token;
+    rsx! {
+        article { class: "community-chat-message", aria_label: "Сообщение участника",
+            header {
+                strong { "{message.author_nickname.as_deref().unwrap_or(\"Без псевдонима\")}" }
+                span { " · rev {message.object_revision}" }
+            }
+            if editing() {
+                form {
+                    class: "community-comment-form compact",
+                    onsubmit: move |event| {
+                        event.prevent_default();
+                        let csrf = edit_csrf.clone();
+                        let request = UpdateSharedChatMessageRequest {
+                            body_markdown: edit_body(),
+                            expected_revision: message.object_revision,
+                        };
+                        spawn(async move {
+                            match update_space_chat_message(&csrf, space_id, message.id, &request).await {
+                                Ok(_) => {
+                                    editing.set(false);
+                                    on_changed.call(());
+                                }
+                                Err(update_error) => error.set(update_error.to_string()),
+                            }
+                        });
+                    },
+                    label { "Изменить сообщение"
+                        textarea {
+                            value: "{edit_body}",
+                            maxlength: "16384",
+                            oninput: move |event| edit_body.set(event.value()),
+                        }
+                    }
+                    div { class: "community-comment-actions",
+                        button { r#type: "submit", "Сохранить" }
+                        button { r#type: "button", onclick: move |_| editing.set(false), "Отмена" }
+                    }
+                }
+            } else if message.state == SocialContentState::Visible {
+                p { class: "community-comment-body", "{message.body_markdown.as_deref().unwrap_or_default()}" }
+            } else {
+                p { class: "community-comment-placeholder", "{social_state_placeholder(message.state)}" }
+            }
+            div { class: "community-comment-actions",
+                if is_author && message.state == SocialContentState::Visible {
+                    button { r#type: "button", onclick: move |_| editing.set(true), "Изменить" }
+                    button {
+                        r#type: "button",
+                        onclick: move |_| {
+                            let csrf = delete_csrf.clone();
+                            spawn(async move {
+                                let request = DeleteSharedChatMessageRequest {
+                                    expected_revision: message.object_revision,
+                                };
+                                match delete_space_chat_message(&csrf, space_id, message.id, &request).await {
+                                    Ok(_) => on_changed.call(()),
+                                    Err(delete_error) => error.set(delete_error.to_string()),
+                                }
+                            });
+                        },
+                        "Удалить"
+                    }
+                }
+                if can_moderate && !is_author && message.state != SocialContentState::Deleted {
+                    button {
+                        r#type: "button",
+                        onclick: move |_| {
+                            let csrf = moderation_csrf.clone();
+                            let action = if message.state == SocialContentState::Hidden {
+                                ModerationActionKind::Restore
+                            } else {
+                                ModerationActionKind::Hide
+                            };
+                            spawn(async move {
+                                match moderate_social_content(
+                                    &csrf,
+                                    space_id,
+                                    ModerationTargetType::ChatMessage,
+                                    message.id,
+                                    action,
+                                    message.object_revision,
+                                ).await {
+                                    Ok(_) => on_changed.call(()),
+                                    Err(moderation_error) => error.set(moderation_error.to_string()),
+                                }
+                            });
+                        },
+                        if message.state == SocialContentState::Hidden { "Восстановить" } else { "Скрыть" }
+                    }
+                }
+            }
+            if !error().is_empty() { p { class: "account-error", role: "alert", "{error}" } }
         }
     }
 }
@@ -738,18 +1032,26 @@ fn DiscussionPanel(
     let mut error = use_signal(String::new);
     let mut busy = use_signal(|| false);
     let mut generation = use_signal(|| 0_u64);
+    let mut poll_ticket = use_signal(|| 0_u64);
     use_effect(move || {
         let _ = generation();
+        let next_ticket = poll_ticket.peek().saturating_add(1);
+        poll_ticket.set(next_ticket);
         if !open() {
             return;
         }
         spawn(async move {
             match load_discussions(space_id, shared_material_id, None).await {
                 Ok(loaded) => {
-                    page.set(Some(loaded));
+                    let current_page = page.peek().clone();
+                    page.set(Some(merge_discussion_pages(current_page, loaded, true)));
                     error.set(String::new());
+                    schedule_visible_refresh(generation, poll_ticket, 5_000);
                 }
-                Err(load_error) => error.set(load_error.to_string()),
+                Err(load_error) => {
+                    error.set(load_error.to_string());
+                    schedule_visible_refresh(generation, poll_ticket, 15_000);
+                }
             }
         });
     });
@@ -1290,6 +1592,65 @@ async fn load_discussions(
     .await
 }
 
+async fn load_space_chat(space_id: Uuid, after: Option<&str>) -> Result<SharedChatPage, ApiError> {
+    let suffix = after.map_or(String::new(), |cursor| format!("?after={cursor}"));
+    api_get(&format!("/spaces/{space_id}/chat{suffix}")).await
+}
+
+async fn create_space_chat_message(
+    csrf: &str,
+    space_id: Uuid,
+    body_markdown: &str,
+) -> Result<SharedChatMessage, ApiError> {
+    api_json_mutation(
+        "POST",
+        &format!("/spaces/{space_id}/chat"),
+        csrf,
+        &CreateSharedChatMessageRequest {
+            body_markdown: body_markdown.to_owned(),
+        },
+    )
+    .await
+}
+
+async fn update_space_chat_message(
+    csrf: &str,
+    space_id: Uuid,
+    message_id: Uuid,
+    request: &UpdateSharedChatMessageRequest,
+) -> Result<SharedChatMessage, ApiError> {
+    api_json_mutation(
+        "PATCH",
+        &format!("/spaces/{space_id}/chat/{message_id}"),
+        csrf,
+        request,
+    )
+    .await
+}
+
+async fn delete_space_chat_message(
+    csrf: &str,
+    space_id: Uuid,
+    message_id: Uuid,
+    request: &DeleteSharedChatMessageRequest,
+) -> Result<SharedChatMessage, ApiError> {
+    api_json_mutation(
+        "DELETE",
+        &format!("/spaces/{space_id}/chat/{message_id}"),
+        csrf,
+        request,
+    )
+    .await
+}
+
+async fn load_space_activity(
+    space_id: Uuid,
+    after: Option<&str>,
+) -> Result<CommunityActivityPage, ApiError> {
+    let suffix = after.map_or(String::new(), |cursor| format!("?after={cursor}"));
+    api_get(&format!("/spaces/{space_id}/activity{suffix}")).await
+}
+
 async fn create_shared_thread(
     csrf: &str,
     space_id: Uuid,
@@ -1714,3 +2075,138 @@ fn social_state_placeholder(state: SocialContentState) -> &'static str {
         SocialContentState::Deleted => "Комментарий удалён.",
     }
 }
+
+fn activity_label(event: &CommunityActivityEvent) -> &'static str {
+    match event.kind {
+        CommunityActivityKind::SpaceCreated => "создал(а) пространство",
+        CommunityActivityKind::MemberJoined => "вступил(а) в пространство",
+        CommunityActivityKind::MemberLeft => "вышел/вышла из пространства",
+        CommunityActivityKind::MemberRemoved => "удалил(а) участника",
+        CommunityActivityKind::MaterialAdded => "добавил(а) материал",
+        CommunityActivityKind::DiscussionStarted => "начал(а) обсуждение материала",
+        CommunityActivityKind::ContentModerated => "изменил(а) видимость публикации",
+        CommunityActivityKind::ChatMessageCreated => "написал(а) в чат",
+    }
+}
+
+fn merge_chat_pages(
+    existing: Option<SharedChatPage>,
+    incoming: SharedChatPage,
+    preserve_existing_cursor: bool,
+) -> SharedChatPage {
+    let Some(mut existing) = existing else {
+        return incoming;
+    };
+    let incoming_len = incoming.messages.len();
+    for message in incoming.messages {
+        if let Some(position) = existing
+            .messages
+            .iter()
+            .position(|candidate| candidate.id == message.id)
+        {
+            existing.messages[position] = message;
+        } else {
+            existing.messages.push(message);
+        }
+    }
+    existing
+        .messages
+        .sort_by_key(|message| (message.created_at, message.id));
+    if !preserve_existing_cursor || existing.messages.len() <= incoming_len {
+        existing.next_cursor = incoming.next_cursor;
+    }
+    existing
+}
+
+fn merge_discussion_pages(
+    existing: Option<SharedDiscussionPage>,
+    mut incoming: SharedDiscussionPage,
+    preserve_existing_cursor: bool,
+) -> SharedDiscussionPage {
+    let Some(mut existing) = existing else {
+        return incoming;
+    };
+    let incoming_len = incoming.threads.len();
+    for thread in incoming.threads.drain(..) {
+        if let Some(position) = existing
+            .threads
+            .iter()
+            .position(|candidate| candidate.id == thread.id)
+        {
+            existing.threads[position] = thread;
+        } else {
+            existing.threads.push(thread);
+        }
+    }
+    existing
+        .threads
+        .sort_by_key(|thread| (thread.created_at, thread.id));
+    if !preserve_existing_cursor || existing.threads.len() <= incoming_len {
+        existing.next_cursor = incoming.next_cursor;
+    }
+    existing
+}
+
+fn merge_activity_pages(
+    existing: Option<CommunityActivityPage>,
+    incoming: CommunityActivityPage,
+    preserve_existing_cursor: bool,
+) -> CommunityActivityPage {
+    let Some(mut existing) = existing else {
+        return incoming;
+    };
+    let incoming_len = incoming.events.len();
+    for event in incoming.events {
+        if !existing
+            .events
+            .iter()
+            .any(|candidate| candidate.id == event.id)
+        {
+            existing.events.push(event);
+        }
+    }
+    existing
+        .events
+        .sort_by_key(|event| (event.created_at, event.id));
+    if !preserve_existing_cursor || existing.events.len() <= incoming_len {
+        existing.next_cursor = incoming.next_cursor;
+    }
+    existing
+}
+
+#[cfg(target_arch = "wasm32")]
+fn schedule_visible_refresh(
+    mut generation: Signal<u64>,
+    mut poll_ticket: Signal<u64>,
+    delay_ms: i32,
+) {
+    let expected_ticket = poll_ticket.peek().saturating_add(1);
+    poll_ticket.set(expected_ticket);
+    let callback = Closure::once(move || {
+        if *poll_ticket.peek() != expected_ticket {
+            return;
+        }
+        let visible = web_sys::window()
+            .and_then(|window| window.document())
+            .is_none_or(|document| !document.hidden());
+        if visible {
+            generation.set(generation().saturating_add(1));
+        } else {
+            schedule_visible_refresh(generation, poll_ticket, 5_000);
+        }
+    });
+    if let Some(window) = web_sys::window() {
+        if window
+            .set_timeout_with_callback_and_timeout_and_arguments_0(
+                callback.as_ref().unchecked_ref(),
+                delay_ms,
+            )
+            .is_ok()
+        {
+            callback.forget();
+        }
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn schedule_visible_refresh(_generation: Signal<u64>, _poll_ticket: Signal<u64>, _delay_ms: i32) {}

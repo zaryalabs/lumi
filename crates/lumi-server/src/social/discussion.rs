@@ -16,6 +16,7 @@ use sqlx_postgres::{PgRow, Postgres};
 use time::OffsetDateTime;
 use uuid::Uuid;
 
+use super::communications::moderate_chat_message;
 use super::permissions;
 use super::service::SocialStoreError;
 use super::store::{
@@ -559,6 +560,9 @@ impl PgSocialStore {
             ModerationTargetType::Comment => {
                 moderate_comment(&mut transaction, space_id, request, user_id, now).await?
             }
+            ModerationTargetType::ChatMessage => {
+                moderate_chat_message(&mut transaction, space_id, request, user_id, now).await?
+            }
         };
         let response = ModerationAction {
             id: Uuid::now_v7(),
@@ -965,6 +969,7 @@ fn target_type_db(value: ModerationTargetType) -> &'static str {
     match value {
         ModerationTargetType::Thread => "thread",
         ModerationTargetType::Comment => "comment",
+        ModerationTargetType::ChatMessage => "chat_message",
     }
 }
 

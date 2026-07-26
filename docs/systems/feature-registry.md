@@ -196,6 +196,8 @@ server-side `whisper-1`, editable transcript acceptance, retry и retention.
 
 `SOC-005` выпускается по capability slices. `material-discussions` покрывает
 material-level threads/replies и moderation без зависимости от `RD-006`.
+`community-communications` покрывает Space chat, append-only activity,
+cursor/polling delivery и MCP parity без доступа к private content.
 Полный `shared-reading` остаётся зависимым от Records v2: shared anchors,
 explicit published highlights и Reader overlay не считаются готовыми.
 

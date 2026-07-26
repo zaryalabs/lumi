@@ -437,5 +437,22 @@ account scope, idempotency и typed errors, не открывает BYOK credent
 audio/blob storage или conversation runtime. Frozen schema и parity/foreign
 account fixtures находятся в `tests/fixtures/mcp/contracts/v2`.
 
+## Расширение `0.5.0/E4`: social parity
+
+Registry `mcp-tools.v3` добавляет:
+
+- `list_community_spaces`, `get_community_space`;
+- `share_material_to_space`;
+- `list_shared_comments`, `create_shared_comment`,
+  `update_shared_comment`, `delete_shared_comment`;
+- `list_space_chat_messages`, `create_space_chat_message`.
+
+Tools публикуются по `community-spaces`, `material-sharing`,
+`material-discussions` и `community-communications`. Каждый adapter вызывает
+тот же permission-checked `SocialRuntime`, что REST/Web; cursor limits,
+idempotency, owner material scope и removed-membership denial не дублируются в
+transport слое. Registry snapshot находится в
+`tests/fixtures/mcp/contracts/v3`.
+
 Операторский smoke и пример клиентской конфигурации:
 [`../runbooks/mcp-external-agents.md`](../runbooks/mcp-external-agents.md).

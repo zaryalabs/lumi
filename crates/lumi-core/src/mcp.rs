@@ -14,7 +14,7 @@ use crate::{
 /// Frozen MCP protocol snapshot.
 pub const MCP_PROTOCOL_VERSION: &str = "2025-06-18";
 /// Version of Lumi MCP tool schemas and DTOs.
-pub const MCP_TOOL_CONTRACT_VERSION: &str = "mcp-tools.v2";
+pub const MCP_TOOL_CONTRACT_VERSION: &str = "mcp-tools.v3";
 /// Maximum MCP control request body.
 pub const MCP_CONTROL_REQUEST_MAX_BYTES: usize = 1024 * 1024;
 /// Maximum ordinary inline MCP tool result.
@@ -379,6 +379,15 @@ pub const MCP_TOOL_NAMES: &[&str] = &[
     "list_learning_items",
     "create_flashcard_task",
     "submit_learning_answer",
+    "list_community_spaces",
+    "get_community_space",
+    "share_material_to_space",
+    "list_shared_comments",
+    "create_shared_comment",
+    "update_shared_comment",
+    "delete_shared_comment",
+    "list_space_chat_messages",
+    "create_space_chat_message",
 ];
 
 const MCP_TOOL_SCHEMAS: &[McpToolSchemaContract] = &[
@@ -557,6 +566,51 @@ const MCP_TOOL_SCHEMAS: &[McpToolSchemaContract] = &[
         input_schema: "submit-learning-answer.input.v1",
         output_schema: "learning-attempt.output.v1",
     },
+    McpToolSchemaContract {
+        name: "list_community_spaces",
+        input_schema: "list-community-spaces.input.v1",
+        output_schema: "community-space-page.output.v1",
+    },
+    McpToolSchemaContract {
+        name: "get_community_space",
+        input_schema: "community-space-id.input.v1",
+        output_schema: "community-space-detail.output.v1",
+    },
+    McpToolSchemaContract {
+        name: "share_material_to_space",
+        input_schema: "share-material-to-space.input.v1",
+        output_schema: "shared-material.output.v1",
+    },
+    McpToolSchemaContract {
+        name: "list_shared_comments",
+        input_schema: "list-shared-comments.input.v1",
+        output_schema: "shared-discussion-page.output.v1",
+    },
+    McpToolSchemaContract {
+        name: "create_shared_comment",
+        input_schema: "create-shared-comment.input.v1",
+        output_schema: "shared-comment.output.v1",
+    },
+    McpToolSchemaContract {
+        name: "update_shared_comment",
+        input_schema: "update-shared-comment.input.v1",
+        output_schema: "shared-comment.output.v1",
+    },
+    McpToolSchemaContract {
+        name: "delete_shared_comment",
+        input_schema: "delete-shared-comment.input.v1",
+        output_schema: "shared-comment.output.v1",
+    },
+    McpToolSchemaContract {
+        name: "list_space_chat_messages",
+        input_schema: "list-space-chat-messages.input.v1",
+        output_schema: "shared-chat-page.output.v1",
+    },
+    McpToolSchemaContract {
+        name: "create_space_chat_message",
+        input_schema: "create-space-chat-message.input.v1",
+        output_schema: "shared-chat-message.output.v1",
+    },
 ];
 
 const MCP_HTTP_ROUTES: [McpHttpRouteContract; 4] = [
@@ -651,7 +705,7 @@ mod tests {
     #[test]
     fn frozen_mcp_tool_snapshot_matches_allowlist() -> Result<(), Box<dyn std::error::Error>> {
         let registry: Value = serde_json::from_str(include_str!(
-            "../../../tests/fixtures/mcp/contracts/v2/tool-registry.json"
+            "../../../tests/fixtures/mcp/contracts/v3/tool-registry.json"
         ))?;
         let tools = registry["tools"]
             .as_array()

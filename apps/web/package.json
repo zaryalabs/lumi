@@ -1,7 +1,7 @@
 {
   "name": "lumi-web-assets",
   "private": true,
-  "version": "0.3.0",
+  "version": "0.5.0",
   "scripts": {
     "prepare:pdfjs": "node scripts/prepare-pdfjs.mjs"
   },

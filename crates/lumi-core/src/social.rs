@@ -14,16 +14,22 @@ use crate::{DocumentRevisionId, MaterialId, SourceFormat, TimestampMs, UserId};
 pub const COMMUNITY_CONTRACT_VERSION: &str = "community-space.v1";
 /// Version of material-level Community discussions independent from private records.
 pub const MATERIAL_DISCUSSION_CONTRACT_VERSION: &str = "material-discussion.v1";
+/// Version of Space chat and activity cursor delivery.
+pub const COMMUNITY_COMMUNICATIONS_CONTRACT_VERSION: &str = "community-communications.v1";
 /// Maximum Community Space name length in Unicode scalar values.
 pub const COMMUNITY_NAME_MAX_CHARS: usize = 120;
 /// Maximum Community Space description length in encoded UTF-8 bytes.
 pub const COMMUNITY_DESCRIPTION_MAX_BYTES: usize = 4 * 1024;
 /// Maximum stored comment body length in encoded UTF-8 bytes.
 pub const SHARED_COMMENT_BODY_MAX_BYTES: usize = 16 * 1024;
+/// Maximum stored Space chat message length in encoded UTF-8 bytes.
+pub const SHARED_CHAT_BODY_MAX_BYTES: usize = 16 * 1024;
 /// Maximum moderation reason length in encoded UTF-8 bytes.
 pub const MODERATION_REASON_MAX_BYTES: usize = 1024;
 /// Maximum number of threads returned by one cursor page.
 pub const SHARED_THREAD_PAGE_MAX: u16 = 100;
+/// Maximum number of chat messages or activity events returned by one cursor page.
+pub const COMMUNITY_FEED_PAGE_MAX: u16 = 100;
 
 /// Stable product identifier of a Community Space.
 pub type CommunitySpaceId = Uuid;
@@ -41,8 +47,52 @@ pub type UserMaterialClaimId = Uuid;
 pub type SharedCommentThreadId = Uuid;
 /// Stable identifier of one shared comment or reply.
 pub type SharedCommentId = Uuid;
+/// Stable identifier of one Space chat message.
+pub type SharedChatMessageId = Uuid;
 /// Stable identifier of an append-only moderation decision.
 pub type ModerationActionId = Uuid;
+
+/// Allowlisted system event kinds exposed by the member-only activity feed.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CommunityActivityKind {
+    /// Space aggregate was created.
+    SpaceCreated,
+    /// A participant joined through an active access link.
+    MemberJoined,
+    /// A participant left voluntarily.
+    MemberLeft,
+    /// A participant was removed by an owner or administrator.
+    MemberRemoved,
+    /// A private material identity was shared without source bytes.
+    MaterialAdded,
+    /// A material-level discussion was started.
+    DiscussionStarted,
+    /// A moderator changed a social object's visibility.
+    ContentModerated,
+    /// A chat message was created.
+    ChatMessageCreated,
+}
+
+/// Allowlisted activity subject kinds; private material/revision identities are absent.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CommunityActivitySubjectType {
+    /// Community Space aggregate.
+    CommunitySpace,
+    /// Community membership projection.
+    CommunityMembership,
+    /// Community-safe shared material identity.
+    SharedMaterial,
+    /// Material-level discussion thread.
+    SharedCommentThread,
+    /// Material-level discussion comment.
+    Comment,
+    /// Space chat message.
+    ChatMessage,
+    /// Generic thread target used by moderation events.
+    Thread,
+}
 
 /// Discoverability supported by the first closed Community release.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -136,6 +186,8 @@ pub enum ModerationTargetType {
     Thread,
     /// Individual comment or reply.
     Comment,
+    /// Space chat message.
+    ChatMessage,
 }
 
 /// Moderation transition applied to one social object.
@@ -209,6 +261,91 @@ pub struct SharedDiscussionPage {
     pub threads: Vec<SharedCommentThread>,
     /// Opaque cursor for the next page or polling continuation.
     pub next_cursor: Option<String>,
+}
+
+/// One member-only Space chat message.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct SharedChatMessage {
+    /// Stable chat message identity.
+    pub id: SharedChatMessageId,
+    /// Community Space containing the message.
+    pub community_space_id: CommunitySpaceId,
+    /// Stable author identity used for authorization.
+    pub author_user_id: UserId,
+    /// Mutable display nickname, never used for authorization.
+    pub author_nickname: Option<String>,
+    /// Body is absent for hidden content unavailable to the caller and tombstones.
+    pub body_markdown: Option<String>,
+    /// Current visibility/tombstone state.
+    pub state: SocialContentState,
+    /// Optimistic concurrency revision.
+    pub object_revision: u64,
+    /// Creation timestamp.
+    pub created_at: TimestampMs,
+    /// Last mutation timestamp.
+    pub updated_at: TimestampMs,
+}
+
+/// Cursor-paginated Space chat response ordered by `(created_at, id)`.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct SharedChatPage {
+    /// Bounded chat message page.
+    pub messages: Vec<SharedChatMessage>,
+    /// Opaque continuation cursor.
+    pub next_cursor: Option<String>,
+}
+
+/// Member-only append-only activity event without private source metadata.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct CommunityActivityEvent {
+    /// Stable event identity.
+    pub id: CommunityActivityEventId,
+    /// Community Space containing the event.
+    pub community_space_id: CommunitySpaceId,
+    /// Optional actor for system-generated events.
+    pub actor_user_id: Option<UserId>,
+    /// Current display nickname, never used for authorization.
+    pub actor_nickname: Option<String>,
+    /// Allowlisted event kind.
+    pub kind: CommunityActivityKind,
+    /// Allowlisted Community-safe subject kind.
+    pub subject_type: CommunityActivitySubjectType,
+    /// Community-safe subject identity.
+    pub subject_id: Uuid,
+    /// Creation timestamp.
+    pub created_at: TimestampMs,
+}
+
+/// Cursor-paginated member-only activity response ordered by `(created_at, id)`.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct CommunityActivityPage {
+    /// Bounded activity event page.
+    pub events: Vec<CommunityActivityEvent>,
+    /// Opaque continuation cursor.
+    pub next_cursor: Option<String>,
+}
+
+/// Input for creating one Space chat message.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct CreateSharedChatMessageRequest {
+    /// Markdown stored as text and rendered without raw HTML.
+    pub body_markdown: String,
+}
+
+/// Input for editing the caller's own Space chat message.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct UpdateSharedChatMessageRequest {
+    /// Replacement Markdown body.
+    pub body_markdown: String,
+    /// Revision observed by the editor.
+    pub expected_revision: u64,
+}
+
+/// Input for deleting the caller's own Space chat message.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct DeleteSharedChatMessageRequest {
+    /// Revision observed by the author.
+    pub expected_revision: u64,
 }
 
 /// Input for starting a material-level discussion with its first comment.
@@ -586,6 +723,8 @@ pub enum CommunityAction {
     RemoveMaterial,
     /// Create a material-level thread or comment.
     CreateDiscussion,
+    /// Create, edit or delete the caller's Space chat message.
+    UseChat,
     /// Hide, restore or delete another member's social content.
     ModerateContent,
 }
@@ -738,6 +877,51 @@ impl ModerateSocialContentRequest {
     }
 }
 
+impl CreateSharedChatMessageRequest {
+    /// Normalize and validate a Space chat body.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed validation error for a blank or oversized body.
+    pub fn normalized(mut self) -> Result<Self, CommunityContractError> {
+        self.body_markdown = normalize_social_body(
+            self.body_markdown,
+            "body_markdown",
+            SHARED_CHAT_BODY_MAX_BYTES,
+        )?;
+        Ok(self)
+    }
+}
+
+impl UpdateSharedChatMessageRequest {
+    /// Normalize the replacement body and validate optimistic concurrency input.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed validation error for revision zero or an invalid body.
+    pub fn normalized(mut self) -> Result<Self, CommunityContractError> {
+        validate_revision(self.expected_revision)?;
+        self.body_markdown = normalize_social_body(
+            self.body_markdown,
+            "body_markdown",
+            SHARED_CHAT_BODY_MAX_BYTES,
+        )?;
+        Ok(self)
+    }
+}
+
+impl DeleteSharedChatMessageRequest {
+    /// Validate optimistic concurrency input.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CommunityContractError::InvalidRevision`] for revision zero.
+    pub fn validate(self) -> Result<Self, CommunityContractError> {
+        validate_revision(self.expected_revision)?;
+        Ok(self)
+    }
+}
+
 /// Validate a caller-selected thread page size.
 ///
 /// # Errors
@@ -745,6 +929,19 @@ impl ModerateSocialContentRequest {
 /// Returns [`CommunityContractError::InvalidPageLimit`] outside `1..=100`.
 pub fn validate_shared_thread_page_limit(limit: u16) -> Result<u16, CommunityContractError> {
     if (1..=SHARED_THREAD_PAGE_MAX).contains(&limit) {
+        Ok(limit)
+    } else {
+        Err(CommunityContractError::InvalidPageLimit)
+    }
+}
+
+/// Validate a chat/activity cursor page size.
+///
+/// # Errors
+///
+/// Returns [`CommunityContractError::InvalidPageLimit`] outside `1..=100`.
+pub fn validate_community_feed_page_limit(limit: u16) -> Result<u16, CommunityContractError> {
+    if (1..=COMMUNITY_FEED_PAGE_MAX).contains(&limit) {
         Ok(limit)
     } else {
         Err(CommunityContractError::InvalidPageLimit)
@@ -767,7 +964,8 @@ pub fn authorize_community_action(
     let allowed = match action {
         CommunityAction::View
         | CommunityAction::AddMaterial
-        | CommunityAction::CreateDiscussion => true,
+        | CommunityAction::CreateDiscussion
+        | CommunityAction::UseChat => true,
         CommunityAction::UpdateSpace | CommunityAction::ManageLinks => {
             matches!(role, CommunityRole::Owner | CommunityRole::Admin)
         }
@@ -859,14 +1057,20 @@ fn normalize_description(value: Option<String>) -> Result<Option<String>, Commun
 }
 
 fn normalize_shared_comment(value: String) -> Result<String, CommunityContractError> {
+    normalize_social_body(value, "body_markdown", SHARED_COMMENT_BODY_MAX_BYTES)
+}
+
+fn normalize_social_body(
+    value: String,
+    field: &'static str,
+    max_bytes: usize,
+) -> Result<String, CommunityContractError> {
     let value = value.trim();
     if value.is_empty() {
-        return Err(CommunityContractError::EmptyField("body_markdown"));
+        return Err(CommunityContractError::EmptyField(field));
     }
-    if value.len() > SHARED_COMMENT_BODY_MAX_BYTES {
-        return Err(CommunityContractError::FieldTooLarge {
-            field: "body_markdown",
-        });
+    if value.len() > max_bytes {
+        return Err(CommunityContractError::FieldTooLarge { field });
     }
     Ok(value.to_owned())
 }
@@ -988,5 +1192,30 @@ mod tests {
         );
 
         assert_eq!(result, Err(CommunityContractError::Forbidden));
+    }
+
+    #[test]
+    fn chat_message_normalization_trims_body() {
+        assert_eq!(
+            CreateSharedChatMessageRequest {
+                body_markdown: "  Обсудим главу?  ".to_owned(),
+            }
+            .normalized(),
+            Ok(CreateSharedChatMessageRequest {
+                body_markdown: "Обсудим главу?".to_owned(),
+            })
+        );
+    }
+
+    #[test]
+    fn active_member_can_use_space_chat() {
+        assert_eq!(
+            authorize_community_action(
+                CommunityRole::Member,
+                CommunityMembershipStatus::Active,
+                CommunityAction::UseChat,
+            ),
+            Ok(())
+        );
     }
 }

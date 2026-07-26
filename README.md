@@ -123,6 +123,13 @@ author edit/delete, moderation tombstones, cursor API и Community discussion
 surface. Persistent server публикует capability `material-discussions`, но не
 `shared-reading`: anchor comments, published highlights и Reader overlay
 остаются отложены до общего Records v2 target/provenance contract `0.4.0`.
+Для независимой части `0.5.0/E4` добавлены отдельные Space chat и append-only
+activity, author CRUD/moderation tombstones, bounded cursor/polling delivery и
+account-scoped social tools в registry `mcp-tools.v3` поверх общих application
+services. Backup/restore evidence включает community state и revoked links,
+performance gate проверяет 50 000 сообщений и 100 000 событий. Workspace и Web
+package имеют версию `0.5.0`. Permission-aware social search events остаются
+выключены и перечислены в deferred-документе до готовности `0.4.0/E3–E5`.
 
 ## Локальный запуск
 

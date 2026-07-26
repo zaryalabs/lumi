@@ -680,6 +680,49 @@ p {
 .community-comment-form.compact textarea {
   min-height: 4.5rem;
 }
+
+.community-communications {
+  display: grid;
+  gap: 1.2rem;
+  margin-top: 1rem;
+}
+
+.community-chat,
+.community-activity {
+  display: grid;
+  gap: 0.75rem;
+  padding-top: 0.8rem;
+  border-top: 1px solid var(--border);
+}
+
+.community-chat-list,
+.community-activity-list {
+  display: grid;
+  gap: 0.65rem;
+  padding: 0;
+  list-style: none;
+}
+
+.community-chat-message {
+  display: grid;
+  gap: 0.5rem;
+  padding: 0.75rem;
+  border: 1px solid var(--border);
+  border-radius: 0.75rem;
+  background: var(--paper);
+}
+
+.community-chat-message header {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: space-between;
+  gap: 0.5rem;
+}
+
+.community-activity-list li {
+  padding-block: 0.45rem;
+  border-bottom: 1px solid var(--border);
+}
 .continue-section {
   margin: 0 0 54px;
 }
