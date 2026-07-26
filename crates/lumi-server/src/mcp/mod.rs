@@ -802,6 +802,7 @@ fn tool_enabled(state: &AppState, name: &str) -> bool {
         "import_url" | "import_text" | "get_import_status" => state.imports.is_some(),
         "get_source_context"
         | "create_summary_task"
+        | "create_abridgement_task"
         | "get_summary"
         | "list_ai_tasks"
         | "claim_ai_task"
@@ -1295,10 +1296,30 @@ async fn call_tool(
         "complete_ai_task" => {
             let request: CompleteAiTaskRequest =
                 serde_json::from_value(arguments).map_err(|_| ToolError::Invalid)?;
+            let abridgement = request.result.get("schema_version").and_then(Value::as_str)
+                == Some(lumi_core::ABRIDGEMENT_ARTIFACT_SCHEMA_VERSION);
+            if abridgement {
+                state
+                    .imports
+                    .as_ref()
+                    .ok_or(ToolError::Unavailable)?
+                    .preflight_abridgement_completion(principal.user_id, &request)
+                    .await
+                    .map_err(map_import_tool)?;
+            }
             let result = ai_repository(state)?
                 .complete_task(principal.user_id, request)
                 .await
                 .map_err(map_ai_tool)?;
+            if result.result_schema_version == lumi_core::ABRIDGEMENT_ARTIFACT_SCHEMA_VERSION {
+                state
+                    .imports
+                    .as_ref()
+                    .ok_or(ToolError::Unavailable)?
+                    .publish_abridgement_artifact(principal.user_id, result.artifact_id)
+                    .await
+                    .map_err(map_import_tool)?;
+            }
             Ok(json!(result))
         }
         "fail_ai_task" | "release_ai_task" => {
@@ -1343,6 +1364,20 @@ async fn call_tool(
             let request: lumi_core::CreateSummaryTaskRequest =
                 serde_json::from_value(arguments).map_err(|_| ToolError::Invalid)?;
             let task = crate::ai::tasks::create_summary_task_for_owner(
+                state,
+                principal.user_id,
+                material_id,
+                request,
+            )
+            .await
+            .map_err(|_| ToolError::Unavailable)?;
+            Ok(json!(task))
+        }
+        "create_abridgement_task" => {
+            let material_id = uuid_arg(&arguments, "material_id")?;
+            let request: lumi_core::CreateAbridgementTaskRequest =
+                serde_json::from_value(arguments).map_err(|_| ToolError::Invalid)?;
+            let task = crate::ai::tasks::create_abridgement_task_for_owner(
                 state,
                 principal.user_id,
                 material_id,

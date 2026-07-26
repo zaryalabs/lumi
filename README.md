@@ -39,19 +39,22 @@ Repository-side production contract и main-only self-hosted CI/CD описан�
 наличие не означает, что server bootstrap, DNS или первый production deploy уже
 выполнены.
 
-Для `0.2.0` реализованы foundation A1 и продуктовые эпики E1–E2:
+Для `0.2.0` реализованы foundation A1 и все продуктовые эпики E1–E4:
 owner-scoped explicit source context, зашифрованный OpenRouter BYOK,
 глобальный durable streaming AI-чат, Reader selection handoff и рабочие
 source citations, а также durable AI queue, внутренний worker, сохранённые
-chapter/material summaries и manual-edit candidate policy. Операционные
+chapter/material summaries и manual-edit candidate policy. Revocable
+account-scoped MCP Streamable HTTP предоставляет product tools и fenced
+external AI worker поверх тех же application services. Сокращение публикуется
+как отдельный portable `.lum`: сервер собирает и повторно импортирует package,
+атомарно добавляет готовый производный материал в библиотеку и сохраняет точные
+ссылки на immutable revision оригинала. Операционные
 контракты описаны в
 [docs/runbooks/ai-persistence.md](docs/runbooks/ai-persistence.md) и
 [docs/runbooks/personal-ai-assistant.md](docs/runbooks/personal-ai-assistant.md),
-[docs/runbooks/ai-task-queue.md](docs/runbooks/ai-task-queue.md).
-Реализован `0.2.0/E3`: revocable account-scoped MCP Streamable HTTP,
-product tools и fenced external AI worker поверх общих application services.
-Производные `.lum` остаются следующим эпиком и не рекламируются capabilities
-преждевременно. Настройка агента описана в
+[docs/runbooks/ai-task-queue.md](docs/runbooks/ai-task-queue.md) и
+[docs/runbooks/derived-materials.md](docs/runbooks/derived-materials.md).
+Настройка внешнего агента описана в
 [`docs/runbooks/mcp-external-agents.md`](docs/runbooks/mcp-external-agents.md).
 
 ## Локальный запуск

@@ -331,6 +331,10 @@ impl AppState {
                 .recover_expired()
                 .await
                 .map_err(|error| anyhow::anyhow!(error))?;
+            imports
+                .recover_abridgements()
+                .await
+                .map_err(|error| anyhow::anyhow!(error))?;
         }
         let telegram = TelegramRuntime::open(
             accounts.pool().clone(),
@@ -355,7 +359,7 @@ impl AppState {
             telegram: Some(telegram),
             ai: Some(Arc::new(ai)),
             mcp,
-            ai_capabilities: ai::AiCapabilityReadiness::e3_external_agents(),
+            ai_capabilities: ai::AiCapabilityReadiness::e4_release(),
         })
     }
 
@@ -418,8 +422,8 @@ impl AppState {
 
     /// Run the durable internal AI task worker until shutdown.
     pub async fn run_ai_tasks(self, cancellation: tokio_util::sync::CancellationToken) {
-        if let Some(runtime) = self.ai {
-            ai::tasks::run_worker(runtime, cancellation).await;
+        if let (Some(runtime), Some(imports)) = (self.ai, self.imports) {
+            ai::tasks::run_worker(runtime, imports, cancellation).await;
         } else {
             cancellation.cancelled().await;
         }
@@ -1542,6 +1546,7 @@ fn fixture_library_entry(
         import_status,
         updated_at: latest_job.updated_at,
         latest_job,
+        derivation: None,
         created_at: material.created_at,
     })
 }

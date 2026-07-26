@@ -12,6 +12,7 @@ const openRouterOrigin = `http://127.0.0.1:${openRouterPort}`;
 
 export default defineConfig({
   testDir: ".",
+  workers: process.env.CI ? 1 : undefined,
   testIgnore: [
     "prototype.spec.ts",
     "pagination-spike.spec.ts",

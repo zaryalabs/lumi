@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
-use crate::{DOMAIN_SCHEMA_VERSION, NORMALIZED_PACKAGE_VERSION};
+use crate::{SourceCitation, DOMAIN_SCHEMA_VERSION, NORMALIZED_PACKAGE_VERSION};
 
 const S0_DOMAIN_SCHEMA_VERSION: &str = "s0.2026-06-21";
 
@@ -1681,7 +1681,7 @@ pub enum MaterialImportStatus {
 }
 
 /// Server-backed projection used by the library for every import lifecycle state.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct LibraryEntry {
     /// Stable material id allocated when upload is accepted.
     pub id: MaterialId,
@@ -1703,10 +1703,32 @@ pub struct LibraryEntry {
     pub import_status: MaterialImportStatus,
     /// Latest durable import job, including diagnostics.
     pub latest_job: Job,
+    /// Exact original relation for a generated material.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub derivation: Option<DerivedMaterialRelation>,
     /// Material creation timestamp.
     pub created_at: TimestampMs,
     /// Last material or import state change timestamp.
     pub updated_at: TimestampMs,
+}
+
+/// Reader-facing owner-scoped provenance for one generated material.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct DerivedMaterialRelation {
+    /// Stable relation kind.
+    pub kind: String,
+    /// Exact source material.
+    pub source_material_id: MaterialId,
+    /// Exact immutable source revision.
+    pub source_revision_id: DocumentRevisionId,
+    /// Producing AI task.
+    pub task_id: Uuid,
+    /// Producing AI artifact.
+    pub artifact_id: Uuid,
+    /// Whether the original now has a newer active revision.
+    pub source_changed: bool,
+    /// Source-backed navigation refs retained from generation.
+    pub source_refs: Vec<SourceCitation>,
 }
 
 impl LibraryEntry {

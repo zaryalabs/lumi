@@ -159,3 +159,74 @@ test("keeps a manual summary edit and offers regeneration as a candidate", async
     .filter({ hasText: "Готово" });
   await expect(completedSummaries).toHaveCount(2);
 });
+
+test("publishes an abridged lum only after ordinary import validation", async ({
+  page,
+}) => {
+  test.setTimeout(120_000);
+  await register(page);
+  await configureOpenRouter(page);
+  const originalCard = await importMarkdown(page);
+
+  await originalCard
+    .getByRole("button", { name: "Дополнительные действия с материалом" })
+    .click();
+  await originalCard.getByRole("button", { name: "Сведения" }).click();
+  const details = page.getByRole("dialog", { name: "Сведения о материале" });
+  await details.getByRole("button", { name: "Сокращённая версия" }).click();
+  const abridgement = details.getByRole("region", {
+    name: "Создание сокращённого материала",
+  });
+  await abridgement
+    .getByRole("button", { name: "Создать и выполнить" })
+    .click();
+  await abridgement.getByRole("link", { name: "Открыть очередь" }).click();
+
+  const queue = page.getByRole("main", { name: "Очередь AI-задач" });
+  await page.getByLabel("Показывать завершённые").check();
+  const row = queue.getByRole("row").filter({ hasText: "Сокращённый .lum" });
+  await expect
+    .poll(
+      async () => {
+        await queue.getByRole("button", { name: "Обновить" }).click();
+        return (await row.textContent()) ?? "";
+      },
+      { timeout: 60_000 },
+    )
+    .toContain("Готово");
+
+  await page.getByRole("link", { name: "Библиотека", exact: true }).click();
+  const derivedCard = page.getByRole("article", {
+    name: "Материал Сокращённое руководство Lumi",
+  });
+  await expect(derivedCard).toContainText("Производный материал");
+  await derivedCard
+    .getByRole("button", { name: "Дополнительные действия с материалом" })
+    .click();
+  await derivedCard.getByRole("button", { name: "Сведения" }).click();
+  const derivedDetails = page.getByRole("dialog", {
+    name: "Сведения о материале",
+  });
+  await expect(derivedDetails.getByText("Сокращение ревизии")).toBeVisible();
+  await expect(
+    derivedDetails.getByRole("link", { name: "Открыть оригинал" }),
+  ).toBeVisible();
+  await expect(
+    derivedDetails.getByRole("button", { name: "Открыть источник 1" }),
+  ).toBeVisible();
+  await derivedDetails
+    .getByRole("button", { name: "Открыть источник 1" })
+    .click();
+  await expect(
+    page.getByRole("main", { name: "Чтение Руководство Lumi" }),
+  ).toBeVisible();
+  await expect(page.getByText("Открыт источник саммари.")).toBeVisible();
+  await page.getByRole("button", { name: "Вернуться в библиотеку" }).click();
+  await derivedCard.getByRole("button", { name: "Читать" }).click();
+  await expect(
+    page.getByRole("main", { name: "Чтение Сокращённое руководство Lumi" }),
+  ).toBeVisible();
+  await expect(
+    page.getByText("Ключевые идеи материала в проверяемом сокращении."),
+  ).toBeVisible();
+});

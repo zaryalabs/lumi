@@ -22,6 +22,12 @@ pub const SOURCE_CITATION_SCHEMA_VERSION: &str = "source-citation.v1";
 pub const EXPLICIT_CONTEXT_LIMITS_VERSION: &str = "explicit-context-limits.v1";
 /// Version of the first summary artifact payload.
 pub const SUMMARY_ARTIFACT_SCHEMA_VERSION: &str = "summary-artifact.v1";
+/// Version of the generated abridgement artifact payload.
+pub const ABRIDGEMENT_ARTIFACT_SCHEMA_VERSION: &str = "abridgement-artifact.v1";
+/// Version of one internal chapter abridgement result.
+pub const ABRIDGEMENT_CHAPTER_SCHEMA_VERSION: &str = "abridgement-chapter.v1";
+/// Version of the material abridgement prompt.
+pub const ABRIDGEMENT_MATERIAL_PROMPT_VERSION: &str = "abridgement.material.v1";
 /// Version of the chapter brief summary prompt.
 pub const SUMMARY_CHAPTER_BRIEF_PROMPT_VERSION: &str = "summary.chapter.brief.v1";
 /// Version of the chapter outline summary prompt.
@@ -1267,6 +1273,90 @@ pub struct CreateAbridgementTaskRequest {
     pub idempotency_key: String,
 }
 
+/// One source-backed chapter in a generated abridgement.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct AbridgementChapter {
+    /// Stable executor-provided chapter label; Lumi assigns package paths.
+    pub title: String,
+    /// Generated Lumi Markdown body.
+    pub content: String,
+    /// Citation identifiers issued in the immutable context pack.
+    pub citation_ids: Vec<String>,
+}
+
+/// Typed executor result from which Lumi assembles a portable `.lum` package.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct AbridgementArtifactPayload {
+    /// Structured payload schema.
+    pub schema_version: String,
+    /// Reader-facing derived material title.
+    pub title: String,
+    /// Compression profile requested by the account.
+    pub profile: String,
+    /// Ordered generated chapters.
+    pub chapters: Vec<AbridgementChapter>,
+    /// De-duplicated union of chapter citation identifiers.
+    pub citation_ids: Vec<String>,
+}
+
+impl AbridgementArtifactPayload {
+    /// Maximum generated chapter count accepted at the executor boundary.
+    pub const MAX_CHAPTERS: usize = 128;
+    /// Maximum generated Markdown bytes accepted across all chapters.
+    pub const MAX_CONTENT_BYTES: usize = 2 * 1024 * 1024;
+
+    /// Validate the bounded, source-backed abridgement payload.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed error for invalid versions, bounds, empty content or
+    /// inconsistent citation unions.
+    pub fn validate(&self) -> Result<(), AiContractError> {
+        require_version(&self.schema_version, ABRIDGEMENT_ARTIFACT_SCHEMA_VERSION)?;
+        require_non_empty("title", &self.title, 512)?;
+        require_non_empty("profile", &self.profile, 64)?;
+        if self.chapters.is_empty() || self.chapters.len() > Self::MAX_CHAPTERS {
+            return Err(AiContractError::InvalidStructuredOutput(
+                "abridgement chapter count is outside bounds",
+            ));
+        }
+        let mut total_bytes = 0usize;
+        let mut chapter_citations = std::collections::HashSet::new();
+        for chapter in &self.chapters {
+            require_non_empty("chapter.title", &chapter.title, 512)?;
+            require_non_empty("chapter.content", &chapter.content, 256 * 1024)?;
+            total_bytes = total_bytes.saturating_add(chapter.content.len());
+            if chapter.citation_ids.is_empty() {
+                return Err(AiContractError::InvalidStructuredOutput(
+                    "every abridgement chapter requires citations",
+                ));
+            }
+            for citation_id in &chapter.citation_ids {
+                require_non_empty("chapter.citation_id", citation_id, 256)?;
+                chapter_citations.insert(citation_id.as_str());
+            }
+        }
+        if total_bytes > Self::MAX_CONTENT_BYTES {
+            return Err(AiContractError::InvalidStructuredOutput(
+                "abridgement content exceeds schema limit",
+            ));
+        }
+        let mut declared = std::collections::HashSet::new();
+        if self.citation_ids.is_empty()
+            || self
+                .citation_ids
+                .iter()
+                .any(|citation_id| !declared.insert(citation_id.as_str()))
+            || declared != chapter_citations
+        {
+            return Err(AiContractError::InvalidStructuredOutput(
+                "abridgement citation union is incomplete or duplicated",
+            ));
+        }
+        Ok(())
+    }
+}
+
 /// Cursor-based page shared by AI list routes.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct AiPage<T> {
@@ -1330,26 +1420,68 @@ pub fn ai_prompt_registry() -> &'static [AiPromptDescriptor] {
 /// Return the frozen structured-output registry.
 #[must_use]
 pub fn ai_output_schema_registry() -> Vec<AiOutputSchemaDescriptor> {
-    vec![AiOutputSchemaDescriptor {
-        version: SUMMARY_ARTIFACT_SCHEMA_VERSION,
-        artifact_kind: "summary_artifact",
-        schema: json!({
-            "$id": SUMMARY_ARTIFACT_SCHEMA_VERSION,
-            "type": "object",
-            "required": ["schema_version", "content", "citation_ids"],
-            "properties": {
-                "schema_version": {"const": SUMMARY_ARTIFACT_SCHEMA_VERSION},
-                "content": {"type": "string", "minLength": 1},
-                "citation_ids": {
-                    "type": "array",
-                    "minItems": 1,
-                    "items": {"type": "string", "minLength": 1}
-                }
-            },
-            "additionalProperties": false
-        }),
-        max_payload_bytes: 256 * 1024,
-    }]
+    vec![
+        AiOutputSchemaDescriptor {
+            version: SUMMARY_ARTIFACT_SCHEMA_VERSION,
+            artifact_kind: "summary_artifact",
+            schema: json!({
+                "$id": SUMMARY_ARTIFACT_SCHEMA_VERSION,
+                "type": "object",
+                "required": ["schema_version", "content", "citation_ids"],
+                "properties": {
+                    "schema_version": {"const": SUMMARY_ARTIFACT_SCHEMA_VERSION},
+                    "content": {"type": "string", "minLength": 1},
+                    "citation_ids": {
+                        "type": "array",
+                        "minItems": 1,
+                        "items": {"type": "string", "minLength": 1}
+                    }
+                },
+                "additionalProperties": false
+            }),
+            max_payload_bytes: 256 * 1024,
+        },
+        AiOutputSchemaDescriptor {
+            version: ABRIDGEMENT_ARTIFACT_SCHEMA_VERSION,
+            artifact_kind: "abridgement_artifact",
+            schema: json!({
+                "$id": ABRIDGEMENT_ARTIFACT_SCHEMA_VERSION,
+                "type": "object",
+                "required": ["schema_version", "title", "profile", "chapters", "citation_ids"],
+                "properties": {
+                    "schema_version": {"const": ABRIDGEMENT_ARTIFACT_SCHEMA_VERSION},
+                    "title": {"type": "string", "minLength": 1, "maxLength": 512},
+                    "profile": {"type": "string", "minLength": 1, "maxLength": 64},
+                    "chapters": {
+                        "type": "array",
+                        "minItems": 1,
+                        "maxItems": AbridgementArtifactPayload::MAX_CHAPTERS,
+                        "items": {
+                            "type": "object",
+                            "required": ["title", "content", "citation_ids"],
+                            "properties": {
+                                "title": {"type": "string", "minLength": 1, "maxLength": 512},
+                                "content": {"type": "string", "minLength": 1},
+                                "citation_ids": {
+                                    "type": "array",
+                                    "minItems": 1,
+                                    "items": {"type": "string", "minLength": 1}
+                                }
+                            },
+                            "additionalProperties": false
+                        }
+                    },
+                    "citation_ids": {
+                        "type": "array",
+                        "minItems": 1,
+                        "items": {"type": "string", "minLength": 1}
+                    }
+                },
+                "additionalProperties": false
+            }),
+            max_payload_bytes: AbridgementArtifactPayload::MAX_CONTENT_BYTES + 256 * 1024,
+        },
+    ]
 }
 
 /// Validate a provider/MCP structured result against a frozen output schema.
@@ -1368,12 +1500,41 @@ pub fn validate_ai_output(schema_version: &str, payload: &Value) -> Result<(), A
             "payload exceeds schema limit",
         ));
     }
+    if schema_version == ABRIDGEMENT_ARTIFACT_SCHEMA_VERSION {
+        let abridgement: AbridgementArtifactPayload = serde_json::from_value(payload.clone())
+            .map_err(|_| {
+                AiContractError::InvalidStructuredOutput(
+                    "payload does not match abridgement-artifact.v1",
+                )
+            })?;
+        let object = payload
+            .as_object()
+            .ok_or(AiContractError::InvalidStructuredOutput(
+                "payload must be an object",
+            ))?;
+        if object.len() != 5
+            || object
+                .get("chapters")
+                .and_then(Value::as_array)
+                .is_none_or(|chapters| {
+                    chapters
+                        .iter()
+                        .any(|chapter| chapter.as_object().map(serde_json::Map::len) != Some(3))
+                })
+        {
+            return Err(AiContractError::InvalidStructuredOutput(
+                "payload does not match abridgement-artifact.v1",
+            ));
+        }
+        return abridgement.validate();
+    }
     let object = payload
         .as_object()
         .ok_or(AiContractError::InvalidStructuredOutput(
             "payload must be an object",
         ))?;
-    if object.len() != 3
+    if schema_version != SUMMARY_ARTIFACT_SCHEMA_VERSION
+        || object.len() != 3
         || object.get("schema_version").and_then(Value::as_str)
             != Some(SUMMARY_ARTIFACT_SCHEMA_VERSION)
         || object
@@ -1431,7 +1592,7 @@ fn require_non_empty(
     }
 }
 
-const PROMPT_REGISTRY: [AiPromptDescriptor; 4] = [
+const PROMPT_REGISTRY: [AiPromptDescriptor; 5] = [
     AiPromptDescriptor {
         version: SUMMARY_CHAPTER_BRIEF_PROMPT_VERSION,
         task_kind: "summary",
@@ -1453,6 +1614,12 @@ const PROMPT_REGISTRY: [AiPromptDescriptor; 4] = [
     AiPromptDescriptor {
         version: SUMMARY_MATERIAL_OUTLINE_PROMPT_VERSION,
         task_kind: "summary",
+        scope: SummaryScopeKind::Material,
+        form: SummaryForm::Outline,
+    },
+    AiPromptDescriptor {
+        version: ABRIDGEMENT_MATERIAL_PROMPT_VERSION,
+        task_kind: "abridgement",
         scope: SummaryScopeKind::Material,
         form: SummaryForm::Outline,
     },

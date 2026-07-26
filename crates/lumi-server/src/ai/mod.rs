@@ -211,6 +211,25 @@ impl AiCapabilityReadiness {
         }
     }
 
+    /// Readiness after `0.2.0/E4`: validated derived materials and release
+    /// hardening complete the public AI/MCP vertical.
+    #[must_use]
+    pub const fn e4_release() -> Self {
+        Self {
+            persistence: true,
+            common_jobs: true,
+            secret_store: true,
+            provider_delivery: true,
+            explicit_context_delivery: true,
+            task_queue_delivery: true,
+            summary_delivery: true,
+            chat_delivery: true,
+            abridgement_delivery: true,
+            mcp_delivery: true,
+            mcp_worker_delivery: true,
+        }
+    }
+
     /// Return only product feature ids whose complete vertical prerequisites
     /// are present.
     #[must_use]
@@ -320,6 +339,14 @@ mod capability_tests {
                 "mcp-ai-worker",
             ]
         );
+    }
+
+    #[test]
+    fn e4_advertises_validated_abridged_lum() {
+        let features = AiCapabilityReadiness::e4_release().advertised_feature_ids();
+
+        assert!(features.iter().any(|feature| feature == "ai-abridged-lum"));
+        assert!(features.iter().any(|feature| feature == "mcp-ai-worker"));
     }
 
     #[test]

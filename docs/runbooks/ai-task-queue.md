@@ -2,9 +2,9 @@
 
 Status: `accepted`
 
-Этот runbook описывает production path эпика `0.2.0/E2`: durable очередь,
-внутренний OpenRouter worker, сохранённые саммари главы/материала и защиту
-ручных правок.
+Этот runbook описывает production path эпиков `0.2.0/E2–E4`: durable очередь,
+внутренний OpenRouter worker, сохранённые саммари главы/материала, защиту
+ручных правок и выпуск производного `.lum`.
 
 ## Пользовательский flow
 
@@ -46,6 +46,13 @@ context pack. Финальный payload обязан пройти frozen
 `summary-artifact.v1` validation и проверку citation IDs до транзакционной
 публикации.
 
+Для material-scoped abridgement worker использует
+`abridgement-artifact.v1`, а после structured result последовательно отмечает
+`package_assembly`, `package_validation`, `import` и `publication`. ZIP не
+является входом AI executor: сервер собирает его из проверенных chapter units и
+повторно использует обычный `.lum` importer. Подробная диагностика и recovery
+описаны в [derived-materials.md](derived-materials.md).
+
 При старте worker вызывает recovery общего Job Runtime. Истёкший claim
 освобождается для следующей попытки, старый fence больше не может опубликовать
 результат. Максимум попыток хранится в job row. Retryable provider failure
@@ -66,6 +73,7 @@ Cancel queued task завершает её сразу. Для running task вы�
 - `POST /ai/tasks/bulk-execute`, не более 50 task IDs;
 - `GET /materials/{material_id}/summaries`;
 - `POST /materials/{material_id}/summary-tasks`;
+- `POST /materials/{material_id}/abridgement-tasks`;
 - `PATCH|DELETE /ai/summaries/{summary_id}`;
 - `GET /ai/artifacts/{artifact_id}`;
 - `POST /ai/artifacts/{artifact_id}/accept|reject`.

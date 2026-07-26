@@ -50,8 +50,9 @@ Webhook не является активным staging transport; будущая
 Server и встроенный listener пишут JSON events. Request middleware создаёт и возвращает
 `x-request-id`; events не содержат request/Telegram body или runtime secrets.
 Минимальные vendor-neutral alerts заданы в `deployments/alerts.yaml`: readiness,
-error rate, import failures и stale backup. Перед beta operator должен привязать
-эти signals к конкретному log/metrics backend и проверить тестовый alert.
+error rate, import/AI task failures, отклонённый abridgement recovery и stale
+backup. Перед beta operator должен привязать эти signals к конкретному
+log/metrics backend и проверить тестовый alert.
 
 ## Backup
 

@@ -6,20 +6,21 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use lumi_core::{
-    content_hash, import_epub, import_lum, import_markdown, import_telegram_composite,
-    import_telegram_text, import_web_snapshot, normalize_pdf, AcceptedImport, Annotation,
-    AnnotationExport, AnnotationKind, BlobManifest, BlobRef, BlobRole, ContinueReadingEntry,
-    CreateAnnotationCommand, DeleteAnnotationCommand, DiagnosticSeverity, DocumentRevision,
-    DocumentRevisionId, EpubImportError, EpubImportRequest, EpubLimits, FixedLayoutContentPackage,
-    ImportDiagnostic, ImportStatusEntry, ImportedEpub, ImportedPdf, ImportedPublication,
-    ImportedPublicationResource, Job, JobId, JobKind, JobStage, JobStatus, LibraryEntry,
-    LibraryState, LumImportError, LumImportRequest, LumLimits, MarkdownImportError,
+    build_generated_lum_package, content_hash, import_epub, import_lum, import_markdown,
+    import_telegram_composite, import_telegram_text, import_web_snapshot, normalize_pdf,
+    AcceptedImport, Annotation, AnnotationExport, AnnotationKind, BlobManifest, BlobRef, BlobRole,
+    ContinueReadingEntry, CreateAnnotationCommand, DeleteAnnotationCommand,
+    DerivedMaterialRelation, DiagnosticSeverity, DocumentRevision, DocumentRevisionId,
+    EpubImportError, EpubImportRequest, EpubLimits, FixedLayoutContentPackage,
+    GeneratedLumPackageRequest, ImportDiagnostic, ImportStatusEntry, ImportedEpub, ImportedPdf,
+    ImportedPublication, ImportedPublicationResource, Job, JobId, JobKind, JobStage, JobStatus,
+    LibraryEntry, LibraryState, LumImportError, LumImportRequest, LumLimits, MarkdownImportError,
     MarkdownImportRequest, MarkdownLimits, Material, MaterialId, MaterialImportStatus,
     MaterialKind, MoveReadingPositionCommand, NormalizedContentPackage, PageFidelityDocument,
     PdfImportRequest, PdfLimits, ReaderSettings, ReadingDocument, ReadingNode, ReadingNodeKind,
     ReadingProgress, RenderPlan, SourceIdentity, TelegramCapturedImage, TelegramMessageSnapshot,
     TelegramPhotoDescriptor, TelegramUpdate, TelegramWebSection, UpdateAnnotationCommand,
-    LUM_SOURCE_MEDIA_TYPE,
+    GENERATED_LUM_PROVENANCE_VERSION, LUM_SOURCE_MEDIA_TYPE,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -63,7 +64,7 @@ const SOURCE_RESERVATION_LEASE_SQL: &str = "1 minute";
 #[cfg(test)]
 pub(crate) static POSTGRES_RECOVERY_TEST_LOCK: tokio::sync::Mutex<()> =
     tokio::sync::Mutex::const_new(());
-const REQUIRED_MIGRATION_COUNT: i64 = 15;
+const REQUIRED_MIGRATION_COUNT: i64 = 19;
 #[cfg(not(test))]
 const HEARTBEAT_INTERVAL: std::time::Duration = std::time::Duration::from_secs(30);
 #[cfg(test)]
@@ -258,6 +259,414 @@ impl ImportService {
             _global: global,
             _account: account,
         })
+    }
+
+    /// Assemble, ordinary-import and atomically publish one completed
+    /// abridgement candidate.
+    pub(crate) async fn publish_abridgement_artifact(
+        &self,
+        owner_id: Uuid,
+        artifact_id: Uuid,
+    ) -> Result<DerivedMaterialRelation, ImportServiceError> {
+        if let Some(relation) = self.derivation_by_artifact(owner_id, artifact_id).await? {
+            return Ok(relation);
+        }
+        let repository = crate::ai::repository::PgAiRepository::new(self.pool.clone());
+        let input = repository
+            .abridgement_publication_input(owner_id, artifact_id)
+            .await
+            .map_err(|error| match error {
+                crate::ai::repository::AiRepositoryError::NotFound => ImportServiceError::NotFound,
+                crate::ai::repository::AiRepositoryError::Conflict
+                | crate::ai::repository::AiRepositoryError::StaleClaim => {
+                    ImportServiceError::Conflict
+                }
+                crate::ai::repository::AiRepositoryError::Invalid(_) => {
+                    ImportServiceError::BadRequest("abridgement artifact is invalid")
+                }
+                crate::ai::repository::AiRepositoryError::Storage => {
+                    ImportServiceError::Unavailable
+                }
+            })?;
+        let material_id = Uuid::now_v7();
+        let revision_id = Uuid::now_v7();
+        let source_name = format!("abridged-{}.lum", input.artifact_id.simple());
+        let book_id = format!("lumi-abridged-{}", input.artifact_id.simple());
+        let package_bytes = build_generated_lum_package(GeneratedLumPackageRequest {
+            book_id: &book_id,
+            source_material_id: input.source_material_id,
+            source_revision_id: input.source_revision_id,
+            task_id: input.task_id,
+            artifact_id: input.artifact_id,
+            prompt_version: &input.prompt_version,
+            artifact_schema_version: &input.schema_version,
+            payload: &input.payload,
+            source_refs: &input.source_refs,
+        })
+        .map_err(|_| ImportServiceError::BadRequest("generated LUM assembly failed"))?;
+        let imported = import_lum(
+            LumImportRequest {
+                owner_id,
+                material_id,
+                revision_id,
+                source_name: &source_name,
+                source: &package_bytes,
+            },
+            LumLimits::web_v1(),
+            || false,
+        )
+        .map_err(|_| ImportServiceError::BadRequest("generated LUM validation failed"))?;
+        let mut publication = PersistablePublication::from_reflowable(imported)?;
+        publication.revision.created_at = timestamp_ms(OffsetDateTime::now_utc());
+
+        let source_hash = content_hash(&package_bytes);
+        let stored_source = self
+            .blobs
+            .put(&source_hash, &package_bytes)
+            .await
+            .map_err(map_blob_error)?;
+        let mut stored_resources = Vec::with_capacity(publication.resources.len());
+        for resource in &publication.resources {
+            let stored = self
+                .blobs
+                .put(&resource.content_hash, &resource.bytes)
+                .await
+                .map_err(map_blob_error)?;
+            stored_resources.push((resource.clone(), stored));
+        }
+        let normalized_bytes = serde_json::to_vec(&publication.package_payload)
+            .map_err(|_| ImportServiceError::Unavailable)?;
+        let normalized_hash = content_hash(&normalized_bytes);
+        let stored_normalized = self
+            .blobs
+            .put(&normalized_hash, &normalized_bytes)
+            .await
+            .map_err(map_blob_error)?;
+
+        let now = OffsetDateTime::now_utc();
+        let mut tx = self.pool.begin().await.map_err(log_storage_error)?;
+        sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 8))")
+            .bind(artifact_id.to_string())
+            .execute(&mut *tx)
+            .await
+            .map_err(log_storage_error)?;
+        if let Some(relation) =
+            derivation_by_artifact_in_transaction(&mut tx, owner_id, artifact_id).await?
+        {
+            tx.rollback().await.map_err(log_storage_error)?;
+            return Ok(relation);
+        }
+        let source_row = sqlx::query(
+            "SELECT material.space_id FROM materials material JOIN document_revisions revision ON revision.revision_id = $2 AND revision.material_id = material.material_id AND revision.space_id = material.space_id WHERE material.material_id = $1 AND material.owner_user_id = $3 AND material.deleted_at IS NULL FOR SHARE OF material, revision",
+        )
+        .bind(input.source_material_id)
+        .bind(input.source_revision_id)
+        .bind(owner_id)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(log_storage_error)?
+        .ok_or(ImportServiceError::NotFound)?;
+        let space_id: Uuid = source_row.try_get("space_id").map_err(log_storage_error)?;
+        let device_id: Uuid = sqlx::query_scalar(
+            "SELECT device_id FROM sync_devices WHERE user_id = $1 AND revoked_at IS NULL ORDER BY created_at, device_id LIMIT 1",
+        )
+        .bind(owner_id)
+        .fetch_one(&mut *tx)
+        .await
+        .map_err(log_storage_error)?;
+        let job_id = Uuid::now_v7();
+        let source_ref = SourceRef::Lum {
+            blob_hash: source_hash.clone(),
+            file_name: source_name.clone(),
+            media_type: LUM_SOURCE_MEDIA_TYPE.to_owned(),
+            device_id,
+        };
+        sqlx::query(
+            "INSERT INTO materials (material_id, space_id, owner_user_id, kind, canonical_title, library_state, source_identity, import_status, created_at, updated_at) VALUES ($1, $2, $3, 'lum', $4, 'active', $5, 'ready', $6, $6)",
+        )
+        .bind(material_id)
+        .bind(space_id)
+        .bind(owner_id)
+        .bind(&publication.title)
+        .bind(serde_json::to_value(&publication.source_identity).map_err(|_| ImportServiceError::Unavailable)?)
+        .bind(now)
+        .execute(&mut *tx)
+        .await
+        .map_err(log_storage_error)?;
+        insert_blob_record(&mut tx, &source_hash, LUM_SOURCE_MEDIA_TYPE, &stored_source).await?;
+        for (resource, stored) in &stored_resources {
+            insert_blob_record(
+                &mut tx,
+                &resource.content_hash,
+                &resource.media_type,
+                stored,
+            )
+            .await?;
+        }
+        insert_blob_record(
+            &mut tx,
+            &normalized_hash,
+            "application/vnd.lumi.normalized+json",
+            &stored_normalized,
+        )
+        .await?;
+        sqlx::query(
+            "INSERT INTO document_revisions (revision_id, material_id, space_id, source_format, source_hash, importer_id, importer_version, created_at, normalized_hash, package_format_version, source_blob_hash, supersedes_revision_id) VALUES ($1, $2, $3, 'lum', $4, $5, $6, $7, $8, $9, $10, NULL)",
+        )
+        .bind(revision_id)
+        .bind(material_id)
+        .bind(space_id)
+        .bind(&publication.revision.source_hash)
+        .bind(&publication.revision.importer_id)
+        .bind(&publication.revision.importer_version)
+        .bind(now)
+        .bind(&publication.revision.normalized_hash)
+        .bind(&publication.revision.package_format_version)
+        .bind(&source_hash)
+        .execute(&mut *tx)
+        .await
+        .map_err(log_storage_error)?;
+        sqlx::query(
+            "INSERT INTO import_jobs (job_id, user_id, space_id, status, stage, source_ref, result_material_id, revision_id, idempotency_key, attempt, max_attempts, cancellation_requested, error_code, started_at, finished_at, source_kind, worker_fence, created_at, updated_at) VALUES ($1, $2, $3, 'succeeded', 'committed', $4, $5, $6, $7, 1, 1, false, NULL, $8, $8, 'lum', 0, $8, $8)",
+        )
+        .bind(job_id)
+        .bind(owner_id)
+        .bind(space_id)
+        .bind(serde_json::to_value(&source_ref).map_err(|_| ImportServiceError::Unavailable)?)
+        .bind(material_id)
+        .bind(revision_id)
+        .bind(format!("abridgement:{}", input.artifact_id))
+        .bind(now)
+        .execute(&mut *tx)
+        .await
+        .map_err(log_storage_error)?;
+        let manifest_id = publication.resources_manifest.id;
+        sqlx::query(
+            "INSERT INTO blob_manifests (manifest_id, space_id, schema_version, created_at) VALUES ($1, $2, $3, $4)",
+        )
+        .bind(manifest_id)
+        .bind(space_id)
+        .bind(&publication.resources_manifest.schema_version)
+        .bind(now)
+        .execute(&mut *tx)
+        .await
+        .map_err(log_storage_error)?;
+        insert_manifest_entry(
+            &mut tx,
+            manifest_id,
+            &source_hash,
+            &format!("source/{source_name}"),
+            "source",
+        )
+        .await?;
+        for (resource, _) in &stored_resources {
+            insert_manifest_entry(
+                &mut tx,
+                manifest_id,
+                &resource.content_hash,
+                &resource.path,
+                "resource",
+            )
+            .await?;
+        }
+        insert_manifest_entry(
+            &mut tx,
+            manifest_id,
+            &normalized_hash,
+            "normalized/package.json",
+            "normalized_package",
+        )
+        .await?;
+        sqlx::query(
+            "INSERT INTO normalized_packages (package_id, revision_id, schema_version, payload, source_map, manifest_id, package_blob_hash, created_at) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
+        )
+        .bind(publication.package_id)
+        .bind(revision_id)
+        .bind(&publication.revision.package_format_version)
+        .bind(publication.package_payload)
+        .bind(publication.source_map)
+        .bind(manifest_id)
+        .bind(&normalized_hash)
+        .bind(now)
+        .execute(&mut *tx)
+        .await
+        .map_err(log_storage_error)?;
+        sqlx::query(
+            "UPDATE materials SET active_revision_id = $2, latest_import_job_id = $3 WHERE material_id = $1",
+        )
+        .bind(material_id)
+        .bind(revision_id)
+        .bind(job_id)
+        .execute(&mut *tx)
+        .await
+        .map_err(log_storage_error)?;
+        sqlx::query(
+            "INSERT INTO material_derivations (derivation_id, user_id, space_id, derived_material_id, derived_revision_id, source_material_id, source_revision_id, kind, task_id, artifact_id, provenance_schema_version, source_refs) VALUES ($1, $2, $3, $4, $5, $6, $7, 'abridgement', $8, $9, $10, $11)",
+        )
+        .bind(Uuid::now_v7())
+        .bind(owner_id)
+        .bind(space_id)
+        .bind(material_id)
+        .bind(revision_id)
+        .bind(input.source_material_id)
+        .bind(input.source_revision_id)
+        .bind(input.task_id)
+        .bind(input.artifact_id)
+        .bind(GENERATED_LUM_PROVENANCE_VERSION)
+        .bind(serde_json::to_value(&input.source_refs).map_err(|_| ImportServiceError::Unavailable)?)
+        .execute(&mut *tx)
+        .await
+        .map_err(log_storage_error)?;
+        let activated = sqlx::query(
+            "UPDATE ai_artifacts SET status = 'active', object_revision = object_revision + 1, updated_at = $3 WHERE artifact_id = $1 AND user_id = $2 AND kind = 'abridgement_artifact' AND status = 'candidate'",
+        )
+        .bind(input.artifact_id)
+        .bind(owner_id)
+        .bind(now)
+        .execute(&mut *tx)
+        .await
+        .map_err(log_storage_error)?;
+        if activated.rows_affected() != 1 {
+            return Err(ImportServiceError::Conflict);
+        }
+        append_import_change(
+            &mut tx,
+            ImportChange {
+                space_id,
+                object_id: material_id,
+                device_id,
+                idempotency_key: &format!("abridgement:{}:publish", input.artifact_id),
+                change_kind: "create",
+                payload: serde_json::json!({
+                    "kind": "lum",
+                    "import_status": "ready",
+                    "revision_id": revision_id,
+                    "derived_from": input.source_material_id,
+                }),
+                now,
+            },
+        )
+        .await?;
+        tx.commit().await.map_err(log_storage_error)?;
+        Ok(DerivedMaterialRelation {
+            kind: "abridgement".to_owned(),
+            source_material_id: input.source_material_id,
+            source_revision_id: input.source_revision_id,
+            task_id: input.task_id,
+            artifact_id: input.artifact_id,
+            source_changed: false,
+            source_refs: input.source_refs,
+        })
+    }
+
+    /// Build and ordinary-import an abridgement result before the fenced task
+    /// completion is allowed to commit.
+    pub(crate) async fn preflight_abridgement_completion(
+        &self,
+        owner_id: Uuid,
+        request: &lumi_core::CompleteAiTaskRequest,
+    ) -> Result<(), ImportServiceError> {
+        let row = sqlx::query(
+            "SELECT task.source_material_id, task.source_revision_id, task.prompt_version, task.output_schema_version, context.source_refs FROM ai_tasks task JOIN ai_runs run ON run.run_id = task.active_run_id AND run.task_id = task.task_id AND run.user_id = task.user_id JOIN ai_context_packs context ON context.context_pack_id = run.context_pack_id AND context.task_id = task.task_id AND context.user_id = task.user_id WHERE task.task_id = $1 AND task.user_id = $2 AND task.kind = 'abridgement' AND task.status = 'running' AND run.run_id = $3",
+        )
+        .bind(request.task_id)
+        .bind(owner_id)
+        .bind(request.run_id)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(log_storage_error)?
+        .ok_or(ImportServiceError::Conflict)?;
+        let payload: lumi_core::AbridgementArtifactPayload =
+            serde_json::from_value(request.result.clone())
+                .map_err(|_| ImportServiceError::BadRequest("abridgement result is invalid"))?;
+        payload
+            .validate()
+            .map_err(|_| ImportServiceError::BadRequest("abridgement result is invalid"))?;
+        let source_refs: Vec<lumi_core::SourceCitation> =
+            serde_json::from_value(row.try_get("source_refs").map_err(log_storage_error)?)
+                .map_err(|_| ImportServiceError::Unavailable)?;
+        let source_material_id: Uuid = row
+            .try_get("source_material_id")
+            .map_err(log_storage_error)?;
+        let source_revision_id: Uuid = row
+            .try_get("source_revision_id")
+            .map_err(log_storage_error)?;
+        let book_id = format!("lumi-abridged-preflight-{}", request.run_id.simple());
+        let package = build_generated_lum_package(GeneratedLumPackageRequest {
+            book_id: &book_id,
+            source_material_id,
+            source_revision_id,
+            task_id: request.task_id,
+            artifact_id: request.run_id,
+            prompt_version: &row
+                .try_get::<String, _>("prompt_version")
+                .map_err(log_storage_error)?,
+            artifact_schema_version: &row
+                .try_get::<String, _>("output_schema_version")
+                .map_err(log_storage_error)?,
+            payload: &payload,
+            source_refs: &source_refs,
+        })
+        .map_err(|_| ImportServiceError::BadRequest("generated LUM assembly failed"))?;
+        import_lum(
+            LumImportRequest {
+                owner_id,
+                material_id: Uuid::now_v7(),
+                revision_id: Uuid::now_v7(),
+                source_name: "abridgement-preflight.lum",
+                source: &package,
+            },
+            LumLimits::web_v1(),
+            || false,
+        )
+        .map(|_| ())
+        .map_err(|_| ImportServiceError::BadRequest("generated LUM validation failed"))
+    }
+
+    /// Reconcile completed abridgement artifacts that survived a restart
+    /// between task completion and atomic library publication.
+    pub(crate) async fn recover_abridgements(&self) -> Result<(), ImportServiceError> {
+        let candidates = sqlx::query(
+            "SELECT artifact.user_id, artifact.artifact_id FROM ai_artifacts artifact JOIN ai_tasks task ON task.task_id = artifact.task_id AND task.user_id = artifact.user_id WHERE artifact.kind = 'abridgement_artifact' AND artifact.status = 'candidate' AND task.status = 'succeeded' ORDER BY artifact.created_at, artifact.artifact_id",
+        )
+        .fetch_all(&self.pool)
+        .await
+        .map_err(log_storage_error)?;
+        for row in candidates {
+            let owner_id: Uuid = row.try_get("user_id").map_err(log_storage_error)?;
+            let artifact_id: Uuid = row.try_get("artifact_id").map_err(log_storage_error)?;
+            match self
+                .publish_abridgement_artifact(owner_id, artifact_id)
+                .await
+            {
+                Ok(_) => {}
+                Err(ImportServiceError::BadRequest(_)) => {
+                    sqlx::query(
+                        "UPDATE ai_artifacts SET status = 'rejected', object_revision = object_revision + 1, updated_at = now() WHERE artifact_id = $1 AND user_id = $2 AND status = 'candidate'",
+                    )
+                    .bind(artifact_id)
+                    .bind(owner_id)
+                    .execute(&self.pool)
+                    .await
+                    .map_err(log_storage_error)?;
+                    tracing::warn!(%artifact_id, "invalid abridgement candidate rejected during recovery");
+                }
+                Err(error) => return Err(error),
+            }
+        }
+        Ok(())
+    }
+
+    async fn derivation_by_artifact(
+        &self,
+        owner_id: Uuid,
+        artifact_id: Uuid,
+    ) -> Result<Option<DerivedMaterialRelation>, ImportServiceError> {
+        let mut tx = self.pool.begin().await.map_err(log_storage_error)?;
+        let relation =
+            derivation_by_artifact_in_transaction(&mut tx, owner_id, artifact_id).await?;
+        tx.commit().await.map_err(log_storage_error)?;
+        Ok(relation)
     }
 
     pub(crate) async fn recover(self: &Arc<Self>) -> Result<(), ImportServiceError> {
@@ -840,7 +1249,7 @@ impl ImportService {
         user_id: Uuid,
     ) -> Result<Vec<ImportStatusEntry>, ImportServiceError> {
         let rows = sqlx::query(
-            "SELECT m.material_id, m.owner_user_id, m.kind, m.canonical_title, m.title_override, m.active_revision_id, m.library_state, m.source_identity, m.import_status, m.created_at, m.updated_at, j.job_id FROM materials m JOIN import_jobs j ON j.job_id = m.latest_import_job_id WHERE m.owner_user_id = $1 AND m.deleted_at IS NULL ORDER BY m.updated_at DESC, m.material_id DESC",
+            "SELECT m.material_id, m.owner_user_id, m.kind, m.canonical_title, m.title_override, m.active_revision_id, m.library_state, m.source_identity, m.import_status, m.created_at, m.updated_at, j.job_id, (SELECT jsonb_build_object('kind', d.kind, 'source_material_id', d.source_material_id, 'source_revision_id', d.source_revision_id, 'task_id', d.task_id, 'artifact_id', d.artifact_id, 'source_changed', d.source_changed OR source.active_revision_id IS DISTINCT FROM d.source_revision_id, 'source_refs', d.source_refs) FROM material_derivations d JOIN materials source ON source.material_id = d.source_material_id AND source.owner_user_id = d.user_id WHERE d.derived_material_id = m.material_id AND d.user_id = m.owner_user_id) AS derivation FROM materials m JOIN import_jobs j ON j.job_id = m.latest_import_job_id WHERE m.owner_user_id = $1 AND m.deleted_at IS NULL ORDER BY m.updated_at DESC, m.material_id DESC",
         )
         .bind(user_id)
         .fetch_all(&self.pool)
@@ -908,7 +1317,7 @@ impl ImportService {
         user_id: Uuid,
     ) -> Result<Option<ContinueReadingEntry>, ImportServiceError> {
         let row = sqlx::query(
-            "SELECT m.material_id, m.owner_user_id, m.kind, m.canonical_title, m.title_override, m.active_revision_id, m.library_state, m.source_identity, m.import_status, m.created_at, m.updated_at, j.job_id, j.user_id AS job_user_id, j.status AS job_status, j.stage AS job_stage, j.result_material_id AS job_result_material_id, j.revision_id AS job_revision_id, j.created_at AS job_created_at, j.updated_at AS job_updated_at, rp.revision_id AS progress_revision_id, rp.locator AS progress_locator, rp.progress_fraction, rp.updated_at AS progress_updated_at, COALESCE((SELECT jsonb_agg(jsonb_build_object('severity', d.severity, 'code', d.code, 'message', d.message, 'source_path', d.source_path) ORDER BY d.diagnostic_id) FROM import_diagnostics d WHERE d.job_id = j.job_id), '[]'::jsonb) AS job_diagnostics FROM reading_progress rp JOIN materials m ON m.material_id = rp.material_id AND m.space_id = rp.space_id JOIN import_jobs j ON j.job_id = m.latest_import_job_id WHERE m.owner_user_id = $1 AND m.deleted_at IS NULL AND m.library_state = 'active' AND m.import_status = 'ready' AND rp.deleted_at IS NULL AND rp.progress_fraction > 0 AND rp.revision_id = m.active_revision_id ORDER BY rp.updated_at DESC, m.material_id DESC LIMIT 1",
+            "SELECT m.material_id, m.owner_user_id, m.kind, m.canonical_title, m.title_override, m.active_revision_id, m.library_state, m.source_identity, m.import_status, m.created_at, m.updated_at, j.job_id, j.user_id AS job_user_id, j.status AS job_status, j.stage AS job_stage, j.result_material_id AS job_result_material_id, j.revision_id AS job_revision_id, j.created_at AS job_created_at, j.updated_at AS job_updated_at, rp.revision_id AS progress_revision_id, rp.locator AS progress_locator, rp.progress_fraction, rp.updated_at AS progress_updated_at, COALESCE((SELECT jsonb_agg(jsonb_build_object('severity', d.severity, 'code', d.code, 'message', d.message, 'source_path', d.source_path) ORDER BY d.diagnostic_id) FROM import_diagnostics d WHERE d.job_id = j.job_id), '[]'::jsonb) AS job_diagnostics, (SELECT jsonb_build_object('kind', derivation.kind, 'source_material_id', derivation.source_material_id, 'source_revision_id', derivation.source_revision_id, 'task_id', derivation.task_id, 'artifact_id', derivation.artifact_id, 'source_changed', derivation.source_changed OR source.active_revision_id IS DISTINCT FROM derivation.source_revision_id, 'source_refs', derivation.source_refs) FROM material_derivations derivation JOIN materials source ON source.material_id = derivation.source_material_id AND source.owner_user_id = derivation.user_id WHERE derivation.derived_material_id = m.material_id AND derivation.user_id = m.owner_user_id) AS derivation FROM reading_progress rp JOIN materials m ON m.material_id = rp.material_id AND m.space_id = rp.space_id JOIN import_jobs j ON j.job_id = m.latest_import_job_id WHERE m.owner_user_id = $1 AND m.deleted_at IS NULL AND m.library_state = 'active' AND m.import_status = 'ready' AND rp.deleted_at IS NULL AND rp.progress_fraction > 0 AND rp.revision_id = m.active_revision_id ORDER BY rp.updated_at DESC, m.material_id DESC LIMIT 1",
         )
         .bind(user_id)
         .fetch_optional(&self.pool)
@@ -949,7 +1358,7 @@ impl ImportService {
         material_id: MaterialId,
     ) -> Result<LibraryEntry, ImportServiceError> {
         let row = sqlx::query(
-            "SELECT m.material_id, m.owner_user_id, m.kind, m.canonical_title, m.title_override, m.active_revision_id, m.library_state, m.source_identity, m.import_status, m.created_at, m.updated_at, j.job_id FROM materials m JOIN import_jobs j ON j.job_id = m.latest_import_job_id WHERE m.material_id = $1 AND m.owner_user_id = $2 AND m.deleted_at IS NULL",
+            "SELECT m.material_id, m.owner_user_id, m.kind, m.canonical_title, m.title_override, m.active_revision_id, m.library_state, m.source_identity, m.import_status, m.created_at, m.updated_at, j.job_id, (SELECT jsonb_build_object('kind', d.kind, 'source_material_id', d.source_material_id, 'source_revision_id', d.source_revision_id, 'task_id', d.task_id, 'artifact_id', d.artifact_id, 'source_changed', d.source_changed OR source.active_revision_id IS DISTINCT FROM d.source_revision_id, 'source_refs', d.source_refs) FROM material_derivations d JOIN materials source ON source.material_id = d.source_material_id AND source.owner_user_id = d.user_id WHERE d.derived_material_id = m.material_id AND d.user_id = m.owner_user_id) AS derivation FROM materials m JOIN import_jobs j ON j.job_id = m.latest_import_job_id WHERE m.material_id = $1 AND m.owner_user_id = $2 AND m.deleted_at IS NULL",
         )
         .bind(material_id)
         .bind(user_id)
@@ -3804,6 +4213,40 @@ async fn insert_blob_record(
     Ok(())
 }
 
+async fn derivation_by_artifact_in_transaction(
+    tx: &mut Transaction<'_, Postgres>,
+    owner_id: Uuid,
+    artifact_id: Uuid,
+) -> Result<Option<DerivedMaterialRelation>, ImportServiceError> {
+    let row = sqlx::query(
+        "SELECT derivation.kind, derivation.source_material_id, derivation.source_revision_id, derivation.task_id, derivation.artifact_id, derivation.source_changed OR source.active_revision_id IS DISTINCT FROM derivation.source_revision_id AS source_changed, derivation.source_refs FROM material_derivations derivation JOIN materials source ON source.material_id = derivation.source_material_id AND source.owner_user_id = derivation.user_id WHERE derivation.artifact_id = $1 AND derivation.user_id = $2",
+    )
+    .bind(artifact_id)
+    .bind(owner_id)
+    .fetch_optional(&mut **tx)
+    .await
+    .map_err(log_storage_error)?;
+    row.map(|row| {
+        let source_refs: serde_json::Value =
+            row.try_get("source_refs").map_err(log_storage_error)?;
+        Ok(DerivedMaterialRelation {
+            kind: row.try_get("kind").map_err(log_storage_error)?,
+            source_material_id: row
+                .try_get("source_material_id")
+                .map_err(log_storage_error)?,
+            source_revision_id: row
+                .try_get("source_revision_id")
+                .map_err(log_storage_error)?,
+            task_id: row.try_get("task_id").map_err(log_storage_error)?,
+            artifact_id: row.try_get("artifact_id").map_err(log_storage_error)?,
+            source_changed: row.try_get("source_changed").map_err(log_storage_error)?,
+            source_refs: serde_json::from_value(source_refs)
+                .map_err(|_| ImportServiceError::Unavailable)?,
+        })
+    })
+    .transpose()
+}
+
 async fn insert_manifest_entry(
     tx: &mut Transaction<'_, Postgres>,
     manifest_id: Uuid,
@@ -4359,6 +4802,12 @@ fn library_entry_from_row(
     let import_status: String = row.try_get("import_status").map_err(log_storage_error)?;
     let source_identity: serde_json::Value =
         row.try_get("source_identity").map_err(log_storage_error)?;
+    let derivation = row
+        .try_get::<Option<serde_json::Value>, _>("derivation")
+        .map_err(log_storage_error)?
+        .map(serde_json::from_value::<lumi_core::DerivedMaterialRelation>)
+        .transpose()
+        .map_err(|_| ImportServiceError::Unavailable)?;
     Ok(LibraryEntry {
         id: row.try_get("material_id").map_err(log_storage_error)?,
         owner_id: row.try_get("owner_user_id").map_err(log_storage_error)?,
@@ -4393,6 +4842,7 @@ fn library_entry_from_row(
             _ => return Err(ImportServiceError::Unavailable),
         },
         latest_job,
+        derivation,
         created_at: timestamp_ms(row.try_get("created_at").map_err(log_storage_error)?),
         updated_at: timestamp_ms(row.try_get("updated_at").map_err(log_storage_error)?),
     })

@@ -13,10 +13,12 @@ use lumi_core::{
     AiArtifact, AiExecutionMode, AiExecutorKind, AiMessageRole, AiPage, AiProviderChatRequest,
     AiProviderMessage, AiSourceScope, AiTask, AiTaskStatus, ArtifactMutationRequest,
     BulkExecuteTasksRequest, BulkTaskItemResult, BulkTaskResult, CompleteAiTaskRequest,
-    CreateAiTaskCommand, CreateSummaryTaskRequest, SummaryArtifact, SummaryForm, SummaryScopeKind,
-    TaskMutationRequest, UpdateSummaryRequest, SUMMARY_ARTIFACT_SCHEMA_VERSION,
-    SUMMARY_CHAPTER_BRIEF_PROMPT_VERSION, SUMMARY_CHAPTER_OUTLINE_PROMPT_VERSION,
-    SUMMARY_MATERIAL_BRIEF_PROMPT_VERSION, SUMMARY_MATERIAL_OUTLINE_PROMPT_VERSION,
+    CreateAbridgementTaskRequest, CreateAiTaskCommand, CreateSummaryTaskRequest, SummaryArtifact,
+    SummaryForm, SummaryScopeKind, TaskMutationRequest, UpdateSummaryRequest,
+    ABRIDGEMENT_ARTIFACT_SCHEMA_VERSION, ABRIDGEMENT_MATERIAL_PROMPT_VERSION,
+    SUMMARY_ARTIFACT_SCHEMA_VERSION, SUMMARY_CHAPTER_BRIEF_PROMPT_VERSION,
+    SUMMARY_CHAPTER_OUTLINE_PROMPT_VERSION, SUMMARY_MATERIAL_BRIEF_PROMPT_VERSION,
+    SUMMARY_MATERIAL_OUTLINE_PROMPT_VERSION,
 };
 use serde::Deserialize;
 use tokio_util::sync::CancellationToken;
@@ -27,6 +29,7 @@ use super::providers::{self, AiProviderClient, AiProviderError};
 use super::repository::{AiRepositoryError, PgAiRepository};
 use super::AiRuntime;
 use crate::account::AuthenticatedSession;
+use crate::imports::ImportService;
 use crate::{AppError, AppState};
 
 const WORKER_POLL_INTERVAL: Duration = Duration::from_millis(250);
@@ -58,6 +61,10 @@ pub(crate) fn routes() -> Router<AppState> {
         .route(
             "/materials/{material_id}/summary-tasks",
             post(create_summary_task),
+        )
+        .route(
+            "/materials/{material_id}/abridgement-tasks",
+            post(create_abridgement_task),
         )
         .route(
             "/ai/summaries/{summary_id}",
@@ -354,6 +361,69 @@ pub(crate) async fn create_summary_task_for_owner(
     Ok(task)
 }
 
+async fn create_abridgement_task(
+    State(state): State<AppState>,
+    Extension(session): Extension<AuthenticatedSession>,
+    Path(material_id): Path<Uuid>,
+    Json(request): Json<CreateAbridgementTaskRequest>,
+) -> Result<Json<AiTask>, AppError> {
+    create_abridgement_task_for_owner(&state, session.user_id, material_id, request)
+        .await
+        .map(Json)
+}
+
+pub(crate) async fn create_abridgement_task_for_owner(
+    state: &AppState,
+    owner_id: Uuid,
+    material_id: Uuid,
+    request: CreateAbridgementTaskRequest,
+) -> Result<AiTask, AppError> {
+    let profile = request.profile.trim();
+    if profile.is_empty()
+        || profile.len() > 64
+        || request.idempotency_key.trim().is_empty()
+        || !matches!(profile, "brief" | "balanced")
+    {
+        return Err(AppError::BadRequest(
+            "abridgement profile must be brief or balanced".to_owned(),
+        ));
+    }
+    let repository = repository(state)?;
+    let mut task = repository
+        .create_task(
+            owner_id,
+            CreateAiTaskCommand {
+                kind: "abridgement".to_owned(),
+                source_scope: AiSourceScope::Material {
+                    material_id,
+                    revision_id: request.source_revision_id,
+                },
+                instruction: "Создай сокращённый source-backed материал по главам. Верни только проверяемый JSON.".to_owned(),
+                parameters: serde_json::json!({"profile": profile}),
+                prompt_version: ABRIDGEMENT_MATERIAL_PROMPT_VERSION.to_owned(),
+                output_schema_version: ABRIDGEMENT_ARTIFACT_SCHEMA_VERSION.to_owned(),
+                idempotency_key: request.idempotency_key.clone(),
+            },
+        )
+        .await
+        .map_err(map_repository_error)?;
+    if request.execution_mode == AiExecutionMode::ExecuteNow && task.status == AiTaskStatus::Queued
+    {
+        task = repository
+            .request_execute(
+                owner_id,
+                task.id,
+                &TaskMutationRequest {
+                    expected_revision: task.object_revision,
+                    idempotency_key: format!("{}:execute", request.idempotency_key),
+                },
+            )
+            .await
+            .map_err(map_repository_error)?;
+    }
+    Ok(task)
+}
+
 async fn update_summary(
     State(state): State<AppState>,
     Extension(session): Extension<AuthenticatedSession>,
@@ -384,7 +454,11 @@ fn repository(state: &AppState) -> Result<PgAiRepository, AppError> {
 }
 
 /// Run the internal provider worker until server shutdown.
-pub(crate) async fn run_worker(runtime: Arc<AiRuntime>, cancellation: CancellationToken) {
+pub(crate) async fn run_worker(
+    runtime: Arc<AiRuntime>,
+    imports: Arc<ImportService>,
+    cancellation: CancellationToken,
+) {
     let repository = PgAiRepository::new(runtime.pool().clone());
     if let Err(error) = repository.recover_expired().await {
         tracing::warn!(error = %error, "AI task recovery failed");
@@ -393,8 +467,14 @@ pub(crate) async fn run_worker(runtime: Arc<AiRuntime>, cancellation: Cancellati
         let next = repository.next_internal_task().await;
         match next {
             Ok(Some((owner_id, task_id))) => {
-                if let Err(error) =
-                    execute_one(Arc::clone(&runtime), &repository, owner_id, task_id).await
+                if let Err(error) = execute_one(
+                    Arc::clone(&runtime),
+                    Arc::clone(&imports),
+                    &repository,
+                    owner_id,
+                    task_id,
+                )
+                .await
                 {
                     tracing::warn!(%task_id, error = %error, "AI task execution failed");
                 }
@@ -421,6 +501,7 @@ pub(crate) async fn run_worker(runtime: Arc<AiRuntime>, cancellation: Cancellati
 
 async fn execute_one(
     runtime: Arc<AiRuntime>,
+    imports: Arc<ImportService>,
     repository: &PgAiRepository,
     owner_id: Uuid,
     task_id: Uuid,
@@ -482,6 +563,26 @@ async fn execute_one(
             WORKER_LEASE,
         )
         .await?;
+    if input.task.kind == "abridgement" {
+        return execute_abridgement(
+            repository,
+            &imports,
+            owner_id,
+            task_id,
+            &input,
+            claim,
+            provider,
+            preferences,
+            pack,
+        )
+        .await;
+    }
+    if input.task.kind != "summary" {
+        repository
+            .fail_task(owner_id, &claim, "unsupported_task_kind", false)
+            .await?;
+        return Ok(());
+    }
     let section_summaries =
         if requires_hierarchical_summary(&pack) {
             let sections = summary_sections(&pack);
@@ -613,23 +714,123 @@ async fn execute_one(
             WORKER_LEASE,
         )
         .await?;
+    let completion_request = CompleteAiTaskRequest {
+        task_id,
+        run_id: claim.run_id,
+        claim_id: claim.claim_id,
+        fence: claim.fence,
+        task_revision: claim.task_revision,
+        idempotency_key: format!("internal-complete:{}", claim.run_id),
+        result,
+    };
     let completion = repository
-        .complete_task(
-            owner_id,
-            CompleteAiTaskRequest {
-                task_id,
-                run_id: claim.run_id,
-                claim_id: claim.claim_id,
-                fence: claim.fence,
-                task_revision: claim.task_revision,
-                idempotency_key: format!("internal-complete:{}", claim.run_id),
-                result,
-            },
-        )
+        .complete_task(owner_id, completion_request)
         .await?;
     repository
         .activate_generated_summary(owner_id, completion.artifact_id)
         .await?;
+    Ok(())
+}
+
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the worker boundary keeps every fenced publication input explicit"
+)]
+async fn execute_abridgement(
+    repository: &PgAiRepository,
+    imports: &ImportService,
+    owner_id: Uuid,
+    task_id: Uuid,
+    input: &super::repository::AiTaskExecutionInput,
+    claim: lumi_core::AiTaskClaim,
+    provider: providers::OpenRouterClient,
+    preferences: lumi_core::ProviderPreferences,
+    pack: lumi_core::AiContextPack,
+) -> Result<(), AiRepositoryError> {
+    let request = AiProviderChatRequest {
+        generation_id: claim.run_id,
+        model: preferences.default_model,
+        messages: vec![
+            AiProviderMessage {
+                role: AiMessageRole::System,
+                content: format!(
+                    "Ты создаёшь сокращённый source-backed материал. Используй только \
+                     переданные источники. Верни JSON schema_version={}, title, profile, \
+                     ordered chapters с Lumi Markdown и citation_ids, а также их полный \
+                     de-duplicated citation_ids union. Prompt version: {}.",
+                    ABRIDGEMENT_ARTIFACT_SCHEMA_VERSION, input.task.prompt_version
+                ),
+            },
+            AiProviderMessage {
+                role: AiMessageRole::User,
+                content: input.instruction.clone(),
+            },
+        ],
+        context_pack: Some(pack),
+        max_output_tokens: 16_384,
+        provider_options: serde_json::json!({"temperature": 0.1}),
+    };
+    let result = match provider
+        .complete_structured(request, ABRIDGEMENT_ARTIFACT_SCHEMA_VERSION)
+        .await
+    {
+        Ok(result) => result,
+        Err(error) => {
+            repository
+                .fail_task(
+                    owner_id,
+                    &claim,
+                    provider_error_code(&error),
+                    error.retryable(),
+                )
+                .await?;
+            return Ok(());
+        }
+    };
+    repository
+        .heartbeat(
+            owner_id,
+            &claim,
+            0.74,
+            Some("package_assembly"),
+            WORKER_LEASE,
+        )
+        .await?;
+    let completion_request = CompleteAiTaskRequest {
+        task_id,
+        run_id: claim.run_id,
+        claim_id: claim.claim_id,
+        fence: claim.fence,
+        task_revision: claim.task_revision,
+        idempotency_key: format!("internal-complete:{}", claim.run_id),
+        result,
+    };
+    if imports
+        .preflight_abridgement_completion(owner_id, &completion_request)
+        .await
+        .is_err()
+    {
+        repository
+            .fail_task(owner_id, &claim, "invalid_abridgement_package", false)
+            .await?;
+        return Ok(());
+    }
+    repository
+        .heartbeat(
+            owner_id,
+            &claim,
+            0.82,
+            Some("package_validation"),
+            WORKER_LEASE,
+        )
+        .await?;
+    let completion = repository
+        .complete_task(owner_id, completion_request)
+        .await?;
+    imports
+        .publish_abridgement_artifact(owner_id, completion.artifact_id)
+        .await
+        .map_err(|_| AiRepositoryError::Storage)?;
     Ok(())
 }
 

@@ -3,11 +3,12 @@
 use std::time::Duration;
 
 use lumi_core::{
-    content_hash, AiArtifact, AiArtifactAuthor, AiArtifactStatus, AiContextPack, AiExecutorKind,
-    AiRun, AiRunStatus, AiSourceScope, AiTask, AiTaskClaim, AiTaskId, AiTaskStatus, AiTokenUsage,
-    CompleteAiTaskRequest, CompleteAiTaskResult, CreateAiTaskCommand, SummaryArtifact, SummaryForm,
-    SummaryScopeKind, TaskMutationRequest, UpdateSummaryRequest, UserId, AI_CONTRACT_VERSION,
-    SUMMARY_ARTIFACT_SCHEMA_VERSION,
+    content_hash, AbridgementArtifactPayload, AiArtifact, AiArtifactAuthor, AiArtifactStatus,
+    AiContextPack, AiExecutorKind, AiRun, AiRunStatus, AiSourceScope, AiTask, AiTaskClaim,
+    AiTaskId, AiTaskStatus, AiTokenUsage, CompleteAiTaskRequest, CompleteAiTaskResult,
+    CreateAiTaskCommand, SourceCitation, SummaryArtifact, SummaryForm, SummaryScopeKind,
+    TaskMutationRequest, UpdateSummaryRequest, UserId, ABRIDGEMENT_ARTIFACT_SCHEMA_VERSION,
+    AI_CONTRACT_VERSION, SUMMARY_ARTIFACT_SCHEMA_VERSION,
 };
 use serde_json::Value;
 use sqlx_core::{row::Row, transaction::Transaction};
@@ -70,6 +71,18 @@ pub(crate) struct AiTaskExecutionInput {
     pub instruction: String,
 }
 
+/// Validated inputs needed by the Lumi-owned derived-material publisher.
+pub(crate) struct AbridgementPublicationInput {
+    pub artifact_id: Uuid,
+    pub task_id: Uuid,
+    pub source_material_id: Uuid,
+    pub source_revision_id: Uuid,
+    pub prompt_version: String,
+    pub schema_version: String,
+    pub payload: AbridgementArtifactPayload,
+    pub source_refs: Vec<SourceCitation>,
+}
+
 impl PgAiRepository {
     /// Build the repository over an already-migrated PostgreSQL pool.
     #[must_use]
@@ -97,7 +110,7 @@ impl PgAiRepository {
             .validate()
             .map_err(|error| AiRepositoryError::Invalid(error.to_string()))?;
         let result_kind = output_kind(&command.output_schema_version)?;
-        validate_summary_slot_command(&command)?;
+        validate_artifact_slot_command(&command, &result_kind)?;
         let request_hash = hash_json(&serde_json::json!({
             "kind": &command.kind,
             "source_scope": &command.source_scope,
@@ -930,7 +943,7 @@ impl PgAiRepository {
         let source_material_id: Uuid = row.try_get("source_material_id").map_err(storage_error)?;
         let source_revision_id: Uuid = row.try_get("source_revision_id").map_err(storage_error)?;
         let result_kind: String = row.try_get("result_kind").map_err(storage_error)?;
-        let (scope_kind, scope_ref, summary_form) = summary_slot_from_row(&row, &result_kind)?;
+        let (scope_kind, scope_ref, summary_form) = artifact_slot_from_row(&row, &result_kind)?;
         sqlx::query(
             "INSERT INTO ai_artifacts (artifact_id, task_id, run_id, user_id, space_id, kind, schema_version, payload, payload_hash, source_material_id, source_revision_id, scope_kind, scope_ref, summary_form, source_refs, status, authored_by) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, 'candidate', 'ai')",
         )
@@ -1042,6 +1055,50 @@ impl PgAiRepository {
         .map_err(storage_error)?
         .ok_or(AiRepositoryError::NotFound)?;
         artifact_from_row(&row)
+    }
+
+    /// Load one completed abridgement candidate through exact owner/source joins.
+    pub(crate) async fn abridgement_publication_input(
+        &self,
+        owner_id: UserId,
+        artifact_id: Uuid,
+    ) -> Result<AbridgementPublicationInput, AiRepositoryError> {
+        let row = sqlx::query(
+            "SELECT artifact.artifact_id, artifact.task_id, artifact.source_material_id, artifact.source_revision_id, artifact.schema_version, artifact.payload, artifact.source_refs, task.prompt_version FROM ai_artifacts artifact JOIN ai_tasks task ON task.task_id = artifact.task_id AND task.user_id = artifact.user_id AND task.space_id = artifact.space_id JOIN materials material ON material.material_id = artifact.source_material_id AND material.owner_user_id = artifact.user_id AND material.space_id = artifact.space_id JOIN document_revisions revision ON revision.revision_id = artifact.source_revision_id AND revision.material_id = material.material_id AND revision.space_id = material.space_id WHERE artifact.artifact_id = $1 AND artifact.user_id = $2 AND artifact.kind = 'abridgement_artifact' AND artifact.status IN ('candidate', 'active') AND task.status = 'succeeded' AND material.deleted_at IS NULL",
+        )
+        .bind(artifact_id)
+        .bind(owner_id)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(storage_error)?
+        .ok_or(AiRepositoryError::NotFound)?;
+        let payload: Value = row.try_get("payload").map_err(storage_error)?;
+        let payload: AbridgementArtifactPayload =
+            serde_json::from_value(payload).map_err(|_| AiRepositoryError::Storage)?;
+        payload.validate().map_err(|_| AiRepositoryError::Storage)?;
+        let source_refs: Value = row.try_get("source_refs").map_err(storage_error)?;
+        let source_refs: Vec<SourceCitation> =
+            serde_json::from_value(source_refs).map_err(|_| AiRepositoryError::Storage)?;
+        let source_material_id: Uuid = row.try_get("source_material_id").map_err(storage_error)?;
+        let source_revision_id: Uuid = row.try_get("source_revision_id").map_err(storage_error)?;
+        if source_refs.is_empty()
+            || source_refs.iter().any(|citation| {
+                citation.material_id != source_material_id
+                    || citation.revision_id != source_revision_id
+            })
+        {
+            return Err(AiRepositoryError::Storage);
+        }
+        Ok(AbridgementPublicationInput {
+            artifact_id: row.try_get("artifact_id").map_err(storage_error)?,
+            task_id: row.try_get("task_id").map_err(storage_error)?,
+            source_material_id,
+            source_revision_id,
+            prompt_version: row.try_get("prompt_version").map_err(storage_error)?,
+            schema_version: row.try_get("schema_version").map_err(storage_error)?,
+            payload,
+            source_refs,
+        })
     }
 
     /// Reconcile a failed or cancelled internal execution through the common
@@ -1580,10 +1637,15 @@ impl PgAiRepository {
     }
 }
 
-fn summary_slot_from_row(
+type ArtifactSlot = (Option<&'static str>, Option<String>, Option<&'static str>);
+
+fn artifact_slot_from_row(
     row: &sqlx_postgres::PgRow,
     result_kind: &str,
-) -> Result<(&'static str, String, &'static str), AiRepositoryError> {
+) -> Result<ArtifactSlot, AiRepositoryError> {
+    if result_kind == "abridgement_artifact" {
+        return Ok((None, None, None));
+    }
     if result_kind != "summary_artifact" {
         return Err(AiRepositoryError::Invalid(
             "unsupported artifact slot".to_owned(),
@@ -1613,10 +1675,33 @@ fn summary_slot_from_row(
         SummaryForm::Brief => "brief",
         SummaryForm::Outline => "outline",
     };
-    Ok((scope_kind, scope_ref, form))
+    Ok((Some(scope_kind), Some(scope_ref), Some(form)))
 }
 
-fn validate_summary_slot_command(command: &CreateAiTaskCommand) -> Result<(), AiRepositoryError> {
+fn validate_artifact_slot_command(
+    command: &CreateAiTaskCommand,
+    result_kind: &str,
+) -> Result<(), AiRepositoryError> {
+    if result_kind == "abridgement_artifact" {
+        if command.kind != "abridgement"
+            || !matches!(command.source_scope, AiSourceScope::Material { .. })
+            || command
+                .parameters
+                .get("profile")
+                .and_then(Value::as_str)
+                .is_none_or(|profile| !matches!(profile, "brief" | "balanced"))
+        {
+            return Err(AiRepositoryError::Invalid(
+                "abridgement requires material scope and a supported profile".to_owned(),
+            ));
+        }
+        return Ok(());
+    }
+    if command.kind != "summary" {
+        return Err(AiRepositoryError::Invalid(
+            "summary schema requires summary task kind".to_owned(),
+        ));
+    }
     if matches!(&command.source_scope, AiSourceScope::Selection { .. }) {
         return Err(AiRepositoryError::Invalid(
             "summary artifact requires chapter or material scope".to_owned(),
@@ -1907,6 +1992,8 @@ fn artifact_status(value: &str) -> Result<AiArtifactStatus, AiRepositoryError> {
 fn output_kind(schema_version: &str) -> Result<String, AiRepositoryError> {
     if schema_version == lumi_core::SUMMARY_ARTIFACT_SCHEMA_VERSION {
         Ok("summary_artifact".to_owned())
+    } else if schema_version == ABRIDGEMENT_ARTIFACT_SCHEMA_VERSION {
+        Ok("abridgement_artifact".to_owned())
     } else {
         Err(AiRepositoryError::Invalid(
             "unsupported result schema".to_owned(),
@@ -1946,7 +2033,8 @@ mod tests {
     use super::*;
     use lumi_core::{
         AiContextFragment, AiPermissionDecision, AiPermissionSnapshot, AiSourceLocator,
-        AiSourceScope, SourceCitation, SummaryForm, AI_CONTEXT_PACK_SCHEMA_VERSION,
+        AiSourceScope, SourceCitation, SummaryForm, ABRIDGEMENT_ARTIFACT_SCHEMA_VERSION,
+        ABRIDGEMENT_MATERIAL_PROMPT_VERSION, AI_CONTEXT_PACK_SCHEMA_VERSION,
         EXPLICIT_CONTEXT_LIMITS_VERSION, SOURCE_CITATION_SCHEMA_VERSION,
         SUMMARY_ARTIFACT_SCHEMA_VERSION, SUMMARY_CHAPTER_BRIEF_PROMPT_VERSION,
     };
@@ -2487,6 +2575,89 @@ mod tests {
         Ok(())
     }
 
+    #[tokio::test]
+    async fn postgres_e4_publishes_generated_lum_once_with_exact_provenance(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let Some(fixture) = AiPgFixture::create().await? else {
+            return Ok(());
+        };
+        let repository = PgAiRepository::new(fixture.pool.clone());
+        let task = repository
+            .create_task(
+                fixture.owner_id,
+                fixture.abridgement_command("e4-abridgement"),
+            )
+            .await?;
+        repository
+            .store_context_pack(fixture.owner_id, &fixture.material_context_pack(task.id))
+            .await?;
+        let claim = repository
+            .claim_task(
+                fixture.owner_id,
+                task.id,
+                AiExecutorKind::McpAgent,
+                Some("agent:e4"),
+            )
+            .await?;
+        let completion = repository
+            .complete_task(
+                fixture.owner_id,
+                CompleteAiTaskRequest {
+                    task_id: task.id,
+                    run_id: claim.run_id,
+                    claim_id: claim.claim_id,
+                    fence: claim.fence,
+                    task_revision: claim.task_revision,
+                    idempotency_key: "e4-complete".to_owned(),
+                    result: serde_json::json!({
+                        "schema_version": ABRIDGEMENT_ARTIFACT_SCHEMA_VERSION,
+                        "title": "Сокращённый материал",
+                        "profile": "balanced",
+                        "chapters": [{
+                            "title": "Глава 1",
+                            "content": "Краткий проверяемый тезис.",
+                            "citation_ids": ["ctx:test:1"]
+                        }],
+                        "citation_ids": ["ctx:test:1"]
+                    }),
+                },
+            )
+            .await?;
+        let blob_root = std::env::temp_dir().join(format!("lumi-e4-derived-{}", Uuid::now_v7()));
+        let imports = crate::imports::ImportService::local(fixture.pool.clone(), blob_root);
+        let relation = imports
+            .publish_abridgement_artifact(fixture.owner_id, completion.artifact_id)
+            .await?;
+        let replay = imports
+            .publish_abridgement_artifact(fixture.owner_id, completion.artifact_id)
+            .await?;
+
+        assert_eq!(replay, relation);
+        let row = sqlx::query(
+            "SELECT derivation.derived_material_id, derivation.derived_revision_id, artifact.status, source.active_revision_id FROM material_derivations derivation JOIN ai_artifacts artifact ON artifact.artifact_id = derivation.artifact_id JOIN materials source ON source.material_id = derivation.source_material_id WHERE derivation.artifact_id = $1",
+        )
+        .bind(completion.artifact_id)
+        .fetch_one(&fixture.pool)
+        .await?;
+        let derived_revision_id: Uuid = row.try_get("derived_revision_id")?;
+        assert_eq!(row.try_get::<String, _>("status")?, "active");
+        assert_eq!(
+            row.try_get::<Option<Uuid>, _>("active_revision_id")?,
+            Some(fixture.revision_id)
+        );
+        let document = imports
+            .reading_document(fixture.owner_id, derived_revision_id)
+            .await?;
+        assert_eq!(document.title, "Сокращённый материал");
+        assert!(document
+            .nodes
+            .iter()
+            .flat_map(|node| node.children.iter())
+            .filter_map(|node| node.text.as_deref())
+            .any(|text| text.contains("Краткий проверяемый тезис.")));
+        Ok(())
+    }
+
     struct AiPgFixture {
         pool: PgPool,
         owner_id: Uuid,
@@ -2514,6 +2685,13 @@ mod tests {
                     .execute(&pool)
                     .await?;
             }
+            sqlx::query(
+                "INSERT INTO sync_devices (device_id, user_id, name, kind) VALUES ($1, $2, 'AI fixture', 'test')",
+            )
+            .bind(Uuid::now_v7())
+            .bind(owner_id)
+            .execute(&pool)
+            .await?;
             sqlx::query(
                 "INSERT INTO sync_spaces (space_id, owner_user_id, kind) VALUES ($1, $2, 'personal')",
             )
@@ -2543,6 +2721,11 @@ mod tests {
                 .bind(space_id)
                 .execute(&pool)
                 .await?;
+            sqlx::query("UPDATE materials SET active_revision_id = $2 WHERE material_id = $1")
+                .bind(material_id)
+                .bind(revision_id)
+                .execute(&pool)
+                .await?;
             Ok(Some(Self {
                 pool,
                 owner_id,
@@ -2564,6 +2747,21 @@ mod tests {
                 parameters: serde_json::json!({"form": SummaryForm::Brief}),
                 prompt_version: SUMMARY_CHAPTER_BRIEF_PROMPT_VERSION.to_owned(),
                 output_schema_version: SUMMARY_ARTIFACT_SCHEMA_VERSION.to_owned(),
+                idempotency_key: idempotency_key.to_owned(),
+            }
+        }
+
+        fn abridgement_command(&self, idempotency_key: &str) -> CreateAiTaskCommand {
+            CreateAiTaskCommand {
+                kind: "abridgement".to_owned(),
+                source_scope: AiSourceScope::Material {
+                    material_id: self.material_id,
+                    revision_id: self.revision_id,
+                },
+                instruction: "Сократи материал по главам.".to_owned(),
+                parameters: serde_json::json!({"profile": "balanced"}),
+                prompt_version: ABRIDGEMENT_MATERIAL_PROMPT_VERSION.to_owned(),
+                output_schema_version: ABRIDGEMENT_ARTIFACT_SCHEMA_VERSION.to_owned(),
                 idempotency_key: idempotency_key.to_owned(),
             }
         }
@@ -2616,6 +2814,15 @@ mod tests {
                 }],
                 pack_hash: format!("fixture-pack-{task_id}-{context_pack_id}"),
             }
+        }
+
+        fn material_context_pack(&self, task_id: AiTaskId) -> AiContextPack {
+            let mut pack = self.context_pack(task_id);
+            pack.scope = AiSourceScope::Material {
+                material_id: self.material_id,
+                revision_id: self.revision_id,
+            };
+            pack
         }
     }
 }

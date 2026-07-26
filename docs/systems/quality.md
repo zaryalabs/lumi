@@ -73,6 +73,17 @@ Initial budgets are design targets for spikes, not final SLA:
   SQL statement и менее чем за 300 ms;
 - budgets запускаются `make performance`; setup fixtures не входит в измерение.
 
+Для `0.2.0` дополнительно проверяются AI/MCP regression targets:
+
+- owner-scoped первая страница очереди для 1 000 задач — p95 менее 300 ms;
+- конкурентный fenced claim — p95 менее 200 ms без duplicate publication;
+- structured AI/MCP body остаётся внутри route limits, а generated `.lum`
+  повторно проходит обычный importer и compatibility corpus;
+- startup recovery идемпотентно завершает публикацию валидного abridgement и
+  не делает partial material видимым;
+- логи и метрики содержат IDs, stage и redacted error code, но не provider
+  credential, context body, текст summary или главы сокращения.
+
 Это regression budgets, а не публичный SLA. Изменение dataset/threshold требует
 обновления fixture, причины и ADR/runbook evidence.
 
@@ -89,6 +100,11 @@ Initial budgets are design targets for spikes, not final SLA:
   audio permissions, deep links.
 - Security tests: sanitizer bypass corpus, SSRF, ZIP/XML/PDF fuzzing,
   malicious plugin/MCP schemas.
+- AI/MCP integration: owner isolation, claim fencing, schema/citation
+  validation, revoke/rotate, body limits и Web/internal/MCP parity.
+- Derived content: generated `.lum` fixture, provenance/checksum corruption,
+  recovery между artifact completion и library publication, source-changed и
+  export/import round-trip.
 
 ## Открытые вопросы
 

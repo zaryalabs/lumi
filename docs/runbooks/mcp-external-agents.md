@@ -1,10 +1,10 @@
 # Внешние агенты через MCP
 
-Status: `active`
+Status: `accepted`
 
 ## Назначение
 
-Lumi `0.2.0/E3` предоставляет account-scoped MCP Streamable HTTP endpoint
+Lumi `0.2.0/E3–E4` предоставляет account-scoped MCP Streamable HTTP endpoint
 `POST /mcp`. Подключение действует с правами обычного пользователя одного
 аккаунта и не открывает provider credentials, административные операции,
 удаление аккаунта или внутренний global chat.
@@ -43,11 +43,13 @@ Lumi `0.2.0/E3` предоставляет account-scoped MCP Streamable HTTP en
 - archive/restore и двухшаговое permanent delete;
 - list/create/update/delete annotations;
 - создание summary task и чтение summary/artifact;
+- создание abridgement task через `create_abridgement_task`;
 - list/claim/context/progress/complete/fail/release AI tasks.
 
 `tools/list` публикует только операции, реально доступные на этом экземпляре.
-Нереализованные search, bookmark, abridgement и large upload-ref tools не
-имитируются.
+Нереализованные search и bookmark tools не имитируются. Для abridgement
+исполнитель возвращает bounded typed chapter result; готовый ZIP и large
+upload-ref намеренно не входят в trust boundary, package собирает Lumi.
 
 ## Ротация и отзыв
 
@@ -71,4 +73,3 @@ curl -sS https://lumi.example/mcp \
 
 После revoke тот же запрос должен вернуть `401` и
 `WWW-Authenticate: Bearer realm="lumi-mcp"`.
-

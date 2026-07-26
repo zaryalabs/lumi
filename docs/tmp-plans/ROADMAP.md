@@ -49,20 +49,22 @@ Knowledge Base, native full-copy replicas, Obsidian, plugin platform, будущ
   durable streaming chat, Reader selection handoff и source-backed citations;
 - `0.2.0 / E2`: durable AI queue/internal worker, chapter/material summaries,
   Queue/Reader UX, retry/cancel/bulk и manual-edit candidate policy;
+- `0.2.0 / E3`: revocable account-scoped MCP transport, product tools,
+  fenced external worker и Web/MCP parity;
+- `0.2.0 / E4`: generated abridged `.lum`, portable provenance, ordinary
+  import validation, atomic library publication и переходы к оригиналу;
 - release evidence A1 зафиксирован commit trailer
   `Lumi-Plan-Stage: 0.2.0/A1`.
 
 Ещё не готово:
 
-- abridged `.lum`;
 - production learning, Desk/search/RAG и Community Spaces.
 
 Persistent server публикует capabilities `ai-provider-openrouter`,
-`ai-provider-byok`, `ai-explicit-context`, `ai-global-chat`, `ai-task-queue`
-и `ai-summary`. Незавершённые MCP и abridgement capabilities остаются
-выключенными.
+`ai-provider-byok`, `ai-explicit-context`, `ai-global-chat`, `ai-task-queue`,
+`ai-summary`, `mcp-account-tools`, `mcp-ai-worker` и `ai-abridged-lum`.
 
-После перехода на новую шкалу выполнено `3/18` продуктовых эпиков. Stage 0,
+После перехода на новую шкалу выполнено `4/18` продуктовых эпиков. Stage 0,
 Contract Freeze 1 и A1 остаются закрытыми prerequisites.
 
 В прежней шкале это соответствовало `3/57` закрытым checkpoint roadmap, но
@@ -70,7 +72,7 @@ Contract Freeze 1 и A1 остаются закрытыми prerequisites.
 готовность. Поэтому новая шкала начинается с нуля завершённых end-to-end
 эпиков и отдельно сохраняет перечень уже готового foundation выше.
 
-Текущий следующий эпик — `0.2.0/E4: Производные материалы и выпуск`.
+Текущий следующий эпик — `0.3.0/E1: Обучение после чтения`.
 
 ## Последовательность
 
@@ -87,11 +89,13 @@ Contract Freeze 1 и A1 остаются закрытыми prerequisites.
    manual-edit policy.
 3. [x] **E3 — Внешние агенты через MCP.** Revocable connections, transport,
    account-scoped product tools, task claim/complete и Web/MCP parity.
-4. [ ] **E4 — Производные материалы и выпуск.** Abridged `.lum`, provenance,
+4. [x] **E4 — Производные материалы и выпуск.** Abridged `.lum`, provenance,
    internal/MCP executor parity, atomic publication и полный release hardening.
 
-Результат: один проверенный Web/MCP AI-контур с общими task, artifact,
-context и authorization contracts.
+Результат: реализован repository-side выпуск единого Web/MCP AI-контура с
+общими task, artifact, context и authorization contracts; workspace и web
+package имеют версию `0.2.0`. Внешнее staging acceptance остаётся отдельным
+operator gate.
 
 ### 2. Lumi 0.3.0 — обучение после чтения
 

@@ -221,7 +221,7 @@ Generated package проходит тот же import/validation pipeline, чт�
 - перегенерировать summary;
 - собрать новую revision сокращенного `.lum`-материала.
 
-## Реализованный срез `0.2.0/E2`
+## Реализованный срез `0.2.0/E2–E4`
 
 Сохранённые `brief`/`outline` саммари главы и материала реализованы поверх
 общей durable queue и frozen `summary-artifact.v1`. Первый AI-authored
@@ -234,8 +234,29 @@ Reader показывает chapter action в конце структурной 
 Reader дают material action, PDF — material и page-as-chapter scope. Summary
 dialog показывает active/candidate/manual-edit/source-changed состояния,
 cancel/retry и source navigation. История задач доступна на отдельной Queue
-page. Производный сокращённый `.lum` по-прежнему относится к следующему
-эпику E4.
+page.
+
+Сокращение создаётся material-scoped задачей с профилем `brief` или
+`balanced`. Внутренний provider и внешний MCP executor возвращают один и тот
+же bounded `abridgement-artifact.v1`: заголовок, главы Markdown и точные
+`SourceCitation`. Lumi не принимает готовый ZIP через AI boundary. Сервер
+самостоятельно собирает portable `.lum`, добавляет
+`META-INF/lumi/provenance.json`, затем прогоняет байты через обычный `.lum`
+importer. Preflight выполняется до завершения задачи, поэтому payload с
+неполными citations или невалидный package не становится успешным artifact.
+
+Публикация library projection использует отдельную транзакцию после атомарного
+завершения task/run/artifact. Crash между этими границами безопасен: startup
+recovery повторно находит валидный candidate artifact и идемпотентно завершает
+публикацию. Material, revision, normalized package, import job, authoritative
+`material_derivations` и sync change становятся видимыми вместе. Исходная
+revision не изменяется. Исходные package bytes сохраняются как source blob,
+поэтому download производного material экспортирует тот же валидный `.lum`
+вместе с portable provenance.
+
+Library помечает сокращение как производный материал. Details показывает
+immutable source revision, состояние «оригинал обновлён» и переходы по
+сохранённым anchors; сам материал читается обычным Reader.
 
 ## Данные
 
@@ -258,10 +279,12 @@ SummaryArtifact {
 }
 ```
 
-Для сокращенного материала нужна явная derived relationship между новым
-`Material` и source `Material`/`DocumentRevision`. Точная schema является
-отдельным implementation decision и должна согласовываться с normalized
-content и export.
+Для сокращенного материала authoritative derived relationship хранится в
+`material_derivations` и связывает новый `Material`/`DocumentRevision` с
+source `Material`/`DocumentRevision`, task, artifact и полным набором source
+refs. Web projection вычисляет `source_changed` относительно текущей active
+revision оригинала. Portable копия тех же связей хранится внутри `.lum`;
+обычный importer проверяет schema marker, checksums глав и citation mapping.
 
 ## Нефункциональные требования
 

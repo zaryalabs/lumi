@@ -32,19 +32,39 @@ const server = createServer((request, response) => {
         const citationId =
           sourceMessage.match(/<source citation_id="([^"]+)">/)?.[1] ??
           "ctx:missing:1";
+        const isAbridgement = body.messages.some((message) =>
+          message.content?.includes("abridgement-artifact.v1"),
+        );
         response.writeHead(200, { "content-type": "application/json" });
         response.end(
           JSON.stringify({
-            id: "structured-summary",
+            id: isAbridgement ? "structured-abridgement" : "structured-summary",
             choices: [
               {
                 message: {
-                  content: JSON.stringify({
-                    schema_version: "summary-artifact.v1",
-                    content:
-                      "Краткое саммари фикстуры с проверяемым источником.",
-                    citation_ids: [citationId],
-                  }),
+                  content: JSON.stringify(
+                    isAbridgement
+                      ? {
+                          schema_version: "abridgement-artifact.v1",
+                          title: "Сокращённое руководство Lumi",
+                          profile: "balanced",
+                          chapters: [
+                            {
+                              title: "Главное",
+                              content:
+                                "Ключевые идеи материала в проверяемом сокращении.",
+                              citation_ids: [citationId],
+                            },
+                          ],
+                          citation_ids: [citationId],
+                        }
+                      : {
+                          schema_version: "summary-artifact.v1",
+                          content:
+                            "Краткое саммари фикстуры с проверяемым источником.",
+                          citation_ids: [citationId],
+                        },
+                  ),
                 },
               },
             ],

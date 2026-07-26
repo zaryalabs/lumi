@@ -24,6 +24,12 @@
       "task_kind": "summary",
       "scope_kind": "material",
       "form": "outline"
+    },
+    {
+      "version": "abridgement.material.v1",
+      "task_kind": "abridgement",
+      "scope_kind": "material",
+      "form": "outline"
     }
   ],
   "outputs": [
@@ -34,6 +40,19 @@
       "required": [
         "schema_version",
         "content",
+        "citation_ids"
+      ],
+      "additional_properties": false
+    },
+    {
+      "version": "abridgement-artifact.v1",
+      "artifact_kind": "abridgement_artifact",
+      "max_payload_bytes": 2359296,
+      "required": [
+        "schema_version",
+        "title",
+        "profile",
+        "chapters",
         "citation_ids"
       ],
       "additional_properties": false

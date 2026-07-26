@@ -9,11 +9,11 @@ use lumi_core::{
     AiArtifact, AiArtifactStatus, AiContextAttachment, AiConversation, AiCredentialState,
     AiExecutionMode, AiGeneration, AiGenerationStatus, AiMessageRole, AiMessageStatus, AiPage,
     AiProviderDescriptor, AiSourceScope, AiTask, AiTaskStatus, ArtifactMutationRequest,
-    BulkExecuteTasksRequest, BulkTaskResult, ConversationDetail, CreateConversationRequest,
-    CreateMessageRequest, CreateMessageResponse, CreateSummaryTaskRequest,
-    GenerationMutationRequest, ProviderCredentialState, PutProviderCredentialRequest,
-    SummaryArtifact, SummaryForm, SummaryScopeKind, TaskMutationRequest, UpdateConversationRequest,
-    UpdateSummaryRequest, ValidateProviderRequest,
+    BulkExecuteTasksRequest, BulkTaskResult, ConversationDetail, CreateAbridgementTaskRequest,
+    CreateConversationRequest, CreateMessageRequest, CreateMessageResponse,
+    CreateSummaryTaskRequest, GenerationMutationRequest, ProviderCredentialState,
+    PutProviderCredentialRequest, SourceCitation, SummaryArtifact, SummaryForm, SummaryScopeKind,
+    TaskMutationRequest, UpdateConversationRequest, UpdateSummaryRequest, ValidateProviderRequest,
 };
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
@@ -448,6 +448,77 @@ pub(crate) fn SummaryAction(
                         }
                     }
                 }
+            }
+        }
+    }
+}
+
+#[component]
+pub(crate) fn AbridgementAction(
+    material_id: Uuid,
+    revision_id: Uuid,
+    csrf_token: String,
+) -> Element {
+    let mut open = use_signal(|| false);
+    let mut profile = use_signal(|| "balanced".to_owned());
+    let mut task = use_signal(|| None::<AiTask>);
+    let mut busy = use_signal(|| false);
+    let mut error = use_signal(String::new);
+
+    rsx! {
+        button {
+            class: "text-action",
+            r#type: "button",
+            onclick: move |_| open.set(true),
+            "Сокращённая версия"
+        }
+        if open() {
+            section { class: "summary-candidate", aria_label: "Создание сокращённого материала",
+                h3 { "Новый производный .lum" }
+                p { "Lumi сохранит точную связь с этой ревизией, проверит пакет обычным импортёром и покажет материал только после полной публикации." }
+                label { "Степень сокращения",
+                    select {
+                        value: "{profile}",
+                        onchange: move |event| profile.set(event.value()),
+                        option { value: "balanced", "Сбалансированная" }
+                        option { value: "brief", "Краткая" }
+                    }
+                }
+                if let Some(current) = task.read().as_ref() {
+                    p { role: "status", "Задача: {task_status_label(current.status)}" }
+                    a { class: "secondary-action", href: "#ai-queue", "Открыть очередь" }
+                } else {
+                    button {
+                        class: "primary-action",
+                        r#type: "button",
+                        disabled: busy(),
+                        onclick: move |_| {
+                            let profile = profile.read().clone();
+                            let csrf = csrf_token.clone();
+                            busy.set(true);
+                            error.set(String::new());
+                            spawn(async move {
+                                match create_abridgement_request(
+                                    material_id,
+                                    revision_id,
+                                    profile,
+                                    &csrf,
+                                )
+                                .await
+                                {
+                                    Ok(created) => task.set(Some(created)),
+                                    Err(message) => error.set(message),
+                                }
+                                busy.set(false);
+                            });
+                        },
+                        if busy() { "Создаём задачу…" } else { "Создать и выполнить" }
+                    }
+                }
+                if !error().is_empty() {
+                    p { class: "account-error", role: "alert", "{error}" }
+                }
+                button { class: "text-action", r#type: "button", onclick: move |_| open.set(false), "Скрыть" }
             }
         }
     }
@@ -1274,6 +1345,25 @@ async fn create_summary_request(
     .await
 }
 
+async fn create_abridgement_request(
+    material_id: Uuid,
+    revision_id: Uuid,
+    profile: String,
+    csrf: &str,
+) -> Result<AiTask, String> {
+    post_json(
+        &format!("/materials/{material_id}/abridgement-tasks"),
+        &CreateAbridgementTaskRequest {
+            source_revision_id: revision_id,
+            profile,
+            execution_mode: AiExecutionMode::ExecuteNow,
+            idempotency_key: Uuid::now_v7().to_string(),
+        },
+        csrf,
+    )
+    .await
+}
+
 async fn mutate_artifact_request(
     summary: &SummaryArtifact,
     accept: bool,
@@ -1580,6 +1670,8 @@ fn task_status_terminal(status: AiTaskStatus) -> bool {
 fn task_kind_label(kind: &str) -> &str {
     if kind == "summary" {
         "Саммари"
+    } else if kind == "abridgement" {
+        "Сокращённый .lum"
     } else {
         kind
     }
@@ -1654,6 +1746,28 @@ fn open_summary_source(
     if let Ok(event) = web_sys::CustomEvent::new(READER_TARGET_EVENT) {
         let _ = window.dispatch_event(&event);
     }
+}
+
+pub(crate) fn open_derived_source(citation: &SourceCitation) {
+    let scope = citation.anchor.as_ref().map_or_else(
+        || AiSourceScope::Chapter {
+            material_id: citation.material_id,
+            revision_id: citation.revision_id,
+            scope_ref: citation.unit_id.clone(),
+        },
+        |anchor| AiSourceScope::Selection {
+            material_id: citation.material_id,
+            revision_id: citation.revision_id,
+            anchor: anchor.clone(),
+        },
+    );
+    open_source(&AiContextAttachment {
+        kind: "derived_material_source".to_owned(),
+        material_id: citation.material_id,
+        revision_id: citation.revision_id,
+        scope,
+        display_label: format!("Источник {}", citation.citation_id),
+    });
 }
 
 fn defer_focus(id: &'static str) {

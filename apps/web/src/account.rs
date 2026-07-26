@@ -830,6 +830,12 @@ fn LibraryApp(csrf_token: String, on_open_reader: EventHandler<Uuid>) -> Element
         .read()
         .as_ref()
         .is_some_and(|value| value.features.iter().any(|feature| feature == "lum-import"));
+    let abridgement_enabled = capabilities.read().as_ref().is_some_and(|value| {
+        value
+            .features
+            .iter()
+            .any(|feature| feature == "ai-abridged-lum")
+    });
     rsx! {
         main { id: "main-content", class: "library-view", aria_label: "Библиотека Lumi",
             header { class: if loaded { "library-hero compact" } else { "library-hero" },
@@ -988,7 +994,7 @@ fn LibraryApp(csrf_token: String, on_open_reader: EventHandler<Uuid>) -> Element
         }
 
         if let Some(entry) = details.read().clone() {
-            MaterialDetailsDialog { entry: entry.clone(), csrf_token: csrf_token.clone(), on_close: move |_| {
+            MaterialDetailsDialog { entry: entry.clone(), csrf_token: csrf_token.clone(), abridgement_enabled, on_close: move |_| {
                 details.set(None);
                 defer_account_focus(&format!("details-{}", entry.id));
             } }
@@ -1068,6 +1074,9 @@ fn MaterialCard(
                 div { class: "material-card-heading",
                     div {
                         span { class: "format-label", "{format_label}" }
+                        if entry.derivation.is_some() {
+                            span { class: "status-pill ready", "Производный материал" }
+                        }
                         h3 { "{title}" }
                     }
                     span { class: "status-pill {status_class}", "{status_label}" }
@@ -1389,6 +1398,7 @@ fn AddMaterialDialog(
 fn MaterialDetailsDialog(
     entry: LibraryEntry,
     csrf_token: String,
+    abridgement_enabled: bool,
     on_close: EventHandler<()>,
 ) -> Element {
     let revision = entry
@@ -1412,12 +1422,33 @@ fn MaterialDetailsDialog(
                 div { dt { "Материал" } dd { "{entry.id}" } }
                 div { dt { "Ревизия" } dd { "{revision}" } }
                 div { dt { "SHA-256" } dd { "{entry.source_identity.source_hash}" } }
+                if let Some(derivation) = entry.derivation.as_ref() {
+                    div { dt { "Происхождение" } dd {
+                        "Сокращение ревизии {derivation.source_revision_id}"
+                        if derivation.source_changed { " · оригинал обновлён" }
+                    } }
+                }
             }
             if !entry.latest_job.diagnostics.is_empty() {
                 section { class: "details-diagnostics", aria_label: "Диагностика импорта",
                     h3 { "Диагностика" }
                     for diagnostic in &entry.latest_job.diagnostics {
                         p { strong { "{diagnostic.code}" } " · {diagnostic.message}" }
+                    }
+                }
+            }
+            if let Some(derivation) = entry.derivation.as_ref() {
+                nav { class: "summary-citations", aria_label: "Источники сокращённого материала",
+                    for (index, citation) in derivation.source_refs.iter().take(8).enumerate() {
+                        button {
+                            class: "text-action",
+                            r#type: "button",
+                            onclick: {
+                                let citation = citation.clone();
+                                move |_| crate::ai::open_derived_source(&citation)
+                            },
+                            "Открыть источник {index + 1}"
+                        }
                     }
                 }
             }
@@ -1430,8 +1461,18 @@ fn MaterialDetailsDialog(
                         scope_kind: lumi_core::SummaryScopeKind::Material,
                         scope_ref: "material".to_owned(),
                         label: "Саммари материала".to_owned(),
-                        csrf_token,
+                        csrf_token: csrf_token.clone(),
                     }
+                    if abridgement_enabled && entry.derivation.is_none() {
+                        crate::ai::AbridgementAction {
+                            material_id: entry.id,
+                            revision_id,
+                            csrf_token: csrf_token.clone(),
+                        }
+                    }
+                }
+                if let Some(derivation) = entry.derivation.as_ref() {
+                    a { class: "secondary-action", href: "#reader/{derivation.source_material_id}", "Открыть оригинал" }
                 }
                 button { class: "primary-action", r#type: "button", onclick: move |_| on_close.call(()), "Готово" }
             }

@@ -1,13 +1,14 @@
 //! Generated `.lum` assembly and ordinary-import compatibility probe.
 
-use std::io::{Cursor, Write};
-
-use lumi_core::{import_lum, LumImportError, LumImportRequest, LumLimits, SourceLocator};
-use serde_json::json;
+use lumi_core::{
+    build_generated_lum_package, content_hash, import_lum, AbridgementArtifactPayload,
+    AbridgementChapter, AiSourceLocator, GeneratedLumPackageError, GeneratedLumPackageRequest,
+    LumImportError, LumImportRequest, LumLimits, SourceCitation, SourceLocator,
+    ABRIDGEMENT_ARTIFACT_SCHEMA_VERSION, ABRIDGEMENT_MATERIAL_PROMPT_VERSION,
+    SOURCE_CITATION_SCHEMA_VERSION,
+};
 use thiserror::Error;
 use uuid::Uuid;
-use zip::write::{SimpleFileOptions, ZipWriter};
-use zip::CompressionMethod;
 
 /// Stable result of assembling and re-importing a generated `.lum` package.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -25,12 +26,9 @@ pub struct GeneratedLumProbeReport {
 /// Failures exposed by generated `.lum` assembly and validation.
 #[derive(Debug, Error)]
 pub enum GeneratedLumProbeError {
-    /// Archive assembly failed.
+    /// Lumi-owned package assembly failed.
     #[error(transparent)]
-    Zip(#[from] zip::result::ZipError),
-    /// A package entry could not be written.
-    #[error(transparent)]
-    Io(#[from] std::io::Error),
+    Assembly(#[from] GeneratedLumPackageError),
     /// The ordinary LUM importer rejected the generated package.
     #[error(transparent)]
     Import(#[from] LumImportError),
@@ -78,63 +76,58 @@ pub fn run_generated_lum_probe() -> Result<GeneratedLumProbeReport, GeneratedLum
 }
 
 fn build_generated_package() -> Result<Vec<u8>, GeneratedLumProbeError> {
-    let cursor = Cursor::new(Vec::new());
-    let mut writer = ZipWriter::new(cursor);
-    let stored = SimpleFileOptions::default().compression_method(CompressionMethod::Stored);
-    let deflated = SimpleFileOptions::default().compression_method(CompressionMethod::Deflated);
-
-    writer.start_file("mimetype", stored)?;
-    writer.write_all(b"application/vnd.lumi.lum+zip")?;
-    writer.start_file("lum.toml", deflated)?;
-    writer.write_all(
-        r#"format_version = "0.1"
-
-[book]
-id = "derived-abridged-fixture"
-title = "Сокращенная fixture-книга"
-language = "ru"
-authors = ["Lumi AI"]
-
-[[spine]]
-id = "chapter-1"
-path = "content/chapter-1.md"
-title = "Глава 1"
-
-[[spine]]
-id = "chapter-2"
-path = "content/chapter-2.md"
-title = "Глава 2"
-
-[features]
-markdown = "lumi-markdown"
-"#
-        .as_bytes(),
-    )?;
-    writer.start_file("content/chapter-1.md", deflated)?;
-    writer.write_all(
-        "# Глава 1\n\nСокращенный тезис со ссылкой `source:revision-1:anchor-1`.\n".as_bytes(),
-    )?;
-    writer.start_file("content/chapter-2.md", deflated)?;
-    writer.write_all(
-        "# Глава 2\n\nСокращенный тезис со ссылкой `source:revision-1:anchor-2`.\n".as_bytes(),
-    )?;
-    writer.start_file("META-INF/lumi/provenance.json", deflated)?;
-    writer.write_all(
-        json!({
-            "schema_version": "lumi.generated-provenance.v1",
-            "kind": "abridgement",
-            "source_material_id": "00000000-0000-0000-0000-000000000100",
-            "source_revision_id": "00000000-0000-0000-0000-000000000101",
-            "source_refs": [
-                "source:revision-1:anchor-1",
-                "source:revision-1:anchor-2"
-            ]
+    let source_material_id = Uuid::from_u128(0x100);
+    let source_revision_id = Uuid::from_u128(0x101);
+    let citations = [1_u64, 2]
+        .into_iter()
+        .map(|ordinal| SourceCitation {
+            schema_version: SOURCE_CITATION_SCHEMA_VERSION.to_owned(),
+            citation_id: format!("ctx:revision-1:anchor-{ordinal}"),
+            material_id: source_material_id,
+            revision_id: source_revision_id,
+            unit_id: format!("unit-{ordinal}"),
+            block_id: format!("block-{ordinal}"),
+            source_locator: AiSourceLocator::Lum {
+                file_path: "content/original.md".to_owned(),
+                byte_start: usize::try_from((ordinal - 1) * 32).unwrap_or_default(),
+                byte_end: usize::try_from(ordinal * 32).unwrap_or_default(),
+            },
+            anchor: None,
+            quote_hash: content_hash(format!("source-{ordinal}").as_bytes()),
+            fragment_byte_start: 0,
+            fragment_byte_end: 32,
         })
-        .to_string()
-        .as_bytes(),
-    )?;
-
-    Ok(writer.finish()?.into_inner())
+        .collect::<Vec<_>>();
+    let payload = AbridgementArtifactPayload {
+        schema_version: ABRIDGEMENT_ARTIFACT_SCHEMA_VERSION.to_owned(),
+        title: "Сокращенная fixture-книга".to_owned(),
+        profile: "balanced".to_owned(),
+        chapters: citations
+            .iter()
+            .enumerate()
+            .map(|(index, citation)| AbridgementChapter {
+                title: format!("Глава {}", index + 1),
+                content: format!("Сокращенный тезис со ссылкой `{}`.", citation.citation_id),
+                citation_ids: vec![citation.citation_id.clone()],
+            })
+            .collect(),
+        citation_ids: citations
+            .iter()
+            .map(|citation| citation.citation_id.clone())
+            .collect(),
+    };
+    build_generated_lum_package(GeneratedLumPackageRequest {
+        book_id: "derived-abridged-fixture",
+        source_material_id,
+        source_revision_id,
+        task_id: Uuid::from_u128(0x102),
+        artifact_id: Uuid::from_u128(0x103),
+        prompt_version: ABRIDGEMENT_MATERIAL_PROMPT_VERSION,
+        artifact_schema_version: ABRIDGEMENT_ARTIFACT_SCHEMA_VERSION,
+        payload: &payload,
+        source_refs: &citations,
+    })
+    .map_err(Into::into)
 }
 
 #[cfg(test)]

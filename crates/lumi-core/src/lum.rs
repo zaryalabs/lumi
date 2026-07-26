@@ -1,29 +1,250 @@
 //! Safe portable LUM package import into Lumi's normalized reader contracts.
 
 use std::collections::{HashMap, HashSet};
-use std::io::{Cursor, Read};
+use std::io::{Cursor, Read, Write};
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use url::Url;
 use uuid::Uuid;
 use zip::read::ZipArchive;
+use zip::write::{SimpleFileOptions, ZipWriter};
 use zip::CompressionMethod;
 
 use crate::{
-    compile_markdown, content_hash, BlobManifest, BlobRef, BlobRole, ContentBlock, ContentUnit,
-    DiagnosticSeverity, DocumentRevision, DocumentRevisionId, ImportDiagnostic,
-    ImportedPublication, ImportedPublicationResource, LumSourceLocator, MarkdownCompileRequest,
-    MarkdownDialect, MarkdownImportError, MarkdownResourceReference, MaterialId, NavigationItem,
-    NormalizedContentPackage, NormalizedPackageManifest, ReadingLinkKind, ReadingNodeKind,
-    SourceFormat, SourceIdentity, SourceLocator, UserId, LUM_IMPORTER_ID, LUM_IMPORTER_VERSION,
-    LUM_WEB_SOURCE_BYTES, NORMALIZED_PACKAGE_VERSION,
+    compile_markdown, content_hash, AbridgementArtifactPayload, BlobManifest, BlobRef, BlobRole,
+    ContentBlock, ContentUnit, DiagnosticSeverity, DocumentRevision, DocumentRevisionId,
+    ImportDiagnostic, ImportedPublication, ImportedPublicationResource, LumSourceLocator,
+    MarkdownCompileRequest, MarkdownDialect, MarkdownImportError, MarkdownResourceReference,
+    MaterialId, NavigationItem, NormalizedContentPackage, NormalizedPackageManifest,
+    ReadingLinkKind, ReadingNodeKind, SourceCitation, SourceFormat, SourceIdentity, SourceLocator,
+    UserId, LUM_IMPORTER_ID, LUM_IMPORTER_VERSION, LUM_WEB_SOURCE_BYTES,
+    NORMALIZED_PACKAGE_VERSION,
 };
 
 const MIB: u64 = 1024 * 1024;
 const LUM_MIMETYPE: &[u8] = b"application/vnd.lumi.lum+zip";
 const LUM_FORMAT_VERSION: &str = "0.1";
 const LUM_LIMITS_VERSION: &str = "lum-limits.web-v1";
+/// Reserved portable provenance marker for Lumi-generated materials.
+pub const GENERATED_LUM_PROVENANCE_VERSION: &str = "lumi.generated-provenance.v1";
+/// Reserved portable provenance entry inside a generated `.lum`.
+pub const GENERATED_LUM_PROVENANCE_PATH: &str = "META-INF/lumi/provenance.json";
+
+/// Inputs owned by Lumi while assembling a generated portable `.lum`.
+pub struct GeneratedLumPackageRequest<'a> {
+    /// Stable portable book identifier, independent of the source book.
+    pub book_id: &'a str,
+    /// Exact source material.
+    pub source_material_id: MaterialId,
+    /// Exact immutable source revision.
+    pub source_revision_id: DocumentRevisionId,
+    /// Producing AI task.
+    pub task_id: Uuid,
+    /// Producing AI artifact.
+    pub artifact_id: Uuid,
+    /// Versioned prompt used by the executor.
+    pub prompt_version: &'a str,
+    /// Versioned output schema accepted from the executor.
+    pub artifact_schema_version: &'a str,
+    /// Validated typed abridgement payload.
+    pub payload: &'a AbridgementArtifactPayload,
+    /// Bounded exact source citations issued to the producing run.
+    pub source_refs: &'a [SourceCitation],
+}
+
+/// Validated portable provenance retained in a generated `.lum`.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GeneratedLumProvenance {
+    /// Provenance schema marker.
+    pub schema_version: String,
+    /// Derived relation kind.
+    pub kind: String,
+    /// Exact source material.
+    pub source_material_id: MaterialId,
+    /// Exact immutable source revision.
+    pub source_revision_id: DocumentRevisionId,
+    /// Producing AI task.
+    pub task_id: Uuid,
+    /// Producing AI artifact.
+    pub artifact_id: Uuid,
+    /// Generator implementation marker.
+    pub generator_version: String,
+    /// Prompt version used by the executor.
+    pub prompt_version: String,
+    /// Artifact schema accepted from the executor.
+    pub artifact_schema_version: String,
+    /// Compression profile.
+    pub profile: String,
+    /// Ordered chapter checksums and citation mappings.
+    pub chapters: Vec<GeneratedLumChapterProvenance>,
+    /// Bounded source-backed citations.
+    pub source_refs: Vec<SourceCitation>,
+}
+
+/// Per-chapter integrity and source mapping in generated provenance.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GeneratedLumChapterProvenance {
+    /// Generated package path.
+    pub path: String,
+    /// SHA-256 of exact Markdown bytes stored at `path`.
+    pub content_hash: String,
+    /// Citation identifiers supporting the chapter.
+    pub citation_ids: Vec<String>,
+}
+
+/// Failure while assembling a Lumi-owned generated package.
+#[derive(Debug, Error)]
+pub enum GeneratedLumPackageError {
+    /// The typed artifact or provenance is inconsistent.
+    #[error("invalid generated LUM input: {0}")]
+    Invalid(&'static str),
+    /// TOML manifest serialization failed.
+    #[error("failed to serialize generated LUM manifest: {0}")]
+    Manifest(#[from] toml::ser::Error),
+    /// JSON provenance serialization failed.
+    #[error("failed to serialize generated LUM provenance: {0}")]
+    Provenance(#[from] serde_json::Error),
+    /// ZIP assembly failed.
+    #[error("failed to assemble generated LUM package: {0}")]
+    Zip(#[from] zip::result::ZipError),
+    /// An archive entry could not be written.
+    #[error("failed to write generated LUM package: {0}")]
+    Io(#[from] std::io::Error),
+}
+
+/// Assemble one deterministic, portable `.lum` from a validated typed result.
+///
+/// The package is still untrusted until it passes [`import_lum`]. Callers must
+/// never publish these bytes directly.
+///
+/// # Errors
+///
+/// Returns an error for inconsistent citations, invalid identifiers or archive
+/// serialization failures.
+pub fn build_generated_lum_package(
+    request: GeneratedLumPackageRequest<'_>,
+) -> Result<Vec<u8>, GeneratedLumPackageError> {
+    request
+        .payload
+        .validate()
+        .map_err(|_| GeneratedLumPackageError::Invalid("artifact payload is invalid"))?;
+    if !valid_identifier(request.book_id) {
+        return Err(GeneratedLumPackageError::Invalid(
+            "book id is not a portable identifier",
+        ));
+    }
+    let issued = request
+        .source_refs
+        .iter()
+        .map(|citation| citation.citation_id.as_str())
+        .collect::<HashSet<_>>();
+    if issued.len() != request.source_refs.len()
+        || request
+            .payload
+            .citation_ids
+            .iter()
+            .any(|citation_id| !issued.contains(citation_id.as_str()))
+    {
+        return Err(GeneratedLumPackageError::Invalid(
+            "artifact cites a source ref that was not issued",
+        ));
+    }
+
+    let mut chapter_entries = Vec::with_capacity(request.payload.chapters.len());
+    let mut spine = Vec::with_capacity(request.payload.chapters.len());
+    let mut chapter_provenance = Vec::with_capacity(request.payload.chapters.len());
+    for (index, chapter) in request.payload.chapters.iter().enumerate() {
+        let ordinal = index + 1;
+        let id = format!("chapter-{ordinal}");
+        let path = format!("content/{id}.md");
+        let markdown = format!("# {}\n\n{}\n", chapter.title.trim(), chapter.content.trim());
+        chapter_provenance.push(GeneratedLumChapterProvenance {
+            path: path.clone(),
+            content_hash: content_hash(markdown.as_bytes()),
+            citation_ids: chapter.citation_ids.clone(),
+        });
+        spine.push(GeneratedManifestSpine {
+            id,
+            path: path.clone(),
+            title: chapter.title.trim().to_owned(),
+        });
+        chapter_entries.push((path, markdown));
+    }
+    let manifest = GeneratedManifest {
+        format_version: LUM_FORMAT_VERSION.to_owned(),
+        book: GeneratedManifestBook {
+            id: request.book_id.to_owned(),
+            title: request.payload.title.trim().to_owned(),
+            language: None,
+            authors: vec!["Lumi AI".to_owned()],
+        },
+        spine,
+        features: GeneratedManifestFeatures {
+            markdown: "lumi-markdown".to_owned(),
+        },
+    };
+    let provenance = GeneratedLumProvenance {
+        schema_version: GENERATED_LUM_PROVENANCE_VERSION.to_owned(),
+        kind: "abridgement".to_owned(),
+        source_material_id: request.source_material_id,
+        source_revision_id: request.source_revision_id,
+        task_id: request.task_id,
+        artifact_id: request.artifact_id,
+        generator_version: "lumi.generated-lum.v1".to_owned(),
+        prompt_version: request.prompt_version.to_owned(),
+        artifact_schema_version: request.artifact_schema_version.to_owned(),
+        profile: request.payload.profile.clone(),
+        chapters: chapter_provenance,
+        source_refs: request.source_refs.to_vec(),
+    };
+
+    let cursor = Cursor::new(Vec::new());
+    let mut writer = ZipWriter::new(cursor);
+    let stored = SimpleFileOptions::default().compression_method(CompressionMethod::Stored);
+    let deflated = SimpleFileOptions::default().compression_method(CompressionMethod::Deflated);
+    writer.start_file("mimetype", stored)?;
+    writer.write_all(LUM_MIMETYPE)?;
+    writer.start_file("lum.toml", deflated)?;
+    writer.write_all(toml::to_string(&manifest)?.as_bytes())?;
+    for (path, markdown) in chapter_entries {
+        writer.start_file(path, deflated)?;
+        writer.write_all(markdown.as_bytes())?;
+    }
+    writer.start_file(GENERATED_LUM_PROVENANCE_PATH, deflated)?;
+    writer.write_all(&serde_json::to_vec(&provenance)?)?;
+    Ok(writer.finish()?.into_inner())
+}
+
+#[derive(Serialize)]
+struct GeneratedManifest {
+    format_version: String,
+    book: GeneratedManifestBook,
+    spine: Vec<GeneratedManifestSpine>,
+    features: GeneratedManifestFeatures,
+}
+
+#[derive(Serialize)]
+struct GeneratedManifestBook {
+    id: String,
+    title: String,
+    language: Option<String>,
+    authors: Vec<String>,
+}
+
+#[derive(Serialize)]
+struct GeneratedManifestSpine {
+    id: String,
+    path: String,
+    title: String,
+}
+
+#[derive(Serialize)]
+struct GeneratedManifestFeatures {
+    markdown: String,
+}
 
 /// Versioned defensive limits for one portable LUM package.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -360,6 +581,14 @@ pub fn import_lum(
     validate_manifest(&manifest, &summary.names)?;
 
     let mut diagnostics = validate_mimetype(&mut archive, &summary, limits, &is_cancelled)?;
+    if summary.names.contains(GENERATED_LUM_PROVENANCE_PATH) {
+        validate_generated_provenance(&mut archive, limits, &is_cancelled)?;
+        diagnostics.push(warning(
+            "lum_generated_provenance",
+            "Generated material provenance was validated and retained in the portable package.",
+            Some(GENERATED_LUM_PROVENANCE_PATH.to_owned()),
+        ));
+    }
     diagnostics.extend(manifest.features.optional_plugins.iter().map(|plugin| {
         warning(
             "lum_optional_plugin_placeholder",
@@ -605,6 +834,76 @@ fn validate_manifest(
         }
     }
     Ok(())
+}
+
+fn validate_generated_provenance(
+    archive: &mut ZipArchive<Cursor<&[u8]>>,
+    limits: LumLimits,
+    is_cancelled: &impl Fn() -> bool,
+) -> Result<GeneratedLumProvenance, LumImportError> {
+    let bytes = read_entry(
+        archive,
+        GENERATED_LUM_PROVENANCE_PATH,
+        limits.manifest_bytes,
+        is_cancelled,
+    )?;
+    let provenance: GeneratedLumProvenance = serde_json::from_slice(&bytes).map_err(|error| {
+        LumImportError::InvalidManifest(format!(
+            "{GENERATED_LUM_PROVENANCE_PATH} is invalid: {error}"
+        ))
+    })?;
+    if provenance.schema_version != GENERATED_LUM_PROVENANCE_VERSION
+        || provenance.kind != "abridgement"
+        || provenance.generator_version.trim().is_empty()
+        || provenance.prompt_version.trim().is_empty()
+        || provenance.artifact_schema_version.trim().is_empty()
+        || provenance.profile.trim().is_empty()
+        || provenance.chapters.is_empty()
+        || provenance.source_refs.is_empty()
+    {
+        return Err(LumImportError::InvalidManifest(
+            "generated provenance is incomplete".to_owned(),
+        ));
+    }
+    let issued = provenance
+        .source_refs
+        .iter()
+        .map(|citation| citation.citation_id.as_str())
+        .collect::<HashSet<_>>();
+    if issued.len() != provenance.source_refs.len()
+        || provenance.source_refs.iter().any(|citation| {
+            citation.material_id != provenance.source_material_id
+                || citation.revision_id != provenance.source_revision_id
+        })
+    {
+        return Err(LumImportError::InvalidManifest(
+            "generated provenance source refs are inconsistent".to_owned(),
+        ));
+    }
+    let mut paths = HashSet::new();
+    for chapter in &provenance.chapters {
+        validate_declared_path(&chapter.path)?;
+        if !paths.insert(chapter.path.as_str())
+            || chapter.content_hash.len() != 64
+            || chapter.citation_ids.is_empty()
+            || chapter
+                .citation_ids
+                .iter()
+                .any(|citation_id| !issued.contains(citation_id.as_str()))
+        {
+            return Err(LumImportError::InvalidManifest(
+                "generated chapter provenance is inconsistent".to_owned(),
+            ));
+        }
+        let content = read_entry(archive, &chapter.path, limits.chapter_bytes, is_cancelled)?;
+        if content_hash(&content) != chapter.content_hash {
+            return Err(LumImportError::InvalidManifest(format!(
+                "generated chapter checksum mismatch for `{}`",
+                chapter.path
+            )));
+        }
+    }
+    Ok(provenance)
 }
 
 fn valid_identifier(value: &str) -> bool {
@@ -1322,6 +1621,61 @@ path = "chapter.md"
             first.revision.normalized_hash,
             second.revision.normalized_hash
         );
+        Ok(())
+    }
+
+    #[test]
+    fn generated_abridgement_reuses_importer_and_validates_provenance(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let source_material_id = Uuid::from_u128(10);
+        let source_revision_id = Uuid::from_u128(11);
+        let citation = SourceCitation {
+            schema_version: crate::SOURCE_CITATION_SCHEMA_VERSION.to_owned(),
+            citation_id: "ctx:chapter-1".to_owned(),
+            material_id: source_material_id,
+            revision_id: source_revision_id,
+            unit_id: "unit-1".to_owned(),
+            block_id: "block-1".to_owned(),
+            source_locator: crate::AiSourceLocator::Lum {
+                file_path: "content/original.md".to_owned(),
+                byte_start: 0,
+                byte_end: 12,
+            },
+            anchor: None,
+            quote_hash: content_hash(b"source quote"),
+            fragment_byte_start: 0,
+            fragment_byte_end: 12,
+        };
+        let payload = AbridgementArtifactPayload {
+            schema_version: crate::ABRIDGEMENT_ARTIFACT_SCHEMA_VERSION.to_owned(),
+            title: "Сокращённая книга".to_owned(),
+            profile: "balanced".to_owned(),
+            chapters: vec![crate::AbridgementChapter {
+                title: "Первая глава".to_owned(),
+                content: "Проверяемый тезис.".to_owned(),
+                citation_ids: vec![citation.citation_id.clone()],
+            }],
+            citation_ids: vec![citation.citation_id.clone()],
+        };
+        let source = build_generated_lum_package(GeneratedLumPackageRequest {
+            book_id: "derived-book",
+            source_material_id,
+            source_revision_id,
+            task_id: Uuid::from_u128(12),
+            artifact_id: Uuid::from_u128(13),
+            prompt_version: crate::ABRIDGEMENT_MATERIAL_PROMPT_VERSION,
+            artifact_schema_version: crate::ABRIDGEMENT_ARTIFACT_SCHEMA_VERSION,
+            payload: &payload,
+            source_refs: &[citation],
+        })?;
+        let imported = import_lum(request(&source), LumLimits::web_v1(), || false)?;
+
+        assert_eq!(imported.package.units.len(), 1);
+        assert!(imported
+            .revision
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == "lum_generated_provenance"));
         Ok(())
     }
 
