@@ -6,7 +6,7 @@
 [`scripts/execute_plan.py`](../../scripts/execute_plan.py) внутри выделенного
 devcontainer. Runner последовательно исполняет текущий
 [`ROADMAP.md`](../tmp-plans/ROADMAP.md): два свежих вызова `codex exec`, внешний
-quality gate и один commit на этап.
+quality gate и один integration commit на продуктовый эпик.
 
 Runner не выполняет `push`, не открывает PR и не развёртывает внешнее
 окружение.
@@ -43,14 +43,14 @@ Codex auth хранится в named volume `codex-home`. Сгенерирова
 внутренний Codex sandbox отключён. После чувствительного или одноразового
 прогона credential следует отозвать и удалить devcontainer volumes.
 
-## Что делает один этап
+## Что делает один эпик
 
-Для каждого hardcoded stage:
+Для каждого hardcoded epic:
 
 1. Проверяет branch, `HEAD`, чистоту worktree, Git identity, Codex auth и
    совместимость CLI.
 2. Запускает новую ephemeral Codex session для реализации только текущего
-   этапа и сразу показывает её события в читаемом виде в текущем terminal.
+   эпика и сразу показывает её события в читаемом виде в текущем terminal.
 3. Запускает вторую независимую ephemeral session для аудита diff и
    исправления пробелов, также с live output.
 4. Проверяет, что Codex не изменил Git history, а подробный план и ROADMAP
@@ -60,17 +60,23 @@ Codex auth хранится в named volume `codex-home`. Сгенерирова
    чувствительные/generated paths, а также изменения runner/devcontainer
    control plane из продуктового этапа.
 7. Выполняет `git diff --check`, staging и один commit с trailer
-   `Lumi-Plan-Stage`.
-8. Переходит к следующему этапу только после успешного commit.
+   `Lumi-Plan-Epic`.
+8. Переходит к следующему эпику только после успешного commit.
 
-Названия этапов, commit subjects и gate commands находятся вместе в начале
+Названия эпиков, commit subjects и gate commands находятся вместе в начале
 `scripts/execute_plan.py`. После изменения единого плана сначала синхронизируйте
 этот список и выполните `make plan-runner-check`.
 
-Runner требует, чтобы в каждом этапе менялись подробный plan и ROADMAP. Пока
-активен запуск, нельзя переименовывать/удалять plan files и stage headings.
+Runner требует, чтобы в каждом эпике менялись подробный plan и ROADMAP. Пока
+активен запуск, нельзя переименовывать/удалять plan files и epic headings.
 Архивацию завершённых tmp-plans выполняют отдельно после окончания выбранной
-серии этапов.
+серии эпиков.
+
+Внутренние A/B/C-workstreams подробного плана не являются runner stages.
+Implementation session может координировать несколько workstreams одного эпика,
+но обязана закрыть единый end-to-end outcome. Targeted checks выполняются по
+мере работы; hardcoded общий gate повторно запускается перед integration
+commit.
 
 ## Подготовка devcontainer
 
@@ -83,7 +89,7 @@ git status --short
 ```
 
 Runner принципиально не смешивает уже существующий dirty worktree с первым
-этапом.
+эпиком.
 
 В VS Code выполните `Dev Containers: Reopen in Container`. Через Make:
 
@@ -147,7 +153,7 @@ git config --local user.email "you@example.com"
 docker info
 make plan-runner-check
 make plan-list
-python3 scripts/execute_plan.py --dry-run --only 0.2.0/A1
+python3 scripts/execute_plan.py --dry-run --only 0.2.0/E1
 ```
 
 ## Запуск
@@ -158,29 +164,37 @@ python3 scripts/execute_plan.py --dry-run --only 0.2.0/A1
 python3 scripts/execute_plan.py
 ```
 
-Начать с определённого этапа и продолжить дальше:
+Начать с определённого эпика и продолжить дальше:
 
 ```sh
-python3 scripts/execute_plan.py --from 0.2.0/A1
+python3 scripts/execute_plan.py --from 0.2.0/E1
 ```
 
-Проверить ровно один этап:
+Проверить ровно один эпик:
 
 ```sh
-python3 scripts/execute_plan.py --only 0.2.0/A1
+python3 scripts/execute_plan.py --only 0.2.0/E1
 ```
 
-Продолжить с первого ещё не закоммиченного этапа до конца конкретного релиза:
+Продолжить с первого ещё не закоммиченного эпика до конца конкретного релиза:
 
 ```sh
 python3 scripts/execute_plan.py --release 0.2.0
 ```
 
 Граница текущего состояния определяется по commit trailer
-`Lumi-Plan-Stage: <stage-id>`. Runner находит первый этап выбранного релиза без
-такого commit и выполняет его вместе со всеми следующими этапами этого же
+`Lumi-Plan-Epic: <epic-id>`. Runner находит первый эпик выбранного релиза без
+такого commit и выполняет его вместе со всеми следующими эпиками этого же
 релиза. Более поздние релизы не выбираются. Если весь релиз уже закрыт, runner
 завершается без Codex calls, gates и commits.
+
+Исторический trailer `Lumi-Plan-Stage: 0.2.0/A1` подтверждает уже готовый
+foundation, но не закрывает новый E1: E1 поставляет полный пользовательский
+AI-assistant vertical поверх A1.
+
+Переход на epic manifest поднял checkpoint format до version 2. Незавершённый
+checkpoint старого micro-stage runner нельзя продолжать через `--resume`;
+сначала сохраните его logs/evidence, затем начинайте новый запуск с E1.
 
 Безопасно проверить вычисленную границу можно через:
 
@@ -192,7 +206,7 @@ python3 scripts/execute_plan.py --dry-run --release 0.2.0
 
 ```sh
 tmux new -s lumi-plan
-python3 scripts/execute_plan.py --from 0.2.0/A1
+python3 scripts/execute_plan.py --from 0.2.0/E1
 ```
 
 Отсоединение: `Ctrl-b`, затем `d`. Возврат:
@@ -248,8 +262,8 @@ python3 scripts/execute_plan.py --resume
 - упавший первый/второй Codex вызов повторяется при resume;
 - упавший внешний gate не создаёт commit и при resume запускается снова;
 - runner не делает третий Codex repair-вызов;
-- ручное изменение `HEAD` во время незавершённого этапа блокирует resume;
-- уже созданный commit с правильным `Lumi-Plan-Stage` trailer распознаётся и
+- ручное изменение `HEAD` во время незавершённого эпика блокирует resume;
+- уже созданный commit с правильным `Lumi-Plan-Epic` trailer распознаётся и
   не создаётся повторно.
 
 После полного успеха активный checkpoint переносится в
@@ -258,11 +272,11 @@ python3 scripts/execute_plan.py --resume
 ## Модель и обслуживание manifest
 
 По умолчанию модель берётся из Codex, а reasoning effort runner явно
-устанавливает в `xhigh` для обоих вызовов каждого этапа. Для явного выбора
+устанавливает в `xhigh` для обоих вызовов каждого эпика. Для явного выбора
 модели:
 
 ```sh
-LUMI_CODEX_MODEL="<model-id>" python3 scripts/execute_plan.py --only 0.2.0/A1
+LUMI_CODEX_MODEL="<model-id>" python3 scripts/execute_plan.py --only 0.2.0/E1
 ```
 
 Reasoning можно понизить для конкретного запуска:
@@ -282,7 +296,7 @@ LUMI_CODEX_REASONING_EFFORT=high \
 После изменения ROADMAP:
 
 1. Обновите `STAGES` и при необходимости наборы `*_GATE` в начале runner.
-2. Сохраните уникальный Conventional Commit subject для каждого этапа.
+2. Сохраните уникальный Conventional Commit subject для каждого эпика.
 3. Не используйте shell operators в gate commands; каждый command задаётся
    tuple аргументов.
 4. Выполните:
@@ -297,7 +311,7 @@ LUMI_CODEX_REASONING_EFFORT=high \
 Посмотреть созданные commits:
 
 ```sh
-git log --format='%h %s%n%b' --grep='Lumi-Plan-Stage'
+git log --format='%h %s%n%b' --grep='Lumi-Plan-Epic'
 ```
 
 Runner ничего не отправляет во внешний repository. Review и push выполняются

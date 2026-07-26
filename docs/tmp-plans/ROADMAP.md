@@ -6,30 +6,68 @@ Status: `active`
 
 ## Назначение
 
-Этот документ задаёт единственную последовательность выполнения текущих
-временных планов. Он не заменяет подробные чек-листы, release gates и
-канонические продуктовые решения.
+Этот документ задаёт единую последовательность крупных продуктовых эпиков от
+текущего состояния до завершения основного Web product roadmap `0.2.0–0.5.0`.
+Он не заменяет подробные contracts, внутренние workstreams, acceptance criteria
+и канонические продуктовые решения.
 
-Правила исполнения:
+Roadmap заканчивается первым закрытым Web-контуром AI, learning, Desk/search и
+Community Spaces. Это не означает завершение полного target design `Final v01`:
+Knowledge Base, native full-copy replicas, Obsidian, plugin platform, будущие
+источники, public Spaces, hosted AI и private/decentralized mode остаются
+отдельными последующими направлениями.
 
-1. В работе находится только один этап.
-2. Следующий этап начинается после закрытия gate текущего.
-3. Незавершённая возможность остаётся выключенной capability flag.
-4. Изменение scope сначала вносится в канонические документы и подробный план,
+## Модель исполнения
+
+1. В работе находится один продуктовый эпик.
+2. Внутри эпика backend, Web, tests, documentation и bounded spikes могут
+   выполняться как независимые workstreams после фиксации общего contract.
+3. Внутренние пакеты `A*`, `B*`, `C*`, gates и checklists из подробных планов
+   являются картой работ, а не отдельными последовательными checkpoint runner.
+4. Эпик закрывается только сквозным пользовательским outcome, миграциями,
+   targeted tests, обязательным общим quality gate и документацией.
+5. Незавершённая возможность остаётся выключенной capability flag.
+6. Изменение scope сначала вносится в канонические документы и подробный план,
    затем отражается здесь.
-5. После выпуска релиза его временный план архивируется или удаляется, а
-   ROADMAP переводится на следующий незавершённый этап.
+7. После выпуска релиза его временный план архивируется или удаляется, а
+   ROADMAP переводится на следующий незавершённый эпик.
 
-## Текущая точка
+## Сверка фактической готовности
 
-Для `0.2.0` уже завершены:
+Проверено по repository state и Git history на 2026-07-26.
 
-- Stage 0: spikes, ADR, threat review и release scope;
-- Contract Freeze 1: общие AI/MCP contracts, fixtures, mocks и router seams;
-- A1: AI persistence, `SecretStore`, общий fenced `Job` runtime и проверенные
-  owner/idempotency/transactional publication invariants.
+Готово:
 
-Текущий следующий этап — `0.2.0 / A2: Explicit source context и context packs`.
+- baseline S1 Web Reader, описанный в корневом `README.md`;
+- `0.2.0 / Stage 0`: spikes, ADR, threat review и release scope;
+- `0.2.0 / Contract Freeze 1`: AI/MCP contracts, fixtures, mocks и router
+  seams;
+- `0.2.0 / A1`: PostgreSQL persistence, reusable encrypted `SecretStore`,
+  общий fenced `JobRuntime`, import adapter, owner/idempotency invariants и
+  transactional artifact publication;
+- release evidence A1 зафиксирован commit trailer
+  `Lumi-Plan-Stage: 0.2.0/A1`.
+
+Ещё не готово:
+
+- production `SourceContextResolver`, BYOK/OpenRouter delivery, global chat,
+  AI queue, summaries, MCP transport/tools и abridged `.lum`;
+- production learning, Desk/search/RAG и Community Spaces.
+
+AI foundation намеренно не публикует product capabilities: provider, explicit
+context, chat, task queue, summaries, MCP и abridgement delivery flags остаются
+выключенными, live chat routes и Web AI surface отсутствуют.
+
+После перехода на новую шкалу выполнено `0/18` продуктовых эпиков. Это не
+обнуляет готовую работу: Stage 0, Contract Freeze 1 и A1 являются закрытыми
+prerequisites первого эпика `0.2.0/E1`.
+
+В прежней шкале это соответствовало `3/57` закрытым checkpoint roadmap, но
+такой процент отражал в основном количество мелких шагов, а не продуктовую
+готовность. Поэтому новая шкала начинается с нуля завершённых end-to-end
+эпиков и отдельно сохраняет перечень уже готового foundation выше.
+
+Текущий следующий эпик — `0.2.0/E1: Персональный AI-ассистент`.
 
 ## Последовательность
 
@@ -38,102 +76,91 @@ Status: `active`
 Подробный план:
 [`0.2.0-ai-plan.md`](0.2.0-ai-plan.md).
 
-1. [x] Stage 0 — решения, spikes и threat review.
-2. [x] Contract Freeze 1 — общие contracts и fixtures.
-3. [x] A1 — AI persistence, `SecretStore` и общий `Job` runtime.
-4. [ ] A2 — bounded explicit source context и context packs.
-5. [ ] A3 — BYOK settings и OpenRouter provider.
-6. [ ] B1 — Web AI shell, settings и fixture-backed states.
-7. [ ] B2 — durable conversations и streaming.
-8. [ ] A4 — durable AI queue и summary execution.
-9. [ ] B3 — Reader actions, queue и summary UX.
-10. [ ] C1 — MCP connections, transport и auth.
-11. [ ] C2 — MCP product и AI worker tools.
-12. [ ] C3 — сокращённый `.lum` и derived-material flow.
-13. [ ] Release gate — интеграция, hardening, migration и staging evidence.
+1. [ ] **E1 — Персональный AI-ассистент.** Explicit source context,
+   BYOK/OpenRouter, settings, global chat, durable streaming conversations,
+   citations и Reader selection handoff.
+2. [ ] **E2 — AI-задачи и саммари.** Durable queue/internal worker,
+   chapter/material summaries, Reader actions, Queue UX, retry/cancel/bulk и
+   manual-edit policy.
+3. [ ] **E3 — Внешние агенты через MCP.** Revocable connections, transport,
+   account-scoped product tools, task claim/complete и Web/MCP parity.
+4. [ ] **E4 — Производные материалы и выпуск.** Abridged `.lum`, provenance,
+   internal/MCP executor parity, atomic publication и полный release hardening.
 
 Результат: один проверенный Web/MCP AI-контур с общими task, artifact,
 context и authorization contracts.
 
 ### 2. Lumi 0.3.0 — обучение после чтения
 
-Начинается только после release gate `0.2.0`.
+Начинается только после `0.2.0/E4`.
 
 Подробный план:
 [`0.3.0-learn-plan.md`](0.3.0-learn-plan.md).
 
-1. [ ] G0 — prerequisite evidence, ADR, contracts и fixtures.
-2. [ ] C0 — UX states, routing и fixture prototype.
-3. [ ] G1 — shared learning foundation.
-4. [ ] A1 — durable learning CRUD, sessions и attempts.
-5. [ ] A2 — completion и immediate recall.
-6. [ ] C1 — deterministic Reader/session vertical.
-7. [ ] A3 — FSRS, hints и due projections.
-8. [ ] C2 — Challenges и scheduling UX.
-9. [ ] B1 — generation и open-answer evaluation.
-10. [ ] B2 — text explain-back.
-11. [ ] C3 — AI drafts и explain-back UX.
-12. [ ] B3 — audio attachments и transcription.
-13. [ ] C4 — browser recorder и transcript UX.
-14. [ ] A4 — MCP learning parity.
-15. [ ] Release gate — hardening, runbook и acceptance.
+1. [ ] **E1 — Обучение после чтения.** Learning foundation, completion,
+   deterministic grading, durable sessions/attempts, Reader offer, source jump
+   и reload/resume.
+2. [ ] **E2 — Повторение и Challenges.** FSRS, hints/evidence, bounded
+   `Сегодня`, pause/resume/snooze/manual-only и scheduling UX.
+3. [ ] **E3 — AI-обучение и explain-back.** Generated drafts, open-answer
+   evaluation, iterative cited feedback и no-provider/self-check fallback.
+4. [ ] **E4 — Голосовой контур.** Generic audio attachment, browser recording,
+   transcription, transcript review, grading/explain-back и retention/delete.
+5. [ ] **E5 — Learning platform и выпуск.** MCP learning parity, общая
+   интеграция, security/accessibility/performance, runbook и release acceptance.
 
 Результат: deterministic learning, scheduling, AI explain-back и voice flow
-закрыты последовательно отдельными вертикальными gates.
+закрыты отдельными пользовательскими вертикалями.
 
 ### 3. Lumi 0.4.0 — записи, Desk, поиск и RAG
 
-Начинается только после release gate `0.3.0`.
+Начинается только после `0.3.0/E5`.
 
 Подробный план:
 [`0.4.0-notes-and-desk-plan.md`](0.4.0-notes-and-desk-plan.md).
 
-1. [ ] Gate 0 — ADR, spikes, shared DTO и fixtures.
-2. [ ] A1 — Annotation v2 и migration.
-3. [ ] A2 — Rich Reader.
-4. [ ] A3 — Voice Notes.
-5. [ ] A4 — links и backlinks.
-6. [ ] B1 — BM25 + fastText foundation.
-7. [ ] B2 — Desk projection и surface.
-8. [ ] B3 — search surfaces.
-9. [ ] B4 — MCP Desk/search parity.
-10. [ ] C1 — record context contract.
-11. [ ] C2 — record RAG integration.
-12. [ ] Gate I — сквозная Reader → Desk → Search → Chat интеграция.
-13. [ ] Release gate — rebuild, performance, security и migration evidence.
+1. [ ] **E1 — Records v2 и Rich Reader.** Совместимая Annotation v2,
+   targets, rich highlights/notes, Reader CRUD, migration и export.
+2. [ ] **E2 — Голосовые записи и связи.** Voice Notes, audio lifecycle,
+   stable `LinkTarget`, wikilinks, unresolved/ambiguous links и backlinks.
+3. [ ] **E3 — Поисковое ядро.** BM25 + fastText, source-aware chunks,
+   indexing/rebuild jobs, permission-aware query/retrieval API и benchmarks.
+4. [ ] **E4 — Desk и единый поиск.** Desk projection/surfaces, global,
+   library, Reader и Desk search, routing, inline edit и MCP parity.
+5. [ ] **E5 — RAG по записям и выпуск.** Record-scoped retrieval в общем
+   AI-чате, citations, сквозной Reader → Desk → Search → Chat flow и release
+   hardening.
 
 Результат: единая модель записей проходит через Reader, Desk, поиск, MCP и
 record-scoped RAG без второго контура данных.
 
 ### 4. Lumi 0.5.0 — социальные пространства
 
-Начинается только после release gate `0.4.0`.
+Начинается только после `0.4.0/E5`.
 
 Подробный план:
 [`0.5.0-social-plan.md`](0.5.0-social-plan.md).
 
-1. [ ] Gate 0 — social contracts, permission matrix и ADR.
-2. [ ] C1 — matching/anchor fixtures, risk spikes и multi-account harness.
-3. [ ] A1 — domain, persistence, jobs и capabilities foundation.
-4. [ ] B1 — Community shell и contract-backed states.
-5. [ ] A2 — Spaces, membership и invite access.
-6. [ ] B2 — Spaces и membership UX.
-7. [ ] C2 — access/security gate.
-8. [ ] A3 — material sharing, fingerprints и matching.
-9. [ ] B3 — share и material-claim UX.
-10. [ ] C3 — sharing/matching security gate.
-11. [ ] A4 — shared anchors, discussions и published highlights.
-12. [ ] B4 — Reader social layer.
-13. [ ] C4 — shared-reading quality gate.
-14. [ ] A5 — Space chat, activity, social search events и MCP parity.
-15. [ ] B5 — chat и activity UX.
-16. [ ] C5 — release hardening.
+1. [ ] **E1 — Community Spaces и доступ.** Social foundation, Community/
+   SyncSpace boundary, create/preview/join, roles, links, membership UX и
+   permission/security gate.
+2. [ ] **E2 — Публикация и сопоставление материалов.** Share flow,
+   fingerprints, shared identity, claims, conservative matching и
+   import-own-copy.
+3. [ ] **E3 — Совместное чтение.** Shared anchors, discussions, explicit
+   published highlights, Reader social layer, moderation и unresolved states.
+4. [ ] **E4 — Коммуникации и выпуск.** Space chat, activity, social search
+   events, MCP parity, polling, backup/restore и multi-account release
+   acceptance.
 
 Результат: два аккаунта проходят полный закрытый Community Space flow без
 раскрытия source-файлов и личных записей.
 
-## Финальная точка
+## Финальная точка текущего roadmap
 
-Roadmap завершён, когда release evidence `0.5.0` закрыт, критерии завершения
+Roadmap `0.2.0–0.5.0` завершён, когда закрыт `0.5.0/E4`, критерии завершения
 всех четырёх планов выполнены, `make c` и обязательные Web E2E проходят, а
 долгоживущие решения перенесены из `docs/tmp-plans/` в канонические документы.
+
+Последующие функции планируются отдельной серией релизов и не считаются
+скрытыми условиями завершения `0.5.0`.

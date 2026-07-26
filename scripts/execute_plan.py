@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Sequentially implement Lumi roadmap stages with two fresh Codex runs each."""
+"""Sequentially implement Lumi roadmap product epics with two Codex runs each."""
 
 from __future__ import annotations
 
@@ -20,8 +20,8 @@ from typing import Any, Callable, Iterable, Sequence
 REPO_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_STATE_ROOT = REPO_ROOT / ".local" / "codex-plan-runs"
 ROADMAP_PATH = "docs/tmp-plans/ROADMAP.md"
-STATE_VERSION = 1
-STAGE_TRAILER = "Lumi-Plan-Stage"
+STATE_VERSION = 2
+STAGE_TRAILER = "Lumi-Plan-Epic"
 DEFAULT_CODEX_REASONING_EFFORT = "xhigh"
 CODEX_REASONING_EFFORTS = frozenset(
     {"minimal", "low", "medium", "high", "xhigh"}
@@ -39,7 +39,7 @@ class Stage:
     gates: tuple[Command, ...]
 
 
-# Stage definitions, commit subjects and executable gates are intentionally
+# Epic definitions, commit subjects and executable gates are intentionally
 # kept together near the start of this file. The order mirrors ROADMAP.md.
 DOC_GATE: tuple[Command, ...] = (("make", "c"),)
 PG_GATE: tuple[Command, ...] = DOC_GATE + (
@@ -60,7 +60,9 @@ PLAN_030 = "docs/tmp-plans/0.3.0-learn-plan.md"
 PLAN_040 = "docs/tmp-plans/0.4.0-notes-and-desk-plan.md"
 PLAN_050 = "docs/tmp-plans/0.5.0-social-plan.md"
 
-STAGES: tuple[Stage, ...] = (
+# Historical micro-stage manifest retained only to explain trailers created
+# before the 2026-07-26 migration to product epics. It is not executed.
+LEGACY_MICRO_STAGES: tuple[Stage, ...] = (
     Stage(
         "0.2.0/A1",
         PLAN_020,
@@ -448,6 +450,135 @@ STAGES: tuple[Stage, ...] = (
     ),
 )
 
+STAGES: tuple[Stage, ...] = (
+    Stage(
+        "0.2.0/E1",
+        PLAN_020,
+        "Эпик E1. Персональный AI-ассистент",
+        "feat(ai): deliver personal AI assistant",
+        PG_WEB_GATE,
+    ),
+    Stage(
+        "0.2.0/E2",
+        PLAN_020,
+        "Эпик E2. AI-задачи и саммари",
+        "feat(ai): deliver tasks and summaries",
+        PG_WEB_GATE,
+    ),
+    Stage(
+        "0.2.0/E3",
+        PLAN_020,
+        "Эпик E3. Внешние агенты через MCP",
+        "feat(mcp): deliver external agent integration",
+        FULL_GATE,
+    ),
+    Stage(
+        "0.2.0/E4",
+        PLAN_020,
+        "Эпик E4. Производные материалы и выпуск",
+        "feat(ai): release derived material workflows",
+        RELEASE_GATE,
+    ),
+    Stage(
+        "0.3.0/E1",
+        PLAN_030,
+        "Эпик E1. Обучение после чтения",
+        "feat(learn): deliver post-reading learning",
+        PG_WEB_GATE,
+    ),
+    Stage(
+        "0.3.0/E2",
+        PLAN_030,
+        "Эпик E2. Повторение и Challenges",
+        "feat(learn): deliver challenges and scheduling",
+        PG_WEB_GATE,
+    ),
+    Stage(
+        "0.3.0/E3",
+        PLAN_030,
+        "Эпик E3. AI-обучение и explain-back",
+        "feat(learn): deliver AI learning workflows",
+        PG_WEB_GATE,
+    ),
+    Stage(
+        "0.3.0/E4",
+        PLAN_030,
+        "Эпик E4. Голосовой контур",
+        "feat(learn): deliver voice learning workflows",
+        PG_WEB_GATE,
+    ),
+    Stage(
+        "0.3.0/E5",
+        PLAN_030,
+        "Эпик E5. Learning platform и выпуск",
+        "feat(learn): release learning platform",
+        RELEASE_GATE,
+    ),
+    Stage(
+        "0.4.0/E1",
+        PLAN_040,
+        "Эпик E1. Records v2 и Rich Reader",
+        "feat(notes): deliver rich reader records",
+        PG_WEB_GATE,
+    ),
+    Stage(
+        "0.4.0/E2",
+        PLAN_040,
+        "Эпик E2. Голосовые записи и связи",
+        "feat(notes): deliver voice notes and links",
+        PG_WEB_GATE,
+    ),
+    Stage(
+        "0.4.0/E3",
+        PLAN_040,
+        "Эпик E3. Поисковое ядро",
+        "feat(search): deliver hybrid search core",
+        FULL_GATE,
+    ),
+    Stage(
+        "0.4.0/E4",
+        PLAN_040,
+        "Эпик E4. Desk и единый поиск",
+        "feat(desk): deliver desk and search surfaces",
+        FULL_GATE,
+    ),
+    Stage(
+        "0.4.0/E5",
+        PLAN_040,
+        "Эпик E5. RAG по записям и выпуск",
+        "feat(ai): release record RAG workflows",
+        RELEASE_GATE,
+    ),
+    Stage(
+        "0.5.0/E1",
+        PLAN_050,
+        "Эпик E1. Community Spaces и доступ",
+        "feat(social): deliver community spaces",
+        FULL_GATE,
+    ),
+    Stage(
+        "0.5.0/E2",
+        PLAN_050,
+        "Эпик E2. Публикация и сопоставление материалов",
+        "feat(social): deliver material sharing",
+        FULL_GATE,
+    ),
+    Stage(
+        "0.5.0/E3",
+        PLAN_050,
+        "Эпик E3. Совместное чтение",
+        "feat(social): deliver shared reading",
+        FULL_GATE,
+    ),
+    Stage(
+        "0.5.0/E4",
+        PLAN_050,
+        "Эпик E4. Коммуникации и выпуск",
+        "feat(social): release community communications",
+        RELEASE_GATE,
+    ),
+)
+
 BLOCKED_EXACT_NAMES = {
     "auth.json",
     "credentials.json",
@@ -574,8 +705,8 @@ def validate_stage_definitions() -> None:
         raise RunnerError("Stage identifiers must be unique")
     if len(subjects) != len(set(subjects)):
         raise RunnerError("Commit subjects must be unique")
-    if not STAGES or STAGES[0].stage_id != "0.2.0/A1":
-        raise RunnerError("The configured roadmap must start at current stage 0.2.0/A1")
+    if not STAGES or STAGES[0].stage_id != "0.2.0/E1":
+        raise RunnerError("The configured roadmap must start at current epic 0.2.0/E1")
 
     roadmap = (REPO_ROOT / ROADMAP_PATH).read_text(encoding="utf-8")
     release_markers = {
@@ -678,16 +809,17 @@ def gate_text(stage: Stage) -> str:
 
 def implementation_prompt(stage: Stage) -> str:
     return f"""\
-Реализуй только этап `{stage.stage_id}` единого плана Lumi.
+Реализуй только продуктовый эпик `{stage.stage_id}` единого плана Lumi.
 
-Источник этапа:
+Источник эпика:
 - план: `{stage.plan_path}`;
 - заголовок: `{stage.heading}`;
 - порядок: `{ROADMAP_PATH}`.
 
-Сначала полностью прочитай AGENTS.md, README.md, указанный этап, его gate и
+Сначала полностью прочитай AGENTS.md, README.md, указанный эпик, его outcome,
+внутренние workstreams, gate и
 связанные канонические документы. Реализуй production-код, migrations, tests и
-документацию, необходимые для полного закрытия этапа. Доведи изменения до
+документацию, необходимые для полного закрытия эпика. Доведи изменения до
 описанного gate, а не до частичной компиляции. Не ослабляй существующие
 проверки и не подменяй production implementation заглушками.
 
@@ -695,12 +827,12 @@ def implementation_prompt(stage: Stage) -> str:
 {gate_text(stage)}
 
 Запускай нужные проверки самостоятельно. Если gate проходит, отметь
-выполненные пункты этапа и его результат в подробном плане и `{ROADMAP_PATH}`.
-Не отмечай следующий этап. Не переименовывай и не удаляй файлы планов или
-заголовки этапов: они являются контрактом активного runner.
+выполненные пункты эпика и его результат в подробном плане и `{ROADMAP_PATH}`.
+Не отмечай следующий эпик. Не переименовывай и не удаляй файлы планов или
+заголовки эпиков: они являются контрактом активного runner.
 
 Ограничения:
-- не переходи к следующему этапу;
+- не переходи к следующему эпику;
 - не выполняй `git commit`, `git push`, `git reset`, `git checkout`, rebase,
   amend и другие операции с историей;
 - не удаляй и не обходи проверки ради зелёного результата;
@@ -713,12 +845,13 @@ def implementation_prompt(stage: Stage) -> str:
 
 def audit_prompt(stage: Stage) -> str:
     return f"""\
-В рабочем дереве только что реализован этап `{stage.stage_id}` из
+В рабочем дереве только что реализован продуктовый эпик `{stage.stage_id}` из
 `{stage.plan_path}`, заголовок `{stage.heading}`.
 
 Проведи независимый аудит результата. Начни с `git status`, `git diff --stat`
-и полного релевантного diff, затем заново сверь реализацию со всем этапом, его
-gate, AGENTS.md и связанными каноническими документами. Найди и исправь
+и полного релевантного diff, затем заново сверь реализацию со всем эпиком, его
+outcome, внутренними workstreams, gate, AGENTS.md и связанными каноническими
+документами. Найди и исправь
 пропущенные требования, незавершённые ветки, слабые invariants, migration и
 ownership ошибки, недостаточные tests, документацию и capability rollout.
 Не ограничивайся обзором: внеси необходимые исправления.
@@ -727,9 +860,9 @@ ownership ошибки, недостаточные tests, документаци
 {gate_text(stage)}
 
 Запусти релевантные проверки. Только если gate действительно закрыт, обнови
-чек-лист/результат этапа в подробном плане и `{ROADMAP_PATH}`. Не отмечай и не
-реализуй следующий этап и не переходи к нему. Не переименовывай и не удаляй
-файлы планов или заголовки этапов: они являются контрактом активного runner.
+чек-лист/результат эпика в подробном плане и `{ROADMAP_PATH}`. Не отмечай и не
+реализуй следующий эпик и не переходи к нему. Не переименовывай и не удаляй
+файлы планов или заголовки эпиков: они являются контрактом активного runner.
 
 Ограничения:
 - не выполняй `git commit`, `git push`, `git reset`, `git checkout`, rebase,
@@ -1274,26 +1407,26 @@ def archive_completed_state(state_file: Path, state: dict[str, Any]) -> None:
 
 def parse_args(argv: Sequence[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Implement Lumi roadmap stages with two Codex exec calls each"
+        description="Implement Lumi roadmap epics with two Codex exec calls each"
     )
     selection = parser.add_mutually_exclusive_group()
     selection.add_argument(
         "--from",
         dest="from_stage",
-        metavar="STAGE",
-        help="start at STAGE and continue through the configured roadmap",
+        metavar="EPIC",
+        help="start at EPIC and continue through the configured roadmap",
     )
     selection.add_argument(
         "--only",
         dest="only_stage",
-        metavar="STAGE",
-        help="run exactly one stage",
+        metavar="EPIC",
+        help="run exactly one epic",
     )
     selection.add_argument(
         "--release",
         metavar="VERSION",
         help=(
-            "continue from the first uncommitted stage through the end of VERSION"
+            "continue from the first uncommitted epic through the end of VERSION"
         ),
     )
     parser.add_argument(
@@ -1304,12 +1437,12 @@ def parse_args(argv: Sequence[str]) -> argparse.Namespace:
     parser.add_argument(
         "--dry-run",
         action="store_true",
-        help="validate and print the selected stages without changing anything",
+        help="validate and print the selected epics without changing anything",
     )
     parser.add_argument(
         "--list",
         action="store_true",
-        help="list all configured stages",
+        help="list all configured epics",
     )
     parser.add_argument(
         "--self-check",
@@ -1330,7 +1463,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     try:
         validate_stage_definitions()
         if args.self_check:
-            print(f"Configured stages: {len(STAGES)}")
+            print(f"Configured epics: {len(STAGES)}")
             print("Plan runner configuration is valid.")
             return 0
         if args.list:

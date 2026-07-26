@@ -88,7 +88,9 @@ make web-e2e
 
 Подробности — в [docs/runbooks/local-dev.md](docs/runbooks/local-dev.md).
 
-Изолированный последовательный запуск этапов через Codex CLI описан в
+Единый Web roadmap теперь сгруппирован в 18 крупных продуктовых эпиков:
+четыре для `0.2.0`, по пять для `0.3.0` и `0.4.0`, четыре для `0.5.0`.
+Изолированный последовательный запуск эпиков через Codex CLI описан в
 [docs/runbooks/codex-plan-runner.md](docs/runbooks/codex-plan-runner.md).
 
 ## Работа с документацией

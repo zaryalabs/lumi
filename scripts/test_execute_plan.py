@@ -21,27 +21,28 @@ SPEC.loader.exec_module(execute_plan)
 class ExecutePlanTests(unittest.TestCase):
     def test_stage_configuration_matches_current_plans(self) -> None:
         execute_plan.validate_stage_definitions()
-        self.assertEqual(execute_plan.STAGES[0].stage_id, "0.2.0/A1")
-        self.assertEqual(execute_plan.STAGES[-1].stage_id, "0.5.0/C5")
+        self.assertEqual(len(execute_plan.STAGES), 18)
+        self.assertEqual(execute_plan.STAGES[0].stage_id, "0.2.0/E1")
+        self.assertEqual(execute_plan.STAGES[-1].stage_id, "0.5.0/E4")
 
     def test_stage_selection(self) -> None:
-        selected = execute_plan.select_stages("0.5.0/A5", None)
+        selected = execute_plan.select_stages("0.5.0/E3", None)
         self.assertEqual(
             [stage.stage_id for stage in selected],
-            ["0.5.0/A5", "0.5.0/B5", "0.5.0/C5"],
+            ["0.5.0/E3", "0.5.0/E4"],
         )
-        only = execute_plan.select_stages(None, "0.2.0/A1")
-        self.assertEqual([stage.stage_id for stage in only], ["0.2.0/A1"])
+        only = execute_plan.select_stages(None, "0.2.0/E1")
+        self.assertEqual([stage.stage_id for stage in only], ["0.2.0/E1"])
 
     def test_release_selection_starts_after_committed_stages(self) -> None:
         release = execute_plan.select_stages(
             None,
             None,
             "0.2.0",
-            completed_stage_ids={"0.2.0/A1", "0.2.0/A2"},
+            completed_stage_ids={"0.2.0/E1", "0.2.0/E2"},
         )
-        self.assertEqual(release[0].stage_id, "0.2.0/A3")
-        self.assertEqual(release[-1].stage_id, "0.2.0/release")
+        self.assertEqual(release[0].stage_id, "0.2.0/E3")
+        self.assertEqual(release[-1].stage_id, "0.2.0/E4")
         self.assertTrue(
             all(stage.stage_id.startswith("0.2.0/") for stage in release)
         )
@@ -89,7 +90,7 @@ class ExecutePlanTests(unittest.TestCase):
             state = {
                 "version": execute_plan.STATE_VERSION,
                 "current_index": 2,
-                "stages": {"0.2.0/A1": {"phase": "gate_failed"}},
+                "stages": {"0.2.0/E1": {"phase": "gate_failed"}},
             }
             execute_plan.atomic_write_json(path, state)
             self.assertEqual(execute_plan.load_state(path), state)

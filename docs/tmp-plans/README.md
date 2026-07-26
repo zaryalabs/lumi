@@ -24,15 +24,21 @@ coordination document.
 - [`ROADMAP.md`](ROADMAP.md) is the temporary execution order for the active
   plans. It must not introduce product or architecture decisions; long-lived
   sequencing stays in the relevant canonical product or systems documents.
-- Work is sequential: only one stage from `ROADMAP.md` may be active. The next
-  stage starts only after the current stage gate is recorded as passed.
+- Work is sequential at product-epic level: only one epic from `ROADMAP.md`
+  may be active. Backend, Web, tests, documentation and bounded spikes inside
+  that epic may proceed as separate workstreams after their shared contract is
+  fixed.
+- Detailed A/B/C packages and local gates inside a release plan are ownership
+  maps and acceptance checklists, not separate ROADMAP checkpoints.
+- A product epic closes only when its end-to-end outcome, migrations, tests,
+  documentation and required common quality gate are complete.
 - After a slice ships or is superseded, archive, replace or delete its
   temporary plan.
 
 ## Current Plans
 
-- [`ROADMAP.md`](ROADMAP.md) — единая последовательность работ от текущего
-  состояния до завершения `0.5.0`.
+- [`ROADMAP.md`](ROADMAP.md) — 18 крупных продуктовых эпиков от текущего
+  состояния до завершения основного Web roadmap `0.5.0`.
 
 - [`0.2.0-ai-plan.md`](0.2.0-ai-plan.md) — реализация BYOK, глобального
   ИИ-чата, саммари, durable AI task queue и MCP-интеграции для внешних агентов.
