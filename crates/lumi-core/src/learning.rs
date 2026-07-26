@@ -26,6 +26,179 @@ pub type LearningItemRevisionId = Uuid;
 pub type LearningSessionId = Uuid;
 /// Stable learning attempt identifier.
 pub type LearningAttemptId = Uuid;
+/// Stable generic audio attachment identifier.
+pub type AudioAttachmentId = Uuid;
+/// Stable bounded upload identifier.
+pub type AudioUploadId = Uuid;
+/// Stable immutable transcript revision identifier.
+pub type TranscriptArtifactId = Uuid;
+
+/// Maximum original audio accepted by the first voice contour (25 MiB).
+pub const MAX_LEARNING_AUDIO_BYTES: u64 = 25 * 1024 * 1024;
+/// Supported browser and portable audio media types.
+pub const LEARNING_AUDIO_MEDIA_TYPES: &[&str] = &[
+    "audio/webm",
+    "audio/ogg",
+    "audio/mp4",
+    "audio/mpeg",
+    "audio/wav",
+    "audio/x-wav",
+];
+
+/// Policy controlling the lifetime of original audio independently of transcripts.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AudioRetentionPolicy {
+    /// Remove the source audio as soon as a reviewed transcript is accepted.
+    DeleteAfterTranscript,
+    /// Preserve source audio until an explicit owner deletion.
+    KeepUntilDeleted,
+}
+
+/// Lifecycle of a bounded audio upload.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AudioUploadStatus {
+    /// Metadata exists but bytes have not been finalized.
+    Pending,
+    /// Bytes matched the declared checksum and length.
+    Completed,
+}
+
+/// Owner-scoped upload metadata without raw audio bytes.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct AudioUpload {
+    /// Stable upload identifier.
+    pub id: AudioUploadId,
+    /// Validated IANA media type.
+    pub media_type: String,
+    /// Exact expected byte length.
+    pub byte_length: u64,
+    /// Lowercase SHA-256 checksum.
+    pub checksum_sha256: String,
+    /// Current upload lifecycle.
+    pub status: AudioUploadStatus,
+    /// Creation timestamp.
+    pub created_at: TimestampMs,
+}
+
+/// Command reserving an audio upload before bytes are transferred.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct CreateAudioUploadCommand {
+    /// Declared audio media type.
+    pub media_type: String,
+    /// Exact byte length.
+    pub byte_length: u64,
+    /// Lowercase SHA-256 checksum.
+    pub checksum_sha256: String,
+}
+
+impl CreateAudioUploadCommand {
+    /// Validate the bounded media type, length and checksum.
+    pub fn validate(&self) -> Result<(), LearningValidationError> {
+        if !LEARNING_AUDIO_MEDIA_TYPES.contains(&self.media_type.as_str()) {
+            return Err(LearningValidationError::UnsupportedAudioMediaType);
+        }
+        if self.byte_length == 0 || self.byte_length > MAX_LEARNING_AUDIO_BYTES {
+            return Err(LearningValidationError::InvalidAudioSize);
+        }
+        if self.checksum_sha256.len() != 64
+            || !self
+                .checksum_sha256
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        {
+            return Err(LearningValidationError::InvalidAudioChecksum);
+        }
+        Ok(())
+    }
+}
+
+/// Generic original audio attachment metadata.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct AudioAttachment {
+    /// Stable attachment identifier.
+    pub id: AudioAttachmentId,
+    /// Validated media type.
+    pub media_type: String,
+    /// Original byte length.
+    pub byte_length: u64,
+    /// Content checksum.
+    pub checksum_sha256: String,
+    /// Owner-selected retention policy.
+    pub retention: AudioRetentionPolicy,
+    /// Timestamp of logical source-audio deletion.
+    pub audio_deleted_at: Option<TimestampMs>,
+    /// Creation timestamp.
+    pub created_at: TimestampMs,
+}
+
+/// Command linking a completed generic upload to a learning session item.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct CreateLearningAttachmentCommand {
+    /// Completed owner-scoped upload.
+    pub upload_id: AudioUploadId,
+    /// Learning session receiving the answer.
+    pub session_id: LearningSessionId,
+    /// Immutable session item identity.
+    pub item_id: LearningItemId,
+    /// Original-audio retention choice.
+    pub retention: AudioRetentionPolicy,
+    /// Retry-safe mutation key.
+    pub idempotency_key: String,
+}
+
+/// User-visible durable transcription lifecycle.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TranscriptStatus {
+    /// Waiting for an executor.
+    Pending,
+    /// Claimed by an active executor.
+    Processing,
+    /// Provider output is ready for user review.
+    NeedsReview,
+    /// A reviewed revision is approved for grading.
+    Accepted,
+    /// Provider execution failed safely.
+    Failed,
+    /// The owner cancelled transcription.
+    Cancelled,
+}
+
+/// Immutable provider or user-edited transcript revision.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct TranscriptArtifact {
+    /// Stable revision identifier.
+    pub id: TranscriptArtifactId,
+    /// Source audio attachment.
+    pub attachment_id: AudioAttachmentId,
+    /// Monotonic attachment-local revision.
+    pub revision: u32,
+    /// Review lifecycle.
+    pub status: TranscriptStatus,
+    /// Transcript content; empty while pending.
+    pub text: String,
+    /// Provenance provider.
+    pub provider: Option<String>,
+    /// Provenance model.
+    pub model: Option<String>,
+    /// Detected or requested language.
+    pub language: Option<String>,
+    /// Revision creation timestamp.
+    pub created_at: TimestampMs,
+    /// Review acceptance timestamp.
+    pub accepted_at: Option<TimestampMs>,
+}
+
+/// Command accepting a reviewed, optionally edited transcript revision.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct AcceptTranscriptCommand {
+    /// Reviewed transcript text used as the learning answer.
+    pub text: String,
+    /// Retry-safe mutation key.
+    pub idempotency_key: String,
+}
 
 /// Request to generate source-backed learning drafts through the common AI queue.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -1350,6 +1523,15 @@ pub enum LearningValidationError {
     /// Submitted answer does not match the expected input shape.
     #[error("submitted answer is invalid for this item")]
     InvalidAnswer,
+    /// Browser audio format is outside the explicit allow-list.
+    #[error("unsupported audio media type")]
+    UnsupportedAudioMediaType,
+    /// Audio is empty or exceeds the bounded upload limit.
+    #[error("invalid audio size")]
+    InvalidAudioSize,
+    /// Checksum is not a lowercase SHA-256 value.
+    #[error("invalid audio checksum")]
+    InvalidAudioChecksum,
     /// Open answer or flashcard requires an explicit self-check.
     #[error("self-check rating is required")]
     SelfCheckRequired,
@@ -1370,6 +1552,40 @@ pub enum LearningValidationError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn audio_upload_should_enforce_type_size_and_checksum() {
+        let valid = CreateAudioUploadCommand {
+            media_type: "audio/webm".to_owned(),
+            byte_length: 42,
+            checksum_sha256: "a".repeat(64),
+        };
+        assert_eq!(valid.validate(), Ok(()));
+        assert_eq!(
+            CreateAudioUploadCommand {
+                media_type: "video/webm".to_owned(),
+                ..valid.clone()
+            }
+            .validate(),
+            Err(LearningValidationError::UnsupportedAudioMediaType)
+        );
+        assert_eq!(
+            CreateAudioUploadCommand {
+                byte_length: MAX_LEARNING_AUDIO_BYTES + 1,
+                ..valid.clone()
+            }
+            .validate(),
+            Err(LearningValidationError::InvalidAudioSize)
+        );
+        assert_eq!(
+            CreateAudioUploadCommand {
+                checksum_sha256: "NOT-A-HASH".to_owned(),
+                ..valid
+            }
+            .validate(),
+            Err(LearningValidationError::InvalidAudioChecksum)
+        );
+    }
 
     fn revision(answer_spec: LearningAnswerSpec) -> LearningItemRevision {
         LearningItemRevision {

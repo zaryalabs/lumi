@@ -7,6 +7,7 @@
 mod account;
 pub mod ai;
 mod api_routes;
+mod audio;
 mod auth_api;
 mod blob;
 mod imports;
@@ -258,6 +259,7 @@ pub struct AppState {
     telegram: Option<Arc<TelegramRuntime>>,
     ai: Option<Arc<ai::AiRuntime>>,
     learning: Arc<learning::LearningRuntime>,
+    audio: Option<Arc<audio::AudioRuntime>>,
     mcp: Arc<mcp::McpRuntime>,
     ai_capabilities: ai::AiCapabilityReadiness,
 }
@@ -296,6 +298,7 @@ impl AppState {
             telegram: None,
             ai: None,
             learning: Arc::new(learning::LearningRuntime::memory()),
+            audio: None,
             mcp: Arc::new(mcp::McpRuntime::memory()),
             ai_capabilities: ai::AiCapabilityReadiness::default(),
         }
@@ -356,6 +359,10 @@ impl AppState {
         .map_err(|error| anyhow::anyhow!(error))?;
         let mcp = Arc::new(mcp::McpRuntime::postgres(accounts.pool().clone()));
         let learning = Arc::new(learning::LearningRuntime::postgres(accounts.pool().clone()));
+        let audio = Some(Arc::new(audio::AudioRuntime::postgres(
+            accounts.pool().clone(),
+            config.blob_root().to_path_buf(),
+        )));
         Ok(Self {
             repository: Arc::new(RwLock::new(Repository::default())),
             accounts: Arc::new(accounts),
@@ -364,6 +371,7 @@ impl AppState {
             telegram: Some(telegram),
             ai: Some(Arc::new(ai)),
             learning,
+            audio,
             mcp,
             ai_capabilities: ai::AiCapabilityReadiness::e4_release(),
         })
@@ -385,6 +393,7 @@ impl AppState {
             telegram: None,
             ai: None,
             learning: Arc::new(learning::LearningRuntime::memory()),
+            audio: None,
             mcp: Arc::new(mcp::McpRuntime::memory()),
             ai_capabilities: ai::AiCapabilityReadiness::default(),
         }
@@ -420,6 +429,12 @@ impl AppState {
 
     fn learning_runtime(&self) -> &learning::LearningRuntime {
         self.learning.as_ref()
+    }
+
+    fn audio_runtime(&self) -> Result<&audio::AudioRuntime, AppError> {
+        self.audio
+            .as_deref()
+            .ok_or(AppError::Unavailable("audio attachment runtime"))
     }
 
     fn learning_material_context(
@@ -634,6 +649,11 @@ async fn capabilities(State(state): State<AppState>) -> Json<ServiceCapabilities
     capabilities.route_groups.push("learning".to_owned());
     capabilities.features.push("learning-core".to_owned());
     capabilities.features.push("learning-scheduling".to_owned());
+    if state.audio.is_some() {
+        capabilities
+            .features
+            .push("learning-audio-attachments".to_owned());
+    }
     if learning_ai_ready {
         capabilities.features.push("learning-ai".to_owned());
         capabilities
@@ -2128,7 +2148,7 @@ mod tests {
         let migrations: Vec<SchemaMigration> =
             json_get(build_router(), "/api/v1/schema/migrations").await?;
 
-        assert_eq!(migrations.len(), 22);
+        assert_eq!(migrations.len(), 23);
         assert!(migrations
             .iter()
             .any(|migration| migration.id == "s1-0017-learning-core"));
@@ -2138,6 +2158,9 @@ mod tests {
         assert!(migrations
             .iter()
             .any(|migration| migration.id == "s1-0019-learning-ai"));
+        assert!(migrations
+            .iter()
+            .any(|migration| migration.id == "s1-0020-learning-voice"));
         Ok(())
     }
 

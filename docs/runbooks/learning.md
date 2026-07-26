@@ -2,10 +2,24 @@
 
 ## Назначение
 
-Runbook описывает repository-side проверку learning verticals `0.3.0/E1–E3`.
-Voice/transcription сюда не входят.
+Runbook описывает repository-side проверку learning verticals `0.3.0/E1–E4`.
 
 ## Capability и маршруты
+
+### Голосовые ответы
+
+Persistent server публикует foundation `learning-audio-attachments` и
+использует общий bounded
+attachment flow: reserve через `POST /api/v1/blobs/uploads`, передача bytes
+через `PUT /api/v1/blobs/uploads/{id}` и explicit complete. Затем
+`POST /api/v1/learning/attachments` связывает blob с session item, а
+`POST .../{id}/transcribe` создаёт durable transcript revision.
+
+После provider result пользователь редактирует текст и вызывает
+`POST .../{id}/transcript/accept`. До acceptance grading запрещён.
+`DELETE .../{id}/audio` закрывает original download, не удаляя transcript.
+Допустимы WebM, Ogg, M4A/MP4, MP3 и WAV до 25 MiB. При ошибке permission,
+credential или provider обычный text input остаётся доступным.
 
 Готовый persistent server публикует:
 
