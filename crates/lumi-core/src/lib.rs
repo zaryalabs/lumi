@@ -6,6 +6,7 @@
 //! normalized content, reading documents, anchors, annotations and jobs.
 
 mod ai;
+mod annotations;
 mod auth;
 mod epub;
 mod fixtures;
@@ -21,6 +22,7 @@ mod reader;
 mod sources;
 
 pub use ai::*;
+pub use annotations::*;
 pub use auth::*;
 pub use epub::*;
 pub use fixtures::{
@@ -45,7 +47,7 @@ use serde::{Deserialize, Serialize};
 pub const API_VERSION: &str = "v1";
 
 /// Current domain schema marker for the frozen `0.2.0` AI contracts.
-pub const DOMAIN_SCHEMA_VERSION: &str = "s1.2026-07-26.learning-voice-v1";
+pub const DOMAIN_SCHEMA_VERSION: &str = "s1.2026-07-26.records-v2";
 
 /// Current normalized content package marker for reflowable S1 documents.
 pub const NORMALIZED_PACKAGE_VERSION: &str = "normalized.reflowable.s1";
@@ -234,6 +236,11 @@ impl ServiceCapabilities {
                 "anchor-backed-annotations".to_owned(),
                 "annotation-crud".to_owned(),
                 "annotation-export".to_owned(),
+                "records-v2".to_owned(),
+                "annotation-targets".to_owned(),
+                "rich-highlights".to_owned(),
+                "margin-notes".to_owned(),
+                "annotation-tags-status".to_owned(),
                 "library-archive-delete".to_owned(),
                 "source-document-download".to_owned(),
                 "import-diagnostics".to_owned(),

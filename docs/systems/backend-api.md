@@ -53,6 +53,8 @@ Responsibilities:
 
 - `auth/account/devices` - seed-derived auth flow, sessions, profile, devices.
 - `materials/revisions` - cloud-backed web material state and revision metadata.
+- `materials/*/annotations` - owner-scoped Annotation v2 CRUD, навигация и
+  portable export с optimistic revision и идемпотентными мутациями.
 - `blobs` - generic upload/download, resumable transfer, checksums, object
   storage and reusable attachment references.
 - `imports/jobs` - one durable execution runtime for imports, AI, indexing,
@@ -104,7 +106,7 @@ Web writes through server-side application commands:
 ImportMaterial(source)
 CreateHighlight(material_id, target, style)
 CreateMarginNote(material_id, target, body)
-UpdateNote(note_id, markdown, expected_revision)
+UpdateAnnotation(annotation_id, target, payload, metadata, expected_revision)
 MoveReadingPosition(material_id, locator, intent)
 CreateChallenge(scope, options)
 SubmitAnswer(attempt_id, item_id, response)
@@ -115,6 +117,13 @@ ExportAccount(options)
 Native clients can execute analogous commands locally, then sync changes. Web
 command success means server durable commit. Native command success means local
 durable commit and later sync.
+
+Annotation v2 использует единый payload для highlight, note и будущего voice
+note. `target` принимает `text_range`, `block`, `section`, `document` или
+`page_area`; metadata включает title, ordered tags, status и optional relation.
+Старые payload без v2-полей декодируются как active text-range annotation.
+Полный контракт и migration policy закреплены в
+[`ADR 0030`](../adr/0030-annotation-v2-rich-reader.md).
 
 Domain requests such as `AiTask`, `IndexRequest`, `TranscriptionRequest` and
 `FingerprintRequest` may have their own payload/status tables, but leases,

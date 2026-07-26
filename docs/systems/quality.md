@@ -48,6 +48,14 @@ Required fixture families:
 - Telegram: text, forwarded posts, files, batches, media captions.
 - X: single post, thread, long post, article, partial/deleted/protected cases.
 - Markdown/`lum`: wikilinks, callouts, rich blocks, resources, broken links.
+- Records: Cyrillic/English legacy v1 и Annotation v2 payloads, target/status/
+  tags backfill и portable export marker.
+
+Для `0.4.0/E1` committed fixture
+`tests/fixtures/records/v1-v2-annotations.json` проверяет совместимое
+декодирование. Browser E2E отдельно покрывает yellow/bold overlays, изменение
+стиля, selection/margin notes, keyboard-only создание записи на полях и оба
+reflowable/PDF path.
 
 ## Performance budgets
 

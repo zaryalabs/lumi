@@ -103,6 +103,15 @@ performance suites, `make c`, Web E2E и staging image smoke. Workspace и Web
 package имеют версию `0.3.0`; внешний staging operator acceptance остаётся
 отдельным gate окружения.
 
+Для `0.4.0/E1` реализованы Records v2 и Rich Reader: прежние annotations
+совместимо декодируются и мигрируются в единый контракт с explicit targets,
+title/tags/status и relation seam. Reflowable и PDF Reader поддерживают
+yellow/bold highlights, изменение стиля, selection notes и keyboard-доступные
+записи на полях, durable CRUD/navigation и portable
+`lumi.annotations.v2` export. Решение и ручная проверка описаны в
+[`ADR 0030`](docs/adr/0030-annotation-v2-rich-reader.md) и
+[`durable annotations runbook`](docs/runbooks/durable-annotations.md).
+
 ## Локальный запуск
 
 Для основного пути нужны Docker с Compose и `make`. Он собирает и запускает

@@ -1113,7 +1113,12 @@ async fn call_tool(
                 material_id: input.material_id,
                 revision_id: input.revision_id,
                 anchor: input.anchor,
+                target: lumi_core::AnnotationTarget::TextRange,
                 kind,
+                title: None,
+                tags: Vec::new(),
+                status: lumi_core::AnnotationStatus::Active,
+                related_annotation_id: None,
             };
             let idempotency_key = input.idempotency_key;
             let annotation = if let Some(imports) = &state.imports {
@@ -1167,7 +1172,7 @@ async fn call_tool(
                 if annotation.revision != command.expected_revision {
                     return Err(ToolError::Conflict);
                 }
-                annotation.update_kind(command.kind, lumi_core::now_timestamp_ms());
+                annotation.update(command, lumi_core::now_timestamp_ms());
                 annotation.clone()
             };
             Ok(json!(annotation))

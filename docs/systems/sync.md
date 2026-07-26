@@ -334,6 +334,15 @@ SyncChange {
 - `shared_chat_message`;
 - `plugin_object`.
 
+Для `annotation` payload является публичным Annotation v2 DTO целиком:
+source-backed anchor, explicit target/type, payload, title, ordered tags,
+status, relation, object revision и timestamps. Create/update/delete сохраняют
+один change в той же транзакции, что primary row; delete остаётся tombstone.
+Legacy payload без v2 metadata детерминированно восстанавливается как active
+text-range annotation. Текущий domain marker —
+`s1.2026-07-26.records-v2`; правила совместимости описаны в
+[`ADR 0030`](../adr/0030-annotation-v2-rich-reader.md).
+
 ## Реализация
 
 ### Локальное хранилище

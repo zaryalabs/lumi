@@ -249,6 +249,13 @@ pub fn s1_schema_migrations() -> Vec<SchemaMigration> {
                 "Owner-scoped audio uploads, learning attachments and immutable transcript revisions."
                     .to_owned(),
         },
+        SchemaMigration {
+            id: "s1-0021-records-v2".to_owned(),
+            schema_version: DOMAIN_SCHEMA_VERSION.to_owned(),
+            description:
+                "Queryable Annotation v2 targets, rich highlight styles, metadata and normalized tags."
+                    .to_owned(),
+        },
     ]);
     migrations
 }
@@ -1324,125 +1331,6 @@ pub struct PageRect {
     pub height: f32,
 }
 
-/// Annotation record backed by a source anchor.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub struct Annotation {
-    /// Stable annotation id.
-    pub id: AnnotationId,
-    /// Parent material id.
-    pub material_id: MaterialId,
-    /// Revision the anchor targets.
-    pub revision_id: DocumentRevisionId,
-    /// Source-backed target anchor.
-    pub anchor: Anchor,
-    /// Annotation kind.
-    pub kind: AnnotationKind,
-    /// Domain revision counter for optimistic writes.
-    pub revision: u64,
-    /// Creation timestamp.
-    pub created_at: TimestampMs,
-    /// Last update timestamp.
-    pub updated_at: TimestampMs,
-}
-
-impl Annotation {
-    /// Create a new annotation from a command.
-    #[must_use]
-    pub fn create(command: CreateAnnotationCommand, timestamp: TimestampMs) -> Self {
-        Self {
-            id: Uuid::now_v7(),
-            material_id: command.material_id,
-            revision_id: command.revision_id,
-            anchor: command.anchor,
-            kind: command.kind,
-            revision: 1,
-            created_at: timestamp,
-            updated_at: timestamp,
-        }
-    }
-
-    /// Replace the annotation payload and advance its optimistic revision.
-    pub fn update_kind(&mut self, kind: AnnotationKind, timestamp: TimestampMs) {
-        self.kind = kind;
-        self.revision = self.revision.saturating_add(1);
-        self.updated_at = timestamp;
-    }
-
-    /// Return the note body when this annotation is a note.
-    #[must_use]
-    pub fn note_body(&self) -> Option<&str> {
-        match &self.kind {
-            AnnotationKind::Note { body } => Some(body),
-            AnnotationKind::Highlight { .. } => None,
-        }
-    }
-}
-
-/// Command for creating an annotation.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub struct CreateAnnotationCommand {
-    /// Parent material id.
-    pub material_id: MaterialId,
-    /// Revision id targeted by the anchor.
-    pub revision_id: DocumentRevisionId,
-    /// Source-backed anchor.
-    pub anchor: Anchor,
-    /// Annotation kind.
-    pub kind: AnnotationKind,
-}
-
-/// Command for editing an existing annotation.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub struct UpdateAnnotationCommand {
-    /// Parent material id.
-    pub material_id: MaterialId,
-    /// Annotation to edit.
-    pub annotation_id: AnnotationId,
-    /// Expected annotation revision for optimistic concurrency.
-    pub expected_revision: u64,
-    /// Replacement annotation payload.
-    pub kind: AnnotationKind,
-}
-
-/// Command for deleting an annotation with optimistic concurrency.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
-pub struct DeleteAnnotationCommand {
-    /// Parent material id.
-    pub material_id: MaterialId,
-    /// Annotation to delete.
-    pub annotation_id: AnnotationId,
-    /// Expected annotation revision for optimistic concurrency.
-    pub expected_revision: u64,
-}
-
-/// Annotation kind.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case", tag = "type")]
-pub enum AnnotationKind {
-    /// Highlight annotation.
-    Highlight {
-        /// Highlight style.
-        style: HighlightStyle,
-    },
-    /// Markdown note attached to an anchor.
-    Note {
-        /// Note body.
-        body: String,
-    },
-}
-
-/// Highlight style token.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum HighlightStyle {
-    /// Yellow highlight.
-    Yellow,
-    /// Green highlight.
-    Green,
-    /// Blue highlight.
-    Blue,
-}
-
 /// Reading progress persisted through the account state.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ReadingProgress {
@@ -1465,77 +1353,6 @@ pub struct ContinueReadingEntry {
     pub entry: LibraryEntry,
     /// Most recently updated non-zero reading position for the entry.
     pub progress: ReadingProgress,
-}
-
-/// Portable export for annotations attached to one material.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub struct AnnotationExport {
-    /// Portable annotation export schema marker.
-    pub schema_version: String,
-    /// Material whose annotations were exported.
-    pub material_id: MaterialId,
-    /// Active revision at export time.
-    pub revision_id: DocumentRevisionId,
-    /// User-facing material title at export time.
-    pub material_title: String,
-    /// Source identity and provenance for the material.
-    pub source: SourceIdentity,
-    /// Exported annotation entries.
-    pub entries: Vec<AnnotationExportEntry>,
-}
-
-impl AnnotationExport {
-    /// Build an annotation export for `material`.
-    #[must_use]
-    pub fn for_material(material: &Material, annotations: &[Annotation]) -> Self {
-        Self {
-            schema_version: "lumi.annotations.v1".to_owned(),
-            material_id: material.id,
-            revision_id: material.active_revision_id,
-            material_title: material.display_title().to_owned(),
-            source: material.source_identity.clone(),
-            entries: annotations
-                .iter()
-                .map(AnnotationExportEntry::from_annotation)
-                .collect(),
-        }
-    }
-}
-
-/// One annotation entry in a portable export.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub struct AnnotationExportEntry {
-    /// Annotation id.
-    pub annotation_id: AnnotationId,
-    /// Annotation revision at export time.
-    pub annotation_revision: u64,
-    /// Annotation kind and payload.
-    pub kind: AnnotationKind,
-    /// Quoted source text stored with the anchor.
-    pub quote: String,
-    /// Note body when the annotation is a note.
-    pub note_body: Option<String>,
-    /// Full source-backed anchor, serialized as JSON in the export response.
-    pub anchor: Anchor,
-    /// Annotation creation timestamp.
-    pub created_at: TimestampMs,
-    /// Annotation last-update timestamp.
-    pub updated_at: TimestampMs,
-}
-
-impl AnnotationExportEntry {
-    fn from_annotation(annotation: &Annotation) -> Self {
-        Self {
-            annotation_id: annotation.id,
-            annotation_revision: annotation.revision,
-            kind: annotation.kind.clone(),
-            quote: annotation.anchor.quote.clone(),
-            note_body: annotation.note_body().map(str::to_owned),
-            anchor: annotation.anchor.clone(),
-            created_at: annotation.created_at,
-            updated_at: annotation.updated_at,
-        }
-    }
 }
 
 /// Command for moving the reading position.
@@ -1814,7 +1631,7 @@ mod tests {
     fn migrations_cover_s1_contract_groups() {
         let migrations = s1_schema_migrations();
 
-        assert_eq!(migrations.len(), 23);
+        assert_eq!(migrations.len(), 24);
         assert!(migrations
             .iter()
             .any(|migration| migration.id == "s1-0011-ai-contract-freeze-v1"));

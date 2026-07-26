@@ -13,9 +13,9 @@ use axum::{
 use crate::{
     ai, auth_api, cancel_job, capabilities, continue_reading, create_annotation, delete_annotation,
     delete_material, delete_telegram_bot_token, download_source_document, export_annotations,
-    get_blob_manifest, get_job, get_job_diagnostics, get_material, get_normalized_package,
-    get_page_fidelity_document, get_progress, get_reader_settings, get_reading_document,
-    get_revision, get_revision_resource, get_telegram_bot_settings, health,
+    get_annotation, get_blob_manifest, get_job, get_job_diagnostics, get_material,
+    get_normalized_package, get_page_fidelity_document, get_progress, get_reader_settings,
+    get_reading_document, get_revision, get_revision_resource, get_telegram_bot_settings, health,
     import_fixture_material, import_web_url, list_annotations, list_imports, list_materials, mcp,
     move_reading_position, readiness, retry_job, schema_migrations, update_annotation,
     update_library_state, update_reader_settings, update_telegram_bot_token, upload_document,
@@ -75,7 +75,8 @@ fn existing_product_routes() -> Router<AppState> {
         )
         .route(
             "/materials/{material_id}/annotations/{annotation_id}",
-            put(update_annotation)
+            get(get_annotation)
+                .put(update_annotation)
                 .delete(delete_annotation)
                 .layer(DefaultBodyLimit::max(512 * 1024)),
         )

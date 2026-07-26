@@ -8,19 +8,20 @@ use std::sync::{Arc, Mutex};
 use lumi_core::{
     build_generated_lum_package, content_hash, import_epub, import_lum, import_markdown,
     import_telegram_composite, import_telegram_text, import_web_snapshot, normalize_pdf,
-    AcceptedImport, Annotation, AnnotationExport, AnnotationKind, BlobManifest, BlobRef, BlobRole,
-    ContinueReadingEntry, CreateAnnotationCommand, DeleteAnnotationCommand,
-    DerivedMaterialRelation, DiagnosticSeverity, DocumentRevision, DocumentRevisionId,
-    EpubImportError, EpubImportRequest, EpubLimits, FixedLayoutContentPackage,
-    GeneratedLumPackageRequest, ImportDiagnostic, ImportStatusEntry, ImportedEpub, ImportedPdf,
-    ImportedPublication, ImportedPublicationResource, Job, JobId, JobKind, JobStage, JobStatus,
-    LibraryEntry, LibraryState, LumImportError, LumImportRequest, LumLimits, MarkdownImportError,
-    MarkdownImportRequest, MarkdownLimits, Material, MaterialId, MaterialImportStatus,
-    MaterialKind, MoveReadingPositionCommand, NormalizedContentPackage, PageFidelityDocument,
-    PdfImportRequest, PdfLimits, ReaderSettings, ReadingDocument, ReadingNode, ReadingNodeKind,
-    ReadingProgress, RenderPlan, SourceIdentity, TelegramCapturedImage, TelegramMessageSnapshot,
-    TelegramPhotoDescriptor, TelegramUpdate, TelegramWebSection, UpdateAnnotationCommand,
-    GENERATED_LUM_PROVENANCE_VERSION, LUM_SOURCE_MEDIA_TYPE,
+    AcceptedImport, Annotation, AnnotationExport, AnnotationKind, AnnotationStatus,
+    AnnotationTarget, AnnotationType, BlobManifest, BlobRef, BlobRole, ContinueReadingEntry,
+    CreateAnnotationCommand, DeleteAnnotationCommand, DerivedMaterialRelation, DiagnosticSeverity,
+    DocumentRevision, DocumentRevisionId, EpubImportError, EpubImportRequest, EpubLimits,
+    FixedLayoutContentPackage, GeneratedLumPackageRequest, ImportDiagnostic, ImportStatusEntry,
+    ImportedEpub, ImportedPdf, ImportedPublication, ImportedPublicationResource, Job, JobId,
+    JobKind, JobStage, JobStatus, LibraryEntry, LibraryState, LumImportError, LumImportRequest,
+    LumLimits, MarkdownImportError, MarkdownImportRequest, MarkdownLimits, Material, MaterialId,
+    MaterialImportStatus, MaterialKind, MoveReadingPositionCommand, NormalizedContentPackage,
+    PageFidelityDocument, PdfImportRequest, PdfLimits, ReaderSettings, ReadingDocument,
+    ReadingNode, ReadingNodeKind, ReadingProgress, RenderPlan, SourceIdentity,
+    TelegramCapturedImage, TelegramMessageSnapshot, TelegramPhotoDescriptor, TelegramUpdate,
+    TelegramWebSection, UpdateAnnotationCommand, GENERATED_LUM_PROVENANCE_VERSION,
+    LUM_SOURCE_MEDIA_TYPE,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -64,7 +65,7 @@ const SOURCE_RESERVATION_LEASE_SQL: &str = "1 minute";
 #[cfg(test)]
 pub(crate) static POSTGRES_RECOVERY_TEST_LOCK: tokio::sync::Mutex<()> =
     tokio::sync::Mutex::const_new(());
-const REQUIRED_MIGRATION_COUNT: i64 = 19;
+const REQUIRED_MIGRATION_COUNT: i64 = 20;
 #[cfg(not(test))]
 const HEARTBEAT_INTERVAL: std::time::Duration = std::time::Duration::from_secs(30);
 #[cfg(test)]
@@ -1998,7 +1999,24 @@ impl ImportService {
             return Err(ImportServiceError::NotFound);
         }
         let rows = sqlx::query(
-            "SELECT a.annotation_id, a.material_id, a.revision_id, a.anchor, a.kind, a.object_revision, a.created_at, a.updated_at FROM annotations a JOIN materials m ON m.material_id = a.material_id AND m.space_id = a.space_id WHERE a.material_id = $1 AND m.owner_user_id = $2 AND m.deleted_at IS NULL AND a.deleted_at IS NULL ORDER BY a.created_at, a.annotation_id",
+            "SELECT a.annotation_id, a.material_id, a.revision_id, a.anchor, a.kind,
+                    a.annotation_type, a.target_kind, a.status, a.title,
+                    a.related_annotation_id, a.object_revision, a.created_at, a.updated_at,
+                    COALESCE(
+                        (SELECT jsonb_agg(t.tag ORDER BY t.ordinal)
+                           FROM annotation_tags t
+                          WHERE t.annotation_id = a.annotation_id),
+                        '[]'::jsonb
+                    ) AS tags
+               FROM annotations a
+               JOIN materials m
+                 ON m.material_id = a.material_id
+                AND m.space_id = a.space_id
+              WHERE a.material_id = $1
+                AND m.owner_user_id = $2
+                AND m.deleted_at IS NULL
+                AND a.deleted_at IS NULL
+              ORDER BY a.created_at, a.annotation_id",
         )
         .bind(material_id)
         .bind(user_id)
@@ -2016,7 +2034,10 @@ impl ImportService {
     ) -> Result<Annotation, ImportServiceError> {
         validate_idempotency_key(idempotency_key)?;
         canonicalize_anchor(&mut command.anchor);
-        validate_annotation_kind(&command.kind)?;
+        command.normalize();
+        command
+            .validate()
+            .map_err(|_| ImportServiceError::BadRequest("invalid Annotation v2 command"))?;
         validate_anchor_shape(command.revision_id, &command.anchor)?;
         let command_value =
             serde_json::to_value(&command).map_err(|_| ImportServiceError::Unavailable)?;
@@ -2055,7 +2076,11 @@ impl ImportService {
         if source_format == "pdf" {
             let package: FixedLayoutContentPackage = serde_json::from_value(package_value)
                 .map_err(|_| ImportServiceError::Unavailable)?;
-            validate_pdf_anchor(&package, &command.anchor, true)?;
+            validate_pdf_anchor(
+                &package,
+                &command.anchor,
+                command.target.is_exact_selection(),
+            )?;
         } else {
             let package: NormalizedContentPackage = serde_json::from_value(package_value)
                 .map_err(|_| ImportServiceError::Unavailable)?;
@@ -2078,13 +2103,26 @@ impl ImportService {
         if active_revision_id != Some(command.revision_id) {
             return Err(ImportServiceError::Conflict);
         }
+        validate_related_annotation(
+            &mut tx,
+            space_id,
+            command.material_id,
+            command.related_annotation_id,
+        )
+        .await?;
+        validate_voice_attachment(&mut tx, session.user_id, &command.kind).await?;
         let annotation = Annotation::create(command, timestamp_ms(now));
         let anchor = serde_json::to_value(&annotation.anchor)
             .map_err(|_| ImportServiceError::Unavailable)?;
         let kind =
             serde_json::to_value(&annotation.kind).map_err(|_| ImportServiceError::Unavailable)?;
         sqlx::query(
-            "INSERT INTO annotations (annotation_id, space_id, material_id, revision_id, kind, anchor, object_revision, created_at, updated_at) VALUES ($1, $2, $3, $4, $5, $6, 1, $7, $7)",
+            "INSERT INTO annotations
+                (annotation_id, space_id, material_id, revision_id, kind, anchor,
+                 annotation_type, target_kind, status, title, related_annotation_id,
+                 audio_attachment_id, payload_schema, object_revision, created_at, updated_at)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12,
+                     'lumi.annotation-payload.v2', 1, $13, $13)",
         )
         .bind(annotation.id)
         .bind(space_id)
@@ -2092,10 +2130,17 @@ impl ImportService {
         .bind(annotation.revision_id)
         .bind(kind)
         .bind(anchor)
+        .bind(annotation.annotation_type.as_str())
+        .bind(annotation.target.kind_str())
+        .bind(annotation.status.as_str())
+        .bind(annotation.title.as_deref())
+        .bind(annotation.related_annotation_id)
+        .bind(annotation.kind.audio_attachment_id())
         .bind(now)
         .execute(&mut *tx)
         .await
         .map_err(log_storage_error)?;
+        replace_annotation_tags(&mut tx, annotation.id, &annotation.tags, now).await?;
         append_annotation_change(
             &mut tx,
             AnnotationChange {
@@ -2117,11 +2162,11 @@ impl ImportService {
     pub(crate) async fn update_annotation(
         &self,
         session: &AuthenticatedSession,
-        command: UpdateAnnotationCommand,
+        mut command: UpdateAnnotationCommand,
         idempotency_key: &str,
     ) -> Result<Annotation, ImportServiceError> {
         validate_idempotency_key(idempotency_key)?;
-        validate_annotation_kind(&command.kind)?;
+        command.normalize();
         let command_value =
             serde_json::to_value(&command).map_err(|_| ImportServiceError::Unavailable)?;
         let now = OffsetDateTime::now_utc();
@@ -2153,10 +2198,67 @@ impl ImportService {
         if owned.is_none() {
             return Err(ImportServiceError::NotFound);
         }
+        let current = sqlx::query(
+            "SELECT anchor
+               FROM annotations
+              WHERE annotation_id = $1
+                AND material_id = $2
+                AND space_id = $3
+                AND deleted_at IS NULL
+              FOR UPDATE",
+        )
+        .bind(command.annotation_id)
+        .bind(command.material_id)
+        .bind(space_id)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(log_storage_error)?
+        .ok_or(ImportServiceError::NotFound)?;
+        let current_anchor: serde_json::Value =
+            current.try_get("anchor").map_err(log_storage_error)?;
+        let current_anchor: lumi_core::Anchor =
+            serde_json::from_value(current_anchor).map_err(|_| ImportServiceError::Unavailable)?;
+        command
+            .validate(&current_anchor)
+            .map_err(|_| ImportServiceError::BadRequest("invalid Annotation v2 command"))?;
+        validate_related_annotation(
+            &mut tx,
+            space_id,
+            command.material_id,
+            command.related_annotation_id,
+        )
+        .await?;
+        validate_voice_attachment(&mut tx, session.user_id, &command.kind).await?;
+        let annotation_type = command.kind.annotation_type(&command.target);
         let row = sqlx::query(
-            "UPDATE annotations SET kind = $1, object_revision = object_revision + 1, updated_at = $2 WHERE annotation_id = $3 AND material_id = $4 AND space_id = $5 AND object_revision = $6 AND deleted_at IS NULL RETURNING annotation_id, material_id, revision_id, anchor, kind, object_revision, created_at, updated_at",
+            "UPDATE annotations
+                SET kind = $1,
+                    annotation_type = $2,
+                    target_kind = $3,
+                    status = $4,
+                    title = $5,
+                    related_annotation_id = $6,
+                    audio_attachment_id = $7,
+                    payload_schema = 'lumi.annotation-payload.v2',
+                    object_revision = object_revision + 1,
+                    updated_at = $8
+              WHERE annotation_id = $9
+                AND material_id = $10
+                AND space_id = $11
+                AND object_revision = $12
+                AND deleted_at IS NULL
+          RETURNING annotation_id, material_id, revision_id, anchor, kind,
+                    annotation_type, target_kind, status, title,
+                    related_annotation_id, object_revision, created_at, updated_at,
+                    '[]'::jsonb AS tags",
         )
         .bind(serde_json::to_value(&command.kind).map_err(|_| ImportServiceError::Unavailable)?)
+        .bind(annotation_type.as_str())
+        .bind(command.target.kind_str())
+        .bind(command.status.as_str())
+        .bind(command.title.as_deref())
+        .bind(command.related_annotation_id)
+        .bind(command.kind.audio_attachment_id())
         .bind(now)
         .bind(command.annotation_id)
         .bind(command.material_id)
@@ -2165,7 +2267,7 @@ impl ImportService {
         .fetch_optional(&mut *tx)
         .await
         .map_err(log_storage_error)?;
-        let annotation = match row {
+        let mut annotation = match row {
             Some(row) => annotation_from_row(&row)?,
             None => {
                 let exists: bool = sqlx::query_scalar(
@@ -2184,6 +2286,8 @@ impl ImportService {
                 });
             }
         };
+        replace_annotation_tags(&mut tx, annotation.id, &command.tags, now).await?;
+        annotation.tags = command.tags.clone();
         append_annotation_change(
             &mut tx,
             AnnotationChange {
@@ -2241,7 +2345,19 @@ impl ImportService {
             return Err(ImportServiceError::NotFound);
         }
         let row = sqlx::query(
-            "UPDATE annotations SET object_revision = object_revision + 1, updated_at = $1, deleted_at = $1 WHERE annotation_id = $2 AND material_id = $3 AND space_id = $4 AND object_revision = $5 AND deleted_at IS NULL RETURNING annotation_id, material_id, revision_id, anchor, kind, object_revision, created_at, updated_at",
+            "UPDATE annotations
+                SET object_revision = object_revision + 1,
+                    updated_at = $1,
+                    deleted_at = $1
+              WHERE annotation_id = $2
+                AND material_id = $3
+                AND space_id = $4
+                AND object_revision = $5
+                AND deleted_at IS NULL
+          RETURNING annotation_id, material_id, revision_id, anchor, kind,
+                    annotation_type, target_kind, status, title,
+                    related_annotation_id, object_revision, created_at, updated_at,
+                    '[]'::jsonb AS tags",
         )
         .bind(now)
         .bind(command.annotation_id)
@@ -2251,7 +2367,7 @@ impl ImportService {
         .fetch_optional(&mut *tx)
         .await
         .map_err(log_storage_error)?;
-        let annotation = match row {
+        let mut annotation = match row {
             Some(row) => annotation_from_row(&row)?,
             None => {
                 let exists: bool = sqlx::query_scalar(
@@ -2270,6 +2386,7 @@ impl ImportService {
                 });
             }
         };
+        annotation.tags = annotation_tags(&mut tx, annotation.id).await?;
         append_annotation_change(
             &mut tx,
             AnnotationChange {
@@ -2339,7 +2456,24 @@ impl ImportService {
             created_at: timestamp_ms(row.try_get("created_at").map_err(log_storage_error)?),
         };
         let rows = sqlx::query(
-            "SELECT annotation_id, material_id, revision_id, anchor, kind, object_revision, created_at, updated_at FROM annotations WHERE material_id = $1 AND space_id = (SELECT space_id FROM materials WHERE material_id = $1 AND owner_user_id = $2) AND deleted_at IS NULL ORDER BY created_at, annotation_id",
+            "SELECT a.annotation_id, a.material_id, a.revision_id, a.anchor, a.kind,
+                    a.annotation_type, a.target_kind, a.status, a.title,
+                    a.related_annotation_id, a.object_revision, a.created_at, a.updated_at,
+                    COALESCE(
+                        (SELECT jsonb_agg(t.tag ORDER BY t.ordinal)
+                           FROM annotation_tags t
+                          WHERE t.annotation_id = a.annotation_id),
+                        '[]'::jsonb
+                    ) AS tags
+               FROM annotations a
+              WHERE a.material_id = $1
+                AND a.space_id = (
+                    SELECT space_id
+                      FROM materials
+                     WHERE material_id = $1 AND owner_user_id = $2
+                )
+                AND a.deleted_at IS NULL
+              ORDER BY a.created_at, a.annotation_id",
         )
         .bind(material_id)
         .bind(user_id)
@@ -4571,33 +4705,198 @@ async fn enforce_account_backpressure(
 fn annotation_from_row(row: &PgRow) -> Result<Annotation, ImportServiceError> {
     let anchor: serde_json::Value = row.try_get("anchor").map_err(log_storage_error)?;
     let kind: serde_json::Value = row.try_get("kind").map_err(log_storage_error)?;
+    let tags: serde_json::Value = row.try_get("tags").map_err(log_storage_error)?;
     let revision: i64 = row.try_get("object_revision").map_err(log_storage_error)?;
+    let anchor: lumi_core::Anchor =
+        serde_json::from_value(anchor).map_err(|_| ImportServiceError::Unavailable)?;
+    let annotation_type_value: String =
+        row.try_get("annotation_type").map_err(log_storage_error)?;
+    let target_kind: String = row.try_get("target_kind").map_err(log_storage_error)?;
+    let target = match target_kind.as_str() {
+        "text_range" => AnnotationTarget::TextRange,
+        "block" => AnnotationTarget::Block {
+            path: anchor.node_path.clone(),
+        },
+        "section" => AnnotationTarget::Section {
+            path: anchor.node_path.clone(),
+        },
+        "document" => AnnotationTarget::Document,
+        "page_area" => AnnotationTarget::PageArea {
+            page_index: anchor.page_rects.first().map_or(0, |rect| rect.page_index),
+            exact: annotation_type_value != "margin_note",
+        },
+        _ => return Err(ImportServiceError::Unavailable),
+    };
+    let annotation_type = match annotation_type_value.as_str() {
+        "highlight" => AnnotationType::Highlight,
+        "note" => AnnotationType::Note,
+        "margin_note" => AnnotationType::MarginNote,
+        "voice_note" => AnnotationType::VoiceNote,
+        _ => return Err(ImportServiceError::Unavailable),
+    };
+    let status: String = row.try_get("status").map_err(log_storage_error)?;
+    let status = match status.as_str() {
+        "active" => AnnotationStatus::Active,
+        "archived" => AnnotationStatus::Archived,
+        _ => return Err(ImportServiceError::Unavailable),
+    };
     Ok(Annotation {
         id: row.try_get("annotation_id").map_err(log_storage_error)?,
         material_id: row.try_get("material_id").map_err(log_storage_error)?,
         revision_id: row.try_get("revision_id").map_err(log_storage_error)?,
-        anchor: serde_json::from_value(anchor).map_err(|_| ImportServiceError::Unavailable)?,
+        anchor,
+        annotation_type,
+        target,
         kind: serde_json::from_value(kind).map_err(|_| ImportServiceError::Unavailable)?,
+        title: row.try_get("title").map_err(log_storage_error)?,
+        tags: serde_json::from_value(tags).map_err(|_| ImportServiceError::Unavailable)?,
+        status,
+        related_annotation_id: row
+            .try_get("related_annotation_id")
+            .map_err(log_storage_error)?,
         revision: u64::try_from(revision).map_err(|_| ImportServiceError::Unavailable)?,
         created_at: timestamp_ms(row.try_get("created_at").map_err(log_storage_error)?),
         updated_at: timestamp_ms(row.try_get("updated_at").map_err(log_storage_error)?),
     })
 }
 
-fn validate_annotation_kind(kind: &AnnotationKind) -> Result<(), ImportServiceError> {
-    if let AnnotationKind::Note { body } = kind {
-        if body.trim().is_empty() {
-            return Err(ImportServiceError::BadRequest(
-                "note body must not be empty",
-            ));
-        }
-        if body.len() > 100_000 {
-            return Err(ImportServiceError::BadRequest(
-                "note body exceeds the 100,000 byte limit",
-            ));
-        }
+async fn replace_annotation_tags(
+    tx: &mut Transaction<'_, Postgres>,
+    annotation_id: Uuid,
+    tags: &[String],
+    now: OffsetDateTime,
+) -> Result<(), ImportServiceError> {
+    sqlx::query("DELETE FROM annotation_tags WHERE annotation_id = $1")
+        .bind(annotation_id)
+        .execute(&mut **tx)
+        .await
+        .map_err(log_storage_error)?;
+    for (ordinal, tag) in tags.iter().enumerate() {
+        sqlx::query(
+            "INSERT INTO annotation_tags
+                (annotation_id, ordinal, tag, tag_key, created_at)
+             VALUES ($1, $2, $3, $4, $5)",
+        )
+        .bind(annotation_id)
+        .bind(i16::try_from(ordinal).map_err(|_| ImportServiceError::Unavailable)?)
+        .bind(tag)
+        .bind(tag.to_lowercase())
+        .bind(now)
+        .execute(&mut **tx)
+        .await
+        .map_err(log_storage_error)?;
     }
     Ok(())
+}
+
+async fn annotation_tags(
+    tx: &mut Transaction<'_, Postgres>,
+    annotation_id: Uuid,
+) -> Result<Vec<String>, ImportServiceError> {
+    sqlx::query_scalar(
+        "SELECT tag
+           FROM annotation_tags
+          WHERE annotation_id = $1
+          ORDER BY ordinal",
+    )
+    .bind(annotation_id)
+    .fetch_all(&mut **tx)
+    .await
+    .map_err(log_storage_error)
+}
+
+async fn validate_related_annotation(
+    tx: &mut Transaction<'_, Postgres>,
+    space_id: Uuid,
+    material_id: MaterialId,
+    related_annotation_id: Option<Uuid>,
+) -> Result<(), ImportServiceError> {
+    let Some(related_annotation_id) = related_annotation_id else {
+        return Ok(());
+    };
+    let valid: bool = sqlx::query_scalar(
+        "SELECT EXISTS(
+            SELECT 1
+              FROM annotations
+             WHERE annotation_id = $1
+               AND space_id = $2
+               AND material_id = $3
+               AND status = 'active'
+               AND deleted_at IS NULL
+        )",
+    )
+    .bind(related_annotation_id)
+    .bind(space_id)
+    .bind(material_id)
+    .fetch_one(&mut **tx)
+    .await
+    .map_err(log_storage_error)?;
+    if valid {
+        Ok(())
+    } else {
+        Err(ImportServiceError::BadRequest(
+            "related annotation must be active and belong to the same material",
+        ))
+    }
+}
+
+async fn validate_voice_attachment(
+    tx: &mut Transaction<'_, Postgres>,
+    user_id: Uuid,
+    kind: &AnnotationKind,
+) -> Result<(), ImportServiceError> {
+    let AnnotationKind::VoiceNote {
+        audio_attachment_id,
+        transcript_artifact_id,
+        ..
+    } = kind
+    else {
+        return Ok(());
+    };
+    let attachment_valid: bool = sqlx::query_scalar(
+        "SELECT EXISTS(
+            SELECT 1
+              FROM audio_attachments
+             WHERE id = $1
+               AND owner_id = $2
+               AND audio_deleted_at IS NULL
+        )",
+    )
+    .bind(audio_attachment_id)
+    .bind(user_id)
+    .fetch_one(&mut **tx)
+    .await
+    .map_err(log_storage_error)?;
+    if !attachment_valid {
+        return Err(ImportServiceError::BadRequest(
+            "voice note requires an active owner-scoped audio attachment",
+        ));
+    }
+    let Some(transcript_artifact_id) = transcript_artifact_id else {
+        return Ok(());
+    };
+    let transcript_valid: bool = sqlx::query_scalar(
+        "SELECT EXISTS(
+            SELECT 1
+              FROM transcript_artifacts
+             WHERE id = $1
+               AND owner_id = $2
+               AND attachment_id = $3
+        )",
+    )
+    .bind(transcript_artifact_id)
+    .bind(user_id)
+    .bind(audio_attachment_id)
+    .fetch_one(&mut **tx)
+    .await
+    .map_err(log_storage_error)?;
+    if transcript_valid {
+        Ok(())
+    } else {
+        Err(ImportServiceError::BadRequest(
+            "voice transcript must belong to the referenced attachment",
+        ))
+    }
 }
 
 fn validate_anchor_shape(
@@ -5286,9 +5585,17 @@ mod tests {
                     material_id: entry.id,
                     revision_id,
                     anchor: anchor.clone(),
+                    target: AnnotationTarget::PageArea {
+                        page_index: 0,
+                        exact: true,
+                    },
                     kind: AnnotationKind::Highlight {
                         style: HighlightStyle::Yellow,
                     },
+                    title: None,
+                    tags: Vec::new(),
+                    status: AnnotationStatus::Active,
+                    related_annotation_id: None,
                 },
                 "pdf-annotation-integration",
             )
@@ -5594,9 +5901,14 @@ mod tests {
             material_id: imported.material.id,
             revision_id: imported.revision.id,
             anchor: anchor.clone(),
+            target: AnnotationTarget::TextRange,
             kind: AnnotationKind::Note {
                 body: "original".to_owned(),
             },
+            title: None,
+            tags: vec!["integration".to_owned()],
+            status: AnnotationStatus::Active,
+            related_annotation_id: None,
         };
         let created = service
             .create_annotation(&session, command.clone(), "stage5-create")
@@ -5608,9 +5920,14 @@ mod tests {
                     material_id: imported.material.id,
                     annotation_id: created.id,
                     expected_revision: created.revision,
+                    target: created.target.clone(),
                     kind: AnnotationKind::Note {
                         body: "edited".to_owned(),
                     },
+                    title: Some("Edited".to_owned()),
+                    tags: created.tags.clone(),
+                    status: created.status,
+                    related_annotation_id: None,
                 },
                 "stage5-update",
             )
@@ -5637,9 +5954,14 @@ mod tests {
                         material_id: imported.material.id,
                         annotation_id: created.id,
                         expected_revision: 1,
+                        target: created.target.clone(),
                         kind: AnnotationKind::Note {
                             body: "stale".to_owned(),
                         },
+                        title: None,
+                        tags: Vec::new(),
+                        status: AnnotationStatus::Active,
+                        related_annotation_id: None,
                     },
                     "stage5-stale",
                 )
@@ -5708,7 +6030,7 @@ mod tests {
             .await?
             .entries
             .iter()
-            .any(|entry| entry.annotation_id == created.id));
+            .any(|entry| entry.annotation.id == created.id));
         assert!(matches!(
             service
                 .annotations(foreign_user_id, imported.material.id)

@@ -70,13 +70,16 @@ Knowledge Base, native full-copy replicas, Obsidian, plugin platform, будущ
 - `0.3.0 / E5 / release foundation`: payload-free learning/audio traces,
   account/process limits AI/transcription и performance fixtures для due,
   session и attempt;
+- `0.4.0 / E1`: совместимый Annotation v2, explicit targets, title/tags/status,
+  yellow/bold overlays, selection/margin notes, durable Reader CRUD/navigation
+  и portable export для reflowable/PDF;
 - release evidence A1 зафиксирован commit trailer
   `Lumi-Plan-Stage: 0.2.0/A1`.
 
 Ещё не готово:
 
-- Desk/search/RAG и Community Spaces. Внешний staging operator acceptance
-  остаётся gate конкретного окружения.
+- Voice Records/links, Desk/search/RAG и Community Spaces. Внешний staging
+  operator acceptance остаётся gate конкретного окружения.
 
 Persistent server публикует capabilities `ai-provider-openrouter`,
 `ai-provider-byok`, `ai-explicit-context`, `ai-global-chat`, `ai-task-queue`,
@@ -84,9 +87,11 @@ Persistent server публикует capabilities `ai-provider-openrouter`,
 `ai-abridged-lum`, а также route group `learning` и capability
 `learning-core`, `learning-scheduling`, `learning-ai`,
 `learning-explain-back`, `learning-audio-attachments`, `learning-voice` и
-`learning-mcp` при готовых prerequisites.
+`learning-mcp` при готовых prerequisites. Records v2 дополнительно публикует
+`records-v2`, `annotation-targets`, `rich-highlights`, `margin-notes` и
+`annotation-tags-status`.
 
-После перехода на новую шкалу выполнено `9/18` продуктовых эпиков. Stage 0,
+После перехода на новую шкалу выполнено `10/18` продуктовых эпиков. Stage 0,
 Contract Freeze 1 и A1 остаются закрытыми prerequisites.
 
 Repository-side gates `make c`, PostgreSQL/compatibility/security/performance,
@@ -99,7 +104,7 @@ operator acceptance остаётся release gate окружения и не м�
 готовность. Поэтому новая шкала начинается с нуля завершённых end-to-end
 эпиков и отдельно сохраняет перечень уже готового foundation выше.
 
-Текущий следующий эпик — `0.4.0/E1: Records v2 и Rich Reader`.
+Текущий следующий эпик — `0.4.0/E2: Голосовые записи и связи`.
 
 ## Последовательность
 
@@ -155,7 +160,7 @@ operator gate.
 Подробный план:
 [`0.4.0-notes-and-desk-plan.md`](0.4.0-notes-and-desk-plan.md).
 
-1. [ ] **E1 — Records v2 и Rich Reader.** Совместимая Annotation v2,
+1. [x] **E1 — Records v2 и Rich Reader.** Совместимая Annotation v2,
    targets, rich highlights/notes, Reader CRUD, migration и export.
 2. [ ] **E2 — Голосовые записи и связи.** Voice Notes, audio lifecycle,
    stable `LinkTarget`, wikilinks, unresolved/ambiguous links и backlinks.

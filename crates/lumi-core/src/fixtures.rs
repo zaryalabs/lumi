@@ -673,9 +673,14 @@ pub fn sample_fixture_highlight(
         material_id: imported.material.id,
         revision_id: imported.revision.id,
         anchor: crate::Anchor::for_node(imported.revision.id, node),
+        target: crate::AnnotationTarget::TextRange,
         kind: crate::AnnotationKind::Highlight {
             style: HighlightStyle::Yellow,
         },
+        title: None,
+        tags: Vec::new(),
+        status: crate::AnnotationStatus::Active,
+        related_annotation_id: None,
     })
 }
 

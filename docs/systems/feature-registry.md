@@ -77,6 +77,11 @@ Status: accepted
 | RD-011 | Reader task creation for AI/learning from selected context | foundation | RD-001, AI-002 | `reading-screen.md`, `ai.md`, `learning.md` |
 | RD-012 | Plugin block placeholders and first-party reader block routing | extension | PLG-001, RD-001 | `reader-architecture.md`, `plugins.md` |
 
+Реализация `0.4.0/E1` закрывает текущий Web baseline `RD-006` и records-часть
+`RD-007`: Annotation v2, yellow/bold styles, selection/block/page targets,
+title/tags/status, durable CRUD/navigation/export и одинаковые контракты для
+reflowable/PDF Reader. Stable links и voice notes остаются `0.4.0/E2`.
+
 ## Desk
 
 | ID | Функция | Тип | Зависит от | Документы |

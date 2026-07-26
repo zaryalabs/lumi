@@ -1282,9 +1282,27 @@ h6.reading-heading {
   background: var(--highlight);
   box-shadow: 0 0 0 2px var(--highlight);
 }
+.annotation-highlight-bold {
+  /* ADR 0030: paint-only emphasis preserves the measured PageMap. */
+  text-shadow:
+    0.025em 0 currentColor,
+    -0.025em 0 currentColor;
+  -webkit-text-stroke: 0.015em currentColor;
+}
+.annotation-highlight-green {
+  background: rgb(184 220 193 / 62%);
+  box-shadow: 0 0 0 2px rgb(184 220 193 / 62%);
+}
+.annotation-highlight-blue {
+  background: rgb(181 211 231 / 62%);
+  box-shadow: 0 0 0 2px rgb(181 211 231 / 62%);
+}
 .annotation-note {
   border-bottom: 2px solid var(--accent);
   background: rgb(223 234 228 / 45%);
+}
+.annotation-voice {
+  border-bottom: 2px dotted var(--accent);
 }
 .reader-pagination {
   display: grid;
@@ -1414,6 +1432,32 @@ h6.reading-heading {
 }
 .annotation-item p {
   margin: 0;
+}
+.annotation-tabs,
+.annotation-style-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.annotation-tabs [aria-selected="true"] {
+  border-color: var(--accent);
+  color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 10%, transparent);
+}
+.annotation-tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.annotation-tags li {
+  border-radius: 999px;
+  padding: 3px 7px;
+  color: var(--reader-muted);
+  background: color-mix(in srgb, var(--reader-ink) 7%, transparent);
+  font-size: 0.72rem;
 }
 .annotation-target {
   height: auto;
@@ -1611,9 +1655,22 @@ h6.reading-heading {
 .pdf-annotation-rect.highlight {
   background: rgb(255 223 82 / 42%);
 }
+.pdf-annotation-rect.highlight-bold {
+  border: 2px solid rgb(42 49 43 / 72%);
+  background: rgb(42 49 43 / 8%);
+}
+.pdf-annotation-rect.highlight-green {
+  background: rgb(115 184 132 / 34%);
+}
+.pdf-annotation-rect.highlight-blue {
+  background: rgb(92 153 196 / 32%);
+}
 .pdf-annotation-rect.note {
   border-bottom: 2px solid #43896d;
   background: rgb(100 184 150 / 22%);
+}
+.pdf-annotation-rect.voice {
+  border-bottom: 3px dotted var(--accent);
 }
 .pdf-annotation-panel {
   min-height: 0;

@@ -1261,7 +1261,7 @@ async fn create_annotation(
     Extension(session): Extension<AuthenticatedSession>,
     Path(material_id): Path<MaterialId>,
     headers: HeaderMap,
-    Json(command): Json<CreateAnnotationCommand>,
+    Json(mut command): Json<CreateAnnotationCommand>,
 ) -> Result<Json<Annotation>, AppError> {
     if command.material_id != material_id {
         return Err(AppError::BadRequest(
@@ -1281,6 +1281,26 @@ async fn create_annotation(
     let mut repository = write_repository(&state)?;
     repository.ensure_material_owned(session.user_id, command.material_id)?;
     repository.ensure_revision_owned(session.user_id, command.revision_id)?;
+    command.normalize();
+    command
+        .validate()
+        .map_err(|error| AppError::BadRequest(error.to_string()))?;
+    if let Some(related_id) = command.related_annotation_id {
+        let related_is_active = repository
+            .annotations_by_material
+            .get(&material_id)
+            .is_some_and(|annotations| {
+                annotations.iter().any(|annotation| {
+                    annotation.id == related_id
+                        && annotation.status == lumi_core::AnnotationStatus::Active
+                })
+            });
+        if !related_is_active {
+            return Err(AppError::BadRequest(
+                "related annotation must be active and belong to the same material".to_owned(),
+            ));
+        }
+    }
 
     let annotation = Annotation::create(command, lumi_core::now_timestamp_ms());
     repository
@@ -1292,12 +1312,42 @@ async fn create_annotation(
     Ok(Json(annotation))
 }
 
+async fn get_annotation(
+    State(state): State<AppState>,
+    Extension(session): Extension<AuthenticatedSession>,
+    Path((material_id, annotation_id)): Path<(MaterialId, AnnotationId)>,
+) -> Result<Json<Annotation>, AppError> {
+    if let Some(imports) = state.imports.as_ref() {
+        return imports
+            .annotations(session.user_id, material_id)
+            .await
+            .map_err(map_import_error)?
+            .into_iter()
+            .find(|annotation| annotation.id == annotation_id)
+            .map(Json)
+            .ok_or(AppError::NotFound("annotation"));
+    }
+    let repository = read_repository(&state)?;
+    repository.ensure_material_owned(session.user_id, material_id)?;
+    repository
+        .annotations_by_material
+        .get(&material_id)
+        .and_then(|annotations| {
+            annotations
+                .iter()
+                .find(|annotation| annotation.id == annotation_id)
+        })
+        .cloned()
+        .map(Json)
+        .ok_or(AppError::NotFound("annotation"))
+}
+
 async fn update_annotation(
     State(state): State<AppState>,
     Extension(session): Extension<AuthenticatedSession>,
     Path((material_id, annotation_id)): Path<(MaterialId, AnnotationId)>,
     headers: HeaderMap,
-    Json(command): Json<UpdateAnnotationCommand>,
+    Json(mut command): Json<UpdateAnnotationCommand>,
 ) -> Result<Json<Annotation>, AppError> {
     if command.material_id != material_id || command.annotation_id != annotation_id {
         return Err(AppError::BadRequest(
@@ -1316,6 +1366,23 @@ async fn update_annotation(
 
     let mut repository = write_repository(&state)?;
     repository.ensure_material_owned(session.user_id, material_id)?;
+    command.normalize();
+    if let Some(related_id) = command.related_annotation_id {
+        let related_is_active = repository
+            .annotations_by_material
+            .get(&material_id)
+            .is_some_and(|annotations| {
+                annotations.iter().any(|annotation| {
+                    annotation.id == related_id
+                        && annotation.status == lumi_core::AnnotationStatus::Active
+                })
+            });
+        if !related_is_active {
+            return Err(AppError::BadRequest(
+                "related annotation must be active and belong to the same material".to_owned(),
+            ));
+        }
+    }
     let annotations = repository
         .annotations_by_material
         .get_mut(&material_id)
@@ -1331,8 +1398,11 @@ async fn update_annotation(
             command.expected_revision, annotation.revision
         )));
     }
+    command
+        .validate(&annotation.anchor)
+        .map_err(|error| AppError::BadRequest(error.to_string()))?;
 
-    annotation.update_kind(command.kind, lumi_core::now_timestamp_ms());
+    annotation.update(command, lumi_core::now_timestamp_ms());
 
     Ok(Json(annotation.clone()))
 }
@@ -2186,7 +2256,7 @@ mod tests {
         let migrations: Vec<SchemaMigration> =
             json_get(build_router(), "/api/v1/schema/migrations").await?;
 
-        assert_eq!(migrations.len(), 23);
+        assert_eq!(migrations.len(), 24);
         assert!(migrations
             .iter()
             .any(|migration| migration.id == "s1-0017-learning-core"));
@@ -2199,6 +2269,9 @@ mod tests {
         assert!(migrations
             .iter()
             .any(|migration| migration.id == "s1-0020-learning-voice"));
+        assert!(migrations
+            .iter()
+            .any(|migration| migration.id == "s1-0021-records-v2"));
         Ok(())
     }
 
@@ -2616,9 +2689,14 @@ mod tests {
             material_id: imported.material.id,
             annotation_id: annotation.id,
             expected_revision: annotation.revision,
+            target: annotation.target.clone(),
             kind: AnnotationKind::Note {
                 body: "Edited note".to_owned(),
             },
+            title: Some("Edited".to_owned()),
+            tags: vec!["reader".to_owned()],
+            status: lumi_core::AnnotationStatus::Active,
+            related_annotation_id: None,
         };
         let edited: Annotation = json_put(
             app.clone(),
@@ -2627,6 +2705,14 @@ mod tests {
                 imported.material.id, annotation.id
             ),
             json_body(&update)?,
+        )
+        .await?;
+        let fetched: Annotation = json_get(
+            app.clone(),
+            &format!(
+                "/api/v1/materials/{}/annotations/{}",
+                imported.material.id, annotation.id
+            ),
         )
         .await?;
         let export: AnnotationExport = json_get(
@@ -2652,6 +2738,8 @@ mod tests {
         .await?;
 
         assert_eq!(edited.revision, 2);
+        assert_eq!(fetched, edited);
+        assert_eq!(export.schema_version, lumi_core::ANNOTATION_SCHEMA_VERSION);
         assert_eq!(
             export
                 .entries

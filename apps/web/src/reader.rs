@@ -9,11 +9,11 @@ use dioxus::prelude::*;
 use gloo_net::http::Request;
 use lumi_core::{
     AiContextAttachment, AiSourceScope, Anchor, AnchorResolution, Annotation, AnnotationId,
-    AnnotationKind, CreateAnnotationCommand, DeleteAnnotationCommand, HighlightStyle, LibraryEntry,
-    MoveReadingPositionCommand, PageBoundary, PageFragment, PageMap, ReaderNavigation, ReaderPage,
-    ReaderSettings, ReaderTheme, ReaderWidth, ReadingDocument, ReadingLink, ReadingLinkKind,
-    ReadingProgress, RenderBlock, RenderPlan, TextRange, UpdateAnnotationCommand,
-    UpdateReaderSettingsCommand,
+    AnnotationKind, AnnotationStatus, AnnotationTarget, AnnotationType, CreateAnnotationCommand,
+    DeleteAnnotationCommand, HighlightStyle, LibraryEntry, MoveReadingPositionCommand,
+    PageBoundary, PageFragment, PageMap, ReaderNavigation, ReaderPage, ReaderSettings, ReaderTheme,
+    ReaderWidth, ReadingDocument, ReadingLink, ReadingLinkKind, ReadingProgress, RenderBlock,
+    RenderPlan, TextRange, UpdateAnnotationCommand, UpdateReaderSettingsCommand,
 };
 use uuid::Uuid;
 use wasm_bindgen::{closure::Closure, JsCast};
@@ -41,10 +41,16 @@ struct ReaderView {
     footnote: Option<ReadingLink>,
     annotations: Vec<AnnotationItem>,
     selected_anchor: Option<Anchor>,
+    draft_target: AnnotationTarget,
     note_composer_open: bool,
+    note_title_draft: String,
     note_draft: String,
+    note_tags_draft: String,
     edit_note_draft: String,
+    edit_note_title: String,
+    edit_note_tags: String,
     editing_note: Option<AnnotationId>,
+    notes_filter: NotesFilter,
     conflict_draft: Option<String>,
     annotation_message: Option<String>,
 }
@@ -109,6 +115,14 @@ enum ReaderPanel {
     Toc,
     Settings,
     Notes,
+}
+
+#[derive(Clone, Copy, Default, Eq, PartialEq)]
+enum NotesFilter {
+    #[default]
+    All,
+    Notes,
+    Highlights,
 }
 
 /// API-backed reader route for one ready material.
@@ -184,10 +198,16 @@ pub(crate) fn ReaderApp(
                                     })
                                     .collect(),
                                 selected_anchor: None,
+                                draft_target: AnnotationTarget::TextRange,
                                 note_composer_open: false,
+                                note_title_draft: String::new(),
                                 note_draft: String::new(),
+                                note_tags_draft: String::new(),
                                 edit_note_draft: String::new(),
+                                edit_note_title: String::new(),
+                                edit_note_tags: String::new(),
                                 editing_note: None,
+                                notes_filter: NotesFilter::All,
                                 conflict_draft: None,
                                 annotation_message: None,
                             };
@@ -305,6 +325,7 @@ pub(crate) fn ReaderApp(
                         div { class: "reader-tools", role: "toolbar", aria_label: "Инструменты чтения",
                             button { id: "reader-toc-button", r#type: "button", aria_expanded: view.toc_open, aria_controls: "reader-toc-panel", onclick: move |_| toggle_reader_panel(state, ReaderPanel::Toc), "Оглавление" }
                             button { id: "reader-settings-button", r#type: "button", aria_expanded: view.settings_open, aria_controls: "reader-settings-panel", onclick: move |_| toggle_reader_panel(state, ReaderPanel::Settings), "Настройки" }
+                            button { id: "reader-margin-note-button", r#type: "button", onclick: move |_| start_margin_note(state, current_page), "Запись на полях" }
                             button { id: "reader-notes-button", r#type: "button", aria_expanded: view.notes_open, aria_controls: "reader-notes-panel", onclick: move |_| {
                                 toggle_reader_panel(state, ReaderPanel::Notes);
                             }, "Заметки ({view.annotations.len()})" }
@@ -480,7 +501,17 @@ pub(crate) fn ReaderApp(
                     }
 
                     if let Some(anchor) = view.selected_anchor.clone() {
-                        SelectionComposer { state, csrf, save_state, anchor, draft: view.note_draft.clone(), note_composer_open: view.note_composer_open }
+                        SelectionComposer {
+                            state,
+                            csrf,
+                            save_state,
+                            anchor,
+                            target: view.draft_target.clone(),
+                            title: view.note_title_draft.clone(),
+                            draft: view.note_draft.clone(),
+                            tags: view.note_tags_draft.clone(),
+                            note_composer_open: view.note_composer_open
+                        }
                     }
 
                     if let Some(link) = view.footnote.clone() {
@@ -615,7 +646,7 @@ fn RenderedFragment(
 struct TextSegment {
     text: String,
     scalar_start: usize,
-    class_name: &'static str,
+    class_name: String,
     link_index: Option<usize>,
 }
 
@@ -632,7 +663,7 @@ fn annotation_segments(
     if chars.is_empty() {
         return Vec::new();
     }
-    let mut classes = vec![""; chars.len()];
+    let mut classes = vec![String::new(); chars.len()];
     let mut link_indices = vec![None; chars.len()];
     for item in annotations {
         let resolved = match plan.resolve_anchor(&item.annotation.anchor) {
@@ -646,12 +677,32 @@ fn annotation_segments(
         let start = annotation_range.start.max(visible.start);
         let end = annotation_range.end.min(visible.end);
         let class_name = match item.annotation.kind {
-            AnnotationKind::Highlight { .. } => "annotation-highlight",
+            AnnotationKind::Highlight {
+                style: HighlightStyle::Bold,
+            } => "annotation-highlight-bold",
+            AnnotationKind::Highlight {
+                style: HighlightStyle::Green,
+            } => "annotation-highlight-green",
+            AnnotationKind::Highlight {
+                style: HighlightStyle::Blue,
+            } => "annotation-highlight-blue",
+            AnnotationKind::Highlight {
+                style: HighlightStyle::Yellow,
+            } => "annotation-highlight",
             AnnotationKind::Note { .. } => "annotation-note",
+            AnnotationKind::VoiceNote { .. } => "annotation-voice",
         };
         for scalar in start..end {
             if let Some(value) = classes.get_mut(scalar.saturating_sub(visible.start)) {
-                *value = class_name;
+                if !value
+                    .split_ascii_whitespace()
+                    .any(|class| class == class_name)
+                {
+                    if !value.is_empty() {
+                        value.push(' ');
+                    }
+                    value.push_str(class_name);
+                }
             }
         }
     }
@@ -667,7 +718,7 @@ fn annotation_segments(
     let mut output = Vec::new();
     let mut start = 0;
     while start < chars.len() {
-        let class_name = classes[start];
+        let class_name = classes[start].clone();
         let link_index = link_indices[start];
         let mut end = start + 1;
         while end < chars.len() && classes[end] == class_name && link_indices[end] == link_index {
@@ -696,6 +747,19 @@ fn NotesPanel(
     let ReaderState::Ready(view) = snapshot else {
         return rsx! {};
     };
+    let visible_annotations = view
+        .annotations
+        .iter()
+        .filter(|item| match view.notes_filter {
+            NotesFilter::All => true,
+            NotesFilter::Notes => matches!(
+                item.annotation.annotation_type,
+                AnnotationType::Note | AnnotationType::MarginNote
+            ),
+            NotesFilter::Highlights => item.annotation.annotation_type == AnnotationType::Highlight,
+        })
+        .cloned()
+        .collect::<Vec<_>>();
     rsx! {
         aside { id: "reader-notes-panel", class: "reader-drawer notes-drawer", tabindex: "-1", aria_label: "Личные заметки и выделения", onkeydown: move |event| {
             if event.key() == Key::Escape { close_reader_panel(state, ReaderPanel::Notes); }
@@ -705,12 +769,30 @@ fn NotesPanel(
                 div { h2 { "Заметки" } p { class: "private-label", "Только для вас" } }
                 button { id: "reader-notes-close", r#type: "button", aria_label: "Закрыть заметки", onclick: move |_| close_reader_panel(state, ReaderPanel::Notes), "×" }
             }
+            div { class: "annotation-tabs", role: "tablist", aria_label: "Тип записей",
+                button { r#type: "button", role: "tab", aria_selected: view.notes_filter == NotesFilter::All, onclick: move |_| set_notes_filter(state, NotesFilter::All), "Все" }
+                button { r#type: "button", role: "tab", aria_selected: view.notes_filter == NotesFilter::Notes, onclick: move |_| set_notes_filter(state, NotesFilter::Notes), "Заметки" }
+                button { r#type: "button", role: "tab", aria_selected: view.notes_filter == NotesFilter::Highlights, onclick: move |_| set_notes_filter(state, NotesFilter::Highlights), "Выделения" }
+            }
             if view.annotations.is_empty() {
                 p { class: "notes-empty", "Выделите фрагмент на странице, чтобы сохранить выделение или заметку." }
+            } else if visible_annotations.is_empty() {
+                p { class: "notes-empty", "Для этого фильтра записей пока нет." }
             } else {
                 ol { class: "annotation-list",
-                    for item in view.annotations.clone() {
-                        AnnotationPanelItem { state, csrf, save_state, progress_generation, progress_in_flight, item, editing: view.editing_note, draft: view.edit_note_draft.clone() }
+                    for item in visible_annotations {
+                        AnnotationPanelItem {
+                            state,
+                            csrf,
+                            save_state,
+                            progress_generation,
+                            progress_in_flight,
+                            item,
+                            editing: view.editing_note,
+                            draft: view.edit_note_draft.clone(),
+                            edit_title: view.edit_note_title.clone(),
+                            edit_tags: view.edit_note_tags.clone()
+                        }
                     }
                 }
             }
@@ -726,16 +808,20 @@ fn SelectionComposer(
     csrf: Signal<String>,
     save_state: Signal<SaveState>,
     anchor: Anchor,
+    target: AnnotationTarget,
+    title: String,
     draft: String,
+    tags: String,
     note_composer_open: bool,
 ) -> Element {
-    let highlight_anchor = anchor.clone();
+    let yellow_anchor = anchor.clone();
+    let bold_anchor = anchor.clone();
     let ask_anchor = anchor.clone();
     let explain_anchor = anchor.clone();
     let summary_anchor = anchor.clone();
     rsx! {
         if !note_composer_open {
-            div { class: "selection-actions", role: "toolbar", aria_label: "Действия с выделением",
+            div { class: "selection-actions", role: "toolbar", aria_label: if target.is_text_range() { "Действия с выделением" } else { "Действия с записью на полях" },
                 button { class: "primary-action", r#type: "button", onclick: move |_| ask_ai_about_selection(state, ask_anchor.clone(), "", false), "Спросить ИИ" }
                 button { r#type: "button", onclick: move |_| ask_ai_about_selection(
                     state,
@@ -749,10 +835,15 @@ fn SelectionComposer(
                     "Кратко перескажи выделенный фрагмент и сохрани ключевые тезисы.",
                     true,
                 ), "Кратко перескажи" }
-                button { r#type: "button", onclick: move |_| create_highlight(state, highlight_anchor.clone(), csrf, save_state), "Выделить" }
+                if target.is_text_range() {
+                    button { r#type: "button", onclick: move |_| create_highlight(state, yellow_anchor.clone(), HighlightStyle::Yellow, csrf, save_state), "Жёлтым" }
+                    button { r#type: "button", onclick: move |_| create_highlight(state, bold_anchor.clone(), HighlightStyle::Bold, csrf, save_state), "Жирным" }
+                }
                 button { r#type: "button", onclick: move |_| {
                     if let ReaderState::Ready(current) = &mut *state.write() {
+                        current.note_title_draft.clear();
                         current.note_draft.clear();
+                        current.note_tags_draft.clear();
                         current.note_composer_open = true;
                         current.annotation_message = None;
                     }
@@ -762,7 +853,10 @@ fn SelectionComposer(
             }
         } else {
             form { class: "note-composer", onsubmit: move |event| { event.prevent_default(); create_note(state, anchor.clone(), csrf, save_state); },
+                p { class: "annotation-kind", if target.is_text_range() { "Заметка к выделению" } else { "Запись на полях" } }
+                label { "Заголовок (необязательно)", input { name: "note_title", autocomplete: "off", maxlength: "240", placeholder: "Короткое название", value: "{title}", oninput: move |event| if let ReaderState::Ready(current) = &mut *state.write() { current.note_title_draft = event.value(); } } }
                 label { "Текст заметки", textarea { id: "reader-note-draft", name: "note_body", autocomplete: "off", placeholder: "Добавьте мысль…", value: "{draft}", oninput: move |event| if let ReaderState::Ready(current) = &mut *state.write() { current.note_draft = event.value(); } } }
+                label { "Теги", input { name: "note_tags", autocomplete: "off", placeholder: "чтение, идея", value: "{tags}", oninput: move |event| if let ReaderState::Ready(current) = &mut *state.write() { current.note_tags_draft = event.value(); } } }
                 div { class: "dialog-actions",
                     button { class: "secondary-action", r#type: "button", onclick: move |_| dismiss_selection(state), "Отмена" }
                     button { class: "primary-action", r#type: "submit", disabled: draft.trim().is_empty(), "Сохранить заметку" }
@@ -890,23 +984,52 @@ fn AnnotationPanelItem(
     item: AnnotationItem,
     editing: Option<AnnotationId>,
     draft: String,
+    edit_title: String,
+    edit_tags: String,
 ) -> Element {
     let target_anchor = item.annotation.anchor.clone();
     let delete_value = item.annotation.clone();
     let retry_value = item.annotation.clone();
     let edit_value = item.annotation.clone();
+    let yellow_value = item.annotation.clone();
+    let bold_value = item.annotation.clone();
+    let status_value = item.annotation.clone();
     let annotation_id = item.annotation.id;
     let quote = item.annotation.anchor.quote.clone();
     rsx! {
         li { class: "annotation-item",
             button { class: "annotation-target", r#type: "button", onclick: move |_| navigate_to_annotation(state, &target_anchor, csrf, progress_generation, progress_in_flight, save_state), blockquote { "{quote}" } }
+            if let Some(title) = item.annotation.title.clone() { strong { "{title}" } }
+            if !item.annotation.tags.is_empty() {
+                ul { class: "annotation-tags", aria_label: "Теги",
+                    for tag in item.annotation.tags.clone() { li { "{tag}" } }
+                }
+            }
             match item.annotation.kind.clone() {
-                AnnotationKind::Highlight { .. } => rsx! { p { class: "annotation-kind", "Выделение" } },
-                AnnotationKind::Note { body } => rsx! {
-                    p { class: "annotation-kind", "Заметка" }
-                    p { "{body}" }
-                    button { r#type: "button", onclick: move |_| if let ReaderState::Ready(current) = &mut *state.write() { current.editing_note = Some(annotation_id); current.edit_note_draft = body.clone(); current.conflict_draft = None; }, "Изменить" }
+                AnnotationKind::Highlight { style } => rsx! {
+                    p { class: "annotation-kind", "Выделение · {highlight_style_label(style)}" }
+                    div { class: "annotation-style-actions", role: "group", aria_label: "Стиль выделения",
+                        button { r#type: "button", disabled: style == HighlightStyle::Yellow, onclick: move |_| update_highlight_style(state, yellow_value.clone(), HighlightStyle::Yellow, csrf, save_state), "Жёлтый" }
+                        button { r#type: "button", disabled: style == HighlightStyle::Bold, onclick: move |_| update_highlight_style(state, bold_value.clone(), HighlightStyle::Bold, csrf, save_state), "Жирный" }
+                    }
                 },
+                AnnotationKind::Note { body } => rsx! {
+                    p { class: "annotation-kind", if item.annotation.annotation_type == AnnotationType::MarginNote { "Запись на полях" } else { "Заметка" } }
+                    p { "{body}" }
+                    button { r#type: "button", onclick: move |_| if let ReaderState::Ready(current) = &mut *state.write() {
+                        current.editing_note = Some(annotation_id);
+                        current.edit_note_draft = body.clone();
+                        current.edit_note_title = item.annotation.title.clone().unwrap_or_default();
+                        current.edit_note_tags = item.annotation.tags.join(", ");
+                        current.conflict_draft = None;
+                    }, "Изменить" }
+                },
+                AnnotationKind::VoiceNote { .. } => rsx! { p { class: "annotation-kind", "Голосовая заметка" } },
+            }
+            button {
+                r#type: "button",
+                onclick: move |_| toggle_annotation_status(state, status_value.clone(), csrf, save_state),
+                if item.annotation.status == AnnotationStatus::Active { "Архивировать" } else { "Восстановить" }
             }
             button { class: "danger-link", r#type: "button", onclick: move |_| delete_annotation_optimistic(state, delete_value.clone(), csrf, save_state), "Удалить" }
             if item.sync_state == ItemSyncState::Saving { span { role: "status", "Сохраняем…" } }
@@ -914,7 +1037,9 @@ fn AnnotationPanelItem(
             if item.sync_state == ItemSyncState::Conflicted { p { class: "annotation-conflict", role: "alert", "Заметка изменилась в другом окне. Ваш текст сохранён в редакторе." } }
             if editing == Some(annotation_id) {
                 form { class: "note-editor", onsubmit: move |event| { event.prevent_default(); update_note_optimistic(state, edit_value.clone(), csrf, save_state); },
+                    label { "Заголовок", input { name: "edited_note_title", maxlength: "240", value: "{edit_title}", oninput: move |event| if let ReaderState::Ready(current) = &mut *state.write() { current.edit_note_title = event.value(); } } }
                     label { "Редактировать заметку", textarea { name: "edited_note_body", autocomplete: "off", value: "{draft}", oninput: move |event| if let ReaderState::Ready(current) = &mut *state.write() { current.edit_note_draft = event.value(); } } }
+                    label { "Теги", input { name: "edited_note_tags", value: "{edit_tags}", oninput: move |event| if let ReaderState::Ready(current) = &mut *state.write() { current.edit_note_tags = event.value(); } } }
                     button { r#type: "submit", disabled: draft.trim().is_empty(), "Сохранить изменения" }
                 }
             }
@@ -967,6 +1092,7 @@ fn capture_browser_selection(mut state: Signal<ReaderState>) {
         match result {
             Ok(anchor) => {
                 view.selected_anchor = Some(anchor);
+                view.draft_target = AnnotationTarget::TextRange;
                 view.annotation_message = None;
             }
             Err(error) if error != "Выделение пусто" => {
@@ -974,6 +1100,94 @@ fn capture_browser_selection(mut state: Signal<ReaderState>) {
             }
             Err(_) => {}
         }
+    }
+}
+
+fn start_margin_note(mut state: Signal<ReaderState>, page_index: usize) {
+    let anchor_and_target = {
+        let ReaderState::Ready(view) = &*state.read() else {
+            return;
+        };
+        let Some(fragment) = view
+            .page_map
+            .pages
+            .get(page_index)
+            .and_then(|page| page.fragments.first())
+        else {
+            return;
+        };
+        let Some(block) = view.plan.block(&fragment.node_path) else {
+            return;
+        };
+        let text_length = block.text.as_deref().map_or(0, |text| text.chars().count());
+        let anchor = view
+            .plan
+            .anchor_from_selection(&fragment.node_path, 0, &fragment.node_path, text_length)
+            .ok();
+        anchor.map(|anchor| {
+            (
+                anchor,
+                AnnotationTarget::Block {
+                    path: fragment.node_path.clone(),
+                },
+            )
+        })
+    };
+    let Some((anchor, target)) = anchor_and_target else {
+        if let ReaderState::Ready(view) = &mut *state.write() {
+            view.annotation_message =
+                Some("На этой странице нет блока для записи на полях.".to_owned());
+        }
+        return;
+    };
+    if let ReaderState::Ready(view) = &mut *state.write() {
+        view.selected_anchor = Some(anchor);
+        view.draft_target = target;
+        view.note_composer_open = true;
+        view.note_title_draft.clear();
+        view.note_draft.clear();
+        view.note_tags_draft.clear();
+        view.annotation_message = None;
+    }
+    defer_reader_focus("reader-note-draft");
+}
+
+fn set_notes_filter(mut state: Signal<ReaderState>, filter: NotesFilter) {
+    if let ReaderState::Ready(view) = &mut *state.write() {
+        view.notes_filter = filter;
+    }
+}
+
+fn parse_tags(value: &str) -> Vec<String> {
+    let mut tags = Vec::new();
+    for candidate in value
+        .split(',')
+        .map(str::trim)
+        .filter(|tag| !tag.is_empty())
+    {
+        if !tags
+            .iter()
+            .any(|tag: &String| tag.eq_ignore_ascii_case(candidate))
+        {
+            tags.push(candidate.to_owned());
+        }
+        if tags.len() == lumi_core::MAX_ANNOTATION_TAGS {
+            break;
+        }
+    }
+    tags
+}
+
+fn non_empty(value: &str) -> Option<String> {
+    (!value.is_empty()).then(|| value.to_owned())
+}
+
+fn highlight_style_label(style: HighlightStyle) -> &'static str {
+    match style {
+        HighlightStyle::Yellow => "жёлтое",
+        HighlightStyle::Bold => "жирное",
+        HighlightStyle::Green => "зелёное",
+        HighlightStyle::Blue => "синее",
     }
 }
 
@@ -1055,15 +1269,17 @@ fn scalar_offset_from_utf16(text: &str, offset: u32) -> Result<usize, String> {
 fn create_highlight(
     state: Signal<ReaderState>,
     anchor: Anchor,
+    style: HighlightStyle,
     csrf: Signal<String>,
     save_state: Signal<SaveState>,
 ) {
     create_annotation_optimistic(
         state,
         anchor,
-        AnnotationKind::Highlight {
-            style: HighlightStyle::Yellow,
-        },
+        AnnotationTarget::TextRange,
+        AnnotationKind::Highlight { style },
+        None,
+        Vec::new(),
         csrf,
         save_state,
     );
@@ -1075,25 +1291,40 @@ fn create_note(
     csrf: Signal<String>,
     save_state: Signal<SaveState>,
 ) {
-    let body = match &*state.read() {
-        ReaderState::Ready(view) => view.note_draft.trim().to_owned(),
+    let (body, target, title, tags) = match &*state.read() {
+        ReaderState::Ready(view) => (
+            view.note_draft.trim().to_owned(),
+            view.draft_target.clone(),
+            non_empty(view.note_title_draft.trim()),
+            parse_tags(&view.note_tags_draft),
+        ),
         _ => return,
     };
     if !body.is_empty() {
         create_annotation_optimistic(
             state,
             anchor,
+            target,
             AnnotationKind::Note { body },
+            title,
+            tags,
             csrf,
             save_state,
         );
     }
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "optimistic Reader mutation mirrors Annotation v2 metadata and UI signals"
+)]
 fn create_annotation_optimistic(
     mut state: Signal<ReaderState>,
     anchor: Anchor,
+    target: AnnotationTarget,
     kind: AnnotationKind,
+    title: Option<String>,
+    tags: Vec<String>,
     csrf: Signal<String>,
     save_state: Signal<SaveState>,
 ) {
@@ -1102,12 +1333,19 @@ fn create_annotation_optimistic(
         _ => return,
     };
     let temporary_id = Uuid::now_v7();
+    let annotation_type = kind.annotation_type(&target);
     let temporary = Annotation {
         id: temporary_id,
         material_id,
         revision_id,
         anchor: anchor.clone(),
+        annotation_type,
+        target: target.clone(),
         kind: kind.clone(),
+        title: title.clone(),
+        tags: tags.clone(),
+        status: AnnotationStatus::Active,
+        related_annotation_id: None,
         revision: 0,
         created_at: 0,
         updated_at: 0,
@@ -1117,7 +1355,12 @@ fn create_annotation_optimistic(
             material_id,
             revision_id,
             anchor,
+            target,
             kind,
+            title,
+            tags,
+            status: AnnotationStatus::Active,
+            related_annotation_id: None,
         }),
         idempotency_key: Uuid::now_v7().to_string(),
     };
@@ -1129,7 +1372,9 @@ fn create_annotation_optimistic(
         });
         view.selected_anchor = None;
         view.note_composer_open = false;
+        view.note_title_draft.clear();
         view.note_draft.clear();
+        view.note_tags_draft.clear();
         view.annotation_message = None;
     }
     begin_save(save_state, pending_key(&pending), pending_subject(&pending));
@@ -1171,48 +1416,124 @@ fn update_note_optimistic(
     csrf: Signal<String>,
     save_state: Signal<SaveState>,
 ) {
-    let draft = match &*state.read() {
-        ReaderState::Ready(view) => view.edit_note_draft.trim().to_owned(),
+    let (draft, title, tags) = match &*state.read() {
+        ReaderState::Ready(view) => (
+            view.edit_note_draft.trim().to_owned(),
+            non_empty(view.edit_note_title.trim()),
+            parse_tags(&view.edit_note_tags),
+        ),
         _ => return,
     };
     if draft.is_empty() {
         return;
     }
     if let ReaderState::Ready(view) = &mut *state.write() {
-        if let Some(item) = view
-            .annotations
-            .iter_mut()
-            .find(|item| item.annotation.id == previous.id)
-        {
-            item.annotation.kind = AnnotationKind::Note {
-                body: draft.clone(),
-            };
-            item.sync_state = ItemSyncState::Saving;
-        }
         view.editing_note = None;
     }
+    update_annotation_optimistic(
+        state,
+        previous,
+        AnnotationKind::Note { body: draft },
+        title,
+        tags,
+        None,
+        csrf,
+        save_state,
+    );
+}
+
+fn update_highlight_style(
+    state: Signal<ReaderState>,
+    previous: Annotation,
+    style: HighlightStyle,
+    csrf: Signal<String>,
+    save_state: Signal<SaveState>,
+) {
+    update_annotation_optimistic(
+        state,
+        previous,
+        AnnotationKind::Highlight { style },
+        None,
+        Vec::new(),
+        None,
+        csrf,
+        save_state,
+    );
+}
+
+fn toggle_annotation_status(
+    state: Signal<ReaderState>,
+    previous: Annotation,
+    csrf: Signal<String>,
+    save_state: Signal<SaveState>,
+) {
+    let status = if previous.status == AnnotationStatus::Active {
+        AnnotationStatus::Archived
+    } else {
+        AnnotationStatus::Active
+    };
+    update_annotation_optimistic(
+        state,
+        previous.clone(),
+        previous.kind,
+        previous.title,
+        previous.tags,
+        Some(status),
+        csrf,
+        save_state,
+    );
+}
+
+#[expect(
+    clippy::too_many_arguments,
+    reason = "mirrors the public Annotation v2 command"
+)]
+fn update_annotation_optimistic(
+    mut state: Signal<ReaderState>,
+    previous: Annotation,
+    kind: AnnotationKind,
+    title: Option<String>,
+    tags: Vec<String>,
+    status: Option<AnnotationStatus>,
+    csrf: Signal<String>,
+    save_state: Signal<SaveState>,
+) {
+    let status = status.unwrap_or(previous.status);
     let command = UpdateAnnotationCommand {
         material_id: previous.material_id,
         annotation_id: previous.id,
         expected_revision: previous.revision,
-        kind: AnnotationKind::Note {
-            body: draft.clone(),
+        target: previous.target.clone(),
+        kind: kind.clone(),
+        title: title.clone().or(previous.title.clone()),
+        tags: if tags.is_empty() {
+            previous.tags.clone()
+        } else {
+            tags
         },
+        status,
+        related_annotation_id: previous.related_annotation_id,
     };
     let pending = PendingMutation::Update {
-        command,
+        command: command.clone(),
         idempotency_key: Uuid::now_v7().to_string(),
     };
-    begin_save(save_state, pending_key(&pending), pending_subject(&pending));
     if let ReaderState::Ready(view) = &mut *state.write() {
         if let Some(item) = view
             .annotations
             .iter_mut()
             .find(|item| item.annotation.id == previous.id)
         {
+            item.annotation.annotation_type = kind.annotation_type(&item.annotation.target);
+            item.annotation.kind = kind;
+            item.annotation.title = command.title.clone();
+            item.annotation.tags = command.tags.clone();
+            item.annotation.status = command.status;
+            item.sync_state = ItemSyncState::Saving;
             item.pending = Some(pending.clone());
         }
     }
+    begin_save(save_state, pending_key(&pending), pending_subject(&pending));
     dispatch_pending(state, previous.id, pending, csrf, save_state);
 }
 
@@ -1598,7 +1919,10 @@ fn dismiss_selection(mut state: Signal<ReaderState>) {
     if let ReaderState::Ready(view) = &mut *state.write() {
         view.selected_anchor = None;
         view.note_composer_open = false;
+        view.note_title_draft.clear();
         view.note_draft.clear();
+        view.note_tags_draft.clear();
+        view.draft_target = AnnotationTarget::TextRange;
     }
     defer_reader_focus("reader-page-surface");
 }

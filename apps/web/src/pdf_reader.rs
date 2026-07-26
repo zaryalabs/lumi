@@ -3,10 +3,11 @@
 use dioxus::prelude::*;
 use gloo_net::http::Request;
 use lumi_core::{
-    AiContextAttachment, AiSourceScope, Anchor, Annotation, AnnotationKind,
-    CreateAnnotationCommand, HighlightStyle, LibraryEntry, MaterialKind,
-    MoveReadingPositionCommand, PageFidelityDocument, PageRect, PdfPage, PdfRect, PdfSourceLocator,
-    ReadingProgress, SourceLocator, TextRange,
+    AiContextAttachment, AiSourceScope, Anchor, Annotation, AnnotationKind, AnnotationStatus,
+    AnnotationTarget, CreateAnnotationCommand, DeleteAnnotationCommand, HighlightStyle,
+    LibraryEntry, MaterialKind, MoveReadingPositionCommand, PageFidelityDocument, PageRect,
+    PdfPage, PdfRect, PdfSourceLocator, ReadingProgress, SourceLocator, TextRange,
+    UpdateAnnotationCommand,
 };
 use serde_json::json;
 use uuid::Uuid;
@@ -111,7 +112,13 @@ fn PdfReaderApp(
     let mut current_page = use_signal(|| 0_u32);
     let mut zoom = use_signal(|| 1.0_f64);
     let mut selected_anchor = use_signal(|| None::<Anchor>);
+    let mut selected_target = use_signal(|| AnnotationTarget::PageArea {
+        page_index: 0,
+        exact: true,
+    });
+    let mut note_title = use_signal(String::new);
     let mut note_draft = use_signal(String::new);
+    let mut note_tags = use_signal(String::new);
     let mut reader_message = use_signal(String::new);
     let save_message = use_signal(|| "Сохранено".to_owned());
     let mut mount_config = use_signal(|| None::<String>);
@@ -128,6 +135,7 @@ fn PdfReaderApp(
                 state,
                 current_page,
                 selected_anchor,
+                selected_target,
                 reader_message,
             );
         });
@@ -195,6 +203,7 @@ fn PdfReaderApp(
                 annotations,
                 current_page,
                 selected_anchor,
+                selected_target,
                 reader_message,
                 save_message,
                 progress_generation,
@@ -233,6 +242,7 @@ fn PdfReaderApp(
                 .map_or_else(|| "—".to_owned(), |page| page.page_label.clone());
             let selected = selected_anchor.read().clone();
             let annotation_items = annotations.read().clone();
+            let margin_data = data.as_ref().clone();
             let progress_percent = ((current_page() as usize + 1) * 100)
                 .checked_div(page_count)
                 .unwrap_or_default();
@@ -275,6 +285,18 @@ fn PdfReaderApp(
                                 zoom.set(next);
                                 call_pdf_two("setZoom", JsValue::from_str(PDF_CONTAINER_ID), JsValue::from_f64(next));
                             }, "+" }
+                            button { r#type: "button", onclick: move |_| {
+                                if let Some(anchor) = anchor_for_page(&margin_data, current_page()) {
+                                    selected_anchor.set(Some(anchor));
+                                    selected_target.set(AnnotationTarget::PageArea {
+                                        page_index: current_page(),
+                                        exact: false,
+                                    });
+                                    note_title.set(String::new());
+                                    note_draft.set(String::new());
+                                    note_tags.set(String::new());
+                                }
+                            }, "Запись на полях" }
                             crate::ai::SummaryAction {
                                 material_id,
                                 revision_id: data.document.revision_id,
@@ -319,17 +341,43 @@ fn PdfReaderApp(
                                         reader_message,
                                     }
                                     div { class: "dialog-actions",
-                                        button { class: "primary-action", r#type: "button", onclick: move |_| {
+                                        button { class: "primary-action", r#type: "button", disabled: !selected_target.read().is_exact_selection(), onclick: move |_| {
                                             create_pdf_annotation(
                                                 AnnotationKind::Highlight { style: HighlightStyle::Yellow },
+                                                None,
+                                                Vec::new(),
                                                 state,
                                                 selected_anchor,
+                                                selected_target,
                                                 annotations,
                                                 save_message,
                                                 reader_message,
                                                 csrf,
                                             );
-                                        }, "Выделить" }
+                                        }, "Жёлтым" }
+                                        button { class: "primary-action", r#type: "button", disabled: !selected_target.read().is_exact_selection(), onclick: move |_| {
+                                            create_pdf_annotation(
+                                                AnnotationKind::Highlight { style: HighlightStyle::Bold },
+                                                None,
+                                                Vec::new(),
+                                                state,
+                                                selected_anchor,
+                                                selected_target,
+                                                annotations,
+                                                save_message,
+                                                reader_message,
+                                                csrf,
+                                            );
+                                        }, "Жирным" }
+                                    }
+                                    label { "Заголовок",
+                                        input {
+                                            name: "pdf_note_title",
+                                            maxlength: "240",
+                                            value: "{note_title}",
+                                            placeholder: "Короткое название",
+                                            oninput: move |event| note_title.set(event.value()),
+                                        }
                                     }
                                     label { "Заметка",
                                         textarea {
@@ -340,19 +388,32 @@ fn PdfReaderApp(
                                             oninput: move |event| note_draft.set(event.value()),
                                         }
                                     }
+                                    label { "Теги",
+                                        input {
+                                            name: "pdf_note_tags",
+                                            value: "{note_tags}",
+                                            placeholder: "чтение, идея",
+                                            oninput: move |event| note_tags.set(event.value()),
+                                        }
+                                    }
                                     button { class: "secondary-action", r#type: "button", disabled: note_draft().trim().is_empty(), onclick: move |_| {
                                         let body = note_draft().trim().to_owned();
                                         if !body.is_empty() {
                                             create_pdf_annotation(
                                                 AnnotationKind::Note { body },
+                                                non_empty(note_title().trim()),
+                                                parse_tags(&note_tags()),
                                                 state,
                                                 selected_anchor,
+                                                selected_target,
                                                 annotations,
                                                 save_message,
                                                 reader_message,
                                                 csrf,
                                             );
+                                            note_title.set(String::new());
                                             note_draft.set(String::new());
+                                            note_tags.set(String::new());
                                         }
                                     }, "Сохранить заметку" }
                                 }
@@ -364,16 +425,13 @@ fn PdfReaderApp(
                             } else {
                                 ol { class: "annotation-list",
                                     for annotation in annotation_items {
-                                        li {
-                                            button { r#type: "button", onclick: move |_| {
-                                                if let Some(page) = pdf_annotation_page(&annotation) {
-                                                    current_page.set(page);
-                                                    call_pdf_two("goToPage", JsValue::from_str(PDF_CONTAINER_ID), JsValue::from_f64(f64::from(page)));
-                                                }
-                                            },
-                                                strong { "{annotation_kind_label(&annotation.kind)}" }
-                                                span { "{annotation.anchor.quote}" }
-                                            }
+                                        PdfAnnotationItem {
+                                            annotation,
+                                            annotations,
+                                            current_page,
+                                            save_message,
+                                            reader_message,
+                                            csrf
                                         }
                                     }
                                 }
@@ -524,6 +582,7 @@ fn apply_pdf_ai_reader_target(
     state: Signal<PdfReaderState>,
     mut current_page: Signal<u32>,
     mut selected_anchor: Signal<Option<Anchor>>,
+    mut selected_target: Signal<AnnotationTarget>,
     mut reader_message: Signal<String>,
 ) {
     let Some(target) = crate::ai::take_reader_target(material_id) else {
@@ -558,6 +617,12 @@ fn apply_pdf_ai_reader_target(
         AiSourceScope::Material { .. } => (0, None),
     };
     current_page.set(page);
+    if anchor.is_some() {
+        selected_target.set(AnnotationTarget::PageArea {
+            page_index: page,
+            exact: true,
+        });
+    }
     selected_anchor.set(anchor);
     call_pdf_two(
         "goToPage",
@@ -650,6 +715,7 @@ async fn mount_pdf(
     annotations: Signal<Vec<Annotation>>,
     mut current_page: Signal<u32>,
     mut selected_anchor: Signal<Option<Anchor>>,
+    mut selected_target: Signal<AnnotationTarget>,
     mut reader_message: Signal<String>,
     save_message: Signal<String>,
     progress_generation: Signal<u64>,
@@ -691,6 +757,14 @@ async fn mount_pdf(
             PdfReaderState::Loading | PdfReaderState::Failed(_) => None,
         }) {
             Some(anchor) => {
+                let page_index = match anchor.source_locator.as_ref() {
+                    Some(SourceLocator::Pdf(locator)) => locator.page_index,
+                    _ => 0,
+                };
+                selected_target.set(AnnotationTarget::PageArea {
+                    page_index,
+                    exact: true,
+                });
                 selected_anchor.set(Some(anchor));
                 reader_message.set(String::new());
             }
@@ -824,10 +898,17 @@ fn schedule_progress_save(
     });
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "PDF mutation bridges independent Dioxus signals and Annotation v2 metadata"
+)]
 fn create_pdf_annotation(
     kind: AnnotationKind,
+    title: Option<String>,
+    tags: Vec<String>,
     state: Signal<PdfReaderState>,
     mut selected_anchor: Signal<Option<Anchor>>,
+    selected_target: Signal<AnnotationTarget>,
     mut annotations: Signal<Vec<Annotation>>,
     mut save_message: Signal<String>,
     mut reader_message: Signal<String>,
@@ -844,7 +925,12 @@ fn create_pdf_annotation(
         material_id,
         revision_id,
         anchor,
+        target: selected_target.read().clone(),
         kind,
+        title,
+        tags,
+        status: AnnotationStatus::Active,
+        related_annotation_id: None,
     };
     save_message.set("Сохраняем аннотацию…".to_owned());
     spawn(async move {
@@ -859,6 +945,126 @@ fn create_pdf_annotation(
             }
             Err(error) => {
                 save_message.set("Аннотация не сохранена".to_owned());
+                reader_message.set(error);
+            }
+        }
+    });
+}
+
+#[component]
+fn PdfAnnotationItem(
+    annotation: Annotation,
+    annotations: Signal<Vec<Annotation>>,
+    mut current_page: Signal<u32>,
+    save_message: Signal<String>,
+    reader_message: Signal<String>,
+    csrf: Signal<String>,
+) -> Element {
+    let navigate_value = annotation.clone();
+    let yellow_value = annotation.clone();
+    let bold_value = annotation.clone();
+    let delete_value = annotation.clone();
+    let style = match annotation.kind {
+        AnnotationKind::Highlight { style } => Some(style),
+        AnnotationKind::Note { .. } | AnnotationKind::VoiceNote { .. } => None,
+    };
+    rsx! {
+        li {
+            button { r#type: "button", onclick: move |_| {
+                if let Some(page) = pdf_annotation_page(&navigate_value) {
+                    current_page.set(page);
+                    call_pdf_two("goToPage", JsValue::from_str(PDF_CONTAINER_ID), JsValue::from_f64(f64::from(page)));
+                }
+            },
+                strong { "{annotation_kind_label(&annotation.kind)}" }
+                span { "{annotation.anchor.quote}" }
+            }
+            if let Some(title) = annotation.title.clone() { strong { "{title}" } }
+            if !annotation.tags.is_empty() { span { "{annotation.tags.join(\", \")}" } }
+            if let Some(style) = style {
+                div { class: "annotation-style-actions",
+                    button { r#type: "button", disabled: style == HighlightStyle::Yellow, onclick: move |_| update_pdf_highlight(yellow_value.clone(), HighlightStyle::Yellow, annotations, save_message, reader_message, csrf), "Жёлтый" }
+                    button { r#type: "button", disabled: style == HighlightStyle::Bold, onclick: move |_| update_pdf_highlight(bold_value.clone(), HighlightStyle::Bold, annotations, save_message, reader_message, csrf), "Жирный" }
+                }
+            }
+            button { class: "danger-link", r#type: "button", onclick: move |_| delete_pdf_annotation(delete_value.clone(), annotations, save_message, reader_message, csrf), "Удалить" }
+        }
+    }
+}
+
+fn update_pdf_highlight(
+    previous: Annotation,
+    style: HighlightStyle,
+    mut annotations: Signal<Vec<Annotation>>,
+    mut save_message: Signal<String>,
+    mut reader_message: Signal<String>,
+    csrf: Signal<String>,
+) {
+    let command = UpdateAnnotationCommand {
+        material_id: previous.material_id,
+        annotation_id: previous.id,
+        expected_revision: previous.revision,
+        target: previous.target,
+        kind: AnnotationKind::Highlight { style },
+        title: previous.title,
+        tags: previous.tags,
+        status: previous.status,
+        related_annotation_id: previous.related_annotation_id,
+    };
+    save_message.set("Сохраняем стиль…".to_owned());
+    spawn(async move {
+        match put_annotation(&command, &csrf.read()).await {
+            Ok(updated) => {
+                if let Some(annotation) = annotations
+                    .write()
+                    .iter_mut()
+                    .find(|annotation| annotation.id == updated.id)
+                {
+                    *annotation = updated;
+                }
+                save_message.set("Сохранено".to_owned());
+                reader_message.set(String::new());
+                update_annotation_overlays(&annotations.read());
+            }
+            Err(error) => {
+                save_message.set("Стиль не сохранён".to_owned());
+                reader_message.set(error);
+            }
+        }
+    });
+}
+
+fn delete_pdf_annotation(
+    annotation: Annotation,
+    mut annotations: Signal<Vec<Annotation>>,
+    mut save_message: Signal<String>,
+    mut reader_message: Signal<String>,
+    csrf: Signal<String>,
+) {
+    let confirmed = web_sys::window()
+        .and_then(|window| window.confirm_with_message("Удалить эту аннотацию?").ok())
+        .unwrap_or(false);
+    if !confirmed {
+        return;
+    }
+    let command = DeleteAnnotationCommand {
+        material_id: annotation.material_id,
+        annotation_id: annotation.id,
+        expected_revision: annotation.revision,
+    };
+    save_message.set("Удаляем аннотацию…".to_owned());
+    spawn(async move {
+        match delete_annotation(&command, &csrf.read()).await {
+            Ok(()) => {
+                annotations
+                    .write()
+                    .retain(|stored| stored.id != command.annotation_id);
+                save_message.set("Сохранено".to_owned());
+                reader_message.set(String::new());
+                update_annotation_overlays(&annotations.read());
+            }
+            Err(error) => {
+                save_message.set("Аннотация не удалена".to_owned());
                 reader_message.set(error);
             }
         }
@@ -894,6 +1100,52 @@ async fn post_annotation(
         .map_err(|error| format!("Некорректный ответ API: {error}"))
 }
 
+async fn put_annotation(
+    command: &UpdateAnnotationCommand,
+    csrf: &str,
+) -> Result<Annotation, String> {
+    let request = Request::put(&format!(
+        "{API_BASE}/materials/{}/annotations/{}",
+        command.material_id, command.annotation_id
+    ))
+    .credentials(RequestCredentials::Include)
+    .header("X-Lumi-CSRF", csrf)
+    .header("Idempotency-Key", &Uuid::now_v7().to_string())
+    .json(command)
+    .map_err(|error| error.to_string())?;
+    let response = request.send().await.map_err(|error| error.to_string())?;
+    if response.status() == 401 {
+        super::account::notify_session_expired();
+    }
+    if !response.ok() {
+        return Err(format!("Стиль не сохранён: HTTP {}.", response.status()));
+    }
+    response
+        .json()
+        .await
+        .map_err(|error| format!("Некорректный ответ API: {error}"))
+}
+
+async fn delete_annotation(command: &DeleteAnnotationCommand, csrf: &str) -> Result<(), String> {
+    let request = Request::delete(&format!(
+        "{API_BASE}/materials/{}/annotations/{}",
+        command.material_id, command.annotation_id
+    ))
+    .credentials(RequestCredentials::Include)
+    .header("X-Lumi-CSRF", csrf)
+    .header("Idempotency-Key", &Uuid::now_v7().to_string())
+    .json(command)
+    .map_err(|error| error.to_string())?;
+    let response = request.send().await.map_err(|error| error.to_string())?;
+    if response.status() == 401 {
+        super::account::notify_session_expired();
+    }
+    response
+        .ok()
+        .then_some(())
+        .ok_or_else(|| format!("Аннотация не удалена: HTTP {}.", response.status()))
+}
+
 async fn save_progress(command: &MoveReadingPositionCommand, csrf: &str) -> Result<(), String> {
     let request = Request::put(&format!(
         "{API_BASE}/materials/{}/progress",
@@ -924,8 +1176,12 @@ fn annotation_overlays(annotations: &[Annotation]) -> Vec<serde_json::Value> {
             Some(json!({
                 "pageIndex": locator.page_index,
                 "kind": match annotation.kind {
-                    AnnotationKind::Highlight { .. } => "highlight",
+                    AnnotationKind::Highlight { style: HighlightStyle::Bold } => "highlight-bold",
+                    AnnotationKind::Highlight { style: HighlightStyle::Green } => "highlight-green",
+                    AnnotationKind::Highlight { style: HighlightStyle::Blue } => "highlight-blue",
+                    AnnotationKind::Highlight { style: HighlightStyle::Yellow } => "highlight",
                     AnnotationKind::Note { .. } => "note",
+                    AnnotationKind::VoiceNote { .. } => "voice",
                 },
                 "rects": locator.page_rects,
             }))
@@ -952,9 +1208,35 @@ fn pdf_annotation_page(annotation: &Annotation) -> Option<u32> {
 
 fn annotation_kind_label(kind: &AnnotationKind) -> &'static str {
     match kind {
+        AnnotationKind::Highlight {
+            style: HighlightStyle::Bold,
+        } => "Жирное выделение",
         AnnotationKind::Highlight { .. } => "Выделение",
         AnnotationKind::Note { .. } => "Заметка",
+        AnnotationKind::VoiceNote { .. } => "Голосовая заметка",
     }
+}
+
+fn parse_tags(value: &str) -> Vec<String> {
+    let mut tags = Vec::new();
+    for candidate in value
+        .split(',')
+        .map(str::trim)
+        .filter(|tag| !tag.is_empty())
+    {
+        let key = candidate.to_lowercase();
+        if !tags.iter().any(|tag: &String| tag.to_lowercase() == key) {
+            tags.push(candidate.to_owned());
+        }
+        if tags.len() == lumi_core::MAX_ANNOTATION_TAGS {
+            break;
+        }
+    }
+    tags
+}
+
+fn non_empty(value: &str) -> Option<String> {
+    (!value.is_empty()).then(|| value.to_owned())
 }
 
 fn pdf_api_function(name: &str) -> Result<(JsValue, js_sys::Function), String> {

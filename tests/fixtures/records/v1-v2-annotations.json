@@ -1,0 +1,66 @@
+{
+  "legacy": {
+    "id": "00000000-0000-0000-0000-000000000001",
+    "material_id": "00000000-0000-0000-0000-000000000002",
+    "revision_id": "00000000-0000-0000-0000-000000000003",
+    "anchor": {
+      "revision_id": "00000000-0000-0000-0000-000000000003",
+      "node_path": ["chapter-1", "paragraph-1"],
+      "end_node_path": ["chapter-1", "paragraph-1"],
+      "text_range": {"start": 0, "end": 14},
+      "quote": "Старая заметка",
+      "prefix": "",
+      "suffix": "",
+      "content_hash": "legacy-hash",
+      "source_locator": {
+        "format": "normalized",
+        "node_path": ["chapter-1", "paragraph-1"]
+      },
+      "end_source_locator": {
+        "format": "normalized",
+        "node_path": ["chapter-1", "paragraph-1"]
+      },
+      "page_rects": []
+    },
+    "kind": {"type": "note", "body": "Legacy body"},
+    "revision": 2,
+    "created_at": 10,
+    "updated_at": 20
+  },
+  "v2": {
+    "id": "00000000-0000-0000-0000-000000000004",
+    "material_id": "00000000-0000-0000-0000-000000000002",
+    "revision_id": "00000000-0000-0000-0000-000000000003",
+    "anchor": {
+      "revision_id": "00000000-0000-0000-0000-000000000003",
+      "node_path": ["chapter-1", "paragraph-2"],
+      "end_node_path": ["chapter-1", "paragraph-2"],
+      "text_range": {"start": 0, "end": 17},
+      "quote": "Mixed мысль / idea",
+      "prefix": "",
+      "suffix": "",
+      "content_hash": "v2-hash",
+      "source_locator": {
+        "format": "normalized",
+        "node_path": ["chapter-1", "paragraph-2"]
+      },
+      "end_source_locator": {
+        "format": "normalized",
+        "node_path": ["chapter-1", "paragraph-2"]
+      },
+      "page_rects": []
+    },
+    "annotation_type": "margin_note",
+    "target": {
+      "kind": "block",
+      "path": ["chapter-1", "paragraph-2"]
+    },
+    "kind": {"type": "note", "body": "Связать source-backed record with Desk"},
+    "title": "Идея / idea",
+    "tags": ["Чтение", "records-v2"],
+    "status": "active",
+    "revision": 1,
+    "created_at": 30,
+    "updated_at": 30
+  }
+}

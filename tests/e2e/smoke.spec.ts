@@ -693,11 +693,37 @@ test("imports and reads a PDF with selectable text and anchored highlights", asy
       response.request().method() === "POST" &&
       response.ok(),
   );
-  await reader.getByRole("button", { name: "Выделить" }).click();
+  await reader.getByRole("button", { name: "Жёлтым" }).click();
   await highlightSaved;
   await expect(
     firstPage.locator(".pdf-annotation-rect.highlight"),
   ).toBeVisible();
+  const pdfAnnotation = reader.locator(".pdf-annotation-panel li").first();
+  const styleUpdated = page.waitForResponse(
+    (response) =>
+      response.url().includes("/annotations/") &&
+      response.request().method() === "PUT" &&
+      response.ok(),
+  );
+  await pdfAnnotation.getByRole("button", { name: "Жирный" }).click();
+  await styleUpdated;
+  await expect(
+    firstPage.locator(".pdf-annotation-rect.highlight-bold"),
+  ).toBeVisible();
+
+  await reader.getByRole("button", { name: "Запись на полях" }).click();
+  await reader.getByLabel("Заголовок").fill("Страница PDF");
+  await reader.getByLabel("Заметка").fill("Мысль на полях PDF");
+  await reader.getByLabel("Теги").fill("pdf, поля");
+  const pdfMarginSaved = page.waitForResponse(
+    (response) =>
+      response.url().endsWith("/annotations") &&
+      response.request().method() === "POST" &&
+      response.ok(),
+  );
+  await reader.getByRole("button", { name: "Сохранить заметку" }).click();
+  await pdfMarginSaved;
+  await expect(reader.getByText("Страница PDF")).toBeVisible();
 
   await reader.getByRole("button", { name: "Следующая страница" }).click();
   await expect(reader.getByText(/2\/2/)).toBeVisible();
@@ -838,7 +864,7 @@ test("persists an API-backed EPUB library lifecycle", async ({ page }) => {
       response.request().method() === "POST" &&
       response.ok(),
   );
-  await page.getByRole("button", { name: "Выделить" }).click();
+  await page.getByRole("button", { name: "Жёлтым" }).click();
   await highlightSaved;
   await expect(page.locator(".annotation-highlight").first()).toBeVisible();
 
@@ -871,6 +897,18 @@ test("persists an API-backed EPUB library lifecycle", async ({ page }) => {
   await notes.getByRole("button", { name: "Сохранить изменения" }).click();
   await noteUpdated;
   await expect(notes.getByText("Заметка Stage 5 · edit")).toBeVisible();
+  const highlightCard = notes.locator("li").filter({ hasText: "Выделение" });
+  const highlightRestyled = page.waitForResponse(
+    (response) =>
+      response.url().includes("/annotations/") &&
+      response.request().method() === "PUT" &&
+      response.ok(),
+  );
+  await highlightCard.getByRole("button", { name: "Жирный" }).click();
+  await highlightRestyled;
+  await expect(
+    page.locator(".annotation-highlight-bold").first(),
+  ).toBeVisible();
   page.once("dialog", (dialog) => dialog.accept());
   const highlightDeleted = page.waitForResponse(
     (response) =>
@@ -894,6 +932,23 @@ test("persists an API-backed EPUB library lifecycle", async ({ page }) => {
     /^lumi-annotations-.*\.json$/,
   );
   await notes.getByRole("button", { name: "Закрыть заметки" }).click();
+
+  await reader.getByRole("button", { name: "Запись на полях" }).click();
+  await expect(page.getByLabel("Текст заметки")).toBeFocused();
+  await page.getByLabel("Заголовок (необязательно)").fill("Идея главы");
+  await page.getByLabel("Текст заметки").fill("Запись без выделения");
+  await page.getByLabel("Теги").fill("чтение, идея");
+  const marginNoteSaved = page.waitForResponse(
+    (response) =>
+      response.url().endsWith("/annotations") &&
+      response.request().method() === "POST" &&
+      response.ok(),
+  );
+  await page.getByRole("button", { name: "Сохранить заметку" }).click();
+  await marginNoteSaved;
+  await expect(
+    page.getByRole("button", { name: /Заметки \(2\)/ }),
+  ).toBeVisible();
 
   await page.getByRole("button", { name: "Дальше" }).click();
   await expect(
@@ -961,8 +1016,9 @@ test("persists an API-backed EPUB library lifecycle", async ({ page }) => {
   await expect(
     page.getByRole("article", { name: /Страница (?:[2-9]|[1-9][0-9]+) из/ }),
   ).toBeVisible();
-  await page.getByRole("button", { name: /Заметки \(1\)/ }).click();
+  await page.getByRole("button", { name: /Заметки \(2\)/ }).click();
   await expect(page.getByText("Заметка Stage 5 · edit")).toBeVisible();
+  await expect(page.getByText("Идея главы")).toBeVisible();
   await page.getByRole("button", { name: "Закрыть заметки" }).click();
   await page.setViewportSize({ width: 390, height: 844 });
   await expect(page.getByRole("article", { name: /Страница/ })).toBeVisible();

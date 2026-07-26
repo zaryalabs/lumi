@@ -44,6 +44,8 @@ plugin, AI, search and account/auth boundaries.
   snapshots.
 - [`0027`](0027-fsrs-scheduling-challenges.md) — versioned FSRS schedules,
   ordered hint evidence и bounded Challenges projection.
+- [`0030`](0030-annotation-v2-rich-reader.md) — совместимый Annotation v2,
+  source-backed targets и paint-only rich overlays Reader.
 
 ## Template
 

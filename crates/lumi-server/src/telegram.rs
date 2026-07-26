@@ -1040,9 +1040,14 @@ mod tests {
                     material_id: direct_import.material_id,
                     revision_id: direct_document.revision_id,
                     anchor,
+                    target: lumi_core::AnnotationTarget::TextRange,
                     kind: lumi_core::AnnotationKind::Note {
                         body: "Telegram source shares annotations".to_owned(),
                     },
+                    title: None,
+                    tags: Vec::new(),
+                    status: lumi_core::AnnotationStatus::Active,
+                    related_annotation_id: None,
                 },
                 "telegram-direct-annotation",
             )
