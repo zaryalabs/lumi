@@ -8,14 +8,15 @@ use dioxus::dioxus_core::spawn_forever;
 use dioxus::prelude::*;
 use gloo_net::http::Request;
 use lumi_core::{
-    Anchor, AnchorResolution, Annotation, AnnotationId, AnnotationKind, CreateAnnotationCommand,
-    DeleteAnnotationCommand, HighlightStyle, LibraryEntry, MoveReadingPositionCommand,
-    PageBoundary, PageFragment, PageMap, ReaderNavigation, ReaderPage, ReaderSettings, ReaderTheme,
-    ReaderWidth, ReadingDocument, ReadingLink, ReadingLinkKind, ReadingProgress, RenderBlock,
-    RenderPlan, TextRange, UpdateAnnotationCommand, UpdateReaderSettingsCommand,
+    AiContextAttachment, AiSourceScope, Anchor, AnchorResolution, Annotation, AnnotationId,
+    AnnotationKind, CreateAnnotationCommand, DeleteAnnotationCommand, HighlightStyle, LibraryEntry,
+    MoveReadingPositionCommand, PageBoundary, PageFragment, PageMap, ReaderNavigation, ReaderPage,
+    ReaderSettings, ReaderTheme, ReaderWidth, ReadingDocument, ReadingLink, ReadingLinkKind,
+    ReadingProgress, RenderBlock, RenderPlan, TextRange, UpdateAnnotationCommand,
+    UpdateReaderSettingsCommand,
 };
 use uuid::Uuid;
-use wasm_bindgen::JsCast;
+use wasm_bindgen::{closure::Closure, JsCast};
 use wasm_bindgen_futures::JsFuture;
 use web_sys::{Element as DomElement, HtmlElement, Node, RequestCredentials};
 
@@ -126,6 +127,21 @@ pub(crate) fn ReaderApp(
     let save_state = use_signal(SaveState::default);
     let mut reload_generation = use_signal(|| 0_u64);
     use_effect(move || {
+        let Some(window) = web_sys::window() else {
+            return;
+        };
+        let handler = Closure::<dyn FnMut(web_sys::Event)>::new(move |_| {
+            if let ReaderState::Ready(view) = &mut *state.write() {
+                apply_ai_reader_target(view);
+            }
+        });
+        let _ = window.add_event_listener_with_callback(
+            crate::ai::READER_TARGET_EVENT,
+            handler.as_ref().unchecked_ref(),
+        );
+        handler.forget();
+    });
+    use_effect(move || {
         let _ = reload_generation();
         state.set(ReaderState::Loading);
         spawn(async move {
@@ -145,7 +161,7 @@ pub(crate) fn ReaderApp(
                                 })
                                 .unwrap_or_default();
                             navigation.move_to(restored_page, page_map.pages.len());
-                            state.set(ReaderState::Ready(Box::new(ReaderView {
+                            let mut view = ReaderView {
                                 entry,
                                 document: Rc::new(document),
                                 plan,
@@ -172,7 +188,9 @@ pub(crate) fn ReaderApp(
                                 editing_note: None,
                                 conflict_draft: None,
                                 annotation_message: None,
-                            })));
+                            };
+                            apply_ai_reader_target(&mut view);
+                            state.set(ReaderState::Ready(Box::new(view)));
                         }
                         Err(error) => state.set(ReaderState::Failed(error)),
                     }
@@ -662,9 +680,25 @@ fn SelectionComposer(
     note_composer_open: bool,
 ) -> Element {
     let highlight_anchor = anchor.clone();
+    let ask_anchor = anchor.clone();
+    let explain_anchor = anchor.clone();
+    let summary_anchor = anchor.clone();
     rsx! {
         if !note_composer_open {
             div { class: "selection-actions", role: "toolbar", aria_label: "Действия с выделением",
+                button { class: "primary-action", r#type: "button", onclick: move |_| ask_ai_about_selection(state, ask_anchor.clone(), "", false), "Спросить ИИ" }
+                button { r#type: "button", onclick: move |_| ask_ai_about_selection(
+                    state,
+                    explain_anchor.clone(),
+                    "Объясни выделенный фрагмент простыми словами, не теряя его смысл.",
+                    true,
+                ), "Объясни проще" }
+                button { r#type: "button", onclick: move |_| ask_ai_about_selection(
+                    state,
+                    summary_anchor.clone(),
+                    "Кратко перескажи выделенный фрагмент и сохрани ключевые тезисы.",
+                    true,
+                ), "Кратко перескажи" }
                 button { r#type: "button", onclick: move |_| create_highlight(state, highlight_anchor.clone(), csrf, save_state), "Выделить" }
                 button { r#type: "button", onclick: move |_| {
                     if let ReaderState::Ready(current) = &mut *state.write() {
@@ -683,6 +717,76 @@ fn SelectionComposer(
                     button { class: "secondary-action", r#type: "button", onclick: move |_| dismiss_selection(state), "Отмена" }
                     button { class: "primary-action", r#type: "submit", disabled: draft.trim().is_empty(), "Сохранить заметку" }
                 }
+            }
+        }
+    }
+}
+
+fn ask_ai_about_selection(
+    mut state: Signal<ReaderState>,
+    anchor: Anchor,
+    instruction: &str,
+    auto_submit: bool,
+) {
+    let handoff = {
+        let ReaderState::Ready(view) = &*state.read() else {
+            return;
+        };
+        let label_quote = anchor.quote.chars().take(80).collect::<String>();
+        crate::ai::ReaderAiHandoff {
+            attachment: AiContextAttachment {
+                kind: "selection".to_owned(),
+                material_id: view.entry.id,
+                revision_id: view.document.revision_id,
+                scope: AiSourceScope::Selection {
+                    material_id: view.entry.id,
+                    revision_id: view.document.revision_id,
+                    anchor: Box::new(anchor),
+                },
+                display_label: format!("{} — «{label_quote}»", view.entry.display_title()),
+            },
+            instruction: instruction.to_owned(),
+            auto_submit,
+        }
+    };
+    match crate::ai::dispatch_reader_handoff(&handoff) {
+        Ok(()) => {
+            if let ReaderState::Ready(view) = &mut *state.write() {
+                view.selected_anchor = None;
+                view.note_composer_open = false;
+                view.annotation_message = Some("Фрагмент прикреплён к AI-чату.".to_owned());
+            }
+        }
+        Err(message) => {
+            if let ReaderState::Ready(view) = &mut *state.write() {
+                view.annotation_message = Some(message);
+            }
+        }
+    }
+}
+
+fn apply_ai_reader_target(view: &mut ReaderView) {
+    let Some(target) = crate::ai::take_reader_target(view.entry.id) else {
+        return;
+    };
+    if target.revision_id != view.document.revision_id {
+        view.annotation_message =
+            Some("Источник ответа относится к другой версии материала.".to_owned());
+        return;
+    }
+    if let AiSourceScope::Selection { anchor, .. } = target.scope {
+        match view.plan.resolve_anchor(&anchor) {
+            AnchorResolution::Resolved { anchor, .. } => {
+                let offset = anchor.text_range.map_or(0, |range| range.start);
+                if let Some(page) = view.page_map.page_for_boundary(&anchor.node_path, offset) {
+                    view.navigation.jump_to(page, view.page_map.pages.len());
+                }
+                view.selected_anchor = Some(*anchor);
+                view.annotation_message = Some("Открыт источник ответа AI.".to_owned());
+            }
+            AnchorResolution::Unresolved => {
+                view.annotation_message =
+                    Some("Не удалось восстановить источник ответа в этой версии.".to_owned());
             }
         }
     }

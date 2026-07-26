@@ -17,6 +17,7 @@ version = "0.1.0"
 anyhow = "1.0.103"
 ammonia = "4.1.4"
 async-trait = "0.1.89"
+async-stream = "0.3.6"
 axum = "0.8.9"
 base64 = "0.22.1"
 bip39 = "2.2.0"
@@ -34,8 +35,11 @@ flate2 = { version = "1.1.9", default-features = false, features = [
 hkdf = "0.12.4"
 rand = "0.8.5"
 reqwest = { version = "0.12.28", default-features = false, features = [
+  "json",
   "rustls-tls",
+  "stream",
 ] }
+futures-util = "0.3.31"
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.150"
 sha2 = "0.10.9"

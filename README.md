@@ -39,12 +39,14 @@ Repository-side production contract и main-only self-hosted CI/CD описан�
 наличие не означает, что server bootstrap, DNS или первый production deploy уже
 выполнены.
 
-Для `0.2.0` также реализован выключенный до следующих вертикальных этапов
-foundation A1: AI PostgreSQL persistence, reusable encrypted `SecretStore` и
-общий fenced `JobRuntime` с adapter существующего import pipeline. Операционный
-контракт описан в
-[docs/runbooks/ai-persistence.md](docs/runbooks/ai-persistence.md); AI/MCP
-product capabilities этот foundation сам по себе не включает.
+Для `0.2.0` реализованы foundation A1 и первый продуктовый эпик E1:
+owner-scoped explicit source context, зашифрованный OpenRouter BYOK,
+глобальный durable streaming AI-чат, Reader selection handoff и рабочие
+source citations. Операционные контракты описаны в
+[docs/runbooks/ai-persistence.md](docs/runbooks/ai-persistence.md) и
+[docs/runbooks/personal-ai-assistant.md](docs/runbooks/personal-ai-assistant.md).
+AI queue, summaries и MCP остаются следующими эпиками и не рекламируются
+capabilities преждевременно.
 
 ## Локальный запуск
 

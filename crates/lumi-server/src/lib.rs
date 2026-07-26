@@ -66,6 +66,8 @@ pub const DEFAULT_WEB_ORIGIN: &str = "http://127.0.0.1:5173";
 pub const DEFAULT_BLOB_ROOT: &str = ".local/blob-store";
 /// Default root for generated local server-side secret keys.
 pub const DEFAULT_SECRET_ROOT: &str = ".local/secrets";
+/// Default fixed OpenRouter OpenAI-compatible chat endpoint.
+pub const DEFAULT_OPENROUTER_ENDPOINT: &str = "https://openrouter.ai/api/v1/chat/completions";
 
 /// Runtime configuration for the Lumi server process.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -77,6 +79,7 @@ pub struct AppConfig {
     secure_cookie: bool,
     blob_root: std::path::PathBuf,
     secret_root: std::path::PathBuf,
+    openrouter_endpoint: String,
     deployment_mode: String,
     admin_lookup_ids_raw: String,
 }
@@ -102,6 +105,8 @@ impl AppConfig {
         let secret_root = std::env::var_os("LUMI_SECRET_ROOT")
             .map(std::path::PathBuf::from)
             .unwrap_or_else(|| std::path::PathBuf::from(DEFAULT_SECRET_ROOT));
+        let openrouter_endpoint = std::env::var("LUMI_OPENROUTER_ENDPOINT")
+            .unwrap_or_else(|_| DEFAULT_OPENROUTER_ENDPOINT.to_owned());
         let deployment_mode =
             std::env::var("LUMI_DEPLOYMENT_MODE").unwrap_or_else(|_| "local".to_owned());
         let admin_lookup_ids_raw = std::env::var("LUMI_ADMIN_LOOKUP_IDS").unwrap_or_default();
@@ -114,6 +119,7 @@ impl AppConfig {
             secure_cookie,
             blob_root,
             secret_root,
+            openrouter_endpoint,
             deployment_mode,
             admin_lookup_ids_raw,
         }
@@ -147,6 +153,12 @@ impl AppConfig {
     #[must_use]
     pub fn secret_root(&self) -> &std::path::Path {
         &self.secret_root
+    }
+
+    /// Fixed server-controlled OpenRouter endpoint.
+    #[must_use]
+    pub fn openrouter_endpoint(&self) -> &str {
+        &self.openrouter_endpoint
     }
 
     fn admin_lookup_ids(&self) -> anyhow::Result<HashSet<LookupId>> {
@@ -242,6 +254,7 @@ pub struct AppState {
     security: SecurityConfig,
     imports: Option<Arc<ImportService>>,
     telegram: Option<Arc<TelegramRuntime>>,
+    ai: Option<Arc<ai::AiRuntime>>,
     ai_capabilities: ai::AiCapabilityReadiness,
 }
 
@@ -277,6 +290,7 @@ impl AppState {
             security: SecurityConfig::local(),
             imports: None,
             telegram: None,
+            ai: None,
             ai_capabilities: ai::AiCapabilityReadiness::default(),
         }
     }
@@ -323,13 +337,21 @@ impl AppState {
         )
         .await
         .map_err(|error| anyhow::anyhow!(error))?;
+        let ai = ai::AiRuntime::open(
+            accounts.pool().clone(),
+            config.secret_root(),
+            config.openrouter_endpoint().to_owned(),
+        )
+        .await
+        .map_err(|error| anyhow::anyhow!(error))?;
         Ok(Self {
             repository: Arc::new(RwLock::new(Repository::default())),
             accounts: Arc::new(accounts),
             security: SecurityConfig::from_app(config),
             imports: Some(imports),
             telegram: Some(telegram),
-            ai_capabilities: ai::AiCapabilityReadiness::a1_foundation(),
+            ai: Some(Arc::new(ai)),
+            ai_capabilities: ai::AiCapabilityReadiness::e1_personal_assistant(),
         })
     }
 
@@ -347,6 +369,7 @@ impl AppState {
             security: SecurityConfig::local(),
             imports: None,
             telegram: None,
+            ai: None,
             ai_capabilities: ai::AiCapabilityReadiness::default(),
         }
     }
@@ -369,6 +392,10 @@ impl AppState {
         self.telegram
             .as_ref()
             .ok_or(AppError::Unavailable("Telegram runtime"))
+    }
+
+    fn ai_runtime(&self) -> Result<&Arc<ai::AiRuntime>, AppError> {
+        self.ai.as_ref().ok_or(AppError::Unavailable("AI runtime"))
     }
 
     /// Run the embedded Telegram listener until `cancellation` is triggered.
@@ -2012,7 +2039,7 @@ mod tests {
         let migrations: Vec<SchemaMigration> =
             json_get(build_router(), "/api/v1/schema/migrations").await?;
 
-        assert_eq!(migrations.len(), 16);
+        assert_eq!(migrations.len(), 17);
         Ok(())
     }
 

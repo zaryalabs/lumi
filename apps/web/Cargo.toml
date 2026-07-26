@@ -39,6 +39,7 @@ web-sys = { version = "0.3.91", features = [
   "NodeList",
   "Range",
   "Selection",
+  "Storage",
   "Text",
   "Url",
   "Window",

@@ -3,9 +3,10 @@
 use dioxus::prelude::*;
 use gloo_net::http::Request;
 use lumi_core::{
-    Anchor, Annotation, AnnotationKind, CreateAnnotationCommand, HighlightStyle, LibraryEntry,
-    MaterialKind, MoveReadingPositionCommand, PageFidelityDocument, PageRect, PdfPage, PdfRect,
-    PdfSourceLocator, ReadingProgress, SourceLocator, TextRange,
+    AiContextAttachment, AiSourceScope, Anchor, Annotation, AnnotationKind,
+    CreateAnnotationCommand, HighlightStyle, LibraryEntry, MaterialKind,
+    MoveReadingPositionCommand, PageFidelityDocument, PageRect, PdfPage, PdfRect, PdfSourceLocator,
+    ReadingProgress, SourceLocator, TextRange,
 };
 use serde_json::json;
 use uuid::Uuid;
@@ -32,7 +33,7 @@ enum PdfReaderState {
     Failed(String),
 }
 
-#[derive(Clone)]
+#[derive(Clone, PartialEq)]
 struct PdfReaderData {
     entry: LibraryEntry,
     document: PageFidelityDocument,
@@ -97,7 +98,7 @@ fn PdfReaderApp(material_id: Uuid, csrf_token: String, on_close: EventHandler<()
     let mut annotations = use_signal(Vec::<Annotation>::new);
     let mut current_page = use_signal(|| 0_u32);
     let mut zoom = use_signal(|| 1.0_f64);
-    let selected_anchor = use_signal(|| None::<Anchor>);
+    let mut selected_anchor = use_signal(|| None::<Anchor>);
     let mut note_draft = use_signal(String::new);
     let mut reader_message = use_signal(String::new);
     let save_message = use_signal(|| "Сохранено".to_owned());
@@ -106,11 +107,50 @@ fn PdfReaderApp(material_id: Uuid, csrf_token: String, on_close: EventHandler<()
     let csrf = use_signal(|| csrf_token);
 
     use_effect(move || {
+        let Some(window) = web_sys::window() else {
+            return;
+        };
+        let handler = Closure::<dyn FnMut(web_sys::Event)>::new(move |_| {
+            apply_pdf_ai_reader_target(
+                material_id,
+                state,
+                current_page,
+                selected_anchor,
+                reader_message,
+            );
+        });
+        let _ = window.add_event_listener_with_callback(
+            crate::ai::READER_TARGET_EVENT,
+            handler.as_ref().unchecked_ref(),
+        );
+        handler.forget();
+    });
+
+    use_effect(move || {
         state.set(PdfReaderState::Loading);
         spawn(async move {
             match load_pdf_reader(material_id).await {
                 Ok((data, progress, loaded_annotations)) => {
-                    let initial_page = restored_pdf_page(&progress)
+                    let target = crate::ai::take_reader_target(material_id);
+                    let target_anchor = target.as_ref().and_then(|attachment| {
+                        if attachment.revision_id != data.document.revision_id {
+                            return None;
+                        }
+                        match &attachment.scope {
+                            AiSourceScope::Selection { anchor, .. } => {
+                                Some(anchor.as_ref().clone())
+                            }
+                            _ => None,
+                        }
+                    });
+                    let target_page = target_anchor.as_ref().and_then(|anchor| {
+                        match anchor.source_locator.as_ref() {
+                            Some(SourceLocator::Pdf(locator)) => Some(locator.page_index),
+                            _ => None,
+                        }
+                    });
+                    let initial_page = target_page
+                        .unwrap_or_else(|| restored_pdf_page(&progress))
                         .min(data.document.pages.len().saturating_sub(1) as u32);
                     let config = json!({
                         "containerId": PDF_CONTAINER_ID,
@@ -121,6 +161,7 @@ fn PdfReaderApp(material_id: Uuid, csrf_token: String, on_close: EventHandler<()
                     })
                     .to_string();
                     current_page.set(initial_page);
+                    selected_anchor.set(target_anchor);
                     annotations.set(loaded_annotations);
                     state.set(PdfReaderState::Ready(Box::new(data)));
                     mount_config.set(Some(config));
@@ -244,6 +285,11 @@ fn PdfReaderApp(material_id: Uuid, csrf_token: String, on_close: EventHandler<()
                                 div { class: "pdf-selection-card",
                                     p { class: "eyebrow", "Выбранный фрагмент" }
                                     blockquote { "{anchor.quote}" }
+                                    PdfAiActions {
+                                        data: data.as_ref().clone(),
+                                        anchor: anchor.clone(),
+                                        reader_message,
+                                    }
                                     div { class: "dialog-actions",
                                         button { class: "primary-action", r#type: "button", onclick: move |_| {
                                             create_pdf_annotation(
@@ -312,6 +358,75 @@ fn PdfReaderApp(material_id: Uuid, csrf_token: String, on_close: EventHandler<()
     }
 }
 
+#[component]
+fn PdfAiActions(data: PdfReaderData, anchor: Anchor, reader_message: Signal<String>) -> Element {
+    let ask_anchor = anchor.clone();
+    let explain_anchor = anchor.clone();
+    let summary_anchor = anchor;
+    let ask_data = data.clone();
+    let explain_data = data.clone();
+    rsx! {
+        div { class: "dialog-actions ai-selection-actions",
+            button { class: "primary-action", r#type: "button", onclick: move |_| {
+                dispatch_pdf_ai_handoff(
+                    &ask_data,
+                    ask_anchor.clone(),
+                    "",
+                    false,
+                    reader_message,
+                );
+            }, "Спросить ИИ" }
+            button { class: "secondary-action", r#type: "button", onclick: move |_| {
+                dispatch_pdf_ai_handoff(
+                    &explain_data,
+                    explain_anchor.clone(),
+                    "Объясни выделенный фрагмент простыми словами, не теряя его смысл.",
+                    true,
+                    reader_message,
+                );
+            }, "Объясни проще" }
+            button { class: "secondary-action", r#type: "button", onclick: move |_| {
+                dispatch_pdf_ai_handoff(
+                    &data,
+                    summary_anchor.clone(),
+                    "Кратко перескажи выделенный фрагмент и сохрани ключевые тезисы.",
+                    true,
+                    reader_message,
+                );
+            }, "Кратко перескажи" }
+        }
+    }
+}
+
+fn dispatch_pdf_ai_handoff(
+    data: &PdfReaderData,
+    anchor: Anchor,
+    instruction: &str,
+    auto_submit: bool,
+    mut reader_message: Signal<String>,
+) {
+    let quote = anchor.quote.chars().take(80).collect::<String>();
+    let handoff = crate::ai::ReaderAiHandoff {
+        attachment: AiContextAttachment {
+            kind: "selection".to_owned(),
+            material_id: data.entry.id,
+            revision_id: data.document.revision_id,
+            scope: AiSourceScope::Selection {
+                material_id: data.entry.id,
+                revision_id: data.document.revision_id,
+                anchor: Box::new(anchor),
+            },
+            display_label: format!("{} — «{quote}»", data.entry.display_title()),
+        },
+        instruction: instruction.to_owned(),
+        auto_submit,
+    };
+    match crate::ai::dispatch_reader_handoff(&handoff) {
+        Ok(()) => reader_message.set("Фрагмент прикреплён к AI-чату.".to_owned()),
+        Err(message) => reader_message.set(message),
+    }
+}
+
 fn loading_view(message: &str) -> Element {
     rsx! {
         main { id: "main-content", class: "reader-loading", aria_label: "Загрузка материала", aria_live: "polite",
@@ -350,6 +465,43 @@ async fn get_json<T: for<'de> serde::Deserialize<'de>>(path: &str) -> Result<T, 
         .json()
         .await
         .map_err(|error| format!("Некорректный ответ PDF reader API: {error}"))
+}
+
+fn apply_pdf_ai_reader_target(
+    material_id: Uuid,
+    state: Signal<PdfReaderState>,
+    mut current_page: Signal<u32>,
+    mut selected_anchor: Signal<Option<Anchor>>,
+    mut reader_message: Signal<String>,
+) {
+    let Some(target) = crate::ai::take_reader_target(material_id) else {
+        return;
+    };
+    let PdfReaderState::Ready(data) = &*state.read() else {
+        return;
+    };
+    if target.revision_id != data.document.revision_id {
+        reader_message.set("Источник ответа относится к другой версии материала.".to_owned());
+        return;
+    }
+    let AiSourceScope::Selection { anchor, .. } = target.scope else {
+        return;
+    };
+    let page = match anchor.source_locator.as_ref() {
+        Some(SourceLocator::Pdf(locator)) => locator.page_index,
+        _ => {
+            reader_message.set("Citation не содержит PDF page anchor.".to_owned());
+            return;
+        }
+    };
+    current_page.set(page);
+    selected_anchor.set(Some(*anchor));
+    call_pdf_two(
+        "goToPage",
+        JsValue::from_str(PDF_CONTAINER_ID),
+        JsValue::from_f64(f64::from(page)),
+    );
+    reader_message.set("Открыт источник ответа AI.".to_owned());
 }
 
 fn restored_pdf_page(progress: &Option<ReadingProgress>) -> u32 {

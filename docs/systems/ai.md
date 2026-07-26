@@ -63,6 +63,22 @@ Durable implementation decisions закреплены в ADR
 frozen DTO/schema/ownership — в [`ai-contracts.md`](ai-contracts.md), а
 security gates — в [`ai-threat-review.md`](ai-threat-review.md).
 
+### Реализованный срез `0.2.0/E1`
+
+На 2026-07-26 production path включает:
+
+- owner/revision-scoped `SourceContextResolver` для selection, chapter/page и
+  material scope с immutable bounded context pack;
+- OpenRouter credential lifecycle через общий encrypted `SecretStore`;
+- durable conversation/message/generation/event state и authenticated
+  replayable SSE с stop/retry/regenerate;
+- глобальную Dioxus-панель, передачу выделения из reflowable/PDF Reader и
+  возврат по source-backed citation.
+
+Provider получает только явно выбранный context pack; библиотечный поиск и
+неявное расширение контекста отсутствуют. Подробности запуска и диагностики
+даны в [`../runbooks/personal-ai-assistant.md`](../runbooks/personal-ai-assistant.md).
+
 ## Пользовательские сценарии
 
 - Пользователь выделяет абзац и спрашивает "объясни проще".

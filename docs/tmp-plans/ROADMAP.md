@@ -45,29 +45,29 @@ Knowledge Base, native full-copy replicas, Obsidian, plugin platform, будущ
 - `0.2.0 / A1`: PostgreSQL persistence, reusable encrypted `SecretStore`,
   общий fenced `JobRuntime`, import adapter, owner/idempotency invariants и
   transactional artifact publication;
+- `0.2.0 / E1`: bounded explicit source context, OpenRouter BYOK, глобальный
+  durable streaming chat, Reader selection handoff и source-backed citations;
 - release evidence A1 зафиксирован commit trailer
   `Lumi-Plan-Stage: 0.2.0/A1`.
 
 Ещё не готово:
 
-- production `SourceContextResolver`, BYOK/OpenRouter delivery, global chat,
-  AI queue, summaries, MCP transport/tools и abridged `.lum`;
+- AI queue, summaries, MCP transport/tools и abridged `.lum`;
 - production learning, Desk/search/RAG и Community Spaces.
 
-AI foundation намеренно не публикует product capabilities: provider, explicit
-context, chat, task queue, summaries, MCP и abridgement delivery flags остаются
-выключенными, live chat routes и Web AI surface отсутствуют.
+Persistent server публикует capabilities `ai-provider-openrouter`,
+`ai-provider-byok`, `ai-explicit-context` и `ai-global-chat`. Незавершённые
+task queue, summary, MCP и abridgement capabilities остаются выключенными.
 
-После перехода на новую шкалу выполнено `0/18` продуктовых эпиков. Это не
-обнуляет готовую работу: Stage 0, Contract Freeze 1 и A1 являются закрытыми
-prerequisites первого эпика `0.2.0/E1`.
+После перехода на новую шкалу выполнено `1/18` продуктовых эпиков. Stage 0,
+Contract Freeze 1 и A1 остаются закрытыми prerequisites.
 
 В прежней шкале это соответствовало `3/57` закрытым checkpoint roadmap, но
 такой процент отражал в основном количество мелких шагов, а не продуктовую
 готовность. Поэтому новая шкала начинается с нуля завершённых end-to-end
 эпиков и отдельно сохраняет перечень уже готового foundation выше.
 
-Текущий следующий эпик — `0.2.0/E1: Персональный AI-ассистент`.
+Текущий следующий эпик — `0.2.0/E2: AI-задачи и саммари`.
 
 ## Последовательность
 
@@ -76,7 +76,7 @@ prerequisites первого эпика `0.2.0/E1`.
 Подробный план:
 [`0.2.0-ai-plan.md`](0.2.0-ai-plan.md).
 
-1. [ ] **E1 — Персональный AI-ассистент.** Explicit source context,
+1. [x] **E1 — Персональный AI-ассистент.** Explicit source context,
    BYOK/OpenRouter, settings, global chat, durable streaming conversations,
    citations и Reader selection handoff.
 2. [ ] **E2 — AI-задачи и саммари.** Durable queue/internal worker,

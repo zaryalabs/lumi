@@ -257,6 +257,7 @@ pub(crate) fn AccountGate() -> Element {
                             }
                         }
                     }
+                    crate::ai::GlobalAiChat { csrf_token: csrf.read().clone() }
                 }
             }
         }

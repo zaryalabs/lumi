@@ -3686,12 +3686,14 @@ name = "lumi-server"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "async-stream",
  "async-trait",
  "axum",
  "base64",
  "bip39",
  "ed25519-dalek",
  "encoding_rs",
+ "futures-util",
  "lumi-core",
  "quick-xml",
  "rand 0.8.6",

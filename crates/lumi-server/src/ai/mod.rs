@@ -1,10 +1,107 @@
 //! Server-side AI contracts, replaceable interfaces and deterministic mocks.
 
+use std::collections::HashMap;
+use std::path::Path;
+
+use sqlx_postgres::PgPool;
+use tokio::sync::Mutex;
+use tokio_util::sync::CancellationToken;
+use uuid::Uuid;
+
+use crate::secrets::{SecretStore, SecretStoreError};
+
 pub mod chat;
+pub mod context;
 pub mod mock;
 pub mod providers;
 pub mod repository;
 pub(crate) mod routes;
+
+/// Production services and in-flight cancellation registry for E1.
+pub struct AiRuntime {
+    pool: PgPool,
+    secrets: SecretStore,
+    context: context::SourceContextResolver,
+    provider_endpoint: String,
+    cancellations: Mutex<HashMap<Uuid, CancellationToken>>,
+}
+
+impl AiRuntime {
+    /// Open account-scoped AI services and reconcile interrupted generations.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the encrypted secret store or PostgreSQL state is
+    /// unavailable.
+    pub async fn open(
+        pool: PgPool,
+        secret_root: &Path,
+        provider_endpoint: String,
+    ) -> Result<Self, SecretStoreError> {
+        let secrets = SecretStore::open(pool.clone(), secret_root).await?;
+        sqlx_core::query::query(
+            "WITH interrupted AS (
+                UPDATE ai_generations
+                   SET status = 'failed',
+                       error_code = 'server_restarted',
+                       object_revision = object_revision + 1,
+                       finished_at = now()
+                 WHERE status IN ('pending', 'streaming')
+                 RETURNING assistant_message_id, user_id
+             )
+             UPDATE ai_messages AS message
+                SET status = 'failed'
+               FROM interrupted
+              WHERE message.message_id = interrupted.assistant_message_id
+                AND message.user_id = interrupted.user_id",
+        )
+        .execute(&pool)
+        .await
+        .map_err(|_| SecretStoreError::Storage)?;
+        Ok(Self {
+            context: context::SourceContextResolver::new(pool.clone()),
+            pool,
+            secrets,
+            provider_endpoint,
+            cancellations: Mutex::new(HashMap::new()),
+        })
+    }
+
+    pub(crate) fn pool(&self) -> &PgPool {
+        &self.pool
+    }
+
+    pub(crate) fn secrets(&self) -> &SecretStore {
+        &self.secrets
+    }
+
+    pub(crate) fn context(&self) -> &context::SourceContextResolver {
+        &self.context
+    }
+
+    pub(crate) fn provider_endpoint(&self) -> &str {
+        &self.provider_endpoint
+    }
+
+    pub(crate) async fn register_cancellation(&self, generation_id: Uuid) -> CancellationToken {
+        let token = CancellationToken::new();
+        self.cancellations
+            .lock()
+            .await
+            .insert(generation_id, token.clone());
+        token
+    }
+
+    pub(crate) async fn cancel(&self, generation_id: Uuid) {
+        if let Some(token) = self.cancellations.lock().await.get(&generation_id) {
+            token.cancel();
+        }
+    }
+
+    pub(crate) async fn clear_cancellation(&self, generation_id: Uuid) {
+        self.cancellations.lock().await.remove(&generation_id);
+    }
+}
 
 /// Readiness inputs used to fail closed when advertising AI capabilities.
 ///
@@ -53,6 +150,24 @@ impl AiCapabilityReadiness {
             task_queue_delivery: false,
             summary_delivery: false,
             chat_delivery: false,
+            abridgement_delivery: false,
+            mcp_delivery: false,
+            mcp_worker_delivery: false,
+        }
+    }
+
+    /// Readiness after the complete `0.2.0/E1` vertical is wired.
+    #[must_use]
+    pub const fn e1_personal_assistant() -> Self {
+        Self {
+            persistence: true,
+            common_jobs: true,
+            secret_store: true,
+            provider_delivery: true,
+            explicit_context_delivery: true,
+            task_queue_delivery: false,
+            summary_delivery: false,
+            chat_delivery: true,
             abridgement_delivery: false,
             mcp_delivery: false,
             mcp_worker_delivery: false,
@@ -121,6 +236,21 @@ mod capability_tests {
         assert!(readiness.common_jobs);
         assert!(readiness.secret_store);
         assert!(readiness.advertised_feature_ids().is_empty());
+    }
+
+    #[test]
+    fn e1_advertises_only_the_complete_personal_assistant_vertical() {
+        let readiness = AiCapabilityReadiness::e1_personal_assistant();
+
+        assert_eq!(
+            readiness.advertised_feature_ids(),
+            vec![
+                "ai-provider-openrouter",
+                "ai-provider-byok",
+                "ai-explicit-context",
+                "ai-global-chat",
+            ]
+        );
     }
 
     #[test]

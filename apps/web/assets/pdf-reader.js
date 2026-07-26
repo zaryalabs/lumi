@@ -1,7 +1,7 @@
-const pdfjsModuleUrl = "/assets/vendor/pdfjs/pdf.mjs";
+const pdfjsModuleUrl = "/assets/pdfjs/pdf.mjs";
 const pdfjsLib = await import(pdfjsModuleUrl);
 
-pdfjsLib.GlobalWorkerOptions.workerSrc = "/assets/vendor/pdfjs/pdf.worker.mjs";
+pdfjsLib.GlobalWorkerOptions.workerSrc = "/assets/pdfjs/pdf.worker.mjs";
 
 const readers = new Map();
 
@@ -253,9 +253,9 @@ async function mount(config) {
   const loadingTask = pdfjsLib.getDocument({
     url: config.sourceUrl,
     withCredentials: true,
-    cMapUrl: "/assets/vendor/pdfjs/cmaps/",
+    cMapUrl: "/assets/pdfjs/cmaps/",
     cMapPacked: true,
-    standardFontDataUrl: "/assets/vendor/pdfjs/standard_fonts/",
+    standardFontDataUrl: "/assets/pdfjs/standard_fonts/",
     rangeChunkSize: 65536,
   });
   const documentProxy = await loadingTask.promise;

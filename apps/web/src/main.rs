@@ -3,6 +3,8 @@ use dioxus::prelude::*;
 #[cfg(target_arch = "wasm32")]
 mod account;
 #[cfg(target_arch = "wasm32")]
+mod ai;
+#[cfg(target_arch = "wasm32")]
 mod pdf_reader;
 #[cfg(target_arch = "wasm32")]
 mod reader;

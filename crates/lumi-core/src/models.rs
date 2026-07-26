@@ -200,6 +200,13 @@ pub fn s1_schema_migrations() -> Vec<SchemaMigration> {
                 "AI task/run/context/artifact persistence, reusable secret envelopes and common Job runtime."
                     .to_owned(),
         },
+        SchemaMigration {
+            id: "s1-0013-personal-ai-assistant".to_owned(),
+            schema_version: DOMAIN_SCHEMA_VERSION.to_owned(),
+            description:
+                "Explicit source context, OpenRouter BYOK and durable streaming conversations."
+                    .to_owned(),
+        },
     ]);
     migrations
 }
@@ -1743,12 +1750,15 @@ mod tests {
     fn migrations_cover_s1_contract_groups() {
         let migrations = s1_schema_migrations();
 
-        assert_eq!(migrations.len(), 16);
+        assert_eq!(migrations.len(), 17);
         assert!(migrations
             .iter()
             .any(|migration| migration.id == "s1-0011-ai-contract-freeze-v1"));
         assert!(migrations
             .iter()
             .any(|migration| migration.id == "s1-0012-ai-persistence-job-runtime"));
+        assert!(migrations
+            .iter()
+            .any(|migration| migration.id == "s1-0013-personal-ai-assistant"));
     }
 }
