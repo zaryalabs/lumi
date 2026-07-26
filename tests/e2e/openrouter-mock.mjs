@@ -8,6 +8,26 @@ const server = createServer((request, response) => {
     response.end("ok");
     return;
   }
+  if (request.method === "POST" && request.url === "/v1/audio/transcriptions") {
+    const chunks = [];
+    request.on("data", (chunk) => chunks.push(chunk));
+    request.on("end", () => {
+      if (request.headers.authorization !== "Bearer sk-e2e-openai") {
+        response.writeHead(401, { "content-type": "application/json" });
+        response.end(JSON.stringify({ error: { code: "invalid_api_key" } }));
+        return;
+      }
+      response.writeHead(200, { "content-type": "application/json" });
+      response.end(
+        JSON.stringify({
+          text: "Reader core не зависит от DOM, Dioxus и platform handles.",
+          language: "ru",
+          duration: 1.25,
+        }),
+      );
+    });
+    return;
+  }
   if (request.method !== "POST" || request.url !== "/api/v1/chat/completions") {
     response.writeHead(404);
     response.end();

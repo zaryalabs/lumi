@@ -61,6 +61,9 @@ Knowledge Base, native full-copy replicas, Obsidian, plugin platform, будущ
   без штрафного backlog;
 - `0.3.0 / E3`: typed source-backed generation, AI drafts, rubric-based
   open-answer evaluation, iterative explain-back и self-check fallback;
+- `0.3.0 / E4`: browser MediaRecorder с preview/cancel, generic owner-scoped
+  audio attachment, server-side OpenAI Whisper transcription, editable
+  transcript acceptance, retry и retention/delete;
 - `0.3.0 / E5 / A4`: MCP learning parity поверх общих application services и
   AI queue, capability-filtered registry `mcp-tools.v2`, account scope,
   idempotency, bounded typed errors и parity/authorization fixtures;
@@ -72,18 +75,18 @@ Knowledge Base, native full-copy replicas, Obsidian, plugin platform, будущ
 
 Ещё не готово:
 
-- полный voice learning browser/provider vertical, общий learning
-  release/operator gate, Desk/search/RAG и Community Spaces.
+- Desk/search/RAG и Community Spaces. Внешний staging operator acceptance
+  остаётся gate конкретного окружения.
 
 Persistent server публикует capabilities `ai-provider-openrouter`,
 `ai-provider-byok`, `ai-explicit-context`, `ai-global-chat`, `ai-task-queue`,
 `ai-summary-artifacts`, `mcp-account-agent`, `mcp-ai-worker` и
 `ai-abridged-lum`, а также route group `learning` и capability
 `learning-core`, `learning-scheduling`, `learning-ai`,
-`learning-explain-back`, `learning-audio-attachments` и `learning-mcp` при
-готовых prerequisites.
+`learning-explain-back`, `learning-audio-attachments`, `learning-voice` и
+`learning-mcp` при готовых prerequisites.
 
-После перехода на новую шкалу выполнено `7/18` продуктовых эпиков. Stage 0,
+После перехода на новую шкалу выполнено `9/18` продуктовых эпиков. Stage 0,
 Contract Freeze 1 и A1 остаются закрытыми prerequisites.
 
 Repository-side gates `make c`, PostgreSQL/compatibility/security/performance,
@@ -96,7 +99,7 @@ operator acceptance остаётся release gate окружения и не м�
 готовность. Поэтому новая шкала начинается с нуля завершённых end-to-end
 эпиков и отдельно сохраняет перечень уже готового foundation выше.
 
-Текущий следующий эпик — `0.3.0/E4: Голосовой контур`.
+Текущий следующий эпик — `0.4.0/E1: Records v2 и Rich Reader`.
 
 ## Последовательность
 
@@ -126,7 +129,7 @@ operator gate.
 Начинается только после `0.2.0/E4`.
 
 Подробный план:
-[`0.3.0-learn-plan.md`](0.3.0-learn-plan.md).
+[`0.3.0-learn-plan.md`](../archive/0.3.0-learn-plan.md) (архив).
 
 1. [x] **E1 — Обучение после чтения.** Learning foundation, completion,
    deterministic grading, durable sessions/attempts, Reader offer, source jump
@@ -135,14 +138,15 @@ operator gate.
    `Сегодня`, pause/resume/snooze/manual-only и scheduling UX.
 3. [x] **E3 — AI-обучение и explain-back.** Generated drafts, open-answer
    evaluation, iterative cited feedback и no-provider/self-check fallback.
-4. [ ] **E4 — Голосовой контур.** Generic audio attachment, browser recording,
+4. [x] **E4 — Голосовой контур.** Generic audio attachment, browser recording,
    transcription, transcript review, grading/explain-back и retention/delete.
-5. [ ] **E5 — Learning platform и выпуск.** Platform slice MCP learning parity,
-   limits/traces/performance fixtures и документация реализован; checkpoint
-   остаётся открытым до V4/E4 и release acceptance.
+5. [x] **E5 — Learning platform и выпуск.** MCP learning parity,
+   limits/traces/performance fixtures, документация и repository-side release
+   acceptance.
 
 Результат: deterministic learning, scheduling, AI explain-back и voice flow
-закрыты отдельными пользовательскими вертикалями.
+закрыты отдельными пользовательскими вертикалями; workspace и Web package
+имеют версию `0.3.0`.
 
 ### 3. Lumi 0.4.0 — записи, Desk, поиск и RAG
 

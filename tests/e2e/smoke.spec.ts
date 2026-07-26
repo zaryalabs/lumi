@@ -312,7 +312,40 @@ test("switches EPUB reader pages through user clicks", async ({ page }) => {
 test("offers a reload-safe deterministic session after reading", async ({
   page,
 }) => {
-  test.setTimeout(60_000);
+  test.setTimeout(90_000);
+  await page.addInitScript(() => {
+    const stream = {
+      getTracks: () => [{ stop: () => undefined }],
+    };
+    Object.defineProperty(navigator, "mediaDevices", {
+      configurable: true,
+      value: { getUserMedia: async () => stream },
+    });
+    class FixtureMediaRecorder {
+      static isTypeSupported() {
+        return true;
+      }
+      mimeType = "audio/webm";
+      state = "inactive";
+      ondataavailable?: (event: { data: Blob }) => void;
+      onerror?: () => void;
+      onstop?: () => void;
+      start() {
+        this.state = "recording";
+      }
+      stop() {
+        this.ondataavailable?.({
+          data: new Blob(["lumi-e2e-audio"], { type: this.mimeType }),
+        });
+        this.state = "inactive";
+        queueMicrotask(() => this.onstop?.());
+      }
+    }
+    Object.defineProperty(window, "MediaRecorder", {
+      configurable: true,
+      value: FixtureMediaRecorder,
+    });
+  });
   await page.goto("/");
   await page
     .getByRole("button", { name: "Создать фразу восстановления" })
@@ -382,15 +415,33 @@ test("offers a reload-safe deterministic session after reading", async ({
       .getByRole("region", { name: "Сохранённые вопросы" })
       .getByText("От чего не зависит reader core?"),
   ).toBeVisible();
+  await editor
+    .getByLabel("Тип")
+    .selectOption({ label: "Открытый ответ с самопроверкой" });
+  await editor
+    .getByRole("textbox", { name: "Вопрос", exact: true })
+    .fill("Объясните границу reader core.");
+  await editor
+    .getByLabel("Пример ответа")
+    .fill("Reader core не зависит от DOM, Dioxus и platform handles.");
+  await editor
+    .getByLabel("Пояснение")
+    .fill("Платформенные детали остаются в adapters.");
+  await editor.getByRole("button", { name: "Создать", exact: true }).click();
+  await expect(
+    page
+      .getByRole("region", { name: "Сохранённые вопросы" })
+      .getByText("Объясните границу reader core."),
+  ).toBeVisible();
   await page.getByRole("button", { name: "Пауза повторения" }).click();
   await expect(
     page.getByRole("button", { name: "Возобновить повторение" }),
   ).toBeVisible();
   await page.getByRole("button", { name: "Возобновить повторение" }).click();
-  await page.getByRole("button", { name: "Начать самопроверку (1)" }).click();
+  await page.getByRole("button", { name: "Начать самопроверку (2)" }).click();
 
   const session = page.getByRole("main", { name: "Сессия самопроверки" });
-  await expect(session.getByText("0 / 1")).toBeVisible();
+  await expect(session.getByText("0 / 2")).toBeVisible();
   await session.getByRole("button", { name: "Открыть подсказку 1" }).click();
   await expect(
     session.getByText("Вспомните границу platform-independent domain."),
@@ -400,10 +451,10 @@ test("offers a reload-safe deterministic session after reading", async ({
     page.getByRole("main", { name: "Чтение Stage Four Reader" }),
   ).toBeVisible();
   await page.getByRole("button", { name: "Вернуться в библиотеку" }).click();
-  await expect(session.getByText("0 / 1")).toBeVisible();
+  await expect(session.getByText("0 / 2")).toBeVisible();
 
   await page.reload();
-  await expect(session.getByText("0 / 1")).toBeVisible();
+  await expect(session.getByText("0 / 2")).toBeVisible();
   await expect(
     session.getByText("Вспомните границу platform-independent domain."),
   ).toBeVisible();
@@ -424,10 +475,53 @@ test("offers a reload-safe deterministic session after reading", async ({
   await session.getByRole("button", { name: "Ответить" }).click();
   await expect(session.getByText("Самопроверка сохранена.")).toBeVisible();
   await expect(session.getByText("Использовано подсказок: 1.")).toBeVisible();
+  await expect(
+    session.getByText("Объясните границу reader core."),
+  ).toBeVisible();
+  await session.getByRole("button", { name: "Записать ответ" }).click();
+  await expect(session.getByText("Идёт запись…")).toBeVisible();
+  await session.getByRole("button", { name: "Остановить запись" }).click();
+  await expect(
+    session.getByLabel("Предпрослушивание голосового ответа"),
+  ).toBeVisible();
+  await session
+    .getByRole("button", { name: "Отправить на транскрибацию" })
+    .click();
+  await expect(
+    session.getByText(
+      "Транскрибация не выполнена. Проверьте ключ OpenAI и повторите запись.",
+    ),
+  ).toBeVisible();
+  await session.getByLabel("Ключ OpenAI для Whisper").fill("sk-e2e-openai");
+  await session.getByRole("button", { name: "Сохранить ключ" }).click();
+  await expect(
+    session.getByText("Ключ сохранён. Повторите транскрибацию этой записи."),
+  ).toBeVisible();
+  await session
+    .getByRole("button", { name: "Повторить транскрибацию" })
+    .click();
+  await expect(
+    session.getByText("Проверьте текст и подтвердите транскрипт."),
+  ).toBeVisible();
+  await expect(session.getByLabel("Ваш ответ")).toHaveValue(
+    "Reader core не зависит от DOM, Dioxus и platform handles.",
+  );
+  await session.getByRole("button", { name: "Подтвердить транскрипт" }).click();
+  await expect(
+    session.getByText(
+      "Транскрипт подтверждён. Его можно отправить на проверку.",
+    ),
+  ).toBeVisible();
+  await session
+    .getByRole("button", { name: "Показать ответ и оценить себя" })
+    .click();
+  await session.getByLabel("Вспомнил", { exact: true }).check();
+  await session.getByLabel("Нормально").check();
+  await session.getByRole("button", { name: "Ответить" }).click();
   await expect(session.getByText("Все задания пройдены")).toBeVisible();
   await session.getByRole("button", { name: "Завершить" }).click();
   await expect(session.getByText("Сессия завершена")).toBeVisible();
-  await expect(session.getByText("Ответов сохранено: 1")).toBeVisible();
+  await expect(session.getByText("Ответов сохранено: 2")).toBeVisible();
   await session.getByRole("button", { name: "Готово" }).click();
   await page.getByRole("link", { name: "Челленджи" }).click();
   const challenges = page.getByRole("main", { name: "Челленджи" });

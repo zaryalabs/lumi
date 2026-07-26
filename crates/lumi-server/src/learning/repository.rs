@@ -344,6 +344,44 @@ impl LearningRuntime {
         }
     }
 
+    pub(crate) async fn session_item_revision(
+        &self,
+        user_id: UserId,
+        session_id: LearningSessionId,
+        item_id: LearningItemId,
+    ) -> Result<LearningItemRevision, LearningStoreError> {
+        match &self.backend {
+            LearningBackend::Memory(data) => lock_memory(data)?
+                .sessions
+                .get(&session_id)
+                .filter(|record| record.session.user_id == user_id)
+                .and_then(|record| record.snapshots.get(&item_id))
+                .map(|snapshot| snapshot.revision.clone())
+                .ok_or(LearningStoreError::NotFound),
+            LearningBackend::Postgres(pool) => {
+                let snapshot: serde_json::Value = query_scalar(
+                    "SELECT item.snapshot
+                       FROM learning_sessions session
+                       JOIN learning_session_items item
+                         ON item.session_id = session.session_id
+                      WHERE session.user_id = $1
+                        AND session.session_id = $2
+                        AND item.item_id = $3",
+                )
+                .bind(user_id)
+                .bind(session_id)
+                .bind(item_id)
+                .fetch_optional(pool)
+                .await
+                .map_err(log_pg)?
+                .ok_or(LearningStoreError::NotFound)?;
+                let snapshot: SessionItemSnapshot = serde_json::from_value(snapshot)
+                    .map_err(|_| LearningStoreError::Unavailable)?;
+                Ok(snapshot.revision)
+            }
+        }
+    }
+
     pub(crate) async fn update_item(
         &self,
         user_id: UserId,
@@ -4208,8 +4246,13 @@ mod tests {
             )
             .await?;
         let restored = runtime.get_session(user_id, session.id).await?;
+        let evaluation_revision = runtime
+            .session_item_revision(user_id, session.id, item.id)
+            .await?;
 
         assert_eq!(restored.items[0].prompt, "Старая формулировка");
+        assert_eq!(evaluation_revision.prompt, "Старая формулировка");
+        assert_eq!(evaluation_revision.explanation, "Пояснение");
         Ok(())
     }
 

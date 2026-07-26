@@ -3,8 +3,7 @@
 ## Назначение
 
 Runbook описывает repository-side проверку learning verticals `0.3.0/E1–E4` и
-platform slice `0.3.0/E5`. Полный release acceptance остаётся открытым до
-browser/provider voice vertical E4.
+platform/release slice `0.3.0/E5`.
 
 ## Capability и маршруты
 
@@ -17,11 +16,17 @@ attachment flow: reserve через `POST /api/v1/blobs/uploads`, передач
 `POST /api/v1/learning/attachments` связывает blob с session item, а
 `POST .../{id}/transcribe` создаёт durable transcript revision.
 
-После provider result пользователь редактирует текст и вызывает
+Встроенный provider использует отдельный account-scoped OpenAI credential,
+который хранится зашифрованно через `PUT /api/v1/providers/openai/credential`.
+Browser не получает key и не обращается в OpenAI напрямую. После provider result
+пользователь редактирует текст и вызывает
 `POST .../{id}/transcript/accept`. До acceptance grading запрещён.
 `DELETE .../{id}/audio` закрывает original download, не удаляя transcript.
 Допустимы WebM, Ogg, M4A/MP4, MP3 и WAV до 25 MiB. При ошибке permission,
 credential или provider обычный text input остаётся доступным.
+Повтор `POST .../{id}/transcribe` с новым idempotency key создаёт новую
+transcript revision для того же attachment; повтор с тем же key возвращает
+прежний результат.
 
 Готовый persistent server публикует:
 
@@ -31,6 +36,7 @@ credential или provider обычный text input остаётся досту
 - `learning-ai` и `learning-explain-back`, когда доступны общие AI provider,
   queue и explicit-context prerequisites;
 - `learning-audio-attachments`;
+- `learning-voice`;
 - `learning-mcp`; AI-dependent `create_flashcard_task` появляется в
   `tools/list` только вместе с `learning-ai`.
 
@@ -90,6 +96,19 @@ AI journey:
 Без provider шаги deterministic learning продолжают работать. AI task получает
 provider failure/needs-input state; attempt не становится incorrect.
 
+Voice journey:
+
+1. В открытом или explain-back задании нажать `Записать ответ` и разрешить
+   микрофон. Проверить timer, остановку, preview и удаление до upload.
+2. Отправить запись без OpenAI key: transcript получает безопасный `failed`,
+   text fallback остаётся доступным.
+3. Сохранить отдельный OpenAI key и нажать `Повторить транскрибацию`: новая
+   revision создаётся для того же attachment без повторной записи.
+4. Исправить распознанный текст, подтвердить transcript и только после этого
+   отправить ответ на self-check или AI evaluation.
+5. При retention `delete_after_transcript` original audio больше не скачивается,
+   accepted transcript сохраняется.
+
 ## Local fake provider
 
 Обычный `make web-e2e` сам запускает
@@ -98,7 +117,9 @@ provider failure/needs-input state; attempt не становится incorrect.
 
 ```sh
 LUMI_E2E_OPENROUTER_PORT=19090 node tests/e2e/openrouter-mock.mjs
-LUMI_OPENROUTER_ENDPOINT=http://127.0.0.1:19090/api/v1/chat/completions make server-r
+LUMI_OPENROUTER_ENDPOINT=http://127.0.0.1:19090/api/v1/chat/completions \
+LUMI_OPENAI_TRANSCRIPTION_ENDPOINT=http://127.0.0.1:19090/v1/audio/transcriptions \
+make server-r
 ```
 
 Mock принимает только тестовый credential и возвращает bounded deterministic

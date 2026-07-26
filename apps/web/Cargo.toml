@@ -7,9 +7,10 @@ rust-version.workspace = true
 
 [dependencies]
 dioxus.workspace = true
-lumi-core = { version = "0.2.0", path = "../../crates/lumi-core", default-features = false }
+lumi-core = { version = "0.3.0", path = "../../crates/lumi-core", default-features = false }
 serde.workspace = true
 serde_json.workspace = true
+sha2.workspace = true
 uuid.workspace = true
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]

@@ -160,7 +160,7 @@ Status: accepted
 | AI-008 | Context policy, cost controls, user-visible context and source citations | foundation | AI-001, CORE-013, SEC-001 | `ai.md`, `security-privacy.md` |
 | AI-009 | Один active summary на главу/материал и отдельный сокращенный `.lum`-материал со связью с источником | product | AI-003, CORE-002, FMT-LUM-001 | `ai-summaries.md`, `ai.md`, `formats/lum.md` |
 
-Реализация `0.3.0/E1–E3` закрывает deterministic baseline `LRN-001`, `LRN-003`,
+Реализация `0.3.0/E1–E4` закрывает deterministic baseline `LRN-001`, `LRN-003`,
 `LRN-004` и части `LRN-005`: revision-bound ручные items, durable completion,
 immutable session snapshots, attempts, ordered hints/source evidence,
 versioned FSRS, bounded Challenges, pause/resume/snooze/manual-only, source
@@ -168,10 +168,13 @@ jump и reload/resume, а также source-backed AI drafts, open-answer evalua
 и iterative explain-back с self-check fallback. Platform slice `0.3.0/E5`
 добавляет `learning-mcp`: list/create-flashcard-task/submit используют те же
 owner-scoped learning services и AI queue, capability filtering и idempotency,
-что Web. Voice browser/provider vertical и общий mastery projection остаются
-незавершёнными; сервер публикует `learning-core`, `learning-scheduling`,
-`learning-ai`, `learning-explain-back`, `learning-audio-attachments` и
-`learning-mcp` только при готовых prerequisites.
+что Web. Voice vertical добавляет явную browser recording/preview ветку,
+owner-scoped generic audio lifecycle, отдельный encrypted OpenAI BYOK,
+server-side `whisper-1`, editable transcript acceptance, retry и retention.
+Сервер публикует `learning-core`, `learning-scheduling`, `learning-ai`,
+`learning-explain-back`, `learning-audio-attachments`, `learning-voice` и
+`learning-mcp` только при готовых prerequisites. Общий mastery projection
+остаётся отдельным последующим расширением.
 
 ## Social And Plugins
 

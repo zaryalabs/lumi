@@ -63,9 +63,7 @@ external AI worker поверх тех же application services. Сокраще
 детерминированная проверка закрытых ответов и explicit self-check открытых,
 immutable session snapshots, durable attempts, source jump и продолжение после
 reload. В карточке материала доступен ручной вход в learning, а сервер публикует
-только готовую capability `learning-core`. Scheduling/Challenges, AI
-evaluation/explain-back, voice и общий release gate остаются следующими эпиками
-`0.3.0`. Контракт описан в
+capability `learning-core`. Контракт описан в
 [`docs/adr/0026-learning-completion-items-sessions.md`](docs/adr/0026-learning-completion-items-sessions.md).
 
 Для `0.3.0/E2` реализованы ordered hints/source assistance evidence,
@@ -86,15 +84,24 @@ items проходят строгую schema/citation validation и появля
 остаётся честная self-check ветка. Решение описано в
 [`ADR 0028`](docs/adr/0028-learning-ai-evaluation-explain-back.md).
 
-Для `0.3.0/E5` реализован независимый platform slice: account-scoped MCP tools
+Для `0.3.0/E4` реализован сквозной голосовой ответ: Web запрашивает микрофон
+только по действию пользователя, даёт прослушать и удалить локальную запись,
+загружает её как owner-scoped `AudioAttachment` и отправляет server-side в
+OpenAI Audio Transcriptions API (`whisper-1`) с отдельным зашифрованным BYOK.
+Транскрипт можно исправить и нужно явно подтвердить до оценки; повтор
+транскрибации использует тот же attachment, а retention удаляет исходное аудио
+после acceptance. Обычный текстовый ответ всегда доступен.
+
+Для `0.3.0/E5` реализован platform/release slice: account-scoped MCP tools
 `list_learning_items`, `create_flashcard_task` и `submit_learning_answer`
 используют те же learning application services, AI queue, authorization и
 idempotency, что HTTP/Web. Добавлены capability filtering, frozen MCP schema
 `mcp-tools.v2`, typed limits/errors, owner/parity fixtures, payload-free
-операционные traces и process/account limits для AI/transcription. Полный
-выпуск `0.3.0` пока не объявлен: обязательный E4 browser recording/provider
-transcription vertical и заключительный release/operator gate ещё не закрыты,
-поэтому версия workspace намеренно остаётся `0.2.0`.
+операционные traces и process/account limits для AI/transcription. Изолированный
+release gate подтверждает fresh migrations, PostgreSQL/compatibility/security/
+performance suites, `make c`, Web E2E и staging image smoke. Workspace и Web
+package имеют версию `0.3.0`; внешний staging operator acceptance остаётся
+отдельным gate окружения.
 
 ## Локальный запуск
 

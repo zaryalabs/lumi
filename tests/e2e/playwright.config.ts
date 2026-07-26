@@ -27,7 +27,7 @@ export default defineConfig({
     ? undefined
     : [
         {
-          command: `LUMI_WEB_FIXTURE_ROOT=tests/fixtures/web LUMI_WEB_ORIGIN=${webOrigin} LUMI_AUTH_AUDIENCE=${webOrigin} LUMI_OPENROUTER_ENDPOINT=${openRouterOrigin}/api/v1/chat/completions make -C ../.. db-up db-migrate server-r LUMI_POSTGRES_PORT=${postgresPort} LUMI_SERVER_BIND=127.0.0.1:${apiPort}`,
+          command: `LUMI_WEB_FIXTURE_ROOT=tests/fixtures/web LUMI_WEB_ORIGIN=${webOrigin} LUMI_AUTH_AUDIENCE=${webOrigin} LUMI_OPENROUTER_ENDPOINT=${openRouterOrigin}/api/v1/chat/completions LUMI_OPENAI_TRANSCRIPTION_ENDPOINT=${openRouterOrigin}/v1/audio/transcriptions make -C ../.. db-up db-migrate server-r LUMI_POSTGRES_PORT=${postgresPort} LUMI_SERVER_BIND=127.0.0.1:${apiPort}`,
           reuseExistingServer: true,
           timeout: 120_000,
           url: `${apiBase}/ready`,

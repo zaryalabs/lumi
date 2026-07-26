@@ -12,21 +12,61 @@ use axum::{
     Json, Router,
 };
 use lumi_core::{
-    AcceptTranscriptCommand, AudioAttachment, AudioRetentionPolicy, AudioUpload, AudioUploadStatus,
-    CreateAudioUploadCommand, CreateLearningAttachmentCommand, TranscriptArtifact,
-    TranscriptStatus, UserId, MAX_LEARNING_AUDIO_BYTES,
+    AcceptTranscriptCommand, AiCredentialState, AiProviderDescriptor, AudioAttachment,
+    AudioRetentionPolicy, AudioUpload, AudioUploadStatus, CreateAudioUploadCommand,
+    CreateLearningAttachmentCommand, ProviderCredentialState, PutProviderCredentialRequest,
+    TranscribeAudioCommand, TranscriptArtifact, TranscriptStatus, UserId, MAX_LEARNING_AUDIO_BYTES,
 };
-use serde::Deserialize;
+use serde::{de::DeserializeOwned, Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use sqlx_core::{query::query, row::Row};
 use sqlx_postgres::PgPool;
 use time::OffsetDateTime;
+use url::Url;
 use uuid::Uuid;
 
 use crate::{
     account::AuthenticatedSession,
     blob::{BlobStore, BlobStoreError, LocalBlobStore},
+    secrets::{SecretContext, SecretStoreError, SecretValue},
     AppError, AppState,
 };
+
+const TRANSCRIPTION_PROVIDER: &str = "openai";
+const TRANSCRIPTION_MODEL: &str = "whisper-1";
+const MAX_TRANSCRIPT_RESPONSE_BYTES: usize = 2 * 1024 * 1024;
+
+#[derive(Deserialize)]
+struct OpenAiTranscriptionResponse {
+    text: String,
+    #[serde(default)]
+    language: Option<String>,
+}
+
+#[derive(Clone, Copy)]
+enum TranscriptionProviderError {
+    MissingCredential,
+    Authentication,
+    RateLimited,
+    QuotaExhausted,
+    InvalidResponse,
+    Timeout,
+    Unavailable,
+}
+
+impl TranscriptionProviderError {
+    const fn code(self) -> &'static str {
+        match self {
+            Self::MissingCredential => "missing_credential",
+            Self::Authentication => "authentication",
+            Self::RateLimited => "rate_limited",
+            Self::QuotaExhausted => "quota_exhausted",
+            Self::InvalidResponse => "invalid_response",
+            Self::Timeout => "timeout",
+            Self::Unavailable => "unavailable",
+        }
+    }
+}
 
 #[derive(Clone)]
 pub(crate) struct AudioRuntime {
@@ -41,12 +81,6 @@ impl AudioRuntime {
             blobs: Arc::new(LocalBlobStore::new(blob_root)),
         }
     }
-}
-
-#[derive(Deserialize)]
-struct TranscribeCommand {
-    #[serde(default)]
-    language: Option<String>,
 }
 
 pub(crate) fn protected_routes() -> Router<AppState> {
@@ -75,6 +109,177 @@ pub(crate) fn protected_routes() -> Router<AppState> {
             "/learning/attachments/{attachment_id}/transcript/accept",
             post(accept_transcript),
         )
+        .route("/providers/openai", get(get_transcription_provider))
+        .route(
+            "/providers/openai/credential",
+            put(put_transcription_credential).delete(delete_transcription_credential),
+        )
+}
+
+async fn get_transcription_provider(
+    State(state): State<AppState>,
+    Extension(session): Extension<AuthenticatedSession>,
+) -> Result<Json<AiProviderDescriptor>, AppError> {
+    let runtime = state.ai_runtime()?;
+    let row = query(
+        "SELECT credential.state, envelope.fingerprint
+           FROM ai_provider_credentials credential
+           JOIN secret_envelopes envelope
+             ON envelope.secret_id = credential.secret_id
+            AND envelope.owner_user_id = credential.user_id
+            AND envelope.purpose = 'provider:openai'
+          WHERE credential.user_id = $1
+            AND credential.provider_kind = 'openai'
+            AND credential.revoked_at IS NULL",
+    )
+    .bind(session.user_id)
+    .fetch_optional(runtime.pool())
+    .await
+    .map_err(log_db)?;
+    let (credential_state, credential_fingerprint) = if let Some(row) = row {
+        let state: String = row.try_get("state").map_err(log_db)?;
+        let fingerprint: Vec<u8> = row.try_get("fingerprint").map_err(log_db)?;
+        (
+            parse_credential_state(&state),
+            Some(fingerprint_prefix(&fingerprint)),
+        )
+    } else {
+        (AiCredentialState::Missing, None)
+    };
+    Ok(Json(AiProviderDescriptor {
+        provider_kind: TRANSCRIPTION_PROVIDER.to_owned(),
+        display_name: "OpenAI Whisper".to_owned(),
+        capabilities: vec!["audio_transcription".to_owned()],
+        allowed_models: vec![TRANSCRIPTION_MODEL.to_owned()],
+        credential_state,
+        credential_fingerprint,
+    }))
+}
+
+async fn put_transcription_credential(
+    State(state): State<AppState>,
+    Extension(session): Extension<AuthenticatedSession>,
+    Json(request): Json<PutProviderCredentialRequest>,
+) -> Result<Json<ProviderCredentialState>, AppError> {
+    if request.credential.trim().is_empty()
+        || request.credential.len() > 4_096
+        || request.validation_model != TRANSCRIPTION_MODEL
+        || request.idempotency_key.trim().is_empty()
+        || request.idempotency_key.len() > 256
+    {
+        return Err(AppError::BadRequest(
+            "OpenAI credential, whisper-1 model and idempotency key are required".to_owned(),
+        ));
+    }
+    let runtime = state.ai_runtime()?;
+    if let Some(row) = query(
+        "SELECT credential.state, credential.last_validated_at, envelope.fingerprint
+           FROM ai_provider_credentials credential
+           JOIN secret_envelopes envelope ON envelope.secret_id = credential.secret_id
+          WHERE credential.user_id = $1
+            AND credential.provider_kind = 'openai'
+            AND credential.write_idempotency_key = $2",
+    )
+    .bind(session.user_id)
+    .bind(request.idempotency_key.trim())
+    .fetch_optional(runtime.pool())
+    .await
+    .map_err(log_db)?
+    {
+        let state: String = row.try_get("state").map_err(log_db)?;
+        let fingerprint: Vec<u8> = row.try_get("fingerprint").map_err(log_db)?;
+        return Ok(Json(ProviderCredentialState {
+            provider_kind: TRANSCRIPTION_PROVIDER.to_owned(),
+            credential_state: parse_credential_state(&state),
+            credential_fingerprint: Some(fingerprint_prefix(&fingerprint)),
+            last_validated_at: row
+                .try_get::<Option<OffsetDateTime>, _>("last_validated_at")
+                .map_err(log_db)?
+                .map(time_to_ms),
+        }));
+    }
+    let context =
+        SecretContext::new(session.user_id, "provider:openai").map_err(map_secret_error)?;
+    let replacement = SecretValue::new(request.credential.as_bytes());
+    let mut tx = runtime.pool().begin().await.map_err(log_db)?;
+    let prior_secret: Option<Uuid> = sqlx_core::query_scalar::query_scalar(
+        "SELECT secret_id FROM ai_provider_credentials
+          WHERE user_id = $1 AND provider_kind = 'openai' AND revoked_at IS NULL
+          FOR UPDATE",
+    )
+    .bind(session.user_id)
+    .fetch_optional(&mut *tx)
+    .await
+    .map_err(log_db)?;
+    if let Some(secret_id) = prior_secret {
+        query(
+            "DELETE FROM ai_provider_credentials
+              WHERE user_id = $1 AND provider_kind = 'openai' AND secret_id = $2",
+        )
+        .bind(session.user_id)
+        .bind(secret_id)
+        .execute(&mut *tx)
+        .await
+        .map_err(log_db)?;
+        runtime
+            .secrets()
+            .delete_in_transaction(&mut tx, &context, secret_id)
+            .await
+            .map_err(map_secret_error)?;
+    }
+    let stored = runtime
+        .secrets()
+        .store_in_transaction(&mut tx, &context, &replacement)
+        .await
+        .map_err(map_secret_error)?;
+    query(
+        "INSERT INTO ai_provider_credentials
+         (credential_id, user_id, provider_kind, secret_id, state,
+          validation_code, write_idempotency_key)
+         VALUES ($1, $2, 'openai', $3, 'unvalidated', 'not_tested', $4)",
+    )
+    .bind(Uuid::now_v7())
+    .bind(session.user_id)
+    .bind(stored.secret_id)
+    .bind(request.idempotency_key.trim())
+    .execute(&mut *tx)
+    .await
+    .map_err(log_db)?;
+    tx.commit().await.map_err(log_db)?;
+    Ok(Json(ProviderCredentialState {
+        provider_kind: TRANSCRIPTION_PROVIDER.to_owned(),
+        credential_state: AiCredentialState::Unvalidated,
+        credential_fingerprint: Some(stored.fingerprint),
+        last_validated_at: None,
+    }))
+}
+
+async fn delete_transcription_credential(
+    State(state): State<AppState>,
+    Extension(session): Extension<AuthenticatedSession>,
+) -> Result<StatusCode, AppError> {
+    let runtime = state.ai_runtime()?;
+    let context =
+        SecretContext::new(session.user_id, "provider:openai").map_err(map_secret_error)?;
+    let mut tx = runtime.pool().begin().await.map_err(log_db)?;
+    let secret_id: Option<Uuid> = sqlx_core::query_scalar::query_scalar(
+        "DELETE FROM ai_provider_credentials
+          WHERE user_id = $1 AND provider_kind = 'openai' AND revoked_at IS NULL
+          RETURNING secret_id",
+    )
+    .bind(session.user_id)
+    .fetch_optional(&mut *tx)
+    .await
+    .map_err(log_db)?;
+    if let Some(secret_id) = secret_id {
+        runtime
+            .secrets()
+            .delete_in_transaction(&mut tx, &context, secret_id)
+            .await
+            .map_err(map_secret_error)?;
+    }
+    tx.commit().await.map_err(log_db)?;
+    Ok(StatusCode::NO_CONTENT)
 }
 
 async fn create_upload(
@@ -206,16 +411,32 @@ async fn create_attachment(
     }
     let runtime = state.audio_runtime()?;
     let mut tx = runtime.pool.begin().await.map_err(log_db)?;
-    let owns_session: bool = sqlx_core::query_scalar::query_scalar(
-        "SELECT EXISTS(SELECT 1 FROM learning_sessions WHERE id = $1 AND user_id = $2)",
+    let mutation_key = format!("audio:attachment:{}", command.idempotency_key.trim());
+    let hash = request_hash(&command)?;
+    if let Some(previous) =
+        replay_mutation::<AudioAttachment>(&mut tx, session.user_id, &mutation_key, hash).await?
+    {
+        return Ok(Json(previous));
+    }
+    let owns_session_item: bool = sqlx_core::query_scalar::query_scalar(
+        "SELECT EXISTS(
+           SELECT 1
+             FROM learning_sessions session
+             JOIN learning_session_items item
+               ON item.session_id = session.session_id
+              AND item.item_id = $2
+            WHERE session.session_id = $1
+              AND session.user_id = $3
+         )",
     )
     .bind(command.session_id)
+    .bind(command.item_id)
     .bind(session.user_id)
     .fetch_one(&mut *tx)
     .await
     .map_err(log_db)?;
-    if !owns_session {
-        return Err(AppError::NotFound("learning_session"));
+    if !owns_session_item {
+        return Err(AppError::NotFound("learning session item"));
     }
     let id = Uuid::now_v7();
     let retention = retention_name(command.retention);
@@ -224,7 +445,6 @@ async fn create_attachment(
          (id, owner_id, upload_id, media_type, byte_length, checksum_sha256, retention)
          SELECT $1, owner_id, id, media_type, byte_length, checksum_sha256, $4
          FROM audio_uploads WHERE id = $2 AND owner_id = $3 AND status = 'completed'
-         ON CONFLICT (owner_id, upload_id) DO UPDATE SET upload_id = EXCLUDED.upload_id
          RETURNING id, media_type, byte_length, checksum_sha256, retention, audio_deleted_at, created_at",
     )
     .bind(id)
@@ -239,19 +459,28 @@ async fn create_attachment(
     query(
         "INSERT INTO learning_attachment_refs
          (attachment_id, owner_id, session_id, item_id, idempotency_key)
-         VALUES ($1, $2, $3, $4, $5)
-         ON CONFLICT (owner_id, idempotency_key) DO NOTHING",
+         VALUES ($1, $2, $3, $4, $5)",
     )
     .bind(attachment_id)
     .bind(session.user_id)
     .bind(command.session_id)
     .bind(command.item_id)
-    .bind(command.idempotency_key)
+    .bind(command.idempotency_key.trim())
     .execute(&mut *tx)
     .await
     .map_err(log_db)?;
+    let attachment = row_to_attachment(&row)?;
+    store_mutation(
+        &mut tx,
+        session.user_id,
+        &mutation_key,
+        "create_audio_attachment",
+        hash,
+        &attachment,
+    )
+    .await?;
     tx.commit().await.map_err(log_db)?;
-    row_to_attachment(&row).map(Json)
+    Ok(Json(attachment))
 }
 
 async fn get_attachment(
@@ -309,9 +538,19 @@ async fn transcribe(
     State(state): State<AppState>,
     Extension(session): Extension<AuthenticatedSession>,
     Path(attachment_id): Path<Uuid>,
-    Json(command): Json<TranscribeCommand>,
+    Json(command): Json<TranscribeAudioCommand>,
 ) -> Result<Json<TranscriptArtifact>, AppError> {
     let started = Instant::now();
+    if command.idempotency_key.trim().is_empty()
+        || command
+            .language
+            .as_deref()
+            .is_some_and(|language| language.trim().is_empty() || language.len() > 64)
+    {
+        return Err(AppError::BadRequest(
+            "transcription idempotency key or language is invalid".to_owned(),
+        ));
+    }
     let _permit = state
         .learning_operation_limits()
         .acquire(
@@ -328,7 +567,28 @@ async fn transcribe(
             }
         })?;
     let runtime = state.audio_runtime()?;
-    attachment_row(runtime, session.user_id, attachment_id).await?;
+    let mut tx = runtime.pool.begin().await.map_err(log_db)?;
+    let mutation_key = format!("audio:transcribe:{}", command.idempotency_key.trim());
+    let hash = request_hash(&(attachment_id, &command))?;
+    if let Some(previous) =
+        replay_mutation::<TranscriptArtifact>(&mut tx, session.user_id, &mutation_key, hash).await?
+    {
+        return Ok(Json(previous));
+    }
+    let attachment_exists: bool = sqlx_core::query_scalar::query_scalar(
+        "SELECT EXISTS(
+           SELECT 1 FROM audio_attachments
+            WHERE id = $1 AND owner_id = $2 AND audio_deleted_at IS NULL
+         )",
+    )
+    .bind(attachment_id)
+    .bind(session.user_id)
+    .fetch_one(&mut *tx)
+    .await
+    .map_err(log_db)?;
+    if !attachment_exists {
+        return Err(AppError::NotFound("audio_attachment"));
+    }
     let id = Uuid::now_v7();
     let row = query(
         "INSERT INTO transcript_artifacts
@@ -342,7 +602,7 @@ async fn transcribe(
     .bind(session.user_id)
     .bind(attachment_id)
     .bind(command.language.as_deref())
-    .fetch_one(&runtime.pool)
+    .fetch_one(&mut *tx)
     .await
     .map_err(log_db)?;
     let transcript = TranscriptArtifact {
@@ -358,6 +618,28 @@ async fn transcribe(
         created_at: time_to_ms(row.try_get("created_at").map_err(log_db)?),
         accepted_at: None,
     };
+    store_mutation(
+        &mut tx,
+        session.user_id,
+        &mutation_key,
+        "request_audio_transcription",
+        hash,
+        &transcript,
+    )
+    .await?;
+    tx.commit().await.map_err(log_db)?;
+    let transcript = execute_transcription(&state, runtime, session.user_id, transcript).await?;
+    query(
+        "UPDATE learning_mutations
+            SET response_payload = $3
+          WHERE user_id = $1 AND command_key = $2",
+    )
+    .bind(session.user_id)
+    .bind(&mutation_key)
+    .bind(serde_json::to_value(&transcript).map_err(|_| AppError::Unavailable("audio mutation"))?)
+    .execute(&runtime.pool)
+    .await
+    .map_err(log_db)?;
     tracing::info!(
         event = "learning.transcription_requested",
         owner_id = %session.user_id,
@@ -367,6 +649,226 @@ async fn transcribe(
         "transcription request persisted"
     );
     Ok(Json(transcript))
+}
+
+async fn execute_transcription(
+    state: &AppState,
+    runtime: &AudioRuntime,
+    owner_id: UserId,
+    transcript: TranscriptArtifact,
+) -> Result<TranscriptArtifact, AppError> {
+    query(
+        "UPDATE transcript_artifacts
+            SET status = 'processing', provider = 'openai', model = 'whisper-1'
+          WHERE id = $1 AND owner_id = $2 AND status = 'pending'",
+    )
+    .bind(transcript.id)
+    .bind(owner_id)
+    .execute(&runtime.pool)
+    .await
+    .map_err(log_db)?;
+    let result = call_transcription_provider(state, runtime, owner_id, &transcript).await;
+    match result {
+        Ok(response) => {
+            if response.text.trim().is_empty() || response.text.len() > 512 * 1024 {
+                return finish_failed_transcription(
+                    runtime,
+                    owner_id,
+                    transcript.id,
+                    TranscriptionProviderError::InvalidResponse,
+                )
+                .await;
+            }
+            let row = query(
+                "UPDATE transcript_artifacts
+                    SET status = 'needs_review',
+                        transcript_text = $3,
+                        language = COALESCE($4, language),
+                        provider = 'openai',
+                        model = 'whisper-1'
+                  WHERE id = $1 AND owner_id = $2 AND status = 'processing'
+                RETURNING id, attachment_id, revision, status, transcript_text, provider,
+                          model, language, created_at, accepted_at",
+            )
+            .bind(transcript.id)
+            .bind(owner_id)
+            .bind(response.text.trim())
+            .bind(response.language)
+            .fetch_one(&runtime.pool)
+            .await
+            .map_err(log_db)?;
+            query(
+                "UPDATE ai_provider_credentials
+                    SET state = 'valid', validation_code = 'ok',
+                        last_validated_at = now(), object_revision = object_revision + 1,
+                        updated_at = now()
+                  WHERE user_id = $1 AND provider_kind = 'openai'
+                    AND revoked_at IS NULL",
+            )
+            .bind(owner_id)
+            .execute(&runtime.pool)
+            .await
+            .map_err(log_db)?;
+            row_to_transcript(&row)
+        }
+        Err(error) => {
+            if matches!(error, TranscriptionProviderError::Authentication) {
+                query(
+                    "UPDATE ai_provider_credentials
+                        SET state = 'invalid', validation_code = 'authentication',
+                            last_validated_at = now(), object_revision = object_revision + 1,
+                            updated_at = now()
+                      WHERE user_id = $1 AND provider_kind = 'openai'
+                        AND revoked_at IS NULL",
+                )
+                .bind(owner_id)
+                .execute(&runtime.pool)
+                .await
+                .map_err(log_db)?;
+            }
+            finish_failed_transcription(runtime, owner_id, transcript.id, error).await
+        }
+    }
+}
+
+async fn call_transcription_provider(
+    state: &AppState,
+    runtime: &AudioRuntime,
+    owner_id: UserId,
+    transcript: &TranscriptArtifact,
+) -> Result<OpenAiTranscriptionResponse, TranscriptionProviderError> {
+    let ai = state
+        .ai_runtime()
+        .map_err(|_| TranscriptionProviderError::Unavailable)?;
+    let secret_id: Uuid = sqlx_core::query_scalar::query_scalar(
+        "SELECT secret_id
+           FROM ai_provider_credentials
+          WHERE user_id = $1 AND provider_kind = 'openai'
+            AND state IN ('unvalidated', 'valid') AND revoked_at IS NULL",
+    )
+    .bind(owner_id)
+    .fetch_optional(ai.pool())
+    .await
+    .map_err(|_| TranscriptionProviderError::Unavailable)?
+    .ok_or(TranscriptionProviderError::MissingCredential)?;
+    let context = SecretContext::new(owner_id, "provider:openai")
+        .map_err(|_| TranscriptionProviderError::Unavailable)?;
+    let secret = ai
+        .secrets()
+        .load(&context, secret_id)
+        .await
+        .map_err(|error| match error {
+            SecretStoreError::NotFound => TranscriptionProviderError::MissingCredential,
+            _ => TranscriptionProviderError::Unavailable,
+        })?;
+    let attachment = query(
+        "SELECT media_type, checksum_sha256
+           FROM audio_attachments
+          WHERE id = $1 AND owner_id = $2 AND audio_deleted_at IS NULL",
+    )
+    .bind(transcript.attachment_id)
+    .bind(owner_id)
+    .fetch_optional(&runtime.pool)
+    .await
+    .map_err(|_| TranscriptionProviderError::Unavailable)?
+    .ok_or(TranscriptionProviderError::Unavailable)?;
+    let media_type: String = attachment
+        .try_get("media_type")
+        .map_err(|_| TranscriptionProviderError::Unavailable)?;
+    let checksum: String = attachment
+        .try_get("checksum_sha256")
+        .map_err(|_| TranscriptionProviderError::Unavailable)?;
+    let bytes = runtime
+        .blobs
+        .get(&checksum)
+        .await
+        .map_err(|_| TranscriptionProviderError::Unavailable)?;
+    let endpoint = validate_transcription_endpoint(ai.transcription_endpoint())?;
+    let credential = secret
+        .expose_str()
+        .map_err(|_| TranscriptionProviderError::Authentication)?;
+    let part = reqwest::multipart::Part::bytes(bytes.to_vec())
+        .file_name(audio_filename(&media_type))
+        .mime_str(&media_type)
+        .map_err(|_| TranscriptionProviderError::InvalidResponse)?;
+    let mut form = reqwest::multipart::Form::new()
+        .text("model", TRANSCRIPTION_MODEL.to_owned())
+        .text("response_format", "verbose_json")
+        .part("file", part);
+    if let Some(language) = transcript.language.as_deref() {
+        form = form.text("language", language.to_owned());
+    }
+    let client = reqwest::Client::builder()
+        .connect_timeout(std::time::Duration::from_secs(10))
+        .timeout(std::time::Duration::from_secs(90))
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .map_err(|_| TranscriptionProviderError::Unavailable)?;
+    let response = client
+        .post(endpoint)
+        .bearer_auth(credential)
+        .multipart(form)
+        .send()
+        .await
+        .map_err(|error| {
+            if error.is_timeout() {
+                TranscriptionProviderError::Timeout
+            } else {
+                TranscriptionProviderError::Unavailable
+            }
+        })?;
+    match response.status() {
+        status if status.is_success() => {}
+        reqwest::StatusCode::UNAUTHORIZED | reqwest::StatusCode::FORBIDDEN => {
+            return Err(TranscriptionProviderError::Authentication);
+        }
+        reqwest::StatusCode::TOO_MANY_REQUESTS => {
+            return Err(TranscriptionProviderError::RateLimited);
+        }
+        reqwest::StatusCode::PAYMENT_REQUIRED => {
+            return Err(TranscriptionProviderError::QuotaExhausted);
+        }
+        status if status.is_server_error() => {
+            return Err(TranscriptionProviderError::Unavailable);
+        }
+        _ => return Err(TranscriptionProviderError::InvalidResponse),
+    }
+    let body = response
+        .bytes()
+        .await
+        .map_err(|_| TranscriptionProviderError::Unavailable)?;
+    if body.len() > MAX_TRANSCRIPT_RESPONSE_BYTES {
+        return Err(TranscriptionProviderError::InvalidResponse);
+    }
+    serde_json::from_slice(&body).map_err(|_| TranscriptionProviderError::InvalidResponse)
+}
+
+async fn finish_failed_transcription(
+    runtime: &AudioRuntime,
+    owner_id: UserId,
+    transcript_id: Uuid,
+    error: TranscriptionProviderError,
+) -> Result<TranscriptArtifact, AppError> {
+    let row = query(
+        "UPDATE transcript_artifacts
+            SET status = 'failed', provider = 'openai', model = 'whisper-1'
+          WHERE id = $1 AND owner_id = $2 AND status IN ('pending', 'processing')
+        RETURNING id, attachment_id, revision, status, transcript_text, provider,
+                  model, language, created_at, accepted_at",
+    )
+    .bind(transcript_id)
+    .bind(owner_id)
+    .fetch_one(&runtime.pool)
+    .await
+    .map_err(log_db)?;
+    tracing::warn!(
+        event = "learning.transcription_failed",
+        owner_id = %owner_id,
+        transcript_id = %transcript_id,
+        error_code = error.code(),
+        "transcription provider call failed"
+    );
+    row_to_transcript(&row)
 }
 
 async fn get_transcript(
@@ -402,11 +904,34 @@ async fn accept_transcript(
         ));
     }
     let runtime = state.audio_runtime()?;
+    let mut tx = runtime.pool.begin().await.map_err(log_db)?;
+    let mutation_key = format!("audio:accept:{}", command.idempotency_key.trim());
+    let hash = request_hash(&(attachment_id, &command))?;
+    if let Some(previous) =
+        replay_mutation::<TranscriptArtifact>(&mut tx, session.user_id, &mutation_key, hash).await?
+    {
+        return Ok(Json(previous));
+    }
     let row = query(
         "INSERT INTO transcript_artifacts
-         (id, owner_id, attachment_id, revision, status, transcript_text, provider, model, accepted_at)
-         SELECT $1, $2, $3, COALESCE(max(revision) + 1, 1), 'accepted', $4, 'user', 'edited', now()
-         FROM transcript_artifacts WHERE attachment_id = $3 AND owner_id = $2
+         (id, owner_id, attachment_id, revision, status, transcript_text,
+          provider, model, language, accepted_at)
+         SELECT $1, source.owner_id, source.attachment_id, source.revision + 1,
+                'accepted', $4, 'user', 'edited', source.language, now()
+           FROM transcript_artifacts source
+           JOIN audio_attachments attachment
+             ON attachment.id = source.attachment_id
+            AND attachment.owner_id = source.owner_id
+          WHERE source.id = (
+                  SELECT latest.id
+                    FROM transcript_artifacts latest
+                   WHERE latest.attachment_id = $3
+                     AND latest.owner_id = $2
+                   ORDER BY latest.revision DESC
+                   LIMIT 1
+                   FOR UPDATE
+                )
+            AND source.status = 'needs_review'
          RETURNING id, attachment_id, revision, status, transcript_text, provider, model,
                    language, created_at, accepted_at",
     )
@@ -414,19 +939,30 @@ async fn accept_transcript(
     .bind(session.user_id)
     .bind(attachment_id)
     .bind(command.text.trim())
-    .fetch_one(&runtime.pool)
+    .fetch_optional(&mut *tx)
     .await
-    .map_err(log_db)?;
+    .map_err(log_db)?
+    .ok_or_else(|| AppError::Conflict("latest transcript is not ready for review".to_owned()))?;
     query(
         "UPDATE audio_attachments SET audio_deleted_at = now()
          WHERE id = $1 AND owner_id = $2 AND retention = 'delete_after_transcript'",
     )
     .bind(attachment_id)
     .bind(session.user_id)
-    .execute(&runtime.pool)
+    .execute(&mut *tx)
     .await
     .map_err(log_db)?;
     let transcript = row_to_transcript(&row)?;
+    store_mutation(
+        &mut tx,
+        session.user_id,
+        &mutation_key,
+        "accept_audio_transcript",
+        hash,
+        &transcript,
+    )
+    .await?;
+    tx.commit().await.map_err(log_db)?;
     tracing::info!(
         event = "learning.transcript_accepted",
         owner_id = %session.user_id,
@@ -512,6 +1048,117 @@ fn retention_name(value: AudioRetentionPolicy) -> &'static str {
     }
 }
 
+fn parse_credential_state(value: &str) -> AiCredentialState {
+    match value {
+        "valid" => AiCredentialState::Valid,
+        "invalid" => AiCredentialState::Invalid,
+        _ => AiCredentialState::Unvalidated,
+    }
+}
+
+fn validate_transcription_endpoint(value: &str) -> Result<Url, TranscriptionProviderError> {
+    let url = Url::parse(value).map_err(|_| TranscriptionProviderError::Unavailable)?;
+    let loopback_http = url.scheme() == "http"
+        && url.host_str().is_some_and(|host| {
+            host == "localhost"
+                || host
+                    .parse::<std::net::IpAddr>()
+                    .is_ok_and(|ip| ip.is_loopback())
+        });
+    if (url.scheme() != "https" && !loopback_http)
+        || !url.username().is_empty()
+        || url.password().is_some()
+        || url.query().is_some()
+        || url.fragment().is_some()
+    {
+        return Err(TranscriptionProviderError::Unavailable);
+    }
+    Ok(url)
+}
+
+fn audio_filename(media_type: &str) -> &'static str {
+    match media_type {
+        "audio/ogg" => "recording.ogg",
+        "audio/mp4" => "recording.m4a",
+        "audio/mpeg" => "recording.mp3",
+        "audio/wav" | "audio/x-wav" => "recording.wav",
+        _ => "recording.webm",
+    }
+}
+
+fn fingerprint_prefix(bytes: &[u8]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut output = String::with_capacity(16);
+    for byte in bytes.iter().take(8) {
+        output.push(HEX[(byte >> 4) as usize] as char);
+        output.push(HEX[(byte & 0x0f) as usize] as char);
+    }
+    output
+}
+
+fn request_hash(value: &impl Serialize) -> Result<[u8; 32], AppError> {
+    let encoded = serde_json::to_vec(value)
+        .map_err(|_| AppError::BadRequest("audio request is invalid".to_owned()))?;
+    Ok(Sha256::digest(encoded).into())
+}
+
+async fn replay_mutation<T: DeserializeOwned>(
+    tx: &mut sqlx_postgres::PgTransaction<'_>,
+    owner_id: UserId,
+    command_key: &str,
+    hash: [u8; 32],
+) -> Result<Option<T>, AppError> {
+    let row = query(
+        "SELECT request_hash, response_payload
+           FROM learning_mutations
+          WHERE user_id = $1 AND command_key = $2",
+    )
+    .bind(owner_id)
+    .bind(command_key)
+    .fetch_optional(&mut **tx)
+    .await
+    .map_err(log_db)?;
+    let Some(row) = row else {
+        return Ok(None);
+    };
+    let stored_hash: Vec<u8> = row.try_get("request_hash").map_err(log_db)?;
+    if stored_hash.as_slice() != hash {
+        return Err(AppError::Conflict(
+            "idempotency key was already used with another audio request".to_owned(),
+        ));
+    }
+    let payload = row.try_get("response_payload").map_err(log_db)?;
+    serde_json::from_value(payload)
+        .map(Some)
+        .map_err(|_| AppError::Unavailable("audio mutation"))
+}
+
+async fn store_mutation<T: Serialize>(
+    tx: &mut sqlx_postgres::PgTransaction<'_>,
+    owner_id: UserId,
+    command_key: &str,
+    operation: &str,
+    hash: [u8; 32],
+    response: &T,
+) -> Result<(), AppError> {
+    let response =
+        serde_json::to_value(response).map_err(|_| AppError::Unavailable("audio mutation"))?;
+    query(
+        "INSERT INTO learning_mutations
+         (user_id, command_key, operation, request_hash, response_payload)
+         VALUES ($1, $2, $3, $4, $5)",
+    )
+    .bind(owner_id)
+    .bind(command_key)
+    .bind(operation)
+    .bind(hash.as_slice())
+    .bind(response)
+    .execute(&mut **tx)
+    .await
+    .map_err(log_db)?;
+    Ok(())
+}
+
 fn time_to_ms(value: OffsetDateTime) -> u64 {
     u64::try_from(value.unix_timestamp_nanos() / 1_000_000).unwrap_or_default()
 }
@@ -526,7 +1173,60 @@ fn map_blob(error: BlobStoreError) -> AppError {
     }
 }
 
+fn map_secret_error(error: SecretStoreError) -> AppError {
+    match error {
+        SecretStoreError::InvalidContext | SecretStoreError::InvalidPlaintext => {
+            AppError::BadRequest("provider credential is invalid".to_owned())
+        }
+        SecretStoreError::NotFound => AppError::NotFound("provider credential"),
+        SecretStoreError::Integrity
+        | SecretStoreError::KeyRing
+        | SecretStoreError::Storage
+        | SecretStoreError::State => AppError::Unavailable("provider secret store"),
+    }
+}
+
 fn log_db(error: sqlx_core::error::Error) -> AppError {
     tracing::error!(%error, "audio repository operation failed");
     AppError::Unavailable("audio repository")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn transcription_endpoint_allows_https_and_loopback_fixture_only() {
+        assert!(
+            validate_transcription_endpoint("https://api.openai.com/v1/audio/transcriptions")
+                .is_ok()
+        );
+        assert!(
+            validate_transcription_endpoint("http://127.0.0.1:4010/v1/audio/transcriptions")
+                .is_ok()
+        );
+        assert!(
+            validate_transcription_endpoint("http://provider.example/v1/audio/transcriptions")
+                .is_err()
+        );
+        assert!(validate_transcription_endpoint(
+            "https://token@api.openai.com/v1/audio/transcriptions"
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn audio_request_hash_includes_payload() -> Result<(), AppError> {
+        let first = TranscribeAudioCommand {
+            language: Some("ru".to_owned()),
+            idempotency_key: "same-key".to_owned(),
+        };
+        let changed = TranscribeAudioCommand {
+            language: Some("en".to_owned()),
+            idempotency_key: "same-key".to_owned(),
+        };
+
+        assert_ne!(request_hash(&first)?, request_hash(&changed)?);
+        Ok(())
+    }
 }

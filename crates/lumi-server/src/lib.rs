@@ -71,6 +71,9 @@ pub const DEFAULT_BLOB_ROOT: &str = ".local/blob-store";
 pub const DEFAULT_SECRET_ROOT: &str = ".local/secrets";
 /// Default fixed OpenRouter OpenAI-compatible chat endpoint.
 pub const DEFAULT_OPENROUTER_ENDPOINT: &str = "https://openrouter.ai/api/v1/chat/completions";
+/// Default fixed OpenAI Audio Transcriptions endpoint.
+pub const DEFAULT_OPENAI_TRANSCRIPTION_ENDPOINT: &str =
+    "https://api.openai.com/v1/audio/transcriptions";
 
 /// Runtime configuration for the Lumi server process.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -83,6 +86,7 @@ pub struct AppConfig {
     blob_root: std::path::PathBuf,
     secret_root: std::path::PathBuf,
     openrouter_endpoint: String,
+    openai_transcription_endpoint: String,
     deployment_mode: String,
     admin_lookup_ids_raw: String,
 }
@@ -110,6 +114,8 @@ impl AppConfig {
             .unwrap_or_else(|| std::path::PathBuf::from(DEFAULT_SECRET_ROOT));
         let openrouter_endpoint = std::env::var("LUMI_OPENROUTER_ENDPOINT")
             .unwrap_or_else(|_| DEFAULT_OPENROUTER_ENDPOINT.to_owned());
+        let openai_transcription_endpoint = std::env::var("LUMI_OPENAI_TRANSCRIPTION_ENDPOINT")
+            .unwrap_or_else(|_| DEFAULT_OPENAI_TRANSCRIPTION_ENDPOINT.to_owned());
         let deployment_mode =
             std::env::var("LUMI_DEPLOYMENT_MODE").unwrap_or_else(|_| "local".to_owned());
         let admin_lookup_ids_raw = std::env::var("LUMI_ADMIN_LOOKUP_IDS").unwrap_or_default();
@@ -123,6 +129,7 @@ impl AppConfig {
             blob_root,
             secret_root,
             openrouter_endpoint,
+            openai_transcription_endpoint,
             deployment_mode,
             admin_lookup_ids_raw,
         }
@@ -162,6 +169,12 @@ impl AppConfig {
     #[must_use]
     pub fn openrouter_endpoint(&self) -> &str {
         &self.openrouter_endpoint
+    }
+
+    /// Fixed server-controlled OpenAI Audio Transcriptions endpoint.
+    #[must_use]
+    pub fn openai_transcription_endpoint(&self) -> &str {
+        &self.openai_transcription_endpoint
     }
 
     fn admin_lookup_ids(&self) -> anyhow::Result<HashSet<LookupId>> {
@@ -358,6 +371,7 @@ impl AppState {
             accounts.pool().clone(),
             config.secret_root(),
             config.openrouter_endpoint().to_owned(),
+            config.openai_transcription_endpoint().to_owned(),
         )
         .await
         .map_err(|error| anyhow::anyhow!(error))?;
@@ -672,6 +686,7 @@ pub(crate) fn service_capabilities(state: &AppState) -> ServiceCapabilities {
         capabilities
             .features
             .push("learning-audio-attachments".to_owned());
+        capabilities.features.push("learning-voice".to_owned());
     }
     if learning_ai_ready {
         capabilities.features.push("learning-ai".to_owned());

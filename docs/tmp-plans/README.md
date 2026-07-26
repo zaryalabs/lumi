@@ -43,10 +43,6 @@ coordination document.
 - [`0.2.0-ai-plan.md`](0.2.0-ai-plan.md) — реализация BYOK, глобального
   ИИ-чата, саммари, durable AI task queue и MCP-интеграции для внешних агентов.
 
-- [`0.3.0-learn-plan.md`](0.3.0-learn-plan.md) — реализация обучения после
-  чтения: post-reading tests, FSRS reviews, подсказки, voice answers и
-  explain-back.
-
 - [`0.4.0-notes-and-desk-plan.md`](0.4.0-notes-and-desk-plan.md) — богатые
   записи по чтению, Desk, BM25 + fastText поиск и RAG по записям.
 
@@ -60,3 +56,8 @@ coordination document.
 - `active` — по плану идёт production-реализация;
 - `completed` — release evidence закрыт, durable решения перенесены в
   канонические документы.
+
+Архив завершённых планов:
+
+- [`0.3.0-learn-plan.md`](../archive/0.3.0-learn-plan.md) — закрытый
+  repository-side выпуск обучения после чтения.

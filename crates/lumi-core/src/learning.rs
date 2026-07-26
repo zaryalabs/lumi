@@ -148,6 +148,16 @@ pub struct CreateLearningAttachmentCommand {
     pub idempotency_key: String,
 }
 
+/// Retry-safe request for one new provider transcript revision.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct TranscribeAudioCommand {
+    /// Optional BCP 47 language hint passed to the transcription provider.
+    #[serde(default)]
+    pub language: Option<String>,
+    /// Retry-safe mutation key.
+    pub idempotency_key: String,
+}
+
 /// User-visible durable transcription lifecycle.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]

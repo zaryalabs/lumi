@@ -24,6 +24,7 @@ pub struct AiRuntime {
     secrets: SecretStore,
     context: context::SourceContextResolver,
     provider_endpoint: String,
+    transcription_endpoint: String,
     cancellations: Mutex<HashMap<Uuid, CancellationToken>>,
 }
 
@@ -38,6 +39,7 @@ impl AiRuntime {
         pool: PgPool,
         secret_root: &Path,
         provider_endpoint: String,
+        transcription_endpoint: String,
     ) -> Result<Self, SecretStoreError> {
         let secrets = SecretStore::open(pool.clone(), secret_root).await?;
         sqlx_core::query::query(
@@ -64,6 +66,7 @@ impl AiRuntime {
             pool,
             secrets,
             provider_endpoint,
+            transcription_endpoint,
             cancellations: Mutex::new(HashMap::new()),
         })
     }
@@ -82,6 +85,10 @@ impl AiRuntime {
 
     pub(crate) fn provider_endpoint(&self) -> &str {
         &self.provider_endpoint
+    }
+
+    pub(crate) fn transcription_endpoint(&self) -> &str {
+        &self.transcription_endpoint
     }
 
     pub(crate) async fn register_cancellation(&self, generation_id: Uuid) -> CancellationToken {

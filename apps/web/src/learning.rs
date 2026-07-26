@@ -5,23 +5,117 @@ use std::collections::HashSet;
 use dioxus::prelude::*;
 use gloo_net::http::Request;
 use lumi_core::{
-    AiContextAttachment, AiExecutionMode, AiSourceScope, AiTask, AiTaskStatus,
+    AcceptTranscriptCommand, AiContextAttachment, AiExecutionMode, AiSourceScope, AiTask,
+    AiTaskStatus, AudioAttachment, AudioRetentionPolicy, AudioUpload,
     ChangeLearningItemStatusCommand, CompleteReadingResponse, CompleteReadingScopeCommand,
-    CreateLearningItemCommand, CreateLearningSessionCommand, EvaluateOpenAnswerRequest,
-    GenerateLearningItemsRequest, LearningAiEvaluation, LearningAnswer, LearningAnswerPresentation,
-    LearningAnswerSpec, LearningAttempt, LearningAttemptOutcome, LearningChallengeGroup,
-    LearningHint, LearningHintReveal, LearningItem, LearningItemKind, LearningItemPage,
-    LearningItemStatus, LearningOffer, LearningOfferAction, LearningOption, LearningReviewRating,
-    LearningSession, LearningSessionId, LearningSessionKind, LearningSessionState,
-    LearningSettings, LearningSourceId, LearningSourceScheduleSettings, LearningToday, MaterialId,
-    MoveReadingPositionCommand, OpenAnswerEvaluationOutcome, SelfCheckRating,
-    SnoozeLearningSessionCommand, SubmitLearningAttemptCommand, UpdateLearningItemCommand,
-    UpdateLearningOfferCommand, UpdateLearningSettingsCommand,
+    CreateAudioUploadCommand, CreateLearningAttachmentCommand, CreateLearningItemCommand,
+    CreateLearningSessionCommand, EvaluateOpenAnswerRequest, GenerateLearningItemsRequest,
+    LearningAiEvaluation, LearningAnswer, LearningAnswerPresentation, LearningAnswerSpec,
+    LearningAttempt, LearningAttemptOutcome, LearningChallengeGroup, LearningHint,
+    LearningHintReveal, LearningItem, LearningItemKind, LearningItemPage, LearningItemStatus,
+    LearningOffer, LearningOfferAction, LearningOption, LearningReviewRating, LearningSession,
+    LearningSessionId, LearningSessionKind, LearningSessionState, LearningSettings,
+    LearningSourceId, LearningSourceScheduleSettings, LearningToday, MaterialId,
+    MoveReadingPositionCommand, OpenAnswerEvaluationOutcome, ProviderCredentialState,
+    PutProviderCredentialRequest, SelfCheckRating, SnoozeLearningSessionCommand,
+    SubmitLearningAttemptCommand, TranscribeAudioCommand, TranscriptArtifact, TranscriptStatus,
+    UpdateLearningItemCommand, UpdateLearningOfferCommand, UpdateLearningSettingsCommand,
 };
+use sha2::{Digest, Sha256};
 use uuid::Uuid;
 use web_sys::RequestCredentials;
 
+#[cfg(target_arch = "wasm32")]
+use wasm_bindgen::prelude::*;
+
 use super::account::{notify_session_expired, API_BASE};
+
+#[cfg(target_arch = "wasm32")]
+#[wasm_bindgen(inline_js = r#"
+let lumiRecorder = null;
+let lumiRecorderStream = null;
+let lumiRecorderChunks = [];
+
+export async function startLumiRecording() {
+  if (!navigator.mediaDevices?.getUserMedia || typeof MediaRecorder === "undefined") {
+    throw new Error("media_recorder_unavailable");
+  }
+  const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+  const candidates = ["audio/webm;codecs=opus", "audio/ogg;codecs=opus", "audio/webm"];
+  const mimeType = candidates.find((value) => MediaRecorder.isTypeSupported(value)) || "";
+  lumiRecorderChunks = [];
+  lumiRecorderStream = stream;
+  lumiRecorder = mimeType ? new MediaRecorder(stream, { mimeType }) : new MediaRecorder(stream);
+  lumiRecorder.ondataavailable = (event) => {
+    if (event.data?.size) lumiRecorderChunks.push(event.data);
+  };
+  lumiRecorder.start(250);
+}
+
+export async function stopLumiRecording() {
+  if (!lumiRecorder || lumiRecorder.state === "inactive") {
+    throw new Error("recorder_not_started");
+  }
+  const recorder = lumiRecorder;
+  const stream = lumiRecorderStream;
+  const result = await new Promise((resolve, reject) => {
+    recorder.onerror = () => reject(new Error("recording_failed"));
+    recorder.onstop = async () => {
+      try {
+        const blob = new Blob(lumiRecorderChunks, { type: recorder.mimeType || "audio/webm" });
+        const bytes = new Uint8Array(await blob.arrayBuffer());
+        resolve({ bytes, mediaType: (blob.type || "audio/webm").split(";")[0] });
+      } catch (error) {
+        reject(error);
+      }
+    };
+    recorder.stop();
+  });
+  stream?.getTracks().forEach((track) => track.stop());
+  lumiRecorder = null;
+  lumiRecorderStream = null;
+  lumiRecorderChunks = [];
+  return result;
+}
+
+export function cancelLumiRecording() {
+  if (lumiRecorder && lumiRecorder.state !== "inactive") {
+    lumiRecorder.ondataavailable = null;
+    lumiRecorder.onstop = null;
+    lumiRecorder.stop();
+  }
+  lumiRecorderStream?.getTracks().forEach((track) => track.stop());
+  lumiRecorder = null;
+  lumiRecorderStream = null;
+  lumiRecorderChunks = [];
+}
+
+export function createLumiAudioUrl(bytes, mediaType) {
+  return URL.createObjectURL(new Blob([bytes], { type: mediaType }));
+}
+
+export function revokeLumiAudioUrl(url) {
+  if (url) URL.revokeObjectURL(url);
+}
+
+export async function sleepLumi(milliseconds) {
+  await new Promise((resolve) => setTimeout(resolve, milliseconds));
+}
+"#)]
+extern "C" {
+    #[wasm_bindgen(catch, js_name = startLumiRecording)]
+    async fn start_lumi_recording() -> Result<JsValue, JsValue>;
+    #[wasm_bindgen(catch, js_name = stopLumiRecording)]
+    async fn stop_lumi_recording() -> Result<JsValue, JsValue>;
+    #[wasm_bindgen(js_name = cancelLumiRecording)]
+    fn cancel_lumi_recording();
+    #[wasm_bindgen(js_name = createLumiAudioUrl)]
+    fn create_lumi_audio_url(bytes: &js_sys::Uint8Array, media_type: &str) -> String;
+    #[wasm_bindgen(js_name = revokeLumiAudioUrl)]
+    fn revoke_lumi_audio_url(url: &str);
+    #[wasm_bindgen(js_name = sleepLumi)]
+    async fn sleep_lumi(milliseconds: u32);
+}
 
 #[derive(Clone, PartialEq)]
 enum CompletionOfferState {
@@ -632,6 +726,13 @@ pub(crate) fn LearningSessionPage(
     let mut refresh = use_signal(|| 0_u64);
     let mut ai_evaluations = use_signal(Vec::<LearningAiEvaluation>::new);
     let mut evaluation_task = use_signal(|| None::<AiTask>);
+    let mut voice_recording = use_signal(|| false);
+    let mut voice_seconds = use_signal(|| 0_u32);
+    let mut voice_draft = use_signal(|| None::<RecordedAudio>);
+    let mut voice_preview_url = use_signal(String::new);
+    let mut voice_transcript = use_signal(|| None::<TranscriptArtifact>);
+    let mut voice_status = use_signal(String::new);
+    let mut openai_key = use_signal(String::new);
     let csrf = use_signal(|| csrf_token);
     use_effect(move || {
         let _ = refresh();
@@ -669,6 +770,9 @@ pub(crate) fn LearningSessionPage(
         .and_then(|value| value.attempts.last())
         .cloned();
     let session_snapshot = session.read().clone();
+    let voice_snapshot = voice_transcript.read().clone();
+    let voice_draft_snapshot = voice_draft.read().clone();
+    let voice_preview_snapshot = voice_preview_url.read().clone();
     rsx! {
         main { id: "main-content", class: "learning-session-view", aria_label: "Сессия самопроверки",
             header { class: "learning-session-header",
@@ -740,8 +844,179 @@ pub(crate) fn LearningSessionPage(
                         }
                         {answer_input(&item.answer, selected, text_answer)}
                         if matches!(item.answer, LearningAnswerPresentation::OpenText | LearningAnswerPresentation::ExplainBack) {
+                            section { class: "learning-voice-answer", aria_label: "Голосовой ответ",
+                                h3 { "Ответить голосом" }
+                                p { class: "capability-note",
+                                    "После записи аудио сохранится в Lumi и будет передано OpenAI Whisper для транскрибации. Перед проверкой вы увидите и подтвердите текст. Исходное аудио удалится после подтверждения."
+                                }
+                                div { class: "dialog-actions",
+                                    if !voice_recording() {
+                                        button { class: "secondary-action", r#type: "button", disabled: busy(), onclick: move |_| {
+                                            spawn(async move {
+                                                match begin_voice_recording().await {
+                                                    Ok(()) => {
+                                                        if !voice_preview_url().is_empty() {
+                                                            revoke_voice_preview(&voice_preview_url());
+                                                        }
+                                                        voice_preview_url.set(String::new());
+                                                        voice_draft.set(None);
+                                                        voice_seconds.set(0);
+                                                        voice_recording.set(true);
+                                                        voice_status.set("Идёт запись…".to_owned());
+                                                        error.set(String::new());
+                                                        spawn(async move {
+                                                            while voice_recording() {
+                                                                sleep_one_second().await;
+                                                                if voice_recording() {
+                                                                    voice_seconds += 1;
+                                                                }
+                                                            }
+                                                        });
+                                                    }
+                                                    Err(message) => error.set(message),
+                                                }
+                                            });
+                                        }, "Записать ответ" }
+                                    } else {
+                                        button { class: "primary-action", r#type: "button", onclick: move |_| {
+                                            busy.set(true);
+                                            spawn(async move {
+                                                match recorded_audio().await {
+                                                    Ok(recording) => {
+                                                        let preview = voice_preview(&recording);
+                                                        voice_draft.set(Some(recording));
+                                                        voice_preview_url.set(preview);
+                                                        voice_status.set("Запись готова. Прослушайте её перед отправкой.".to_owned());
+                                                        error.set(String::new());
+                                                    }
+                                                    Err(message) => error.set(message),
+                                                }
+                                                voice_recording.set(false);
+                                                busy.set(false);
+                                            });
+                                        }, "Остановить запись" }
+                                        button { class: "text-action", r#type: "button", onclick: move |_| {
+                                            cancel_voice_recording();
+                                            voice_recording.set(false);
+                                            voice_seconds.set(0);
+                                            voice_status.set("Запись отменена.".to_owned());
+                                        }, "Отменить запись" }
+                                    }
+                                }
+                                if voice_recording() {
+                                    p { role: "timer", aria_live: "off", "Записано: {voice_seconds()} с" }
+                                }
+                                if let Some(recording) = voice_draft_snapshot.clone() {
+                                    audio {
+                                        controls: true,
+                                        src: "{voice_preview_snapshot}",
+                                        aria_label: "Предпрослушивание голосового ответа",
+                                    }
+                                    div { class: "dialog-actions",
+                                        button { class: "primary-action", r#type: "button", disabled: busy(), onclick: move |_| {
+                                            let item_id = item.item_id;
+                                            let recording = recording.clone();
+                                            busy.set(true);
+                                            spawn(async move {
+                                                match upload_voice_recording(
+                                                    session_id,
+                                                    item_id,
+                                                    recording,
+                                                    &csrf.read(),
+                                                ).await {
+                                                    Ok(transcript) => {
+                                                        text_answer.set(transcript.text.clone());
+                                                        voice_status.set(transcript_status_label(transcript.status).to_owned());
+                                                        voice_transcript.set(Some(transcript));
+                                                        revoke_voice_preview(&voice_preview_url());
+                                                        voice_preview_url.set(String::new());
+                                                        voice_draft.set(None);
+                                                        error.set(String::new());
+                                                    }
+                                                    Err(message) => error.set(message),
+                                                }
+                                                busy.set(false);
+                                            });
+                                        }, "Отправить на транскрибацию" }
+                                        button { class: "text-action", r#type: "button", disabled: busy(), onclick: move |_| {
+                                            revoke_voice_preview(&voice_preview_url());
+                                            voice_preview_url.set(String::new());
+                                            voice_draft.set(None);
+                                            voice_status.set("Запись удалена до отправки.".to_owned());
+                                        }, "Удалить запись" }
+                                    }
+                                }
+                                if !voice_status().is_empty() {
+                                    p { role: "status", aria_live: "polite", "{voice_status}" }
+                                }
+                                if let Some(transcript) = voice_snapshot.clone() {
+                                    if transcript.status == TranscriptStatus::NeedsReview {
+                                        button { class: "secondary-action", r#type: "button", disabled: busy() || text_answer().trim().is_empty(), onclick: move |_| {
+                                            let attachment_id = transcript.attachment_id;
+                                            let reviewed_text = text_answer.read().clone();
+                                            busy.set(true);
+                                            spawn(async move {
+                                                match accept_voice_transcript(
+                                                    attachment_id,
+                                                    &reviewed_text,
+                                                    &csrf.read(),
+                                                ).await {
+                                                    Ok(accepted) => {
+                                                        voice_status.set("Транскрипт подтверждён. Его можно отправить на проверку.".to_owned());
+                                                        voice_transcript.set(Some(accepted));
+                                                        error.set(String::new());
+                                                    }
+                                                    Err(message) => error.set(message),
+                                                }
+                                                busy.set(false);
+                                            });
+                                        }, "Подтвердить транскрипт" }
+                                    }
+                                    if transcript.status == TranscriptStatus::Failed {
+                                        label { "Ключ OpenAI для Whisper",
+                                            input {
+                                                r#type: "password",
+                                                autocomplete: "off",
+                                                value: "{openai_key}",
+                                                oninput: move |event| openai_key.set(event.value()),
+                                            }
+                                        }
+                                        button { class: "text-action", r#type: "button", disabled: busy() || openai_key().trim().is_empty(), onclick: move |_| {
+                                            let key = openai_key.read().clone();
+                                            busy.set(true);
+                                            spawn(async move {
+                                                match save_transcription_key(&key, &csrf.read()).await {
+                                                    Ok(_) => {
+                                                        openai_key.set(String::new());
+                                                        voice_status.set("Ключ сохранён. Повторите транскрибацию этой записи.".to_owned());
+                                                        error.set(String::new());
+                                                    }
+                                                    Err(message) => error.set(message),
+                                                }
+                                                busy.set(false);
+                                            });
+                                        }, "Сохранить ключ" }
+                                        button { class: "secondary-action", r#type: "button", disabled: busy(), onclick: move |_| {
+                                            let attachment_id = transcript.attachment_id;
+                                            busy.set(true);
+                                            spawn(async move {
+                                                match retry_voice_transcription(attachment_id, &csrf.read()).await {
+                                                    Ok(retried) => {
+                                                        text_answer.set(retried.text.clone());
+                                                        voice_status.set(transcript_status_label(retried.status).to_owned());
+                                                        voice_transcript.set(Some(retried));
+                                                        error.set(String::new());
+                                                    }
+                                                    Err(message) => error.set(message),
+                                                }
+                                                busy.set(false);
+                                            });
+                                        }, "Повторить транскрибацию" }
+                                    }
+                                }
+                            }
                             div { class: "learning-ai-evaluation",
-                                button { class: "secondary-action", r#type: "button", disabled: busy() || text_answer().trim().is_empty(), onclick: move |_| {
+                                button { class: "secondary-action", r#type: "button", disabled: busy() || text_answer().trim().is_empty() || voice_transcript.read().as_ref().is_some_and(|transcript| transcript.status != TranscriptStatus::Accepted), onclick: move |_| {
                                     let answer = text_answer.read().clone();
                                     let item_id = item.item_id;
                                     busy.set(true);
@@ -810,6 +1085,8 @@ pub(crate) fn LearningSessionPage(
                                             selected.set(HashSet::new());
                                             text_answer.set(String::new());
                                             revealed_item.set(None);
+                                            voice_transcript.set(None);
+                                            voice_status.set(String::new());
                                             self_check.set(None);
                                             review_rating.set(None);
                                             refresh += 1;
@@ -1416,6 +1693,227 @@ fn task_status_label(status: AiTaskStatus) -> &'static str {
         AiTaskStatus::Failed => "ошибка",
         AiTaskStatus::Cancelled => "отменено",
     }
+}
+
+fn transcript_status_label(status: TranscriptStatus) -> &'static str {
+    match status {
+        TranscriptStatus::Pending => "Запись ждёт транскрибации.",
+        TranscriptStatus::Processing => "Whisper расшифровывает запись…",
+        TranscriptStatus::NeedsReview => "Проверьте текст и подтвердите транскрипт.",
+        TranscriptStatus::Accepted => "Транскрипт подтверждён.",
+        TranscriptStatus::Failed => {
+            "Транскрибация не выполнена. Проверьте ключ OpenAI и повторите запись."
+        }
+        TranscriptStatus::Cancelled => "Транскрибация отменена.",
+    }
+}
+
+#[derive(Clone, PartialEq)]
+struct RecordedAudio {
+    bytes: Vec<u8>,
+    media_type: String,
+}
+
+#[cfg(target_arch = "wasm32")]
+async fn begin_voice_recording() -> Result<(), String> {
+    start_lumi_recording()
+        .await
+        .map(|_| ())
+        .map_err(|_| "Браузер не дал доступ к микрофону или не поддерживает запись.".to_owned())
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+async fn begin_voice_recording() -> Result<(), String> {
+    Err("Запись голоса доступна только в Web-сборке.".to_owned())
+}
+
+#[cfg(target_arch = "wasm32")]
+async fn recorded_audio() -> Result<RecordedAudio, String> {
+    let value = stop_lumi_recording()
+        .await
+        .map_err(|_| "Не удалось завершить запись.".to_owned())?;
+    let bytes = js_sys::Reflect::get(&value, &JsValue::from_str("bytes"))
+        .map_err(|_| "Браузер вернул некорректную запись.".to_owned())?;
+    let media_type = js_sys::Reflect::get(&value, &JsValue::from_str("mediaType"))
+        .ok()
+        .and_then(|value| value.as_string())
+        .unwrap_or_else(|| "audio/webm".to_owned());
+    let bytes = js_sys::Uint8Array::new(&bytes).to_vec();
+    if bytes.is_empty() || bytes.len() > lumi_core::MAX_LEARNING_AUDIO_BYTES as usize {
+        return Err("Запись пуста или превышает 25 МиБ.".to_owned());
+    }
+    Ok(RecordedAudio { bytes, media_type })
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+async fn recorded_audio() -> Result<RecordedAudio, String> {
+    Err("Запись голоса доступна только в Web-сборке.".to_owned())
+}
+
+#[cfg(target_arch = "wasm32")]
+fn voice_preview(recording: &RecordedAudio) -> String {
+    let bytes = js_sys::Uint8Array::from(recording.bytes.as_slice());
+    create_lumi_audio_url(&bytes, &recording.media_type)
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn voice_preview(_recording: &RecordedAudio) -> String {
+    String::new()
+}
+
+#[cfg(target_arch = "wasm32")]
+fn revoke_voice_preview(url: &str) {
+    revoke_lumi_audio_url(url);
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn revoke_voice_preview(_url: &str) {}
+
+#[cfg(target_arch = "wasm32")]
+fn cancel_voice_recording() {
+    cancel_lumi_recording();
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn cancel_voice_recording() {}
+
+#[cfg(target_arch = "wasm32")]
+async fn sleep_one_second() {
+    sleep_lumi(1_000).await;
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+async fn sleep_one_second() {}
+
+async fn upload_voice_recording(
+    session_id: LearningSessionId,
+    item_id: Uuid,
+    recording: RecordedAudio,
+    csrf: &str,
+) -> Result<TranscriptArtifact, String> {
+    let checksum = hex_sha256(&recording.bytes);
+    let upload: AudioUpload = post_json(
+        "/blobs/uploads",
+        &CreateAudioUploadCommand {
+            media_type: recording.media_type.clone(),
+            byte_length: recording.bytes.len() as u64,
+            checksum_sha256: checksum,
+        },
+        csrf,
+    )
+    .await?;
+    put_audio_bytes(
+        &format!("/blobs/uploads/{}", upload.id),
+        &recording.media_type,
+        recording.bytes,
+        csrf,
+    )
+    .await?;
+    let _: AudioUpload =
+        post_empty(&format!("/blobs/uploads/{}/complete", upload.id), csrf).await?;
+    let attachment: AudioAttachment = post_json(
+        "/learning/attachments",
+        &CreateLearningAttachmentCommand {
+            upload_id: upload.id,
+            session_id,
+            item_id,
+            retention: AudioRetentionPolicy::DeleteAfterTranscript,
+            idempotency_key: Uuid::now_v7().to_string(),
+        },
+        csrf,
+    )
+    .await?;
+    post_json(
+        &format!("/learning/attachments/{}/transcribe", attachment.id),
+        &TranscribeAudioCommand {
+            language: None,
+            idempotency_key: Uuid::now_v7().to_string(),
+        },
+        csrf,
+    )
+    .await
+}
+
+async fn accept_voice_transcript(
+    attachment_id: Uuid,
+    text: &str,
+    csrf: &str,
+) -> Result<TranscriptArtifact, String> {
+    post_json(
+        &format!("/learning/attachments/{attachment_id}/transcript/accept"),
+        &AcceptTranscriptCommand {
+            text: text.trim().to_owned(),
+            idempotency_key: Uuid::now_v7().to_string(),
+        },
+        csrf,
+    )
+    .await
+}
+
+async fn retry_voice_transcription(
+    attachment_id: Uuid,
+    csrf: &str,
+) -> Result<TranscriptArtifact, String> {
+    post_json(
+        &format!("/learning/attachments/{attachment_id}/transcribe"),
+        &TranscribeAudioCommand {
+            language: None,
+            idempotency_key: Uuid::now_v7().to_string(),
+        },
+        csrf,
+    )
+    .await
+}
+
+async fn save_transcription_key(key: &str, csrf: &str) -> Result<ProviderCredentialState, String> {
+    let response = Request::put(&format!("{API_BASE}/providers/openai/credential"))
+        .credentials(RequestCredentials::Include)
+        .header("X-Lumi-CSRF", csrf)
+        .json(&PutProviderCredentialRequest {
+            credential: key.to_owned(),
+            validation_model: "whisper-1".to_owned(),
+            idempotency_key: Uuid::now_v7().to_string(),
+        })
+        .map_err(|error| error.to_string())?
+        .send()
+        .await
+        .map_err(|error| error.to_string())?;
+    parse_response(response).await
+}
+
+async fn put_audio_bytes(
+    path: &str,
+    media_type: &str,
+    bytes: Vec<u8>,
+    csrf: &str,
+) -> Result<(), String> {
+    let response = Request::put(&format!("{API_BASE}{path}"))
+        .credentials(RequestCredentials::Include)
+        .header("X-Lumi-CSRF", csrf)
+        .header("Content-Type", media_type)
+        .body(bytes)
+        .map_err(|error| error.to_string())?
+        .send()
+        .await
+        .map_err(|error| error.to_string())?;
+    if response.status() == 401 {
+        notify_session_expired();
+    }
+    if !response.ok() {
+        return Err(format!("Lumi API вернул HTTP {}.", response.status()));
+    }
+    Ok(())
+}
+
+fn hex_sha256(bytes: &[u8]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let digest = Sha256::digest(bytes);
+    let mut output = String::with_capacity(64);
+    for byte in digest {
+        output.push(HEX[(byte >> 4) as usize] as char);
+        output.push(HEX[(byte & 0x0f) as usize] as char);
+    }
+    output
 }
 
 async fn load_session(session_id: LearningSessionId) -> Result<LearningSession, String> {
