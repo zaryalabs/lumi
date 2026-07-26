@@ -10,10 +10,12 @@ use axum::{
 };
 use lumi_core::{
     ChangeLearningItemStatusCommand, CompleteReadingResponse, CompleteReadingScopeCommand,
-    CreateLearningItemCommand, CreateLearningSessionCommand, LearningAttempt, LearningItem,
-    LearningItemId, LearningItemPage, LearningItemStatus, LearningOffer, LearningSession,
-    LearningSessionId, LearningSourceId, MaterialId, RecordLearningSourceOpenedCommand,
-    SubmitLearningAttemptCommand, UpdateLearningItemCommand, UpdateLearningOfferCommand,
+    CreateLearningItemCommand, CreateLearningSessionCommand, LearningAttempt, LearningHintReveal,
+    LearningItem, LearningItemId, LearningItemPage, LearningItemStatus, LearningOffer,
+    LearningSchedule, LearningSession, LearningSessionId, LearningSettings, LearningSourceId,
+    LearningSourceScheduleSettings, LearningToday, MaterialId, RecordLearningSourceOpenedCommand,
+    RevealLearningHintCommand, SnoozeLearningSessionCommand, SubmitLearningAttemptCommand,
+    UpdateLearningItemCommand, UpdateLearningOfferCommand, UpdateLearningSettingsCommand,
 };
 use serde::Deserialize;
 
@@ -38,6 +40,10 @@ pub(crate) fn protected_routes() -> Router<AppState> {
         .route("/learning/items/{item_id}/archive", post(archive_item))
         .route("/learning/sessions", post(create_session))
         .route("/learning/sessions/{session_id}", get(get_session))
+        .route(
+            "/learning/sessions/{session_id}/items/{item_id}/hints/{position}/reveal",
+            post(reveal_hint),
+        )
         .route("/learning/sessions/{session_id}/start", post(start_session))
         .route(
             "/learning/sessions/{session_id}/items/{item_id}/source-opened",
@@ -55,6 +61,22 @@ pub(crate) fn protected_routes() -> Router<AppState> {
             "/learning/sessions/{session_id}/abandon",
             post(abandon_session),
         )
+        .route(
+            "/learning/sessions/{session_id}/snooze",
+            post(snooze_session),
+        )
+        .route("/learning/challenges/today", get(today_challenges))
+        .route("/learning/schedules", get(list_schedules))
+        .route(
+            "/learning/settings",
+            get(get_settings).patch(update_settings),
+        )
+        .route(
+            "/learning/sources/{source_id}/settings",
+            get(get_source_settings),
+        )
+        .route("/learning/sources/{source_id}/pause", post(pause_source))
+        .route("/learning/sources/{source_id}/resume", post(resume_source))
         .layer(DefaultBodyLimit::max(512 * 1024))
 }
 
@@ -70,6 +92,11 @@ struct ItemListQuery {
     status: Option<LearningItemStatus>,
     cursor: Option<LearningItemId>,
     limit: Option<usize>,
+}
+
+#[derive(Deserialize)]
+struct ChallengesQuery {
+    material_id: Option<MaterialId>,
 }
 
 async fn complete_reading(
@@ -381,6 +408,26 @@ async fn source_opened(
         .map_err(map_learning_error)
 }
 
+async fn reveal_hint(
+    State(state): State<AppState>,
+    Extension(session): Extension<AuthenticatedSession>,
+    Path((session_id, item_id, position)): Path<(LearningSessionId, LearningItemId, u16)>,
+    headers: HeaderMap,
+) -> Result<Json<LearningHintReveal>, AppError> {
+    let command_key = required_idempotency_key(&headers)?;
+    state
+        .learning_runtime()
+        .reveal_hint(
+            session.user_id,
+            session_id,
+            RevealLearningHintCommand { item_id, position },
+            command_key,
+        )
+        .await
+        .map(Json)
+        .map_err(map_learning_error)
+}
+
 async fn submit_attempt(
     State(state): State<AppState>,
     Extension(session): Extension<AuthenticatedSession>,
@@ -399,6 +446,131 @@ async fn submit_attempt(
             &command,
             command_key,
         )
+        .await
+        .map(Json)
+        .map_err(map_learning_error)
+}
+
+async fn today_challenges(
+    State(state): State<AppState>,
+    Extension(session): Extension<AuthenticatedSession>,
+    Query(query): Query<ChallengesQuery>,
+) -> Result<Json<LearningToday>, AppError> {
+    state
+        .learning_runtime()
+        .today(session.user_id, query.material_id)
+        .await
+        .map(Json)
+        .map_err(map_learning_error)
+}
+
+async fn list_schedules(
+    State(state): State<AppState>,
+    Extension(session): Extension<AuthenticatedSession>,
+    Query(query): Query<ChallengesQuery>,
+) -> Result<Json<Vec<LearningSchedule>>, AppError> {
+    state
+        .learning_runtime()
+        .list_schedules(session.user_id, query.material_id)
+        .await
+        .map(Json)
+        .map_err(map_learning_error)
+}
+
+async fn get_settings(
+    State(state): State<AppState>,
+    Extension(session): Extension<AuthenticatedSession>,
+) -> Result<Json<LearningSettings>, AppError> {
+    state
+        .learning_runtime()
+        .settings(session.user_id)
+        .await
+        .map(Json)
+        .map_err(map_learning_error)
+}
+
+async fn update_settings(
+    State(state): State<AppState>,
+    Extension(session): Extension<AuthenticatedSession>,
+    headers: HeaderMap,
+    Json(command): Json<UpdateLearningSettingsCommand>,
+) -> Result<Json<LearningSettings>, AppError> {
+    let command_key = required_idempotency_key(&headers)?;
+    state
+        .learning_runtime()
+        .update_settings(session.user_id, session.device_id, &command, command_key)
+        .await
+        .map(Json)
+        .map_err(map_learning_error)
+}
+
+async fn get_source_settings(
+    State(state): State<AppState>,
+    Extension(session): Extension<AuthenticatedSession>,
+    Path(source_id): Path<LearningSourceId>,
+) -> Result<Json<LearningSourceScheduleSettings>, AppError> {
+    state
+        .learning_runtime()
+        .source_schedule_settings(session.user_id, source_id)
+        .await
+        .map(Json)
+        .map_err(map_learning_error)
+}
+
+async fn pause_source(
+    State(state): State<AppState>,
+    Extension(session): Extension<AuthenticatedSession>,
+    Path(source_id): Path<LearningSourceId>,
+    headers: HeaderMap,
+) -> Result<Json<LearningSourceScheduleSettings>, AppError> {
+    set_source_paused(&state, &session, source_id, true, &headers)
+        .await
+        .map(Json)
+}
+
+async fn resume_source(
+    State(state): State<AppState>,
+    Extension(session): Extension<AuthenticatedSession>,
+    Path(source_id): Path<LearningSourceId>,
+    headers: HeaderMap,
+) -> Result<Json<LearningSourceScheduleSettings>, AppError> {
+    set_source_paused(&state, &session, source_id, false, &headers)
+        .await
+        .map(Json)
+}
+
+async fn set_source_paused(
+    state: &AppState,
+    session: &AuthenticatedSession,
+    source_id: LearningSourceId,
+    paused: bool,
+    headers: &HeaderMap,
+) -> Result<LearningSourceScheduleSettings, AppError> {
+    let command_key = required_idempotency_key(headers)?;
+    state
+        .learning_runtime()
+        .set_source_paused(
+            session.user_id,
+            session.device_id,
+            source_id,
+            paused,
+            command_key,
+        )
+        .await
+        .map_err(map_learning_error)
+}
+
+async fn snooze_session(
+    State(state): State<AppState>,
+    Extension(session): Extension<AuthenticatedSession>,
+    Path(session_id): Path<LearningSessionId>,
+    headers: HeaderMap,
+    Json(command): Json<SnoozeLearningSessionCommand>,
+) -> Result<Json<LearningSession>, AppError> {
+    let command_key = required_idempotency_key(&headers)?;
+    state
+        .learning_runtime()
+        .snooze_session(session.user_id, session_id, command, command_key)
         .await
         .map(Json)
         .map_err(map_learning_error)

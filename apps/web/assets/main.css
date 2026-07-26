@@ -2500,6 +2500,101 @@ h6.reading-heading {
   border-color: #b07a6c;
 }
 
+.learning-hints {
+  display: grid;
+  gap: 0.6rem;
+  margin: 0;
+  padding: 0.85rem 1rem 0.85rem 2.2rem;
+  border-radius: 1rem;
+  background: rgb(103 122 93 / 10%);
+}
+
+.learning-rating {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.65rem 1rem;
+  margin: 1rem 0 0;
+  padding: 0;
+  border: 0;
+}
+
+.learning-rating legend {
+  width: 100%;
+  font-weight: 700;
+}
+
+.challenge-estimate,
+.challenge-settings,
+.challenge-counts,
+.challenge-card,
+.challenge-future article {
+  border: 1px solid rgb(91 105 86 / 24%);
+  border-radius: 1rem;
+  background: #fffdf8;
+}
+
+.challenge-estimate {
+  display: grid;
+  gap: 0.2rem;
+  min-width: 10rem;
+  padding: 0.85rem 1rem;
+}
+
+.challenge-settings {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: end;
+  gap: 0.8rem;
+  padding: 1rem;
+}
+
+.challenge-settings > div,
+.challenge-settings label {
+  display: grid;
+  gap: 0.3rem;
+}
+
+.challenge-settings select {
+  min-height: 2.6rem;
+  padding: 0 0.7rem;
+  border: 1px solid rgb(91 105 86 / 42%);
+  border-radius: 0.7rem;
+  background: #fffdf8;
+}
+
+.challenge-counts {
+  display: inline-block;
+  padding: 0.55rem 0.8rem;
+}
+
+.challenge-grid,
+.challenge-future {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(15rem, 1fr));
+  gap: 1rem;
+}
+
+.challenge-card,
+.challenge-future article {
+  display: grid;
+  align-content: start;
+  gap: 0.7rem;
+  padding: 1rem;
+}
+
+.challenge-card h3,
+.challenge-card p,
+.challenge-future h2,
+.challenge-future p {
+  margin: 0;
+}
+
+.challenge-empty {
+  padding: 1rem;
+  border-radius: 1rem;
+  background: rgb(103 122 93 / 8%);
+}
+
 @media (max-width: 720px) {
   .learning-session-header {
     align-items: flex-start;
@@ -2510,5 +2605,14 @@ h6.reading-heading {
   .learning-question-card .dialog-actions {
     align-items: stretch;
     flex-direction: column;
+  }
+
+  .challenge-settings {
+    align-items: stretch;
+  }
+
+  .challenge-settings > *,
+  .challenge-settings button {
+    width: 100%;
   }
 }

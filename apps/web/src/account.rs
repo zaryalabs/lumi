@@ -26,6 +26,7 @@ pub(crate) const API_BASE: &str = match option_env!("LUMI_API_BASE") {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum AppRoute {
     Library,
+    Challenges,
     AiQueue,
     Connections,
     Settings,
@@ -40,6 +41,9 @@ fn initial_route() -> AppRoute {
         .unwrap_or_default();
     if hash == "#settings" {
         return AppRoute::Settings;
+    }
+    if hash == "#challenges" {
+        return AppRoute::Challenges;
     }
     if hash == "#connections" {
         return AppRoute::Connections;
@@ -72,6 +76,7 @@ fn initial_route() -> AppRoute {
 fn set_browser_route(route: AppRoute) {
     let hash = match route {
         AppRoute::Library => "library".to_owned(),
+        AppRoute::Challenges => "challenges".to_owned(),
         AppRoute::AiQueue => "ai-queue".to_owned(),
         AppRoute::Connections => "connections".to_owned(),
         AppRoute::Settings => "settings".to_owned(),
@@ -164,6 +169,7 @@ pub(crate) fn AccountGate() -> Element {
     use_effect(move || {
         let title = match route() {
             AppRoute::Library => "Библиотека — Lumi",
+            AppRoute::Challenges => "Челленджи — Lumi",
             AppRoute::AiQueue => "AI-задачи — Lumi",
             AppRoute::Connections => "Подключения — Lumi",
             AppRoute::Settings => "Администрирование — Lumi",
@@ -252,6 +258,10 @@ pub(crate) fn AccountGate() -> Element {
                                 set_browser_route(AppRoute::Library);
                                 route.set(AppRoute::Library);
                             }, "Библиотека" }
+                            a { href: "#challenges", aria_current: if route() == AppRoute::Challenges { "page" } else { "false" }, onclick: move |_| {
+                                set_browser_route(AppRoute::Challenges);
+                                route.set(AppRoute::Challenges);
+                            }, "Челленджи" }
                             a { href: "#ai-queue", aria_current: if route() == AppRoute::AiQueue { "page" } else { "false" }, onclick: move |_| {
                                 set_browser_route(AppRoute::AiQueue);
                                 route.set(AppRoute::AiQueue);
@@ -332,6 +342,15 @@ pub(crate) fn AccountGate() -> Element {
                         }
                     } else if route() == AppRoute::Connections {
                         ConnectionsApp { csrf_token: csrf.read().clone() }
+                    } else if route() == AppRoute::Challenges {
+                        crate::learning::ChallengesPage {
+                            csrf_token: csrf.read().clone(),
+                            on_open_session: move |session_id| {
+                                let next = AppRoute::LearningSession(session_id);
+                                set_browser_route(next);
+                                route.set(next);
+                            },
+                        }
                     } else if route() == AppRoute::AiQueue {
                         crate::ai::AiQueuePage { csrf_token: csrf.read().clone() }
                     } else if route() == AppRoute::Settings && is_admin {

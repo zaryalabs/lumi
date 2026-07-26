@@ -68,6 +68,15 @@ evaluation/explain-back, voice и общий release gate остаются сл�
 `0.3.0`. Контракт описан в
 [`docs/adr/0026-learning-completion-items-sessions.md`](docs/adr/0026-learning-completion-items-sessions.md).
 
+Для `0.3.0/E2` реализованы ordered hints/source assistance evidence,
+versioned FSRS scheduling, атомарное обновление attempt + schedule и bounded
+экран `Челленджи` с `Сегодня`/`Закрепить сейчас`. Global scheduling,
+manual-only, material pause/resume и session snooze сохраняют историю и не
+создают штрафной backlog. Persistent server публикует capability
+`learning-scheduling`; контракт и проверка описаны в
+[`ADR 0027`](docs/adr/0027-fsrs-scheduling-challenges.md) и
+[`learning runbook`](docs/runbooks/learning.md).
+
 ## Локальный запуск
 
 Для основного пути нужны Docker с Compose и `make`. Он собирает и запускает

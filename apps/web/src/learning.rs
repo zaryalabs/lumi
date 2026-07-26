@@ -8,11 +8,13 @@ use lumi_core::{
     AiContextAttachment, AiSourceScope, ChangeLearningItemStatusCommand, CompleteReadingResponse,
     CompleteReadingScopeCommand, CreateLearningItemCommand, CreateLearningSessionCommand,
     LearningAnswer, LearningAnswerPresentation, LearningAnswerSpec, LearningAttempt,
-    LearningAttemptOutcome, LearningItem, LearningItemKind, LearningItemPage, LearningItemStatus,
-    LearningOffer, LearningOfferAction, LearningOption, LearningSession, LearningSessionId,
-    LearningSessionKind, LearningSessionState, LearningSourceId, MaterialId,
-    MoveReadingPositionCommand, SelfCheckRating, SubmitLearningAttemptCommand,
-    UpdateLearningItemCommand, UpdateLearningOfferCommand,
+    LearningAttemptOutcome, LearningChallengeGroup, LearningHint, LearningHintReveal, LearningItem,
+    LearningItemKind, LearningItemPage, LearningItemStatus, LearningOffer, LearningOfferAction,
+    LearningOption, LearningReviewRating, LearningSession, LearningSessionId, LearningSessionKind,
+    LearningSessionState, LearningSettings, LearningSourceId, LearningSourceScheduleSettings,
+    LearningToday, MaterialId, MoveReadingPositionCommand, SelfCheckRating,
+    SnoozeLearningSessionCommand, SubmitLearningAttemptCommand, UpdateLearningItemCommand,
+    UpdateLearningOfferCommand, UpdateLearningSettingsCommand,
 };
 use uuid::Uuid;
 use web_sys::RequestCredentials;
@@ -155,6 +157,9 @@ pub(crate) fn MaterialLearningPage(
     let mut answer_b = use_signal(String::new);
     let mut correct = use_signal(|| "a".to_owned());
     let mut explanation = use_signal(String::new);
+    let mut hint_one = use_signal(String::new);
+    let mut hint_two = use_signal(String::new);
+    let mut schedule_settings = use_signal(|| None::<LearningSourceScheduleSettings>);
     let csrf = use_signal(|| csrf_token);
     use_effect(move || {
         let _ = refresh();
@@ -164,6 +169,16 @@ pub(crate) fn MaterialLearningPage(
                 Err(message) => error.set(message),
             }
         });
+    });
+    use_effect(move || {
+        if let Some(source_id) = source_id {
+            spawn(async move {
+                match load_source_settings(source_id).await {
+                    Ok(value) => schedule_settings.set(Some(value)),
+                    Err(message) => error.set(message),
+                }
+            });
+        }
     });
     let active_count = items
         .read()
@@ -186,16 +201,35 @@ pub(crate) fn MaterialLearningPage(
                     p { class: "library-lead", "Вопросы версионируются, а начатые сессии сохраняют исходную формулировку." }
                 }
                 if let Some(source_id) = effective_source_id {
-                    button { class: "primary-action", r#type: "button", disabled: active_count == 0 || busy(), onclick: move |_| {
-                        busy.set(true);
-                        spawn(async move {
-                            match create_session(source_id, LearningSessionKind::ManualPractice, &csrf.read()).await {
-                                Ok(session) => on_open_session.call(session.id),
-                                Err(message) => error.set(message),
+                    div { class: "dialog-actions",
+                        button { class: "primary-action", r#type: "button", disabled: active_count == 0 || busy(), onclick: move |_| {
+                            busy.set(true);
+                            spawn(async move {
+                                match create_session(source_id, LearningSessionKind::ManualPractice, &csrf.read()).await {
+                                    Ok(session) => on_open_session.call(session.id),
+                                    Err(message) => error.set(message),
+                                }
+                                busy.set(false);
+                            });
+                        }, "Начать самопроверку ({active_count})" }
+                        if let Some(settings) = schedule_settings.read().as_ref() {
+                            {
+                                let paused = settings.paused_at.is_some();
+                                rsx! {
+                                    button { class: "secondary-action", r#type: "button", disabled: busy(), onclick: move |_| {
+                                        busy.set(true);
+                                        spawn(async move {
+                                            match set_source_paused(source_id, !paused, &csrf.read()).await {
+                                                Ok(value) => schedule_settings.set(Some(value)),
+                                                Err(message) => error.set(message),
+                                            }
+                                            busy.set(false);
+                                        });
+                                    }, if paused { "Возобновить повторение" } else { "Пауза повторения" } }
+                                }
                             }
-                            busy.set(false);
-                        });
-                    }, "Начать самопроверку ({active_count})" }
+                        }
+                    }
                 }
             }
             if !error().is_empty() {
@@ -220,7 +254,7 @@ pub(crate) fn MaterialLearningPage(
                                         p { "{item.current_revision.explanation}" }
                                         div { class: "dialog-actions",
                                             button { class: "secondary-action", r#type: "button", onclick: move |_| {
-                                                fill_editor(&edit_item, &mut kind, &mut prompt, &mut answer_a, &mut answer_b, &mut correct, &mut explanation);
+                                                fill_editor(&edit_item, &mut kind, &mut prompt, &mut answer_a, &mut answer_b, &mut correct, &mut explanation, &mut hint_one, &mut hint_two);
                                                 editing.set(Some(edit_item.clone()));
                                             }, "Редактировать" }
                                             button { class: "text-action", r#type: "button", onclick: move |_| {
@@ -250,6 +284,7 @@ pub(crate) fn MaterialLearningPage(
                         select { value: "{kind}", onchange: move |event| kind.set(event.value()),
                             option { value: "single", "Один вариант" }
                             option { value: "open", "Открытый ответ с самопроверкой" }
+                            option { value: "hinted", "Вопрос с подсказками" }
                             option { value: "true_false", "Верно / неверно" }
                         }
                     }
@@ -265,7 +300,7 @@ pub(crate) fn MaterialLearningPage(
                                 option { value: "b", "B" }
                             }
                         }
-                    } else if kind() == "open" {
+                    } else if kind() == "open" || kind() == "hinted" {
                         label { "Пример ответа",
                             textarea { rows: "3", value: "{answer_a}", oninput: move |event| answer_a.set(event.value()) }
                         }
@@ -280,11 +315,19 @@ pub(crate) fn MaterialLearningPage(
                     label { "Пояснение",
                         textarea { rows: "3", value: "{explanation}", oninput: move |event| explanation.set(event.value()) }
                     }
+                    if kind() == "hinted" {
+                        label { "Подсказка 1",
+                            textarea { rows: "2", value: "{hint_one}", oninput: move |event| hint_one.set(event.value()) }
+                        }
+                        label { "Подсказка 2 (необязательно)",
+                            textarea { rows: "2", value: "{hint_two}", oninput: move |event| hint_two.set(event.value()) }
+                        }
+                    }
                     div { class: "dialog-actions",
                         button { class: "primary-action", r#type: "button", disabled: busy() || prompt().trim().is_empty(), onclick: move |_| {
                             let Some(source_id) = effective_source_id else { return; };
                             let edit = editing.read().clone();
-                            let command = item_command(source_id, &kind(), &prompt(), &answer_a(), &answer_b(), &correct(), &explanation());
+                            let command = item_command(source_id, &kind(), &prompt(), &answer_a(), &answer_b(), &correct(), &explanation(), &hint_one(), &hint_two());
                             busy.set(true);
                             spawn(async move {
                                 let result = match (edit, command) {
@@ -299,6 +342,8 @@ pub(crate) fn MaterialLearningPage(
                                         answer_a.set(String::new());
                                         answer_b.set(String::new());
                                         explanation.set(String::new());
+                                        hint_one.set(String::new());
+                                        hint_two.set(String::new());
                                         refresh += 1;
                                     }
                                     Err(message) => error.set(message),
@@ -316,6 +361,217 @@ pub(crate) fn MaterialLearningPage(
     }
 }
 
+/// Bounded due and ready projection for deterministic review.
+#[component]
+pub(crate) fn ChallengesPage(
+    csrf_token: String,
+    on_open_session: EventHandler<LearningSessionId>,
+) -> Element {
+    let mut today = use_signal(|| None::<LearningToday>);
+    let mut error = use_signal(String::new);
+    let busy = use_signal(|| false);
+    let refresh = use_signal(|| 0_u64);
+    let mut material_filter = use_signal(|| None::<MaterialId>);
+    let csrf = use_signal(|| csrf_token);
+    use_effect(move || {
+        let _ = refresh();
+        spawn(async move {
+            match load_today().await {
+                Ok(value) => today.set(Some(value)),
+                Err(message) => error.set(message),
+            }
+        });
+    });
+    let snapshot = today.read().clone();
+    rsx! {
+        main { id: "main-content", class: "library-view challenges-view", aria_label: "Челленджи",
+            header { class: "library-hero compact",
+                div {
+                    p { class: "eyebrow", "Повторение с учётом забывания" }
+                    h1 { "Челленджи" }
+                    p { class: "library-lead", "Короткая очередь на сегодня. Подсказки и открытие источника учитываются, но не превращаются в штраф." }
+                }
+                if let Some(value) = snapshot.as_ref() {
+                    div { class: "challenge-estimate", role: "status",
+                        strong { "До {value.settings.daily_limit} заданий" }
+                        span { "≈ {value.groups.iter().map(|group| usize::from(group.estimated_minutes)).sum::<usize>()} мин" }
+                    }
+                }
+            }
+            if !error().is_empty() {
+                p { class: "library-alert", role: "alert", "{error}" }
+            }
+            if let Some(value) = snapshot {
+                section { class: "challenge-settings", aria_label: "Настройки повторения",
+                    div {
+                        strong { "Расписание" }
+                        span { if value.settings.scheduling_enabled { "Включено" } else { "Выключено" } }
+                    }
+                    button { class: "secondary-action", r#type: "button", disabled: busy(), onclick: move |_| {
+                        let next = UpdateLearningSettingsCommand {
+                            expected_revision: value.settings.object_revision,
+                            scheduling_enabled: !value.settings.scheduling_enabled,
+                            daily_limit: value.settings.daily_limit,
+                            manual_only: value.settings.manual_only,
+                        };
+                        update_settings_action(next, csrf, busy, error, refresh);
+                    }, if value.settings.scheduling_enabled { "Выключить" } else { "Включить" } }
+                    button { class: "secondary-action", r#type: "button", disabled: busy(), onclick: move |_| {
+                        let next = UpdateLearningSettingsCommand {
+                            expected_revision: value.settings.object_revision,
+                            scheduling_enabled: value.settings.scheduling_enabled,
+                            daily_limit: value.settings.daily_limit,
+                            manual_only: !value.settings.manual_only,
+                        };
+                        update_settings_action(next, csrf, busy, error, refresh);
+                    }, if value.settings.manual_only { "Вернуть «Сегодня»" } else { "Только вручную" } }
+                    label { "Лимит",
+                        select { value: "{value.settings.daily_limit}", onchange: move |event| {
+                            let Ok(limit) = event.value().parse::<u16>() else { return; };
+                            let next = UpdateLearningSettingsCommand {
+                                expected_revision: value.settings.object_revision,
+                                scheduling_enabled: value.settings.scheduling_enabled,
+                                daily_limit: limit,
+                                manual_only: value.settings.manual_only,
+                            };
+                            update_settings_action(next, csrf, busy, error, refresh);
+                        },
+                            option { value: "5", "5" }
+                            option { value: "10", "10" }
+                            option { value: "20", "20" }
+                            option { value: "40", "40" }
+                        }
+                    }
+                    label { "Материал",
+                        select { value: material_filter().map_or_else(|| "all".to_owned(), |id| id.to_string()), onchange: move |event| {
+                            material_filter.set(
+                                (event.value() != "all")
+                                    .then(|| Uuid::parse_str(&event.value()).ok())
+                                    .flatten()
+                            );
+                        },
+                            option { value: "all", "Все материалы" }
+                            for group in unique_material_groups(&value) {
+                                option { value: "{group.material_id}", "{group.title}" }
+                            }
+                        }
+                    }
+                }
+                section { class: "library-section challenge-today", aria_label: "Сегодня",
+                    h2 { "Сегодня" }
+                    p { class: "challenge-counts", "К повторению: {value.counts.due} · Закрепить: {value.counts.ready} · Черновики: {value.counts.drafts}" }
+                    if !value.settings.scheduling_enabled {
+                        p { class: "challenge-empty", "Повторения выключены. Задания и история сохранены; ручная практика доступна ниже." }
+                    } else if value.settings.manual_only {
+                        p { class: "challenge-empty", "Включён режим «только вручную». Lumi не формирует автоматическую очередь." }
+                    } else if filtered_groups(&value.groups, material_filter()).is_empty() {
+                        p { class: "challenge-empty", if value.counts.due == 0 { "На сегодня всё выполнено." } else { "Для выбранного материала нет заданий на сегодня." } }
+                    } else {
+                        div { class: "challenge-grid",
+                            for group in filtered_groups(&value.groups, material_filter()) {
+                                {challenge_group_card(group, true, csrf, busy, error, on_open_session)}
+                            }
+                        }
+                    }
+                }
+                section { class: "library-section", aria_label: "Закрепить сейчас",
+                    h2 { "Закрепить сейчас" }
+                    if filtered_groups(&value.ready_groups, material_filter()).is_empty() {
+                        p { class: "challenge-empty", "Новых активных заданий нет." }
+                    } else {
+                        div { class: "challenge-grid",
+                            for group in filtered_groups(&value.ready_groups, material_filter()) {
+                                {challenge_group_card(group, false, csrf, busy, error, on_open_session)}
+                            }
+                        }
+                    }
+                }
+                section { class: "library-section challenge-future", aria_label: "Другие режимы",
+                    article {
+                        h2 { "Объяснить" }
+                        p { "Explain-back появится в следующем learning-эпике. Готовые тесты, подсказки и расписание работают без AI-провайдера." }
+                    }
+                    article {
+                        h2 { "Черновики" }
+                        p { "{value.counts.drafts} заданий ожидают активации в материалах." }
+                    }
+                }
+            } else if error().is_empty() {
+                p { role: "status", aria_live: "polite", "Собираем ограниченную очередь…" }
+            }
+        }
+    }
+}
+
+fn challenge_group_card(
+    group: LearningChallengeGroup,
+    scheduled: bool,
+    csrf: Signal<String>,
+    mut busy: Signal<bool>,
+    mut error: Signal<String>,
+    on_open_session: EventHandler<LearningSessionId>,
+) -> Element {
+    let source_id = group.source_id;
+    rsx! {
+        article { class: "challenge-card",
+            p { class: "eyebrow", if scheduled { "Повторить" } else { "Новое" } }
+            h3 { "{group.title}" }
+            p { "{group.item_ids.len()} заданий · ≈ {group.estimated_minutes} мин" }
+            button { class: "primary-action", r#type: "button", disabled: busy(), onclick: move |_| {
+                busy.set(true);
+                spawn(async move {
+                    let kind = if scheduled { LearningSessionKind::ScheduledReview } else { LearningSessionKind::ManualPractice };
+                    match create_session(source_id, kind, &csrf.read()).await {
+                        Ok(session) => on_open_session.call(session.id),
+                        Err(message) => error.set(message),
+                    }
+                    busy.set(false);
+                });
+            }, if scheduled { "Начать повторение" } else { "Закрепить" } }
+        }
+    }
+}
+
+fn filtered_groups(
+    groups: &[LearningChallengeGroup],
+    material_id: Option<MaterialId>,
+) -> Vec<LearningChallengeGroup> {
+    groups
+        .iter()
+        .filter(|group| material_id.is_none_or(|id| group.material_id == id))
+        .cloned()
+        .collect()
+}
+
+fn unique_material_groups(today: &LearningToday) -> Vec<LearningChallengeGroup> {
+    let mut groups = today
+        .groups
+        .iter()
+        .chain(&today.ready_groups)
+        .cloned()
+        .collect::<Vec<_>>();
+    groups.sort_by_key(|group| group.material_id);
+    groups.dedup_by_key(|group| group.material_id);
+    groups
+}
+
+fn update_settings_action(
+    command: UpdateLearningSettingsCommand,
+    csrf: Signal<String>,
+    mut busy: Signal<bool>,
+    mut error: Signal<String>,
+    mut refresh: Signal<u64>,
+) {
+    busy.set(true);
+    spawn(async move {
+        match save_learning_settings(&command, &csrf.read()).await {
+            Ok(_) => refresh += 1,
+            Err(message) => error.set(message),
+        }
+        busy.set(false);
+    });
+}
+
 /// Reload-safe deterministic learning session runner.
 #[component]
 pub(crate) fn LearningSessionPage(
@@ -331,6 +587,7 @@ pub(crate) fn LearningSessionPage(
     let mut text_answer = use_signal(String::new);
     let mut revealed_item = use_signal(|| None::<LearningItem>);
     let mut self_check = use_signal(|| None::<SelfCheckRating>);
+    let mut review_rating = use_signal(|| None::<LearningReviewRating>);
     let mut refresh = use_signal(|| 0_u64);
     let csrf = use_signal(|| csrf_token);
     use_effect(move || {
@@ -376,6 +633,18 @@ pub(crate) fn LearningSessionPage(
                 }
                 if let Some(value) = session.read().as_ref() {
                     span { role: "status", "{value.attempts.len()} / {value.items.len()}" }
+                    if value.kind == LearningSessionKind::ScheduledReview {
+                        button { class: "text-action", r#type: "button", disabled: busy(), onclick: move |_| {
+                            busy.set(true);
+                            spawn(async move {
+                                match snooze(session_id, 1, &csrf.read()).await {
+                                    Ok(_) => on_close.call(()),
+                                    Err(message) => error.set(message),
+                                }
+                                busy.set(false);
+                            });
+                        }, "Отложить на завтра" }
+                    }
                 }
             }
             if !error().is_empty() {
@@ -398,6 +667,31 @@ pub(crate) fn LearningSessionPage(
                     section { class: "learning-question-card", aria_label: "Задание {item.position + 1}",
                         p { class: "eyebrow", "Задание {item.position + 1} из {value.items.len()}" }
                         h2 { "{item.prompt}" }
+                        if item.revealed_hint_count > 0 {
+                            ol { class: "learning-hints", aria_label: "Открытые подсказки",
+                                for hint in item.hints.iter().take(usize::from(item.revealed_hint_count)) {
+                                    li { "{hint.text}" }
+                                }
+                            }
+                        }
+                        if usize::from(item.revealed_hint_count) < item.hints.len() {
+                            {
+                                let hint_item_id = item.item_id;
+                                let next_position = item.revealed_hint_count.saturating_add(1);
+                                rsx! {
+                                    button { class: "secondary-action", r#type: "button", disabled: busy(), onclick: move |_| {
+                                        busy.set(true);
+                                        spawn(async move {
+                                            match reveal_hint(session_id, hint_item_id, next_position, &csrf.read()).await {
+                                                Ok(_) => refresh += 1,
+                                                Err(message) => error.set(message),
+                                            }
+                                            busy.set(false);
+                                        });
+                                    }, "Открыть подсказку {next_position}" }
+                                }
+                            }
+                        }
                         {answer_input(&item.answer, selected, text_answer)}
                         if matches!(item.answer, LearningAnswerPresentation::OpenText | LearningAnswerPresentation::Flashcard) {
                             if revealed_item.read().is_none() {
@@ -424,9 +718,16 @@ pub(crate) fn LearningSessionPage(
                                 }
                             }
                         }
+                        fieldset { class: "learning-rating",
+                            legend { "Насколько легко получилось вспомнить?" }
+                            label { input { r#type: "radio", name: "review-rating", checked: review_rating() == Some(LearningReviewRating::Again), onchange: move |_| review_rating.set(Some(LearningReviewRating::Again)) } "Не вспомнил" }
+                            label { input { r#type: "radio", name: "review-rating", checked: review_rating() == Some(LearningReviewRating::Hard), onchange: move |_| review_rating.set(Some(LearningReviewRating::Hard)) } "С трудом" }
+                            label { input { r#type: "radio", name: "review-rating", checked: review_rating() == Some(LearningReviewRating::Good), onchange: move |_| review_rating.set(Some(LearningReviewRating::Good)) } "Нормально" }
+                            label { input { r#type: "radio", name: "review-rating", checked: review_rating() == Some(LearningReviewRating::Easy), onchange: move |_| review_rating.set(Some(LearningReviewRating::Easy)) } "Легко" }
+                        }
                         div { class: "dialog-actions",
-                            button { class: "primary-action", r#type: "button", disabled: busy() || !answer_ready(&item.answer, &selected.read(), &text_answer(), self_check()), onclick: move |_| {
-                                let command = build_attempt(&submit_item.answer, &selected.read(), &text_answer(), self_check());
+                            button { class: "primary-action", r#type: "button", disabled: busy() || review_rating().is_none() || !answer_ready(&item.answer, &selected.read(), &text_answer(), self_check()), onclick: move |_| {
+                                let command = build_attempt(&submit_item.answer, &selected.read(), &text_answer(), self_check(), review_rating());
                                 let Some(command) = command else { return; };
                                 busy.set(true);
                                 spawn(async move {
@@ -436,6 +737,7 @@ pub(crate) fn LearningSessionPage(
                                             text_answer.set(String::new());
                                             revealed_item.set(None);
                                             self_check.set(None);
+                                            review_rating.set(None);
                                             refresh += 1;
                                         }
                                         Err(message) => error.set(message),
@@ -505,6 +807,9 @@ fn AttemptFeedback(attempt: LearningAttempt) -> Element {
             p { "{attempt.feedback.explanation}" }
             if attempt.source_opened {
                 small { "Источник был открыт до ответа." }
+            }
+            if !attempt.hints_used.is_empty() {
+                small { "Использовано подсказок: {attempt.hints_used.len()}." }
             }
         }
     }
@@ -586,6 +891,7 @@ fn build_attempt(
     selected: &HashSet<String>,
     text: &str,
     self_check: Option<SelfCheckRating>,
+    review_rating: Option<LearningReviewRating>,
 ) -> Option<SubmitLearningAttemptCommand> {
     let answer = match answer {
         LearningAnswerPresentation::SingleChoice { .. } => LearningAnswer::SingleChoice {
@@ -609,6 +915,7 @@ fn build_attempt(
         answer,
         self_check,
         elapsed_ms: 0,
+        review_rating,
     })
 }
 
@@ -643,6 +950,10 @@ fn source_attachment(
     }
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the small browser editor passes independent controlled field values"
+)]
 fn item_command(
     source_id: LearningSourceId,
     kind: &str,
@@ -651,6 +962,8 @@ fn item_command(
     answer_b: &str,
     correct: &str,
     explanation: &str,
+    hint_one: &str,
+    hint_two: &str,
 ) -> Result<CreateLearningItemCommand, String> {
     let (item_kind, answer_spec) = match kind {
         "single" => {
@@ -680,6 +993,17 @@ fn item_command(
                 sample_answer: answer_a.trim().to_owned(),
             },
         ),
+        "hinted" => {
+            if answer_a.trim().is_empty() || hint_one.trim().is_empty() {
+                return Err("Добавьте пример ответа и первую подсказку.".to_owned());
+            }
+            (
+                LearningItemKind::HintedQuestion,
+                LearningAnswerSpec::HintedSelfCheck {
+                    sample_answer: answer_a.trim().to_owned(),
+                },
+            )
+        }
         _ => (
             LearningItemKind::QuizTrueFalse,
             LearningAnswerSpec::TrueFalse {
@@ -687,6 +1011,16 @@ fn item_command(
             },
         ),
     };
+    let hints = [hint_one, hint_two]
+        .into_iter()
+        .filter(|hint| !hint.trim().is_empty())
+        .enumerate()
+        .map(|(index, hint)| LearningHint {
+            position: u16::try_from(index + 1).unwrap_or(u16::MAX),
+            text: hint.trim().to_owned(),
+            source_anchor: None,
+        })
+        .collect();
     Ok(CreateLearningItemCommand {
         source_id,
         kind: item_kind,
@@ -694,10 +1028,15 @@ fn item_command(
         prompt: prompt.trim().to_owned(),
         answer_spec,
         explanation: explanation.trim().to_owned(),
+        hints,
         source_anchor: None,
     })
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the small browser editor restores independent controlled field signals"
+)]
 fn fill_editor(
     item: &LearningItem,
     kind: &mut Signal<String>,
@@ -706,9 +1045,25 @@ fn fill_editor(
     answer_b: &mut Signal<String>,
     correct: &mut Signal<String>,
     explanation: &mut Signal<String>,
+    hint_one: &mut Signal<String>,
+    hint_two: &mut Signal<String>,
 ) {
     prompt.set(item.current_revision.prompt.clone());
     explanation.set(item.current_revision.explanation.clone());
+    hint_one.set(
+        item.current_revision
+            .hints
+            .first()
+            .map(|hint| hint.text.clone())
+            .unwrap_or_default(),
+    );
+    hint_two.set(
+        item.current_revision
+            .hints
+            .get(1)
+            .map(|hint| hint.text.clone())
+            .unwrap_or_default(),
+    );
     match &item.current_revision.answer_spec {
         LearningAnswerSpec::SingleChoice {
             options,
@@ -731,6 +1086,11 @@ fn fill_editor(
         }
         LearningAnswerSpec::OpenSelfCheck { sample_answer } => {
             kind.set("open".to_owned());
+            answer_a.set(sample_answer.clone());
+            answer_b.set(String::new());
+        }
+        LearningAnswerSpec::HintedSelfCheck { sample_answer } => {
+            kind.set("hinted".to_owned());
             answer_a.set(sample_answer.clone());
             answer_b.set(String::new());
         }
@@ -802,6 +1162,38 @@ async fn load_items(material_id: MaterialId) -> Result<LearningItemPage, String>
     .await
 }
 
+async fn load_today() -> Result<LearningToday, String> {
+    get_json("/learning/challenges/today").await
+}
+
+async fn save_learning_settings(
+    command: &UpdateLearningSettingsCommand,
+    csrf: &str,
+) -> Result<LearningSettings, String> {
+    patch_json("/learning/settings", command, csrf).await
+}
+
+async fn load_source_settings(
+    source_id: LearningSourceId,
+) -> Result<LearningSourceScheduleSettings, String> {
+    get_json(&format!("/learning/sources/{source_id}/settings")).await
+}
+
+async fn set_source_paused(
+    source_id: LearningSourceId,
+    paused: bool,
+    csrf: &str,
+) -> Result<LearningSourceScheduleSettings, String> {
+    post_empty(
+        &format!(
+            "/learning/sources/{source_id}/{}",
+            if paused { "pause" } else { "resume" }
+        ),
+        csrf,
+    )
+    .await
+}
+
 async fn create_item(
     command: &CreateLearningItemCommand,
     csrf: &str,
@@ -821,6 +1213,7 @@ async fn update_item(
             prompt: command.prompt,
             answer_spec: command.answer_spec,
             explanation: command.explanation,
+            hints: command.hints,
             source_anchor: command.source_anchor,
         },
         csrf,
@@ -887,6 +1280,32 @@ async fn record_source_opened(
 ) -> Result<LearningSession, String> {
     post_empty(
         &format!("/learning/sessions/{session_id}/items/{item_id}/source-opened"),
+        csrf,
+    )
+    .await
+}
+
+async fn reveal_hint(
+    session_id: LearningSessionId,
+    item_id: Uuid,
+    position: u16,
+    csrf: &str,
+) -> Result<LearningHintReveal, String> {
+    post_empty(
+        &format!("/learning/sessions/{session_id}/items/{item_id}/hints/{position}/reveal"),
+        csrf,
+    )
+    .await
+}
+
+async fn snooze(
+    session_id: LearningSessionId,
+    days: u16,
+    csrf: &str,
+) -> Result<LearningSession, String> {
+    post_json(
+        &format!("/learning/sessions/{session_id}/snooze"),
+        &SnoozeLearningSessionCommand { days },
         csrf,
     )
     .await

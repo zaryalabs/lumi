@@ -27,6 +27,31 @@ pub type LearningSessionId = Uuid;
 /// Stable learning attempt identifier.
 pub type LearningAttemptId = Uuid;
 
+/// One ordered assistance level attached to an immutable item revision.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct LearningHint {
+    /// Stable one-based reveal position.
+    pub position: u16,
+    /// User-visible assistance text.
+    pub text: String,
+    /// Optional exact source target for this assistance level.
+    pub source_anchor: Option<Anchor>,
+}
+
+impl LearningHint {
+    /// Validate the ordered assistance payload.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`LearningValidationError`] when the position or text is empty.
+    pub fn validate(&self) -> Result<(), LearningValidationError> {
+        if self.position == 0 || self.text.trim().is_empty() {
+            return Err(LearningValidationError::InvalidHint);
+        }
+        Ok(())
+    }
+}
+
 /// Immutable source scope used by learning items and sessions.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -425,6 +450,9 @@ pub struct LearningItemRevision {
     pub answer_spec: LearningAnswerSpec,
     /// Feedback explanation shown after submission.
     pub explanation: String,
+    /// Ordered assistance levels hidden until explicitly revealed.
+    #[serde(default)]
+    pub hints: Vec<LearningHint>,
     /// Optional exact source anchor.
     pub source_anchor: Option<Anchor>,
     /// Creation timestamp.
@@ -446,6 +474,17 @@ impl LearningItemRevision {
             return Err(LearningValidationError::EmptyPrompt);
         }
         self.answer_spec.validate()?;
+        for (index, hint) in self.hints.iter().enumerate() {
+            hint.validate()?;
+            if usize::from(hint.position) != index.saturating_add(1)
+                || hint
+                    .source_anchor
+                    .as_ref()
+                    .is_some_and(|anchor| anchor.revision_id != source_revision_id)
+            {
+                return Err(LearningValidationError::InvalidHint);
+            }
+        }
         if self
             .source_anchor
             .as_ref()
@@ -495,6 +534,9 @@ pub struct CreateLearningItemCommand {
     pub answer_spec: LearningAnswerSpec,
     /// Feedback explanation.
     pub explanation: String,
+    /// Ordered assistance levels.
+    #[serde(default)]
+    pub hints: Vec<LearningHint>,
     /// Optional source anchor.
     pub source_anchor: Option<Anchor>,
 }
@@ -510,6 +552,9 @@ pub struct UpdateLearningItemCommand {
     pub answer_spec: LearningAnswerSpec,
     /// Replacement feedback explanation.
     pub explanation: String,
+    /// Replacement ordered assistance levels.
+    #[serde(default)]
+    pub hints: Vec<LearningHint>,
     /// Replacement optional source anchor.
     pub source_anchor: Option<Anchor>,
 }
@@ -620,6 +665,12 @@ pub struct LearningSessionItem {
     pub prompt: String,
     /// Presentation-safe answer input.
     pub answer: LearningAnswerPresentation,
+    /// Ordered assistance levels, revealed progressively by the client.
+    #[serde(default)]
+    pub hints: Vec<LearningHint>,
+    /// Number of assistance levels already revealed in this session.
+    #[serde(default)]
+    pub revealed_hint_count: u16,
     /// Exact source anchor available for source navigation.
     pub source_anchor: Option<Anchor>,
 }
@@ -662,6 +713,20 @@ pub enum SelfCheckRating {
     Partial,
     /// The answer was not recalled.
     NotRecalled,
+}
+
+/// Explicit FSRS review rating selected by the user.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LearningReviewRating {
+    /// Recall failed; relearn soon.
+    Again,
+    /// Recall succeeded with substantial effort.
+    Hard,
+    /// Recall succeeded with expected effort.
+    Good,
+    /// Recall was immediate and unassisted.
+    Easy,
 }
 
 /// Deterministic attempt outcome.
@@ -712,6 +777,12 @@ pub struct LearningAttempt {
     pub elapsed_ms: u64,
     /// Whether the source was opened before submission.
     pub source_opened: bool,
+    /// Ordered hint positions revealed before submission.
+    #[serde(default)]
+    pub hints_used: Vec<u16>,
+    /// Explicit or conservatively inferred scheduler rating.
+    #[serde(default)]
+    pub review_rating: Option<LearningReviewRating>,
     /// Creation timestamp.
     pub created_at: TimestampMs,
 }
@@ -812,6 +883,9 @@ pub struct SubmitLearningAttemptCommand {
     pub self_check: Option<SelfCheckRating>,
     /// Client-measured elapsed time.
     pub elapsed_ms: u64,
+    /// Explicit recall rating used by the replaceable scheduler.
+    #[serde(default)]
+    pub review_rating: Option<LearningReviewRating>,
 }
 
 /// Evidence command recorded when the user opens the source before answering.
@@ -819,6 +893,24 @@ pub struct SubmitLearningAttemptCommand {
 pub struct RecordLearningSourceOpenedCommand {
     /// Item whose source was opened.
     pub item_id: LearningItemId,
+}
+
+/// Command for revealing exactly the next ordered assistance level.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct RevealLearningHintCommand {
+    /// Item whose next hint is being revealed.
+    pub item_id: LearningItemId,
+    /// Expected one-based position.
+    pub position: u16,
+}
+
+/// Result of an ordered hint reveal.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct LearningHintReveal {
+    /// Revealed assistance level.
+    pub hint: LearningHint,
+    /// Total assistance levels revealed for the item in this session.
+    pub revealed_count: u16,
 }
 
 /// Deterministically grade one answer against an immutable item revision.
@@ -987,28 +1079,79 @@ fn normalize_answer(answer: &str) -> Result<String, LearningValidationError> {
     }
 }
 
-/// Scheduling input contract implemented by the later FSRS adapter.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+/// Durable scheduler lifecycle state.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LearningScheduleState {
+    /// Item has not completed its first recall.
+    New,
+    /// Item is in initial learning.
+    Learning,
+    /// Item is in ordinary spaced review.
+    Review,
+    /// Item is being relearned after a lapse.
+    Relearning,
+    /// Scheduling is paused without deleting history.
+    Paused,
+}
+
+/// Versioned per-user schedule for one stable learning item.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct LearningSchedule {
+    /// Stable item identity.
+    pub item_id: LearningItemId,
+    /// Current scheduler lifecycle state.
+    pub state: LearningScheduleState,
+    /// Next actionable UTC timestamp.
+    pub due_at: TimestampMs,
+    /// FSRS memory stability in days.
+    pub stability: f64,
+    /// FSRS difficulty on the 1–10 scale.
+    pub difficulty: f64,
+    /// Timestamp of the latest scheduled review.
+    pub last_review_at: Option<TimestampMs>,
+    /// Successful and failed scheduler updates.
+    pub repetitions: u32,
+    /// Count of `again` reviews after first exposure.
+    pub lapses: u32,
+    /// Stable algorithm identifier.
+    pub algorithm: String,
+    /// Exact parameter/mapping version.
+    pub algorithm_version: String,
+    /// Opaque versioned algorithm state for future migration.
+    pub algorithm_payload: serde_json::Value,
+    /// Optimistic object revision.
+    pub object_revision: u64,
+    /// Timestamp at which this item was paused.
+    pub paused_at: Option<TimestampMs>,
+}
+
+/// Scheduling input contract implemented by the FSRS adapter.
+#[derive(Clone, Debug, PartialEq)]
 pub struct SchedulerReview {
+    /// Existing durable state, absent for the first exposure.
+    pub previous: Option<LearningSchedule>,
+    /// Explicit or conservatively inferred review rating.
+    pub rating: LearningReviewRating,
     /// Attempt outcome.
     pub outcome: LearningAttemptOutcome,
     /// Explicit self-check rating, when present.
     pub self_check: Option<SelfCheckRating>,
     /// Whether source assistance was used.
     pub source_opened: bool,
+    /// Ordered hint positions revealed before submission.
+    pub hints_used: Vec<u16>,
+    /// UTC timestamp at which recall was submitted.
+    pub reviewed_at: TimestampMs,
 }
 
 /// Versioned scheduler output stored outside core.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct SchedulerDecision {
-    /// Algorithm identifier.
-    pub algorithm: String,
-    /// Algorithm version.
-    pub version: String,
-    /// Next due timestamp.
-    pub due_at: TimestampMs,
-    /// Opaque versioned algorithm state.
-    pub payload: serde_json::Value,
+    /// Complete next durable schedule state.
+    pub schedule: LearningSchedule,
+    /// Conservative rating suggested from correctness and assistance evidence.
+    pub suggested_rating: LearningReviewRating,
 }
 
 /// Replaceable scheduling boundary without PostgreSQL or UI dependencies.
@@ -1021,6 +1164,121 @@ pub trait Scheduler: Send + Sync {
     /// algorithm state cannot be processed safely.
     fn review(&self, review: SchedulerReview)
         -> Result<SchedulerDecision, LearningValidationError>;
+}
+
+/// Account-wide learning scheduling settings.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct LearningSettings {
+    /// Whether automatic scheduling is enabled.
+    pub scheduling_enabled: bool,
+    /// Maximum number of items projected into `Сегодня`.
+    pub daily_limit: u16,
+    /// Whether due items are hidden until an explicit manual launch.
+    pub manual_only: bool,
+    /// Optimistic object revision.
+    pub object_revision: u64,
+}
+
+impl Default for LearningSettings {
+    fn default() -> Self {
+        Self {
+            scheduling_enabled: true,
+            daily_limit: 20,
+            manual_only: false,
+            object_revision: 1,
+        }
+    }
+}
+
+/// Account-wide scheduling settings mutation.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct UpdateLearningSettingsCommand {
+    /// Expected optimistic object revision.
+    pub expected_revision: u64,
+    /// Whether automatic scheduling is enabled.
+    pub scheduling_enabled: bool,
+    /// Bounded daily item limit.
+    pub daily_limit: u16,
+    /// Whether review is available only through a manual launch.
+    pub manual_only: bool,
+}
+
+impl UpdateLearningSettingsCommand {
+    /// Validate safe projection bounds.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`LearningValidationError`] when the daily limit is outside
+    /// the supported lightweight session range.
+    pub fn validate(&self) -> Result<(), LearningValidationError> {
+        if !(1..=100).contains(&self.daily_limit) {
+            return Err(LearningValidationError::InvalidDailyLimit);
+        }
+        Ok(())
+    }
+}
+
+/// Per-source scheduling override and pause state.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct LearningSourceScheduleSettings {
+    /// Immutable source identity.
+    pub source_id: LearningSourceId,
+    /// Whether this source participates in automatic scheduling.
+    pub scheduling_enabled: bool,
+    /// Pause marker that preserves history and excludes overdue projection.
+    pub paused_at: Option<TimestampMs>,
+    /// Optimistic object revision.
+    pub object_revision: u64,
+}
+
+/// One source group in the bounded Challenges projection.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct LearningChallengeGroup {
+    /// Immutable source identity.
+    pub source_id: LearningSourceId,
+    /// Material identity used by navigation and filtering.
+    pub material_id: MaterialId,
+    /// Reader-facing source title.
+    pub title: String,
+    /// Due item ids selected in stable due order.
+    pub item_ids: Vec<LearningItemId>,
+    /// Approximate completion time in minutes.
+    pub estimated_minutes: u16,
+    /// Whether the source is currently paused.
+    pub paused: bool,
+}
+
+/// Counts kept separate from the bounded item payload.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+pub struct LearningChallengeCounts {
+    /// Due review items, excluding paused sources.
+    pub due: u32,
+    /// Active items without schedule history.
+    pub ready: u32,
+    /// Draft items awaiting activation.
+    pub drafts: u32,
+}
+
+/// Bounded `Сегодня` projection used by Web and future MCP adapters.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct LearningToday {
+    /// Current account scheduling settings.
+    pub settings: LearningSettings,
+    /// Selected source groups, together bounded by the daily limit.
+    pub groups: Vec<LearningChallengeGroup>,
+    /// Active unscheduled items available for immediate reinforcement.
+    pub ready_groups: Vec<LearningChallengeGroup>,
+    /// Unbounded category counts for clear empty states.
+    pub counts: LearningChallengeCounts,
+    /// Projection generation timestamp.
+    pub generated_at: TimestampMs,
+}
+
+/// Snooze a bounded review session without recording fake failures.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct SnoozeLearningSessionCommand {
+    /// Number of days to move unanswered items, bounded to 1–30.
+    pub days: u16,
 }
 
 /// Validation errors shared by core, API and clients.
@@ -1053,6 +1311,15 @@ pub enum LearningValidationError {
     /// Session lifecycle transition is invalid.
     #[error("learning session transition is invalid")]
     InvalidSessionTransition,
+    /// Hints must be non-empty and consecutively ordered from one.
+    #[error("learning hints are invalid or out of order")]
+    InvalidHint,
+    /// Daily review limit is outside the supported range.
+    #[error("learning daily limit must be between 1 and 100")]
+    InvalidDailyLimit,
+    /// Scheduler state or rating is invalid.
+    #[error("learning scheduler state is invalid")]
+    InvalidSchedule,
 }
 
 #[cfg(test)]
@@ -1067,6 +1334,7 @@ mod tests {
             prompt: "Проверка".to_owned(),
             answer_spec,
             explanation: "Пояснение".to_owned(),
+            hints: Vec::new(),
             source_anchor: None,
             created_at: 1,
         }

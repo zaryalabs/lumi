@@ -56,13 +56,16 @@ Knowledge Base, native full-copy replicas, Obsidian, plugin platform, будущ
 - `0.3.0 / E1`: revision-bound learning sources, durable completion и one-shot
   Reader offer, ручные versioned items, deterministic grading/self-check,
   immutable sessions, attempts, source jump и reload/resume;
+- `0.3.0 / E2`: ordered hints/source evidence, versioned FSRS schedules,
+  bounded Challenges `Сегодня`, daily limit, pause/resume/snooze/manual-only
+  без штрафного backlog;
 - release evidence A1 зафиксирован commit trailer
   `Lumi-Plan-Stage: 0.2.0/A1`.
 
 Ещё не готово:
 
-- learning scheduling/Challenges, AI/voice learning, общий learning release
-  gate, Desk/search/RAG и Community Spaces.
+- AI/voice learning, общий learning release gate, Desk/search/RAG и Community
+  Spaces.
 
 Persistent server публикует capabilities `ai-provider-openrouter`,
 `ai-provider-byok`, `ai-explicit-context`, `ai-global-chat`, `ai-task-queue`,
@@ -70,7 +73,7 @@ Persistent server публикует capabilities `ai-provider-openrouter`,
 `ai-abridged-lum`, а также route group `learning` и capability
 `learning-core`.
 
-После перехода на новую шкалу выполнено `5/18` продуктовых эпиков. Stage 0,
+После перехода на новую шкалу выполнено `6/18` продуктовых эпиков. Stage 0,
 Contract Freeze 1 и A1 остаются закрытыми prerequisites.
 
 Repository-side gates `make c`, PostgreSQL/compatibility/security/performance,
@@ -83,7 +86,7 @@ operator acceptance остаётся release gate окружения и не м�
 готовность. Поэтому новая шкала начинается с нуля завершённых end-to-end
 эпиков и отдельно сохраняет перечень уже готового foundation выше.
 
-Текущий следующий эпик — `0.3.0/E2: Повторение и Challenges`.
+Текущий следующий эпик — `0.3.0/E3: AI-обучение и explain-back`.
 
 ## Последовательность
 
@@ -118,7 +121,7 @@ operator gate.
 1. [x] **E1 — Обучение после чтения.** Learning foundation, completion,
    deterministic grading, durable sessions/attempts, Reader offer, source jump
    и reload/resume.
-2. [ ] **E2 — Повторение и Challenges.** FSRS, hints/evidence, bounded
+2. [x] **E2 — Повторение и Challenges.** FSRS, hints/evidence, bounded
    `Сегодня`, pause/resume/snooze/manual-only и scheduling UX.
 3. [ ] **E3 — AI-обучение и explain-back.** Generated drafts, open-answer
    evaluation, iterative cited feedback и no-provider/self-check fallback.

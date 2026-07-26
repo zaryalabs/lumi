@@ -14,6 +14,7 @@ pub mod jobs;
 mod learning;
 mod mcp;
 mod pdf_engine;
+mod scheduler;
 pub mod secrets;
 mod telegram;
 mod telegram_media;
@@ -626,6 +627,7 @@ async fn capabilities(State(state): State<AppState>) -> Json<ServiceCapabilities
         .extend(state.ai_capabilities.advertised_feature_ids());
     capabilities.route_groups.push("learning".to_owned());
     capabilities.features.push("learning-core".to_owned());
+    capabilities.features.push("learning-scheduling".to_owned());
     Json(capabilities)
 }
 
@@ -2055,6 +2057,10 @@ mod tests {
             .iter()
             .any(|feature| feature == "learning-core"));
         assert!(capabilities
+            .features
+            .iter()
+            .any(|feature| feature == "learning-scheduling"));
+        assert!(capabilities
             .route_groups
             .iter()
             .any(|group| group == "learning"));
@@ -2110,10 +2116,13 @@ mod tests {
         let migrations: Vec<SchemaMigration> =
             json_get(build_router(), "/api/v1/schema/migrations").await?;
 
-        assert_eq!(migrations.len(), 20);
+        assert_eq!(migrations.len(), 21);
         assert!(migrations
             .iter()
             .any(|migration| migration.id == "s1-0017-learning-core"));
+        assert!(migrations
+            .iter()
+            .any(|migration| migration.id == "s1-0018-learning-scheduling"));
         Ok(())
     }
 
@@ -2187,6 +2196,7 @@ mod tests {
                 prompt: "Reader core не зависит от DOM?".to_owned(),
                 answer_spec: lumi_core::LearningAnswerSpec::TrueFalse { correct: true },
                 explanation: "Reader core остаётся platform-independent.".to_owned(),
+                hints: Vec::new(),
                 source_anchor: None,
             })?,
         )
@@ -2203,6 +2213,7 @@ mod tests {
                     sample_answer: "Доменная модель не зависит от UI.".to_owned(),
                 },
                 explanation: "Ответ оценивает сам пользователь.".to_owned(),
+                hints: Vec::new(),
                 source_anchor: None,
             })?,
         )
@@ -2237,6 +2248,7 @@ mod tests {
                 answer: lumi_core::LearningAnswer::TrueFalse { value: true },
                 self_check: None,
                 elapsed_ms: 400,
+                review_rating: Some(lumi_core::LearningReviewRating::Good),
             })?,
         )
         .await?;
@@ -2244,6 +2256,13 @@ mod tests {
             attempt.feedback.outcome,
             lumi_core::LearningAttemptOutcome::Correct
         );
+        let schedules: Vec<lumi_core::LearningSchedule> =
+            json_get(app.clone(), "/api/v1/learning/schedules").await?;
+        assert_eq!(schedules.len(), 1);
+        assert_eq!(schedules[0].item_id, closed.id);
+        let today: lumi_core::LearningToday =
+            json_get(app.clone(), "/api/v1/learning/challenges/today").await?;
+        assert_eq!(today.counts.ready, 1);
 
         let resumed: lumi_core::LearningSession =
             json_get(app, &format!("/api/v1/learning/sessions/{}", offered.id)).await?;

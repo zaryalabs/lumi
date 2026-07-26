@@ -273,6 +273,7 @@ pub fn sample_learning_fixture(imported: &ImportedFixture) -> Option<LearningFix
                     },
                     explanation: "Material хранит identity, revision — immutable content."
                         .to_owned(),
+                    hints: Vec::new(),
                     source_anchor: Some(first_anchor.clone()),
                 },
                 answer: LearningAnswer::SingleChoice {
@@ -292,6 +293,7 @@ pub fn sample_learning_fixture(imported: &ImportedFixture) -> Option<LearningFix
                             "Platform adapter измеряет layout поверх общего reader core.".to_owned(),
                     },
                     explanation: "Открытый ответ оценивает пользователь.".to_owned(),
+                    hints: Vec::new(),
                     source_anchor: Some(second_anchor),
                 },
                 answer: LearningAnswer::Text {
@@ -310,6 +312,18 @@ pub fn sample_learning_fixture(imported: &ImportedFixture) -> Option<LearningFix
                         sample_answer: "Из path, quote context, hash и source locator.".to_owned(),
                     },
                     explanation: "Anchor остаётся source-backed.".to_owned(),
+                    hints: vec![
+                        crate::LearningHint {
+                            position: 1,
+                            text: "Вспомните, как anchor переживает изменение layout.".to_owned(),
+                            source_anchor: None,
+                        },
+                        crate::LearningHint {
+                            position: 2,
+                            text: "Нужны структурный путь и текстовый контекст.".to_owned(),
+                            source_anchor: Some(first_anchor.clone()),
+                        },
+                    ],
                     source_anchor: Some(first_anchor),
                 },
                 answer: LearningAnswer::Text {
@@ -727,6 +741,7 @@ mod tests {
                 prompt: item.command.prompt,
                 answer_spec: item.command.answer_spec,
                 explanation: item.command.explanation,
+                hints: item.command.hints,
                 source_anchor: item.command.source_anchor,
                 created_at: 0,
             };

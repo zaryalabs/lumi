@@ -114,6 +114,24 @@ reload не теряет ответов. `Открыть источник` за�
 AI generation/evaluation, explain-back и voice не объявляются capability
 `learning-core` и поставляются следующими эпиками.
 
+#### Реализованный scheduling vertical `0.3.0/E2`
+
+Ordered hints и открытие source сохраняются как append-only evidence и входят в
+attempt. Явный review rating обновляет versioned FSRS schedule атомарно с
+attempt; корректность и assistance дают только консервативную рекомендацию и не
+подменяют пользовательский rating.
+
+`#challenges` показывает bounded `Сегодня`, unscheduled `Закрепить сейчас`,
+due/ready/draft counts и отдельные состояния disabled/manual-only/done.
+Account daily limit по умолчанию равен `20`. Global disable и manual-only
+сохраняют schedules; source pause исключает material из overdue и reminder
+projection, а resume не раскрывает весь накопленный backlog. Snooze переносит
+только unanswered items без fake failures.
+
+Persistent server публикует capability `learning-scheduling`. Алгоритм,
+параметры, mapping и upgrade contract закреплены в
+[`ADR 0027`](../adr/0027-fsrs-scheduling-challenges.md).
+
 ### Типы упражнений
 
 Базовые exercise families:
@@ -296,6 +314,9 @@ Decision:
 - Use FSRS as the default scheduler behind a `Scheduler` port.
 - Store enough fields to replace algorithm later.
 - Keep algorithm version in schedule records.
+- Initial adapter is reproducible FSRS 4.5, desired retention `0.9`, version
+  `fsrs-4.5-lumi-v1`; a newer FSRS generation is an explicit replayed upgrade,
+  not an in-place semantic change.
 
 FSRS models estimated retention from actual attempts; UI may call this
 `повторение с учетом забывания`, but should not promise a universal fixed

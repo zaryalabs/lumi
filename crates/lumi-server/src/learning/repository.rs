@@ -6,13 +6,17 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use lumi_core::{
     grade_learning_answer, now_timestamp_ms, ChangeLearningItemStatusCommand,
     CompleteReadingResponse, CompleteReadingScopeCommand, CreateLearningItemCommand,
-    CreateLearningSessionCommand, DocumentRevisionId, LearningAttempt, LearningFeedback,
-    LearningItem, LearningItemId, LearningItemKind, LearningItemOrigin, LearningItemPage,
-    LearningItemRevision, LearningItemStatus, LearningOffer, LearningOfferAction,
-    LearningScopeKind, LearningSession, LearningSessionId, LearningSessionItem,
-    LearningSessionKind, LearningSessionState, LearningSource, LearningSourceId,
+    CreateLearningSessionCommand, DocumentRevisionId, LearningAttempt, LearningChallengeCounts,
+    LearningChallengeGroup, LearningFeedback, LearningHintReveal, LearningItem, LearningItemId,
+    LearningItemKind, LearningItemOrigin, LearningItemPage, LearningItemRevision,
+    LearningItemStatus, LearningOffer, LearningOfferAction, LearningReviewRating, LearningSchedule,
+    LearningScheduleState, LearningScopeKind, LearningSession, LearningSessionId,
+    LearningSessionItem, LearningSessionKind, LearningSessionState, LearningSettings,
+    LearningSource, LearningSourceId, LearningSourceScheduleSettings, LearningToday,
     LearningValidationError, MaterialId, ReadingCompletion, RecordLearningSourceOpenedCommand,
-    SubmitLearningAttemptCommand, UpdateLearningItemCommand, UpdateLearningOfferCommand, UserId,
+    RevealLearningHintCommand, SchedulerReview, SnoozeLearningSessionCommand,
+    SubmitLearningAttemptCommand, UpdateLearningItemCommand, UpdateLearningOfferCommand,
+    UpdateLearningSettingsCommand, UserId,
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -21,6 +25,8 @@ use sqlx_postgres::{PgPool, Postgres};
 use thiserror::Error;
 use time::OffsetDateTime;
 use uuid::Uuid;
+
+use crate::scheduler::FsrsScheduler;
 
 /// Material metadata used to validate a reader-emitted source in memory mode.
 #[derive(Clone, Debug)]
@@ -59,18 +65,21 @@ enum LearningBackend {
 #[derive(Clone)]
 pub(crate) struct LearningRuntime {
     backend: LearningBackend,
+    scheduler: FsrsScheduler,
 }
 
 impl LearningRuntime {
     pub(crate) fn memory() -> Self {
         Self {
             backend: LearningBackend::Memory(Arc::new(Mutex::new(MemoryLearningData::default()))),
+            scheduler: FsrsScheduler,
         }
     }
 
     pub(crate) fn postgres(pool: PgPool) -> Self {
         Self {
             backend: LearningBackend::Postgres(pool),
+            scheduler: FsrsScheduler,
         }
     }
 
@@ -346,6 +355,7 @@ impl LearningRuntime {
                 let mut data = lock_memory(data)?;
                 memory_submit_attempt(
                     &mut data,
+                    self.scheduler,
                     user_id,
                     session_id,
                     item_id,
@@ -356,6 +366,7 @@ impl LearningRuntime {
             LearningBackend::Postgres(pool) => {
                 pg_submit_attempt(
                     pool,
+                    self.scheduler,
                     user_id,
                     device_id,
                     session_id,
@@ -364,6 +375,165 @@ impl LearningRuntime {
                     command_key,
                 )
                 .await
+            }
+        }
+    }
+
+    pub(crate) async fn reveal_hint(
+        &self,
+        user_id: UserId,
+        session_id: LearningSessionId,
+        command: RevealLearningHintCommand,
+        command_key: &str,
+    ) -> Result<LearningHintReveal, LearningStoreError> {
+        match &self.backend {
+            LearningBackend::Memory(data) => {
+                let mut data = lock_memory(data)?;
+                memory_reveal_hint(&mut data, user_id, session_id, command, command_key)
+            }
+            LearningBackend::Postgres(pool) => {
+                pg_reveal_hint(pool, user_id, session_id, command, command_key).await
+            }
+        }
+    }
+
+    pub(crate) async fn settings(
+        &self,
+        user_id: UserId,
+    ) -> Result<LearningSettings, LearningStoreError> {
+        match &self.backend {
+            LearningBackend::Memory(data) => Ok(lock_memory(data)?
+                .settings
+                .get(&user_id)
+                .cloned()
+                .unwrap_or_default()),
+            LearningBackend::Postgres(pool) => pg_settings(pool, user_id).await,
+        }
+    }
+
+    pub(crate) async fn update_settings(
+        &self,
+        user_id: UserId,
+        device_id: Uuid,
+        command: &UpdateLearningSettingsCommand,
+        command_key: &str,
+    ) -> Result<LearningSettings, LearningStoreError> {
+        command.validate()?;
+        match &self.backend {
+            LearningBackend::Memory(data) => {
+                let mut data = lock_memory(data)?;
+                memory_update_settings(&mut data, user_id, command, command_key)
+            }
+            LearningBackend::Postgres(pool) => {
+                pg_update_settings(pool, user_id, device_id, command, command_key).await
+            }
+        }
+    }
+
+    pub(crate) async fn source_schedule_settings(
+        &self,
+        user_id: UserId,
+        source_id: LearningSourceId,
+    ) -> Result<LearningSourceScheduleSettings, LearningStoreError> {
+        match &self.backend {
+            LearningBackend::Memory(data) => {
+                let data = lock_memory(data)?;
+                if !data.sources.contains_key(&source_id) {
+                    return Err(LearningStoreError::NotFound);
+                }
+                Ok(data
+                    .source_schedule_settings
+                    .get(&(user_id, source_id))
+                    .cloned()
+                    .unwrap_or_else(|| default_source_settings(source_id)))
+            }
+            LearningBackend::Postgres(pool) => {
+                pg_source_schedule_settings(pool, user_id, source_id).await
+            }
+        }
+    }
+
+    pub(crate) async fn set_source_paused(
+        &self,
+        user_id: UserId,
+        device_id: Uuid,
+        source_id: LearningSourceId,
+        paused: bool,
+        command_key: &str,
+    ) -> Result<LearningSourceScheduleSettings, LearningStoreError> {
+        match &self.backend {
+            LearningBackend::Memory(data) => {
+                let mut data = lock_memory(data)?;
+                memory_set_source_paused(&mut data, user_id, source_id, paused, command_key)
+            }
+            LearningBackend::Postgres(pool) => {
+                pg_set_source_paused(pool, user_id, device_id, source_id, paused, command_key).await
+            }
+        }
+    }
+
+    pub(crate) async fn today(
+        &self,
+        user_id: UserId,
+        material_id: Option<MaterialId>,
+    ) -> Result<LearningToday, LearningStoreError> {
+        match &self.backend {
+            LearningBackend::Memory(data) => {
+                let data = lock_memory(data)?;
+                memory_today(&data, user_id, material_id)
+            }
+            LearningBackend::Postgres(pool) => pg_today(pool, user_id, material_id).await,
+        }
+    }
+
+    pub(crate) async fn list_schedules(
+        &self,
+        user_id: UserId,
+        material_id: Option<MaterialId>,
+    ) -> Result<Vec<LearningSchedule>, LearningStoreError> {
+        match &self.backend {
+            LearningBackend::Memory(data) => {
+                let data = lock_memory(data)?;
+                let mut schedules = data
+                    .schedules
+                    .iter()
+                    .filter(|((owner, _), _)| *owner == user_id)
+                    .filter(|((_, item_id), _)| {
+                        material_id.is_none_or(|material_id| {
+                            data.items
+                                .get(item_id)
+                                .and_then(|item| data.sources.get(&item.item.source_id))
+                                .is_some_and(|source| source.material_id == material_id)
+                        })
+                    })
+                    .map(|(_, schedule)| schedule.clone())
+                    .collect::<Vec<_>>();
+                schedules.sort_by_key(|schedule| (schedule.due_at, schedule.item_id));
+                Ok(schedules)
+            }
+            LearningBackend::Postgres(pool) => pg_list_schedules(pool, user_id, material_id).await,
+        }
+    }
+
+    pub(crate) async fn snooze_session(
+        &self,
+        user_id: UserId,
+        session_id: LearningSessionId,
+        command: SnoozeLearningSessionCommand,
+        command_key: &str,
+    ) -> Result<LearningSession, LearningStoreError> {
+        if !(1..=30).contains(&command.days) {
+            return Err(LearningStoreError::InvalidDetail(
+                "snooze days must be between 1 and 30".to_owned(),
+            ));
+        }
+        match &self.backend {
+            LearningBackend::Memory(data) => {
+                let mut data = lock_memory(data)?;
+                memory_snooze_session(&mut data, user_id, session_id, command, command_key)
+            }
+            LearningBackend::Postgres(pool) => {
+                pg_snooze_session(pool, user_id, session_id, command, command_key).await
             }
         }
     }
@@ -408,6 +578,11 @@ struct MemoryLearningData {
     items: HashMap<LearningItemId, ItemRecord>,
     sessions: HashMap<LearningSessionId, SessionRecord>,
     source_opened: HashSet<(LearningSessionId, LearningItemId)>,
+    hints_revealed: HashMap<(LearningSessionId, LearningItemId), Vec<u16>>,
+    settings: HashMap<UserId, LearningSettings>,
+    source_schedule_settings: HashMap<(UserId, LearningSourceId), LearningSourceScheduleSettings>,
+    schedules: HashMap<(UserId, LearningItemId), LearningSchedule>,
+    snoozed_until: HashMap<LearningSessionId, u64>,
     idempotency: HashMap<(UserId, String), IdempotentValue>,
 }
 
@@ -698,6 +873,7 @@ fn memory_create_item(
         prompt: command.prompt.clone(),
         answer_spec: command.answer_spec.clone(),
         explanation: command.explanation.clone(),
+        hints: command.hints.clone(),
         source_anchor: command.source_anchor.clone(),
         created_at: now,
     };
@@ -800,6 +976,7 @@ fn memory_update_item(
         prompt: command.prompt.clone(),
         answer_spec: command.answer_spec.clone(),
         explanation: command.explanation.clone(),
+        hints: command.hints.clone(),
         source_anchor: command.source_anchor.clone(),
         created_at: now,
     };
@@ -853,6 +1030,8 @@ fn public_snapshot(snapshot: &SessionItemSnapshot, position: usize) -> LearningS
         kind: snapshot.kind,
         prompt: snapshot.revision.prompt.clone(),
         answer: snapshot.revision.answer_spec.presentation(),
+        hints: snapshot.revision.hints.clone(),
+        revealed_hint_count: 0,
         source_anchor: snapshot.revision.source_anchor.clone(),
     }
 }
@@ -879,6 +1058,14 @@ fn memory_create_session(
             record.owner_user_id == user_id
                 && record.item.source_id == command.source_id
                 && record.item.status == LearningItemStatus::Active
+                && (command.kind != LearningSessionKind::ScheduledReview
+                    || data
+                        .schedules
+                        .get(&(user_id, record.item.id))
+                        .is_some_and(|schedule| {
+                            schedule.state != LearningScheduleState::Paused
+                                && schedule.due_at <= now_timestamp_ms()
+                        }))
         })
         .map(|record| record.item.clone())
         .collect::<Vec<_>>();
@@ -938,11 +1125,21 @@ fn memory_get_session(
     user_id: UserId,
     session_id: LearningSessionId,
 ) -> Result<LearningSession, LearningStoreError> {
-    data.sessions
+    let mut session = data
+        .sessions
         .get(&session_id)
         .filter(|record| record.session.user_id == user_id)
         .map(|record| record.session.clone())
-        .ok_or(LearningStoreError::NotFound)
+        .ok_or(LearningStoreError::NotFound)?;
+    for item in &mut session.items {
+        item.revealed_hint_count = u16::try_from(
+            data.hints_revealed
+                .get(&(session_id, item.item_id))
+                .map_or(0, Vec::len),
+        )
+        .unwrap_or(u16::MAX);
+    }
+    Ok(session)
 }
 
 fn memory_transition_session(
@@ -1003,8 +1200,330 @@ fn memory_source_opened(
     Ok(session)
 }
 
+fn memory_reveal_hint(
+    data: &mut MemoryLearningData,
+    user_id: UserId,
+    session_id: LearningSessionId,
+    command: RevealLearningHintCommand,
+    command_key: &str,
+) -> Result<LearningHintReveal, LearningStoreError> {
+    let hash = request_hash(&(session_id, command))?;
+    if let Some(value) = memory_idempotent(data, user_id, command_key, hash)? {
+        return Ok(value);
+    }
+    let snapshot = data
+        .sessions
+        .get(&session_id)
+        .filter(|record| record.session.user_id == user_id)
+        .and_then(|record| record.snapshots.get(&command.item_id))
+        .ok_or(LearningStoreError::NotFound)?;
+    let revealed = data
+        .hints_revealed
+        .entry((session_id, command.item_id))
+        .or_default();
+    let expected = u16::try_from(revealed.len())
+        .unwrap_or(u16::MAX)
+        .saturating_add(1);
+    if command.position != expected {
+        return Err(LearningStoreError::Conflict);
+    }
+    let hint = snapshot
+        .revision
+        .hints
+        .iter()
+        .find(|hint| hint.position == command.position)
+        .cloned()
+        .ok_or(LearningStoreError::NotFound)?;
+    revealed.push(command.position);
+    let result = LearningHintReveal {
+        hint,
+        revealed_count: u16::try_from(revealed.len()).unwrap_or(u16::MAX),
+    };
+    remember_memory(data, user_id, command_key, hash, &result)?;
+    Ok(result)
+}
+
+fn memory_update_settings(
+    data: &mut MemoryLearningData,
+    user_id: UserId,
+    command: &UpdateLearningSettingsCommand,
+    command_key: &str,
+) -> Result<LearningSettings, LearningStoreError> {
+    let hash = request_hash(command)?;
+    if let Some(value) = memory_idempotent(data, user_id, command_key, hash)? {
+        return Ok(value);
+    }
+    let current = data.settings.get(&user_id).cloned().unwrap_or_default();
+    if current.object_revision != command.expected_revision {
+        return Err(LearningStoreError::Conflict);
+    }
+    let settings = LearningSettings {
+        scheduling_enabled: command.scheduling_enabled,
+        daily_limit: command.daily_limit,
+        manual_only: command.manual_only,
+        object_revision: current.object_revision.saturating_add(1),
+    };
+    data.settings.insert(user_id, settings.clone());
+    remember_memory(data, user_id, command_key, hash, &settings)?;
+    Ok(settings)
+}
+
+fn default_source_settings(source_id: LearningSourceId) -> LearningSourceScheduleSettings {
+    LearningSourceScheduleSettings {
+        source_id,
+        scheduling_enabled: true,
+        paused_at: None,
+        object_revision: 1,
+    }
+}
+
+fn user_owns_memory_source(
+    data: &MemoryLearningData,
+    user_id: UserId,
+    source_id: LearningSourceId,
+) -> bool {
+    data.items
+        .values()
+        .any(|record| record.owner_user_id == user_id && record.item.source_id == source_id)
+        || data.completions.contains_key(&(user_id, source_id))
+}
+
+fn memory_set_source_paused(
+    data: &mut MemoryLearningData,
+    user_id: UserId,
+    source_id: LearningSourceId,
+    paused: bool,
+    command_key: &str,
+) -> Result<LearningSourceScheduleSettings, LearningStoreError> {
+    let hash = request_hash(&(source_id, paused))?;
+    if let Some(value) = memory_idempotent(data, user_id, command_key, hash)? {
+        return Ok(value);
+    }
+    if !user_owns_memory_source(data, user_id, source_id) {
+        return Err(LearningStoreError::NotFound);
+    }
+    let now = now_timestamp_ms();
+    let mut settings = data
+        .source_schedule_settings
+        .get(&(user_id, source_id))
+        .cloned()
+        .unwrap_or_else(|| default_source_settings(source_id));
+    settings.paused_at = paused.then_some(now);
+    settings.object_revision = settings.object_revision.saturating_add(1);
+    data.source_schedule_settings
+        .insert((user_id, source_id), settings.clone());
+    for ((owner, item_id), schedule) in &mut data.schedules {
+        if *owner != user_id
+            || data
+                .items
+                .get(item_id)
+                .is_none_or(|record| record.item.source_id != source_id)
+        {
+            continue;
+        }
+        if paused {
+            schedule.algorithm_payload["state_before_pause"] =
+                serde_json::json!(schedule_state_key(schedule.state));
+            schedule.state = LearningScheduleState::Paused;
+            schedule.paused_at = Some(now);
+        } else if schedule.state == LearningScheduleState::Paused {
+            schedule.state = state_before_pause(schedule);
+            schedule.paused_at = None;
+            // Resume exposes a bounded actionable item now instead of the
+            // entire time-shifted backlog.
+            schedule.due_at = schedule.due_at.max(now);
+        }
+        schedule.object_revision = schedule.object_revision.saturating_add(1);
+    }
+    remember_memory(data, user_id, command_key, hash, &settings)?;
+    Ok(settings)
+}
+
+fn state_before_pause(schedule: &LearningSchedule) -> LearningScheduleState {
+    schedule
+        .algorithm_payload
+        .get("state_before_pause")
+        .and_then(serde_json::Value::as_str)
+        .and_then(parse_schedule_state_value)
+        .unwrap_or({
+            if schedule.repetitions == 0 {
+                LearningScheduleState::New
+            } else {
+                LearningScheduleState::Review
+            }
+        })
+}
+
+fn memory_today(
+    data: &MemoryLearningData,
+    user_id: UserId,
+    material_id: Option<MaterialId>,
+) -> Result<LearningToday, LearningStoreError> {
+    let settings = data.settings.get(&user_id).cloned().unwrap_or_default();
+    let now = now_timestamp_ms();
+    let mut due = Vec::new();
+    let mut ready = Vec::new();
+    let mut drafts = 0_u32;
+    for record in data.items.values().filter(|record| {
+        record.owner_user_id == user_id
+            && data
+                .sources
+                .get(&record.item.source_id)
+                .is_some_and(|source| {
+                    material_id.is_none_or(|material| source.material_id == material)
+                })
+    }) {
+        if record.item.status == LearningItemStatus::Draft {
+            drafts = drafts.saturating_add(1);
+            continue;
+        }
+        if record.item.status != LearningItemStatus::Active {
+            continue;
+        }
+        let paused = data
+            .source_schedule_settings
+            .get(&(user_id, record.item.source_id))
+            .is_some_and(|source| source.paused_at.is_some() || !source.scheduling_enabled);
+        match data.schedules.get(&(user_id, record.item.id)) {
+            Some(schedule)
+                if !paused
+                    && schedule.state != LearningScheduleState::Paused
+                    && schedule.due_at <= now =>
+            {
+                due.push((schedule.due_at, record.item.id, record.item.source_id));
+            }
+            None if !paused => ready.push((record.item.id, record.item.source_id)),
+            _ => {}
+        }
+    }
+    due.sort_by_key(|(due_at, item_id, _)| (*due_at, *item_id));
+    ready.sort_by_key(|(item_id, _)| *item_id);
+    let counts = LearningChallengeCounts {
+        due: u32::try_from(due.len()).unwrap_or(u32::MAX),
+        ready: u32::try_from(ready.len()).unwrap_or(u32::MAX),
+        drafts,
+    };
+    let due_items = if settings.scheduling_enabled && !settings.manual_only {
+        due.into_iter()
+            .take(usize::from(settings.daily_limit))
+            .map(|(_, item_id, source_id)| (item_id, source_id))
+            .collect()
+    } else {
+        Vec::new()
+    };
+    let ready_items = ready
+        .into_iter()
+        .take(usize::from(settings.daily_limit))
+        .collect::<Vec<_>>();
+    Ok(LearningToday {
+        groups: challenge_groups(data, user_id, &due_items),
+        ready_groups: challenge_groups(data, user_id, &ready_items),
+        settings,
+        counts,
+        generated_at: now,
+    })
+}
+
+fn challenge_groups(
+    data: &MemoryLearningData,
+    user_id: UserId,
+    items: &[(LearningItemId, LearningSourceId)],
+) -> Vec<LearningChallengeGroup> {
+    let mut groups = Vec::<LearningChallengeGroup>::new();
+    for (item_id, source_id) in items {
+        let Some(source) = data.sources.get(source_id) else {
+            continue;
+        };
+        if let Some(group) = groups
+            .iter_mut()
+            .find(|group| group.source_id == *source_id)
+        {
+            group.item_ids.push(*item_id);
+            group.estimated_minutes =
+                u16::try_from((group.item_ids.len() * 3).div_ceil(2)).unwrap_or(u16::MAX);
+        } else {
+            groups.push(LearningChallengeGroup {
+                source_id: *source_id,
+                material_id: source.material_id,
+                title: source.title.clone(),
+                item_ids: vec![*item_id],
+                estimated_minutes: 2,
+                paused: data
+                    .source_schedule_settings
+                    .get(&(user_id, *source_id))
+                    .is_some_and(|settings| settings.paused_at.is_some()),
+            });
+        }
+    }
+    groups
+}
+
+fn memory_snooze_session(
+    data: &mut MemoryLearningData,
+    user_id: UserId,
+    session_id: LearningSessionId,
+    command: SnoozeLearningSessionCommand,
+    command_key: &str,
+) -> Result<LearningSession, LearningStoreError> {
+    let hash = request_hash(&(session_id, command))?;
+    if let Some(value) = memory_idempotent(data, user_id, command_key, hash)? {
+        return Ok(value);
+    }
+    let record = data
+        .sessions
+        .get_mut(&session_id)
+        .filter(|record| {
+            record.session.user_id == user_id
+                && record.session.kind == LearningSessionKind::ScheduledReview
+        })
+        .ok_or(LearningStoreError::NotFound)?;
+    let answered = record
+        .session
+        .attempts
+        .iter()
+        .map(|attempt| attempt.item_id)
+        .collect::<HashSet<_>>();
+    let delta = u64::from(command.days).saturating_mul(86_400_000);
+    for item in &record.session.items {
+        if answered.contains(&item.item_id) {
+            continue;
+        }
+        if let Some(schedule) = data.schedules.get_mut(&(user_id, item.item_id)) {
+            schedule.due_at = now_timestamp_ms().saturating_add(delta);
+            schedule.object_revision = schedule.object_revision.saturating_add(1);
+        }
+    }
+    data.snoozed_until
+        .insert(session_id, now_timestamp_ms().saturating_add(delta));
+    record.session.abandon()?;
+    let session = record.session.clone();
+    remember_memory(data, user_id, command_key, hash, &session)?;
+    Ok(session)
+}
+
+fn conservative_rating(
+    outcome: lumi_core::LearningAttemptOutcome,
+    self_check: Option<lumi_core::SelfCheckRating>,
+    source_opened: bool,
+    hints_used: &[u16],
+) -> LearningReviewRating {
+    if outcome == lumi_core::LearningAttemptOutcome::Incorrect
+        || self_check == Some(lumi_core::SelfCheckRating::NotRecalled)
+    {
+        LearningReviewRating::Again
+    } else if source_opened
+        || !hints_used.is_empty()
+        || self_check == Some(lumi_core::SelfCheckRating::Partial)
+    {
+        LearningReviewRating::Hard
+    } else {
+        LearningReviewRating::Good
+    }
+}
+
 fn memory_submit_attempt(
     data: &mut MemoryLearningData,
+    scheduler: FsrsScheduler,
     user_id: UserId,
     session_id: LearningSessionId,
     item_id: LearningItemId,
@@ -1016,6 +1535,11 @@ fn memory_submit_attempt(
         return Ok(value);
     }
     let source_opened = data.source_opened.contains(&(session_id, item_id));
+    let hints_used = data
+        .hints_revealed
+        .get(&(session_id, item_id))
+        .cloned()
+        .unwrap_or_default();
     let record = data
         .sessions
         .get_mut(&session_id)
@@ -1047,10 +1571,34 @@ fn memory_submit_attempt(
         feedback,
         elapsed_ms: command.elapsed_ms.min(86_400_000),
         source_opened,
+        hints_used: hints_used.clone(),
+        review_rating: command.review_rating,
         created_at: now_timestamp_ms(),
     };
     record.session.attempts.push(attempt.clone());
     record.session.updated_at = attempt.created_at;
+    let rating = command.review_rating.unwrap_or_else(|| {
+        conservative_rating(
+            attempt.feedback.outcome,
+            command.self_check,
+            source_opened,
+            &hints_used,
+        )
+    });
+    let previous = data.schedules.get(&(user_id, item_id)).cloned();
+    let decision = scheduler.review_item(
+        item_id,
+        SchedulerReview {
+            previous,
+            rating,
+            outcome: attempt.feedback.outcome,
+            self_check: command.self_check,
+            source_opened,
+            hints_used,
+            reviewed_at: attempt.created_at,
+        },
+    )?;
+    data.schedules.insert((user_id, item_id), decision.schedule);
     remember_memory(data, user_id, command_key, hash, &attempt)?;
     Ok(attempt)
 }
@@ -1475,6 +2023,7 @@ async fn pg_create_item(
         prompt: command.prompt.clone(),
         answer_spec: command.answer_spec.clone(),
         explanation: command.explanation.clone(),
+        hints: command.hints.clone(),
         source_anchor: command.source_anchor.clone(),
         created_at: now,
     };
@@ -1675,6 +2224,7 @@ async fn pg_update_item(
         prompt: command.prompt.clone(),
         answer_spec: command.answer_spec.clone(),
         explanation: command.explanation.clone(),
+        hints: command.hints.clone(),
         source_anchor: command.source_anchor.clone(),
         created_at: now_timestamp_ms(),
     };
@@ -1835,11 +2385,20 @@ async fn pg_create_session(
          JOIN learning_item_revisions lir ON lir.item_revision_id = li.current_revision_id
          WHERE li.owner_user_id = $1 AND li.source_id = $2
            AND li.status = 'active' AND li.deleted_at IS NULL
+           AND (
+               $3 <> 'scheduled_review'
+               OR EXISTS (
+                   SELECT 1 FROM learning_schedules lsch
+                   WHERE lsch.user_id = $1 AND lsch.item_id = li.item_id
+                     AND lsch.state <> 'paused' AND lsch.due_at <= now()
+               )
+           )
          ORDER BY li.item_id
          LIMIT 7",
     )
     .bind(user_id)
     .bind(command.source_id)
+    .bind(session_kind_key(command.kind))
     .fetch_all(&mut *tx)
     .await
     .map_err(log_pg)?;
@@ -1963,7 +2522,7 @@ async fn pg_get_session_tx(
     .fetch_all(&mut **tx)
     .await
     .map_err(log_pg)?;
-    let items = item_rows
+    let mut items = item_rows
         .iter()
         .map(|item_row| {
             let snapshot: SessionItemSnapshot =
@@ -1976,6 +2535,28 @@ async fn pg_get_session_tx(
             ))
         })
         .collect::<Result<Vec<_>, LearningStoreError>>()?;
+    let hint_rows = query(
+        "SELECT payload ->> 'item_id' AS item_id, count(*) AS hint_count
+         FROM learning_attempt_events
+         WHERE user_id = $1 AND session_id = $2 AND event_kind = 'hint_revealed'
+         GROUP BY payload ->> 'item_id'",
+    )
+    .bind(user_id)
+    .bind(session_id)
+    .fetch_all(&mut **tx)
+    .await
+    .map_err(log_pg)?;
+    for hint_row in &hint_rows {
+        let item_id = hint_row
+            .try_get::<String, _>("item_id")
+            .map_err(log_pg)?
+            .parse::<Uuid>()
+            .map_err(|_| LearningStoreError::Unavailable)?;
+        let count = hint_row.try_get::<i64, _>("hint_count").map_err(log_pg)?;
+        if let Some(item) = items.iter_mut().find(|item| item.item_id == item_id) {
+            item.revealed_hint_count = u16::try_from(count).unwrap_or(u16::MAX);
+        }
+    }
     let attempt_rows = query(
         "SELECT payload FROM learning_attempts
          WHERE user_id = $1 AND session_id = $2 ORDER BY created_at, attempt_id",
@@ -2123,8 +2704,564 @@ async fn pg_source_opened(
     Ok(session)
 }
 
+async fn pg_reveal_hint(
+    pool: &PgPool,
+    user_id: UserId,
+    session_id: LearningSessionId,
+    command: RevealLearningHintCommand,
+    command_key: &str,
+) -> Result<LearningHintReveal, LearningStoreError> {
+    let hash = request_hash(&(session_id, command))?;
+    let mut tx = pool.begin().await.map_err(log_pg)?;
+    if let Some(value) =
+        pg_read_mutation(&mut tx, user_id, command_key, hash, "reveal_hint").await?
+    {
+        return Ok(value);
+    }
+    let row = query(
+        "SELECT lsi.snapshot
+         FROM learning_sessions ls
+         JOIN learning_session_items lsi ON lsi.session_id = ls.session_id
+         WHERE ls.user_id = $1 AND ls.session_id = $2 AND lsi.item_id = $3
+         FOR UPDATE OF ls",
+    )
+    .bind(user_id)
+    .bind(session_id)
+    .bind(command.item_id)
+    .fetch_optional(&mut *tx)
+    .await
+    .map_err(log_pg)?
+    .ok_or(LearningStoreError::NotFound)?;
+    let snapshot: SessionItemSnapshot =
+        serde_json::from_value(row.try_get("snapshot").map_err(log_pg)?)
+            .map_err(|_| LearningStoreError::Unavailable)?;
+    let count: i64 = query_scalar(
+        "SELECT count(*) FROM learning_attempt_events
+         WHERE user_id = $1 AND session_id = $2 AND event_kind = 'hint_revealed'
+           AND payload ->> 'item_id' = $3",
+    )
+    .bind(user_id)
+    .bind(session_id)
+    .bind(command.item_id.to_string())
+    .fetch_one(&mut *tx)
+    .await
+    .map_err(log_pg)?;
+    let expected = u16::try_from(count).unwrap_or(u16::MAX).saturating_add(1);
+    if command.position != expected {
+        return Err(LearningStoreError::Conflict);
+    }
+    let hint = snapshot
+        .revision
+        .hints
+        .iter()
+        .find(|hint| hint.position == command.position)
+        .cloned()
+        .ok_or(LearningStoreError::NotFound)?;
+    query(
+        "INSERT INTO learning_attempt_events
+         (event_id, session_id, user_id, event_kind, payload)
+         VALUES ($1, $2, $3, 'hint_revealed', $4)",
+    )
+    .bind(Uuid::now_v7())
+    .bind(session_id)
+    .bind(user_id)
+    .bind(serde_json::json!({
+        "item_id": command.item_id,
+        "position": command.position
+    }))
+    .execute(&mut *tx)
+    .await
+    .map_err(log_pg)?;
+    let result = LearningHintReveal {
+        hint,
+        revealed_count: command.position,
+    };
+    pg_store_mutation(&mut tx, user_id, command_key, hash, "reveal_hint", &result).await?;
+    tx.commit().await.map_err(log_pg)?;
+    Ok(result)
+}
+
+async fn pg_settings(
+    pool: &PgPool,
+    user_id: UserId,
+) -> Result<LearningSettings, LearningStoreError> {
+    let row = query(
+        "SELECT scheduling_enabled, daily_limit, manual_only, object_revision
+         FROM learning_settings WHERE user_id = $1",
+    )
+    .bind(user_id)
+    .fetch_optional(pool)
+    .await
+    .map_err(log_pg)?;
+    row.as_ref().map_or_else(
+        || Ok(LearningSettings::default()),
+        learning_settings_from_row,
+    )
+}
+
+async fn pg_update_settings(
+    pool: &PgPool,
+    user_id: UserId,
+    device_id: Uuid,
+    command: &UpdateLearningSettingsCommand,
+    command_key: &str,
+) -> Result<LearningSettings, LearningStoreError> {
+    let hash = request_hash(command)?;
+    let mut tx = pool.begin().await.map_err(log_pg)?;
+    if let Some(value) =
+        pg_read_mutation(&mut tx, user_id, command_key, hash, "update_settings").await?
+    {
+        return Ok(value);
+    }
+    let current = query(
+        "SELECT object_revision FROM learning_settings
+         WHERE user_id = $1 FOR UPDATE",
+    )
+    .bind(user_id)
+    .fetch_optional(&mut *tx)
+    .await
+    .map_err(log_pg)?;
+    let current_revision = current
+        .as_ref()
+        .map(|row| row.try_get::<i64, _>("object_revision").map_err(log_pg))
+        .transpose()?
+        .map_or(1, |value| u64::try_from(value).unwrap_or(u64::MAX));
+    if current_revision != command.expected_revision {
+        return Err(LearningStoreError::Conflict);
+    }
+    let object_revision = current_revision.saturating_add(1);
+    query(
+        "INSERT INTO learning_settings
+         (user_id, scheduling_enabled, daily_limit, manual_only, object_revision, updated_at)
+         VALUES ($1, $2, $3, $4, $5, now())
+         ON CONFLICT (user_id) DO UPDATE SET
+           scheduling_enabled = EXCLUDED.scheduling_enabled,
+           daily_limit = EXCLUDED.daily_limit,
+           manual_only = EXCLUDED.manual_only,
+           object_revision = EXCLUDED.object_revision,
+           updated_at = now()",
+    )
+    .bind(user_id)
+    .bind(command.scheduling_enabled)
+    .bind(i16::try_from(command.daily_limit).unwrap_or(i16::MAX))
+    .bind(command.manual_only)
+    .bind(i64::try_from(object_revision).unwrap_or(i64::MAX))
+    .execute(&mut *tx)
+    .await
+    .map_err(log_pg)?;
+    let settings = LearningSettings {
+        scheduling_enabled: command.scheduling_enabled,
+        daily_limit: command.daily_limit,
+        manual_only: command.manual_only,
+        object_revision,
+    };
+    let space_id: Uuid = query_scalar(
+        "SELECT space_id FROM sync_spaces
+         WHERE owner_user_id = $1 AND kind = 'personal'
+         ORDER BY created_at LIMIT 1",
+    )
+    .bind(user_id)
+    .fetch_one(&mut *tx)
+    .await
+    .map_err(log_pg)?;
+    append_sync_change(
+        &mut tx,
+        space_id,
+        user_id,
+        device_id,
+        "learning_settings",
+        user_id,
+        object_revision,
+        "update",
+        &settings,
+        &format!("learning:settings:{command_key}"),
+    )
+    .await?;
+    pg_store_mutation(
+        &mut tx,
+        user_id,
+        command_key,
+        hash,
+        "update_settings",
+        &settings,
+    )
+    .await?;
+    tx.commit().await.map_err(log_pg)?;
+    Ok(settings)
+}
+
+async fn pg_source_schedule_settings(
+    pool: &PgPool,
+    user_id: UserId,
+    source_id: LearningSourceId,
+) -> Result<LearningSourceScheduleSettings, LearningStoreError> {
+    let row = query(
+        "SELECT lsrc.source_id, lsss.scheduling_enabled, lsss.paused_at,
+                lsss.object_revision
+         FROM learning_sources lsrc
+         LEFT JOIN learning_source_schedule_settings lsss
+           ON lsss.user_id = $1 AND lsss.source_id = lsrc.source_id
+         WHERE lsrc.owner_user_id = $1 AND lsrc.source_id = $2
+           AND lsrc.deleted_at IS NULL",
+    )
+    .bind(user_id)
+    .bind(source_id)
+    .fetch_optional(pool)
+    .await
+    .map_err(log_pg)?
+    .ok_or(LearningStoreError::NotFound)?;
+    if row
+        .try_get::<Option<i64>, _>("object_revision")
+        .map_err(log_pg)?
+        .is_none()
+    {
+        return Ok(default_source_settings(source_id));
+    }
+    source_settings_from_row(&row)
+}
+
+async fn pg_set_source_paused(
+    pool: &PgPool,
+    user_id: UserId,
+    device_id: Uuid,
+    source_id: LearningSourceId,
+    paused: bool,
+    command_key: &str,
+) -> Result<LearningSourceScheduleSettings, LearningStoreError> {
+    let hash = request_hash(&(source_id, paused))?;
+    let operation = if paused {
+        "pause_source"
+    } else {
+        "resume_source"
+    };
+    let mut tx = pool.begin().await.map_err(log_pg)?;
+    if let Some(value) = pg_read_mutation(&mut tx, user_id, command_key, hash, operation).await? {
+        return Ok(value);
+    }
+    let space_id: Uuid = query_scalar(
+        "SELECT space_id FROM learning_sources
+         WHERE owner_user_id = $1 AND source_id = $2 AND deleted_at IS NULL
+         FOR UPDATE",
+    )
+    .bind(user_id)
+    .bind(source_id)
+    .fetch_optional(&mut *tx)
+    .await
+    .map_err(log_pg)?
+    .ok_or(LearningStoreError::NotFound)?;
+    let previous_revision: Option<i64> = query_scalar(
+        "SELECT object_revision FROM learning_source_schedule_settings
+         WHERE user_id = $1 AND source_id = $2 FOR UPDATE",
+    )
+    .bind(user_id)
+    .bind(source_id)
+    .fetch_optional(&mut *tx)
+    .await
+    .map_err(log_pg)?;
+    let object_revision = previous_revision
+        .map_or(2, |revision| revision.saturating_add(1))
+        .max(1);
+    query(
+        "INSERT INTO learning_source_schedule_settings
+         (user_id, source_id, scheduling_enabled, paused_at, object_revision, updated_at)
+         VALUES ($1, $2, true, CASE WHEN $3 THEN now() ELSE NULL END, $4, now())
+         ON CONFLICT (user_id, source_id) DO UPDATE SET
+           paused_at = CASE WHEN $3 THEN now() ELSE NULL END,
+           object_revision = $4, updated_at = now()",
+    )
+    .bind(user_id)
+    .bind(source_id)
+    .bind(paused)
+    .bind(object_revision)
+    .execute(&mut *tx)
+    .await
+    .map_err(log_pg)?;
+    if paused {
+        query(
+            "UPDATE learning_schedules
+             SET algorithm_payload = jsonb_set(
+                   algorithm_payload, '{state_before_pause}', to_jsonb(state), true
+                 ),
+                 state = 'paused', paused_at = now(),
+                 object_revision = object_revision + 1, updated_at = now()
+             WHERE user_id = $1 AND source_id = $2 AND state <> 'paused'",
+        )
+        .bind(user_id)
+        .bind(source_id)
+        .execute(&mut *tx)
+        .await
+        .map_err(log_pg)?;
+    } else {
+        query(
+            "UPDATE learning_schedules
+             SET state = CASE algorithm_payload ->> 'state_before_pause'
+                   WHEN 'new' THEN 'new'
+                   WHEN 'learning' THEN 'learning'
+                   WHEN 'relearning' THEN 'relearning'
+                   ELSE 'review'
+                 END,
+                 paused_at = NULL, due_at = GREATEST(due_at, now()),
+                 object_revision = object_revision + 1, updated_at = now()
+             WHERE user_id = $1 AND source_id = $2 AND state = 'paused'",
+        )
+        .bind(user_id)
+        .bind(source_id)
+        .execute(&mut *tx)
+        .await
+        .map_err(log_pg)?;
+    }
+    let settings = LearningSourceScheduleSettings {
+        source_id,
+        scheduling_enabled: true,
+        paused_at: paused.then_some(now_timestamp_ms()),
+        object_revision: u64::try_from(object_revision).unwrap_or(u64::MAX),
+    };
+    append_sync_change(
+        &mut tx,
+        space_id,
+        user_id,
+        device_id,
+        "learning_source_settings",
+        source_id,
+        settings.object_revision,
+        "update",
+        &settings,
+        &format!("learning:source-settings:{command_key}"),
+    )
+    .await?;
+    pg_store_mutation(&mut tx, user_id, command_key, hash, operation, &settings).await?;
+    tx.commit().await.map_err(log_pg)?;
+    Ok(settings)
+}
+
+async fn pg_today(
+    pool: &PgPool,
+    user_id: UserId,
+    material_id: Option<MaterialId>,
+) -> Result<LearningToday, LearningStoreError> {
+    let settings = pg_settings(pool, user_id).await?;
+    let rows = query(
+        "SELECT li.item_id, li.status, lsrc.source_id, lsrc.material_id, lsrc.title,
+                lsch.state AS schedule_state, lsch.due_at,
+                lsss.paused_at AS source_paused_at,
+                COALESCE(lsss.scheduling_enabled, true) AS source_enabled
+         FROM learning_items li
+         JOIN learning_sources lsrc ON lsrc.source_id = li.source_id
+         LEFT JOIN learning_schedules lsch
+           ON lsch.user_id = $1 AND lsch.item_id = li.item_id
+         LEFT JOIN learning_source_schedule_settings lsss
+           ON lsss.user_id = $1 AND lsss.source_id = lsrc.source_id
+         WHERE li.owner_user_id = $1 AND li.deleted_at IS NULL
+           AND ($2::uuid IS NULL OR lsrc.material_id = $2)
+         ORDER BY lsch.due_at NULLS LAST, li.item_id",
+    )
+    .bind(user_id)
+    .bind(material_id)
+    .fetch_all(pool)
+    .await
+    .map_err(log_pg)?;
+    let now = OffsetDateTime::now_utc();
+    let mut due = Vec::new();
+    let mut ready = Vec::new();
+    let mut drafts = 0_u32;
+    for row in &rows {
+        let status = parse_item_status(&row.try_get::<String, _>("status").map_err(log_pg)?)?;
+        if status == LearningItemStatus::Draft {
+            drafts = drafts.saturating_add(1);
+            continue;
+        }
+        if status != LearningItemStatus::Active {
+            continue;
+        }
+        let paused = row
+            .try_get::<Option<OffsetDateTime>, _>("source_paused_at")
+            .map_err(log_pg)?
+            .is_some()
+            || !row.try_get::<bool, _>("source_enabled").map_err(log_pg)?;
+        if paused {
+            continue;
+        }
+        let item_id: Uuid = row.try_get("item_id").map_err(log_pg)?;
+        let source_id: Uuid = row.try_get("source_id").map_err(log_pg)?;
+        let schedule_state = row
+            .try_get::<Option<String>, _>("schedule_state")
+            .map_err(log_pg)?;
+        let due_at = row
+            .try_get::<Option<OffsetDateTime>, _>("due_at")
+            .map_err(log_pg)?;
+        match (schedule_state.as_deref(), due_at) {
+            (Some(state), Some(due_at)) if state != "paused" && due_at <= now => {
+                due.push((item_id, source_id));
+            }
+            (None, None) => ready.push((item_id, source_id)),
+            _ => {}
+        }
+    }
+    let counts = LearningChallengeCounts {
+        due: u32::try_from(due.len()).unwrap_or(u32::MAX),
+        ready: u32::try_from(ready.len()).unwrap_or(u32::MAX),
+        drafts,
+    };
+    let due = if settings.scheduling_enabled && !settings.manual_only {
+        due.into_iter()
+            .take(usize::from(settings.daily_limit))
+            .collect::<Vec<_>>()
+    } else {
+        Vec::new()
+    };
+    ready.truncate(usize::from(settings.daily_limit));
+    Ok(LearningToday {
+        groups: pg_challenge_groups(&rows, &due)?,
+        ready_groups: pg_challenge_groups(&rows, &ready)?,
+        settings,
+        counts,
+        generated_at: now_timestamp_ms(),
+    })
+}
+
+fn pg_challenge_groups(
+    rows: &[sqlx_postgres::PgRow],
+    items: &[(LearningItemId, LearningSourceId)],
+) -> Result<Vec<LearningChallengeGroup>, LearningStoreError> {
+    let mut groups = Vec::<LearningChallengeGroup>::new();
+    for (item_id, source_id) in items {
+        let row = rows
+            .iter()
+            .find(|row| row.try_get::<Uuid, _>("item_id").ok() == Some(*item_id))
+            .ok_or(LearningStoreError::Unavailable)?;
+        if let Some(group) = groups
+            .iter_mut()
+            .find(|group| group.source_id == *source_id)
+        {
+            group.item_ids.push(*item_id);
+            group.estimated_minutes =
+                u16::try_from((group.item_ids.len() * 3).div_ceil(2)).unwrap_or(u16::MAX);
+        } else {
+            groups.push(LearningChallengeGroup {
+                source_id: *source_id,
+                material_id: row.try_get("material_id").map_err(log_pg)?,
+                title: row.try_get("title").map_err(log_pg)?,
+                item_ids: vec![*item_id],
+                estimated_minutes: 2,
+                paused: false,
+            });
+        }
+    }
+    Ok(groups)
+}
+
+async fn pg_list_schedules(
+    pool: &PgPool,
+    user_id: UserId,
+    material_id: Option<MaterialId>,
+) -> Result<Vec<LearningSchedule>, LearningStoreError> {
+    let rows = query(
+        "SELECT lsch.item_id, lsch.state, lsch.due_at, lsch.stability,
+                lsch.difficulty, lsch.last_review_at, lsch.repetitions,
+                lsch.lapses, lsch.algorithm, lsch.algorithm_version,
+                lsch.algorithm_payload, lsch.object_revision, lsch.paused_at
+         FROM learning_schedules lsch
+         JOIN learning_sources lsrc ON lsrc.source_id = lsch.source_id
+         WHERE lsch.user_id = $1
+           AND ($2::uuid IS NULL OR lsrc.material_id = $2)
+         ORDER BY lsch.due_at, lsch.item_id",
+    )
+    .bind(user_id)
+    .bind(material_id)
+    .fetch_all(pool)
+    .await
+    .map_err(log_pg)?;
+    rows.iter().map(schedule_from_row).collect()
+}
+
+async fn pg_snooze_session(
+    pool: &PgPool,
+    user_id: UserId,
+    session_id: LearningSessionId,
+    command: SnoozeLearningSessionCommand,
+    command_key: &str,
+) -> Result<LearningSession, LearningStoreError> {
+    let hash = request_hash(&(session_id, command))?;
+    let mut tx = pool.begin().await.map_err(log_pg)?;
+    if let Some(value) =
+        pg_read_mutation(&mut tx, user_id, command_key, hash, "snooze_session").await?
+    {
+        return Ok(value);
+    }
+    let kind: String = query_scalar(
+        "SELECT kind FROM learning_sessions
+         WHERE user_id = $1 AND session_id = $2 FOR UPDATE",
+    )
+    .bind(user_id)
+    .bind(session_id)
+    .fetch_optional(&mut *tx)
+    .await
+    .map_err(log_pg)?
+    .ok_or(LearningStoreError::NotFound)?;
+    if parse_session_kind(&kind)? != LearningSessionKind::ScheduledReview {
+        return Err(LearningStoreError::Conflict);
+    }
+    let snoozed_until = OffsetDateTime::now_utc() + time::Duration::days(i64::from(command.days));
+    query(
+        "UPDATE learning_schedules lsch
+         SET due_at = $3, object_revision = object_revision + 1, updated_at = now()
+         FROM learning_session_items lsi
+         WHERE lsi.session_id = $2 AND lsi.item_id = lsch.item_id
+           AND lsch.user_id = $1
+           AND NOT EXISTS (
+             SELECT 1 FROM learning_attempts la
+             WHERE la.session_id = $2 AND la.item_id = lsi.item_id
+           )",
+    )
+    .bind(user_id)
+    .bind(session_id)
+    .bind(snoozed_until)
+    .execute(&mut *tx)
+    .await
+    .map_err(log_pg)?;
+    query(
+        "INSERT INTO learning_session_snoozes
+         (session_id, user_id, snoozed_until)
+         VALUES ($1, $2, $3)
+         ON CONFLICT (session_id) DO UPDATE SET snoozed_until = EXCLUDED.snoozed_until",
+    )
+    .bind(session_id)
+    .bind(user_id)
+    .bind(snoozed_until)
+    .execute(&mut *tx)
+    .await
+    .map_err(log_pg)?;
+    query(
+        "UPDATE learning_sessions
+         SET state = 'abandoned', object_revision = object_revision + 1, updated_at = now()
+         WHERE user_id = $1 AND session_id = $2",
+    )
+    .bind(user_id)
+    .bind(session_id)
+    .execute(&mut *tx)
+    .await
+    .map_err(log_pg)?;
+    let session = pg_get_session_tx(&mut tx, user_id, session_id).await?;
+    pg_store_mutation(
+        &mut tx,
+        user_id,
+        command_key,
+        hash,
+        "snooze_session",
+        &session,
+    )
+    .await?;
+    tx.commit().await.map_err(log_pg)?;
+    Ok(session)
+}
+
+#[expect(
+    clippy::too_many_arguments,
+    reason = "transactional submit carries explicit owner, session, item, command and scheduler boundaries"
+)]
 async fn pg_submit_attempt(
     pool: &PgPool,
+    scheduler: FsrsScheduler,
     user_id: UserId,
     device_id: Uuid,
     session_id: LearningSessionId,
@@ -2140,7 +3277,7 @@ async fn pg_submit_attempt(
         return Ok(value);
     }
     let row = query(
-        "SELECT ls.state, ls.space_id, lsi.item_revision_id, lsi.snapshot
+        "SELECT ls.state, ls.space_id, ls.source_id, lsi.item_revision_id, lsi.snapshot
          FROM learning_sessions ls
          JOIN learning_session_items lsi ON lsi.session_id = ls.session_id
          WHERE ls.user_id = $1 AND ls.session_id = $2 AND lsi.item_id = $3
@@ -2175,6 +3312,24 @@ async fn pg_submit_attempt(
     .await
     .map_err(log_pg)?
     .is_some();
+    let hint_rows = query(
+        "SELECT payload FROM learning_attempt_events
+         WHERE user_id = $1 AND session_id = $2 AND event_kind = 'hint_revealed'
+           AND payload ->> 'item_id' = $3
+         ORDER BY created_at, event_id",
+    )
+    .bind(user_id)
+    .bind(session_id)
+    .bind(item_id.to_string())
+    .fetch_all(&mut *tx)
+    .await
+    .map_err(log_pg)?;
+    let hints_used = hint_rows
+        .iter()
+        .filter_map(|hint_row| hint_row.try_get::<serde_json::Value, _>("payload").ok())
+        .filter_map(|payload| payload.get("position").and_then(serde_json::Value::as_u64))
+        .filter_map(|position| u16::try_from(position).ok())
+        .collect::<Vec<_>>();
     let attempt = LearningAttempt {
         id: Uuid::now_v7(),
         session_id,
@@ -2185,6 +3340,8 @@ async fn pg_submit_attempt(
         feedback,
         elapsed_ms: command.elapsed_ms.min(86_400_000),
         source_opened,
+        hints_used: hints_used.clone(),
+        review_rating: command.review_rating,
         created_at: now_timestamp_ms(),
     };
     query(
@@ -2204,6 +3361,74 @@ async fn pg_submit_attempt(
     .execute(&mut *tx)
     .await
     .map_err(map_pg_conflict)?;
+    let schedule_row = query(
+        "SELECT item_id, state, due_at, stability, difficulty, last_review_at,
+                repetitions, lapses, algorithm, algorithm_version, algorithm_payload,
+                object_revision, paused_at
+         FROM learning_schedules
+         WHERE user_id = $1 AND item_id = $2
+         FOR UPDATE",
+    )
+    .bind(user_id)
+    .bind(item_id)
+    .fetch_optional(&mut *tx)
+    .await
+    .map_err(log_pg)?;
+    let previous = schedule_row.as_ref().map(schedule_from_row).transpose()?;
+    let rating = command.review_rating.unwrap_or_else(|| {
+        conservative_rating(
+            attempt.feedback.outcome,
+            command.self_check,
+            source_opened,
+            &hints_used,
+        )
+    });
+    let decision = scheduler.review_item(
+        item_id,
+        SchedulerReview {
+            previous,
+            rating,
+            outcome: attempt.feedback.outcome,
+            self_check: command.self_check,
+            source_opened,
+            hints_used,
+            reviewed_at: attempt.created_at,
+        },
+    )?;
+    let schedule = &decision.schedule;
+    let source_id: Uuid = row.try_get("source_id").map_err(log_pg)?;
+    query(
+        "INSERT INTO learning_schedules
+         (user_id, item_id, source_id, state, due_at, stability, difficulty,
+          last_review_at, repetitions, lapses, algorithm, algorithm_version,
+          algorithm_payload, object_revision, paused_at, updated_at)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, NULL, now())
+         ON CONFLICT (user_id, item_id) DO UPDATE SET
+          state = EXCLUDED.state, due_at = EXCLUDED.due_at,
+          stability = EXCLUDED.stability, difficulty = EXCLUDED.difficulty,
+          last_review_at = EXCLUDED.last_review_at, repetitions = EXCLUDED.repetitions,
+          lapses = EXCLUDED.lapses, algorithm = EXCLUDED.algorithm,
+          algorithm_version = EXCLUDED.algorithm_version,
+          algorithm_payload = EXCLUDED.algorithm_payload,
+          object_revision = EXCLUDED.object_revision, paused_at = NULL, updated_at = now()",
+    )
+    .bind(user_id)
+    .bind(item_id)
+    .bind(source_id)
+    .bind(schedule_state_key(schedule.state))
+    .bind(ms_to_time(schedule.due_at)?)
+    .bind(schedule.stability)
+    .bind(schedule.difficulty)
+    .bind(schedule.last_review_at.map(ms_to_time).transpose()?)
+    .bind(i32::try_from(schedule.repetitions).unwrap_or(i32::MAX))
+    .bind(i32::try_from(schedule.lapses).unwrap_or(i32::MAX))
+    .bind(&schedule.algorithm)
+    .bind(&schedule.algorithm_version)
+    .bind(&schedule.algorithm_payload)
+    .bind(i64::try_from(schedule.object_revision).unwrap_or(i64::MAX))
+    .execute(&mut *tx)
+    .await
+    .map_err(log_pg)?;
     for event_kind in ["answer_submitted", "feedback_received"] {
         query(
             "INSERT INTO learning_attempt_events
@@ -2240,6 +3465,19 @@ async fn pg_submit_attempt(
         "append",
         &attempt,
         &format!("learning:attempt:{command_key}"),
+    )
+    .await?;
+    append_sync_change(
+        &mut tx,
+        space_id,
+        user_id,
+        device_id,
+        "learning_schedule",
+        schedule.item_id,
+        schedule.object_revision,
+        "update",
+        schedule,
+        &format!("learning:schedule:{command_key}"),
     )
     .await?;
     pg_store_mutation(
@@ -2460,6 +3698,98 @@ fn parse_session_state(value: &str) -> Result<LearningSessionState, LearningStor
     }
 }
 
+fn schedule_state_key(value: LearningScheduleState) -> &'static str {
+    match value {
+        LearningScheduleState::New => "new",
+        LearningScheduleState::Learning => "learning",
+        LearningScheduleState::Review => "review",
+        LearningScheduleState::Relearning => "relearning",
+        LearningScheduleState::Paused => "paused",
+    }
+}
+
+fn parse_schedule_state_value(value: &str) -> Option<LearningScheduleState> {
+    match value {
+        "new" => Some(LearningScheduleState::New),
+        "learning" => Some(LearningScheduleState::Learning),
+        "review" => Some(LearningScheduleState::Review),
+        "relearning" => Some(LearningScheduleState::Relearning),
+        "paused" => Some(LearningScheduleState::Paused),
+        _ => None,
+    }
+}
+
+fn parse_schedule_state(value: &str) -> Result<LearningScheduleState, LearningStoreError> {
+    parse_schedule_state_value(value).ok_or(LearningStoreError::Unavailable)
+}
+
+fn learning_settings_from_row(
+    row: &sqlx_postgres::PgRow,
+) -> Result<LearningSettings, LearningStoreError> {
+    Ok(LearningSettings {
+        scheduling_enabled: row.try_get("scheduling_enabled").map_err(log_pg)?,
+        daily_limit: u16::try_from(row.try_get::<i16, _>("daily_limit").map_err(log_pg)?)
+            .map_err(|_| LearningStoreError::Unavailable)?,
+        manual_only: row.try_get("manual_only").map_err(log_pg)?,
+        object_revision: u64::try_from(row.try_get::<i64, _>("object_revision").map_err(log_pg)?)
+            .map_err(|_| LearningStoreError::Unavailable)?,
+    })
+}
+
+fn source_settings_from_row(
+    row: &sqlx_postgres::PgRow,
+) -> Result<LearningSourceScheduleSettings, LearningStoreError> {
+    Ok(LearningSourceScheduleSettings {
+        source_id: row.try_get("source_id").map_err(log_pg)?,
+        scheduling_enabled: row
+            .try_get::<Option<bool>, _>("scheduling_enabled")
+            .map_err(log_pg)?
+            .unwrap_or(true),
+        paused_at: row
+            .try_get::<Option<OffsetDateTime>, _>("paused_at")
+            .map_err(log_pg)?
+            .map(time_to_ms),
+        object_revision: u64::try_from(
+            row.try_get::<Option<i64>, _>("object_revision")
+                .map_err(log_pg)?
+                .unwrap_or(1),
+        )
+        .map_err(|_| LearningStoreError::Unavailable)?,
+    })
+}
+
+fn schedule_from_row(row: &sqlx_postgres::PgRow) -> Result<LearningSchedule, LearningStoreError> {
+    Ok(LearningSchedule {
+        item_id: row.try_get("item_id").map_err(log_pg)?,
+        state: parse_schedule_state(&row.try_get::<String, _>("state").map_err(log_pg)?)?,
+        due_at: time_to_ms(row.try_get("due_at").map_err(log_pg)?),
+        stability: row.try_get("stability").map_err(log_pg)?,
+        difficulty: row.try_get("difficulty").map_err(log_pg)?,
+        last_review_at: row
+            .try_get::<Option<OffsetDateTime>, _>("last_review_at")
+            .map_err(log_pg)?
+            .map(time_to_ms),
+        repetitions: u32::try_from(row.try_get::<i32, _>("repetitions").map_err(log_pg)?)
+            .map_err(|_| LearningStoreError::Unavailable)?,
+        lapses: u32::try_from(row.try_get::<i32, _>("lapses").map_err(log_pg)?)
+            .map_err(|_| LearningStoreError::Unavailable)?,
+        algorithm: row.try_get("algorithm").map_err(log_pg)?,
+        algorithm_version: row.try_get("algorithm_version").map_err(log_pg)?,
+        algorithm_payload: row.try_get("algorithm_payload").map_err(log_pg)?,
+        object_revision: u64::try_from(row.try_get::<i64, _>("object_revision").map_err(log_pg)?)
+            .map_err(|_| LearningStoreError::Unavailable)?,
+        paused_at: row
+            .try_get::<Option<OffsetDateTime>, _>("paused_at")
+            .map_err(log_pg)?
+            .map(time_to_ms),
+    })
+}
+
+fn ms_to_time(value: u64) -> Result<OffsetDateTime, LearningStoreError> {
+    OffsetDateTime::from_unix_timestamp_nanos(i128::from(value) * 1_000_000)
+        .map_err(|_| LearningStoreError::Unavailable)
+}
+
 fn time_to_ms(value: OffsetDateTime) -> u64 {
     let millis = value.unix_timestamp_nanos() / 1_000_000;
     u64::try_from(millis).unwrap_or_default()
@@ -2484,7 +3814,10 @@ fn log_pg(error: sqlx_core::Error) -> LearningStoreError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use lumi_core::{LearningAnswer, LearningAnswerSpec, LearningOption, ReadingCompletionTrigger};
+    use lumi_core::{
+        LearningAnswer, LearningAnswerSpec, LearningHint, LearningOption, ReadingCompletionTrigger,
+        SelfCheckRating,
+    };
 
     fn context(
         user_id: UserId,
@@ -2586,6 +3919,7 @@ mod tests {
                         correct_option_id: "a".to_owned(),
                     },
                     explanation: "Пояснение".to_owned(),
+                    hints: Vec::new(),
                     source_anchor: None,
                 },
                 "item",
@@ -2612,6 +3946,7 @@ mod tests {
                     prompt: "Новая формулировка".to_owned(),
                     answer_spec: item.current_revision.answer_spec,
                     explanation: "Новое пояснение".to_owned(),
+                    hints: Vec::new(),
                     source_anchor: None,
                 },
                 "item-update",
@@ -2620,6 +3955,220 @@ mod tests {
         let restored = runtime.get_session(user_id, session.id).await?;
 
         assert_eq!(restored.items[0].prompt, "Старая формулировка");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn ordered_hint_becomes_attempt_and_schedule_evidence() -> Result<(), LearningStoreError>
+    {
+        let runtime = LearningRuntime::memory();
+        let user_id = Uuid::now_v7();
+        let device_id = Uuid::now_v7();
+        let material_id = Uuid::now_v7();
+        let revision_id = Uuid::now_v7();
+        let completion = runtime
+            .complete_reading(
+                user_id,
+                device_id,
+                Some(context(user_id, material_id, revision_id)),
+                &CompleteReadingScopeCommand {
+                    material_id,
+                    revision_id,
+                    scope_kind: LearningScopeKind::ContentUnit,
+                    content_unit_id: Some("chapter-1".to_owned()),
+                    anchor: None,
+                    trigger: ReadingCompletionTrigger::ReaderBoundary,
+                },
+                "hint-completion",
+            )
+            .await?;
+        let item = runtime
+            .create_item(
+                user_id,
+                device_id,
+                &CreateLearningItemCommand {
+                    source_id: completion.offer.source.id,
+                    kind: LearningItemKind::HintedQuestion,
+                    status: LearningItemStatus::Active,
+                    prompt: "Что хранит schedule?".to_owned(),
+                    answer_spec: LearningAnswerSpec::HintedSelfCheck {
+                        sample_answer: "Версию алгоритма и memory state.".to_owned(),
+                    },
+                    explanation: "Schedule остаётся заменяемой projection.".to_owned(),
+                    hints: vec![
+                        LearningHint {
+                            position: 1,
+                            text: "Вспомните versioning.".to_owned(),
+                            source_anchor: None,
+                        },
+                        LearningHint {
+                            position: 2,
+                            text: "Нужен opaque payload.".to_owned(),
+                            source_anchor: None,
+                        },
+                    ],
+                    source_anchor: None,
+                },
+                "hint-item",
+            )
+            .await?;
+        let session = runtime
+            .create_session(
+                user_id,
+                device_id,
+                CreateLearningSessionCommand {
+                    source_id: completion.offer.source.id,
+                    kind: LearningSessionKind::ImmediateRecall,
+                },
+                "hint-session",
+            )
+            .await?;
+        runtime
+            .transition_session(
+                user_id,
+                device_id,
+                session.id,
+                SessionTransition::Start,
+                "hint-start",
+            )
+            .await?;
+        let out_of_order = runtime
+            .reveal_hint(
+                user_id,
+                session.id,
+                RevealLearningHintCommand {
+                    item_id: item.id,
+                    position: 2,
+                },
+                "hint-two-first",
+            )
+            .await;
+        assert!(matches!(out_of_order, Err(LearningStoreError::Conflict)));
+        runtime
+            .reveal_hint(
+                user_id,
+                session.id,
+                RevealLearningHintCommand {
+                    item_id: item.id,
+                    position: 1,
+                },
+                "hint-one",
+            )
+            .await?;
+        let attempt = runtime
+            .submit_attempt(
+                user_id,
+                device_id,
+                session.id,
+                item.id,
+                &SubmitLearningAttemptCommand {
+                    answer: LearningAnswer::Text {
+                        text: "Версия и state.".to_owned(),
+                    },
+                    self_check: Some(SelfCheckRating::Partial),
+                    elapsed_ms: 100,
+                    review_rating: Some(LearningReviewRating::Hard),
+                },
+                "hint-attempt",
+            )
+            .await?;
+        let schedules = runtime.list_schedules(user_id, None).await?;
+
+        assert_eq!(attempt.hints_used, vec![1]);
+        assert_eq!(schedules.len(), 1);
+        assert_eq!(schedules[0].algorithm_version, "fsrs-4.5-lumi-v1");
+        runtime
+            .set_source_paused(
+                user_id,
+                device_id,
+                completion.offer.source.id,
+                true,
+                "pause-source",
+            )
+            .await?;
+        assert_eq!(
+            runtime.list_schedules(user_id, None).await?[0].state,
+            LearningScheduleState::Paused
+        );
+        runtime
+            .set_source_paused(
+                user_id,
+                device_id,
+                completion.offer.source.id,
+                false,
+                "resume-source",
+            )
+            .await?;
+        if let LearningBackend::Memory(data) = &runtime.backend {
+            let mut data = lock_memory(data)?;
+            let schedule = data
+                .schedules
+                .get_mut(&(user_id, item.id))
+                .ok_or(LearningStoreError::NotFound)?;
+            schedule.due_at = now_timestamp_ms().saturating_sub(1);
+        }
+        let today = runtime.today(user_id, None).await?;
+        assert_eq!(today.counts.due, 1);
+        assert_eq!(today.groups.len(), 1);
+        runtime
+            .update_settings(
+                user_id,
+                device_id,
+                &UpdateLearningSettingsCommand {
+                    expected_revision: 1,
+                    scheduling_enabled: true,
+                    daily_limit: 5,
+                    manual_only: true,
+                },
+                "manual-only",
+            )
+            .await?;
+        let manual_today = runtime.today(user_id, None).await?;
+        assert_eq!(manual_today.counts.due, 1);
+        assert!(manual_today.groups.is_empty());
+        runtime
+            .update_settings(
+                user_id,
+                device_id,
+                &UpdateLearningSettingsCommand {
+                    expected_revision: 2,
+                    scheduling_enabled: true,
+                    daily_limit: 5,
+                    manual_only: false,
+                },
+                "automatic-today",
+            )
+            .await?;
+        let scheduled = runtime
+            .create_session(
+                user_id,
+                device_id,
+                CreateLearningSessionCommand {
+                    source_id: completion.offer.source.id,
+                    kind: LearningSessionKind::ScheduledReview,
+                },
+                "scheduled-session",
+            )
+            .await?;
+        runtime
+            .transition_session(
+                user_id,
+                device_id,
+                scheduled.id,
+                SessionTransition::Start,
+                "scheduled-start",
+            )
+            .await?;
+        let snoozed = runtime
+            .snooze_session(
+                user_id,
+                scheduled.id,
+                SnoozeLearningSessionCommand { days: 1 },
+                "snooze",
+            )
+            .await?;
+        assert_eq!(snoozed.state, LearningSessionState::Abandoned);
+        assert!(runtime.list_schedules(user_id, None).await?[0].due_at > now_timestamp_ms());
         Ok(())
     }
 

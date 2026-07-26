@@ -361,9 +361,18 @@ test("offers a reload-safe deterministic session after reading", async ({
   await offer.getByRole("button", { name: "Создать вопрос" }).click();
 
   const editor = page.getByRole("region", { name: "Редактор вопроса" });
-  await editor.getByLabel("Вопрос").fill("От чего не зависит reader core?");
-  await editor.getByLabel("Вариант A").fill("От DOM и Dioxus");
-  await editor.getByLabel("Вариант B").fill("От доменных контрактов");
+  await editor
+    .getByLabel("Тип")
+    .selectOption({ label: "Вопрос с подсказками" });
+  await editor
+    .getByRole("textbox", { name: "Вопрос", exact: true })
+    .fill("От чего не зависит reader core?");
+  await editor
+    .getByLabel("Пример ответа")
+    .fill("От DOM, Dioxus и platform handles.");
+  await editor
+    .getByLabel("Подсказка 1")
+    .fill("Вспомните границу platform-independent domain.");
   await editor
     .getByLabel("Пояснение")
     .fill("Reader core остаётся platform-independent.");
@@ -373,10 +382,19 @@ test("offers a reload-safe deterministic session after reading", async ({
       .getByRole("region", { name: "Сохранённые вопросы" })
       .getByText("От чего не зависит reader core?"),
   ).toBeVisible();
+  await page.getByRole("button", { name: "Пауза повторения" }).click();
+  await expect(
+    page.getByRole("button", { name: "Возобновить повторение" }),
+  ).toBeVisible();
+  await page.getByRole("button", { name: "Возобновить повторение" }).click();
   await page.getByRole("button", { name: "Начать самопроверку (1)" }).click();
 
   const session = page.getByRole("main", { name: "Сессия самопроверки" });
   await expect(session.getByText("0 / 1")).toBeVisible();
+  await session.getByRole("button", { name: "Открыть подсказку 1" }).click();
+  await expect(
+    session.getByText("Вспомните границу platform-independent domain."),
+  ).toBeVisible();
   await session.getByRole("button", { name: "Открыть источник" }).click();
   await expect(
     page.getByRole("main", { name: "Чтение Stage Four Reader" }),
@@ -386,13 +404,35 @@ test("offers a reload-safe deterministic session after reading", async ({
 
   await page.reload();
   await expect(session.getByText("0 / 1")).toBeVisible();
-  await session.getByLabel("От DOM и Dioxus").check();
+  await expect(
+    session.getByText("Вспомните границу platform-independent domain."),
+  ).toBeVisible();
+  await session.getByLabel("Ваш ответ").fill("От DOM и Dioxus.");
+  await session
+    .getByRole("button", { name: "Показать ответ и оценить себя" })
+    .click();
+  await session.getByLabel("Частично").check();
+  await session.getByLabel("С трудом").check();
   await session.getByRole("button", { name: "Ответить" }).click();
-  await expect(session.getByText("Верно.")).toBeVisible();
+  await expect(session.getByText("Самопроверка сохранена.")).toBeVisible();
+  await expect(session.getByText("Использовано подсказок: 1.")).toBeVisible();
   await expect(session.getByText("Все задания пройдены")).toBeVisible();
   await session.getByRole("button", { name: "Завершить" }).click();
   await expect(session.getByText("Сессия завершена")).toBeVisible();
   await expect(session.getByText("Ответов сохранено: 1")).toBeVisible();
+  await session.getByRole("button", { name: "Готово" }).click();
+  await page.getByRole("link", { name: "Челленджи" }).click();
+  const challenges = page.getByRole("main", { name: "Челленджи" });
+  await expect(challenges.getByText("На сегодня всё выполнено.")).toBeVisible();
+  await expect(
+    challenges.getByText("К повторению: 0 · Закрепить: 0 · Черновики: 0"),
+  ).toBeVisible();
+  await challenges.getByRole("button", { name: "Только вручную" }).click();
+  await expect(
+    challenges.getByText(
+      "Включён режим «только вручную». Lumi не формирует автоматическую очередь.",
+    ),
+  ).toBeVisible();
 });
 
 test("imports Markdown through the shared reflowable reader", async ({

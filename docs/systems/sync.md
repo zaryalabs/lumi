@@ -172,6 +172,9 @@ Personal SyncSpace принадлежит одному пользователю.
 - `ReadingCompletion`, `LearningAttempt` и learning evidence events
   append-only. `LearningSession` сохраняет точные item revision snapshots, а
   lifecycle transition записывает новую object revision.
+- `LearningSchedule`, account/source learning settings являются mutable
+  versioned projections. Они перестраиваются из immutable attempts, а
+  pause/resume обновляет object revision без удаления history.
 - Server-side Web baseline пишет learning mutations в существующий personal
   `sync_changes`. Полный native reducer/snapshot contract поставляется вместе с
   native replica, не меняя owner/source/item/session identity.
@@ -322,6 +325,9 @@ SyncChange {
 - `reading_progress`;
 - `learning_item`;
 - `learning_attempt`;
+- `learning_schedule`;
+- `learning_settings`;
+- `learning_source_settings`;
 - `ai_task`;
 - `ai_artifact`;
 - `shared_comment`;

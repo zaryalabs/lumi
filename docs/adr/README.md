@@ -42,6 +42,8 @@ plugin, AI, search and account/auth boundaries.
 - [`0026`](0026-learning-completion-items-sessions.md) — revision-bound
   learning sources, durable completion, versioned items и immutable session
   snapshots.
+- [`0027`](0027-fsrs-scheduling-challenges.md) — versioned FSRS schedules,
+  ordered hint evidence и bounded Challenges projection.
 
 ## Template
 

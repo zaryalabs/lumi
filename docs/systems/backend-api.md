@@ -36,6 +36,9 @@ Dioxus Fullstack/server functions можно использовать для UI-
 /api/v1/mcp/connections/*
 /api/v1/learning/items/*
 /api/v1/learning/sessions/*
+/api/v1/learning/challenges/*
+/api/v1/learning/schedules
+/api/v1/learning/settings
 /api/v1/sync/*
 /api/v1/spaces/*
 /api/v1/shares/*
@@ -65,8 +68,9 @@ Responsibilities:
   results, summary slots и derived-material workflows.
 - `mcp/connections` - authenticated Web management revocable MCP connections;
   сам agent transport остается на `/mcp`.
-- `learning/items/sessions` - account-owned versioned exercises, immutable
-  session snapshots, deterministic attempts и source-open evidence.
+- `learning/items/sessions/challenges/schedules/settings` - account-owned
+  versioned exercises, immutable session snapshots, deterministic attempts,
+  ordered assistance evidence, versioned FSRS state и bounded due projection.
 - `materials/*/reading-completions` и `materials/*/learning-offer` - durable
   completion before optional one-shot Reader offer; learning failure не меняет
   reading progress.
