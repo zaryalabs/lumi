@@ -263,6 +263,13 @@ pub fn s1_schema_migrations() -> Vec<SchemaMigration> {
                 "Generic Voice Note attachments, stable internal LinkTarget bindings and backlinks."
                     .to_owned(),
         },
+        SchemaMigration {
+            id: "s1-0023-search-core".to_owned(),
+            schema_version: DOMAIN_SCHEMA_VERSION.to_owned(),
+            description:
+                "Rebuildable source-aware chunks, common search jobs and BM25 plus fastText retrieval."
+                    .to_owned(),
+        },
     ]);
     migrations
 }
@@ -1638,7 +1645,7 @@ mod tests {
     fn migrations_cover_s1_contract_groups() {
         let migrations = s1_schema_migrations();
 
-        assert_eq!(migrations.len(), 24);
+        assert_eq!(migrations.len(), 26);
         assert!(migrations
             .iter()
             .any(|migration| migration.id == "s1-0011-ai-contract-freeze-v1"));
@@ -1666,5 +1673,14 @@ mod tests {
         assert!(migrations
             .iter()
             .any(|migration| migration.id == "s1-0020-learning-voice"));
+        assert!(migrations
+            .iter()
+            .any(|migration| migration.id == "s1-0021-records-v2"));
+        assert!(migrations
+            .iter()
+            .any(|migration| migration.id == "s1-0022-voice-notes-links"));
+        assert!(migrations
+            .iter()
+            .any(|migration| migration.id == "s1-0023-search-core"));
     }
 }

@@ -50,6 +50,8 @@ plugin, AI, search and account/auth boundaries.
   lifecycle для Voice Notes и learning.
 - [`0032`](0032-stable-record-links-backlinks.md) — stable `LinkTarget`,
   wikilinks, ambiguous/unresolved states и backlinks.
+- [`0033`](0033-search-chunks-tantivy-fasttext.md) — source-aware chunks,
+  Tantivy BM25, fastText rerank, общий indexing job и retrieval API.
 
 ## Template
 

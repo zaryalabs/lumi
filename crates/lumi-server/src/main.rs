@@ -35,10 +35,12 @@ async fn main() -> anyhow::Result<()> {
         .with_graceful_shutdown(cancellation.clone().cancelled_owned())
         .into_future();
     let telegram = state.clone().run_telegram(cancellation.clone());
-    let ai_tasks = state.run_ai_tasks(cancellation.clone());
+    let ai_tasks = state.clone().run_ai_tasks(cancellation.clone());
+    let search = state.run_search(cancellation.clone());
     tokio::pin!(server);
     tokio::pin!(telegram);
     tokio::pin!(ai_tasks);
+    tokio::pin!(search);
 
     tokio::select! {
         result = &mut server => {
@@ -46,24 +48,35 @@ async fn main() -> anyhow::Result<()> {
             result.context("Lumi server failed")?;
             telegram.await;
             ai_tasks.await;
+            search.await;
         }
         () = &mut telegram => {
             cancellation.cancel();
             server.await.context("Lumi server failed")?;
             ai_tasks.await;
+            search.await;
             anyhow::bail!("embedded Telegram supervisor stopped unexpectedly");
         }
         () = &mut ai_tasks => {
             cancellation.cancel();
             server.await.context("Lumi server failed")?;
             telegram.await;
+            search.await;
             anyhow::bail!("internal AI task worker stopped unexpectedly");
+        }
+        () = &mut search => {
+            cancellation.cancel();
+            server.await.context("Lumi server failed")?;
+            telegram.await;
+            ai_tasks.await;
+            anyhow::bail!("search indexing worker stopped unexpectedly");
         }
         () = shutdown_signal() => {
             cancellation.cancel();
             server.await.context("Lumi server failed")?;
             telegram.await;
             ai_tasks.await;
+            search.await;
         }
     }
 

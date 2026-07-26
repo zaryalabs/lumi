@@ -250,6 +250,26 @@ SearchChunk {
 
 ## Реализация
 
+Web personal search foundation реализован в `0.4.0/E3` по
+[`ADR 0033`](../adr/0033-search-chunks-tantivy-fasttext.md):
+
+- `search.contract.v1` и `search.chunker.v1` находятся в `lumi-core`;
+- Tantivy `0.26` выполняет BM25 с owner/material/type/tag filters до stored
+  payload;
+- `finalfusion 0.18` читает проверенный fastText `.bin`/`.fifu`;
+- `search_index_requests` и common `Job(kind = search_index)` создаются
+  транзакционно с domain changes;
+- incremental replace/delete, restart recovery и full owner rebuild используют
+  один worker/runtime;
+- `/api/v1/search`, `/search/retrieve`, `/search/status` и `/search/rebuild`
+  являются общим Web/будущим MCP application boundary.
+- status различает `ready`/`partial`/`rebuilding`/`failed` и отдельно сообщает
+  количество source documents без searchable text.
+
+Отсутствие model/checksum не включает BM25 fallback: status становится
+`failed`, а capabilities не публикуются. Global/Library/Reader/Desk UI и MCP
+adapters принадлежат следующему эпику и не дублируют query service.
+
 ### Libraries
 
 Primary candidates:
@@ -347,13 +367,14 @@ Reindex when:
 - `revisit`: cross-encoder rerank. Better quality for AI retrieval, but
   requires heavier model/runtime.
 
-## Открытые вопросы
+## Принятые параметры первого среза
 
-- Какой fastText model and runtime использовать для Russian/English mixed
-  libraries and web compatibility?
-- Каким должен быть default BM25 candidate tail size before rerank?
-- Нужно ли хранить vector index locally on mobile or compute semantic rerank
-  server-side when allowed?
-- Какой query syntax дать пользователю: `tag:`, `type:`, `in:`, quotes?
-- Нужно ли индексировать rejected/generated drafts or keep them invisible until
-  accepted?
+- Runtime: pure-Rust `finalfusion`, модельная семья `cc.ru.300`, exact
+  deployment checksum; candidate tail ограничен 500 chunks.
+- Rejected/candidate/superseded AI artifacts и draft/rejected/archived learning
+  items не индексируются.
+- Public API принимает explicit `scope`, `type`, `tag`, `material_id`, cursor и
+  limit. Расширенный user query syntax остаётся последующим совместимым
+  дополнением.
+- Web использует server-side index. Native vector storage/runtime выбирается
+  вместе с первой full-copy replica, сохраняя текущие DTO и versions.

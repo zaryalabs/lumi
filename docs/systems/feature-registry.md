@@ -145,6 +145,12 @@ audio lifecycle, stable `LinkTarget`, wikilinks и backlinks.
 | SEARCH-007 | Knowledge Base search surface and graph-aware filters | product | SEARCH-004, KB-001 | `search.md`, `knowledge-base.md` |
 | SEARCH-008 | Community Space search surface over shared content | product | SEARCH-006, SOC-001 | `search.md`, `social.md` |
 
+Реализация `0.4.0/E3` закрывает Web foundation `SEARCH-001`–`SEARCH-003` и
+`SEARCH-005`: versioned Tantivy index, verified fastText rerank, source-aware
+chunks, common indexing jobs, owner-filtered query и bounded retrieval API.
+Пользовательские search surfaces `SEARCH-004`, MCP adapters и social
+permissions `SEARCH-006` остаются следующими эпиками.
+
 ## Learning And AI
 
 | ID | Функция | Тип | Зависит от | Документы |

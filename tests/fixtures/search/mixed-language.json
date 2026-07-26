@@ -1,0 +1,20 @@
+{
+  "schema_version": "lumi.search-quality.v1",
+  "queries": [
+    {
+      "query": "память",
+      "relevant": "Память укрепляют методы запоминания и повторения материала.",
+      "irrelevant": "Асинхронное выполнение распределяет задачи."
+    },
+    {
+      "query": "search notes",
+      "relevant": "Search and retrieval across personal notes.",
+      "irrelevant": "Reading layout measures the page."
+    },
+    {
+      "query": "поиск records",
+      "relevant": "Единый поиск находит notes и личные записи.",
+      "irrelevant": "Книга открывается на первой странице."
+    }
+  ]
+}

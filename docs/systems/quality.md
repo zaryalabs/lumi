@@ -87,6 +87,21 @@ Initial budgets are design targets for spikes, not final SLA:
   SQL statement и менее чем за 300 ms;
 - budgets запускаются `make performance`; setup fixtures не входит в измерение.
 
+Для `0.4.0/E3` search budget фиксируется отдельно:
+
+- dataset: 10 000 materials / 500 000 source-aware chunks;
+- после построения index первая owner-scoped global page (BM25 top 500 +
+  fastText rerank) — p95 менее 750 ms в `--release`;
+- incremental replace одной note projection — менее 250 ms без учёта
+  пользовательской network latency;
+- deterministic golden corpus требует, чтобы relevant result находился в top 5
+  и опережал paired irrelevant result для каждого Cyrillic/English case;
+- dataset запускается `make search-performance`; model cold start/RSS
+  фиксируются оператором рядом с точным model checksum и не входят в query p95.
+
+Ослабление threshold или уменьшение 500k dataset требует обновления ADR и
+причины; отсутствие fastText model не считается успешным benchmark fallback.
+
 Для `0.2.0` дополнительно проверяются AI/MCP regression targets:
 
 - owner-scoped первая страница очереди для 1 000 задач — p95 менее 300 ms;
@@ -122,6 +137,5 @@ Initial budgets are design targets for spikes, not final SLA:
 
 ## Открытые вопросы
 
-- Exact benchmark datasets and thresholds for serious search.
 - Which fixtures can be committed under open licenses.
 - CI cadence for expensive compatibility/performance suites.

@@ -121,6 +121,17 @@ unresolved/ambiguous resolution и backlinks без зависимости от 
 [`ADR 0032`](docs/adr/0032-stable-record-links-backlinks.md) и
 [`runbook`](docs/runbooks/voice-notes-and-links.md).
 
+Для `0.4.0/E3` реализовано поисковое ядро: versioned source-aware chunks для
+normalized materials/PDF, Annotation v2, accepted AI artifacts и active
+learning items; Tantivy BM25 с проверяемым fastText rerank; транзакционные
+`search_index` jobs, incremental replace/delete, restart recovery и full
+rebuild. Owner-filtered `/search`, `/search/retrieve`, `/search/status` и
+`/search/rebuild` возвращают plain snippets, exact open targets и compatible
+citations. Model/checksum failure явно отключает query capabilities без
+BM25-only деградации. Решение и эксплуатация описаны в
+[`ADR 0033`](docs/adr/0033-search-chunks-tantivy-fasttext.md) и
+[`search runbook`](docs/runbooks/search-index.md).
+
 ## Локальный запуск
 
 Для основного пути нужны Docker с Compose и `make`. Он собирает и запускает

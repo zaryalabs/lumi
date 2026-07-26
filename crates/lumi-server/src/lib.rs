@@ -17,6 +17,7 @@ mod links;
 mod mcp;
 mod pdf_engine;
 mod scheduler;
+mod search;
 pub mod secrets;
 mod telegram;
 mod telegram_media;
@@ -70,6 +71,8 @@ pub const DEFAULT_WEB_ORIGIN: &str = "http://127.0.0.1:5173";
 pub const DEFAULT_BLOB_ROOT: &str = ".local/blob-store";
 /// Default root for generated local server-side secret keys.
 pub const DEFAULT_SECRET_ROOT: &str = ".local/secrets";
+/// Default root for the rebuildable Tantivy search index.
+pub const DEFAULT_SEARCH_ROOT: &str = ".local/search-index";
 /// Default fixed OpenRouter OpenAI-compatible chat endpoint.
 pub const DEFAULT_OPENROUTER_ENDPOINT: &str = "https://openrouter.ai/api/v1/chat/completions";
 /// Default fixed OpenAI Audio Transcriptions endpoint.
@@ -86,6 +89,10 @@ pub struct AppConfig {
     secure_cookie: bool,
     blob_root: std::path::PathBuf,
     secret_root: std::path::PathBuf,
+    search_root: std::path::PathBuf,
+    fasttext_model_path: Option<std::path::PathBuf>,
+    fasttext_model_sha256: Option<String>,
+    fasttext_model_version: String,
     openrouter_endpoint: String,
     openai_transcription_endpoint: String,
     deployment_mode: String,
@@ -113,6 +120,14 @@ impl AppConfig {
         let secret_root = std::env::var_os("LUMI_SECRET_ROOT")
             .map(std::path::PathBuf::from)
             .unwrap_or_else(|| std::path::PathBuf::from(DEFAULT_SECRET_ROOT));
+        let search_root = std::env::var_os("LUMI_SEARCH_ROOT")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|| std::path::PathBuf::from(DEFAULT_SEARCH_ROOT));
+        let fasttext_model_path =
+            std::env::var_os("LUMI_FASTTEXT_MODEL").map(std::path::PathBuf::from);
+        let fasttext_model_sha256 = std::env::var("LUMI_FASTTEXT_MODEL_SHA256").ok();
+        let fasttext_model_version = std::env::var("LUMI_FASTTEXT_MODEL_VERSION")
+            .unwrap_or_else(|_| "cc.ru.300.fasttext.v1".to_owned());
         let openrouter_endpoint = std::env::var("LUMI_OPENROUTER_ENDPOINT")
             .unwrap_or_else(|_| DEFAULT_OPENROUTER_ENDPOINT.to_owned());
         let openai_transcription_endpoint = std::env::var("LUMI_OPENAI_TRANSCRIPTION_ENDPOINT")
@@ -129,6 +144,10 @@ impl AppConfig {
             secure_cookie,
             blob_root,
             secret_root,
+            search_root,
+            fasttext_model_path,
+            fasttext_model_sha256,
+            fasttext_model_version,
             openrouter_endpoint,
             openai_transcription_endpoint,
             deployment_mode,
@@ -164,6 +183,30 @@ impl AppConfig {
     #[must_use]
     pub fn secret_root(&self) -> &std::path::Path {
         &self.secret_root
+    }
+
+    /// Filesystem root used by the rebuildable Tantivy index.
+    #[must_use]
+    pub fn search_root(&self) -> &std::path::Path {
+        &self.search_root
+    }
+
+    /// Optional verified fastText binary used for ordinary search.
+    #[must_use]
+    pub fn fasttext_model_path(&self) -> Option<&std::path::Path> {
+        self.fasttext_model_path.as_deref()
+    }
+
+    /// Expected SHA-256 checksum for the configured fastText binary.
+    #[must_use]
+    pub fn fasttext_model_sha256(&self) -> Option<&str> {
+        self.fasttext_model_sha256.as_deref()
+    }
+
+    /// Stable operator-controlled fastText model identity.
+    #[must_use]
+    pub fn fasttext_model_version(&self) -> &str {
+        &self.fasttext_model_version
     }
 
     /// Fixed server-controlled OpenRouter endpoint.
@@ -276,6 +319,7 @@ pub struct AppState {
     learning_operation_limits: Arc<learning::limits::LearningOperationLimits>,
     audio: Option<Arc<audio::AudioRuntime>>,
     mcp: Arc<mcp::McpRuntime>,
+    search: Arc<search::SearchRuntime>,
     ai_capabilities: ai::AiCapabilityReadiness,
 }
 
@@ -318,6 +362,7 @@ impl AppState {
             ),
             audio: None,
             mcp: Arc::new(mcp::McpRuntime::memory()),
+            search: Arc::new(search::SearchRuntime::empty_memory()),
             ai_capabilities: ai::AiCapabilityReadiness::default(),
         }
     }
@@ -382,6 +427,16 @@ impl AppState {
             accounts.pool().clone(),
             config.blob_root().to_path_buf(),
         )));
+        let search = Arc::new(
+            search::SearchRuntime::persistent(
+                accounts.pool().clone(),
+                config.search_root(),
+                config.fasttext_model_path(),
+                config.fasttext_model_sha256(),
+                config.fasttext_model_version().to_owned(),
+            )
+            .await,
+        );
         Ok(Self {
             repository: Arc::new(RwLock::new(Repository::default())),
             accounts: Arc::new(accounts),
@@ -395,6 +450,7 @@ impl AppState {
             ),
             audio,
             mcp,
+            search,
             ai_capabilities: ai::AiCapabilityReadiness::e4_release(),
         })
     }
@@ -404,6 +460,7 @@ impl AppState {
         source: SourceDownload,
         accounts: Arc<dyn AccountStore>,
     ) -> Self {
+        let search = Arc::new(search::SearchRuntime::memory(&imported));
         let mut repository = Repository::default();
         repository.insert_imported_with_source(imported, source);
 
@@ -420,6 +477,7 @@ impl AppState {
             ),
             audio: None,
             mcp: Arc::new(mcp::McpRuntime::memory()),
+            search,
             ai_capabilities: ai::AiCapabilityReadiness::default(),
         }
     }
@@ -510,6 +568,11 @@ impl AppState {
         } else {
             cancellation.cancelled().await;
         }
+    }
+
+    /// Run the durable search indexing worker until shutdown.
+    pub async fn run_search(self, cancellation: tokio_util::sync::CancellationToken) {
+        self.search.run_worker(cancellation).await;
     }
 }
 
@@ -702,6 +765,12 @@ pub(crate) fn service_capabilities(state: &AppState) -> ServiceCapabilities {
         capabilities
             .features
             .push("annotation-backlinks".to_owned());
+    }
+    if state.search.is_query_ready() {
+        capabilities.route_groups.push("search".to_owned());
+        capabilities.features.push("search-index".to_owned());
+        capabilities.features.push("search-query".to_owned());
+        capabilities.features.push("ai-retrieval".to_owned());
     }
     if learning_ai_ready {
         capabilities.features.push("learning-ai".to_owned());
@@ -2271,7 +2340,7 @@ mod tests {
         let migrations: Vec<SchemaMigration> =
             json_get(build_router(), "/api/v1/schema/migrations").await?;
 
-        assert_eq!(migrations.len(), 25);
+        assert_eq!(migrations.len(), 26);
         assert!(migrations
             .iter()
             .any(|migration| migration.id == "s1-0017-learning-core"));
@@ -2290,6 +2359,9 @@ mod tests {
         assert!(migrations
             .iter()
             .any(|migration| migration.id == "s1-0022-voice-notes-links"));
+        assert!(migrations
+            .iter()
+            .any(|migration| migration.id == "s1-0023-search-core"));
         Ok(())
     }
 

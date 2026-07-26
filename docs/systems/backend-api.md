@@ -138,6 +138,21 @@ Voice Note создаётся только после completed generic upload �
 [`ADR 0031`](../adr/0031-voice-note-audio-lifecycle.md) и
 [`ADR 0032`](../adr/0032-stable-record-links-backlinks.md).
 
+Search foundation публикует:
+
+```text
+GET  /api/v1/search?q=&scope=&type=&material_id=&tag=&cursor=&limit=
+POST /api/v1/search/retrieve
+GET  /api/v1/search/status
+POST /api/v1/search/rebuild
+```
+
+Query/retrieve начинают с authenticated account scope. Stored snippets читаются
+только после owner/material/type/tag filtering. Retrieval возвращает bounded
+`RetrievedChunk[]` и compatible source citations, но не вызывает AI provider.
+Schema, jobs и model failure behavior закреплены в
+[`ADR 0033`](../adr/0033-search-chunks-tantivy-fasttext.md).
+
 Domain requests such as `AiTask`, `IndexRequest`, `TranscriptionRequest` and
 `FingerprintRequest` may have their own payload/status tables, but leases,
 claim fencing, retry, cancellation, progress and recovery use one common

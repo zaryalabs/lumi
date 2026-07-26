@@ -97,7 +97,7 @@ Persistent server публикует capabilities `ai-provider-openrouter`,
 `stable-link-targets`, `annotation-wikilinks`, `annotation-backlinks` и route
 groups `audio`, `links`.
 
-После перехода на новую шкалу выполнено `11/18` продуктовых эпиков. Stage 0,
+После перехода на новую шкалу выполнено `12/18` продуктовых эпиков. Stage 0,
 Contract Freeze 1 и A1 остаются закрытыми prerequisites.
 
 Repository-side gates `make c`, PostgreSQL/compatibility/security/performance,
@@ -110,7 +110,7 @@ operator acceptance остаётся release gate окружения и не м�
 готовность. Поэтому новая шкала начинается с нуля завершённых end-to-end
 эпиков и отдельно сохраняет перечень уже готового foundation выше.
 
-Текущий следующий эпик — `0.4.0/E3: Поисковое ядро`.
+Текущий следующий эпик — `0.4.0/E4: Desk и единый поиск`.
 
 ## Последовательность
 
@@ -170,7 +170,7 @@ operator gate.
    targets, rich highlights/notes, Reader CRUD, migration и export.
 2. [x] **E2 — Голосовые записи и связи.** Voice Notes, audio lifecycle,
    stable `LinkTarget`, wikilinks, unresolved/ambiguous links и backlinks.
-3. [ ] **E3 — Поисковое ядро.** BM25 + fastText, source-aware chunks,
+3. [x] **E3 — Поисковое ядро.** BM25 + fastText, source-aware chunks,
    indexing/rebuild jobs, permission-aware query/retrieval API и benchmarks.
 4. [ ] **E4 — Desk и единый поиск.** Desk projection/surfaces, global,
    library, Reader и Desk search, routing, inline edit и MCP parity.

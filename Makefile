@@ -52,7 +52,7 @@ CARGO ?= $(if $(RUSTUP_TOOLCHAIN_BIN),PATH=$(RUSTUP_TOOLCHAIN_BIN):$$PATH $(RUST
 
 .DEFAULT_GOAL := help
 
-.PHONY: help prepare build push release-manifest deploy ci-clean-images ops-config cicd-contract-test production-compose-smoke init fmt l dl t c pc docs-fmt docs-l rust-fmt rust-l rust-web-check rust-web-l rust-dl rust-t plan-runner-check plan-list devcontainer-up devcontainer-down up logs down reset server-r admin-lookup-id telegram-r db-up db-down db-migrate pdfjs-assets web-r prototype-r prototype-e2e pagination-spike-r pagination-spike-e2e ai-chat-spike-e2e stage0-spikes web-build e2e-fmt e2e-fmt-check e2e-l e2e-dl web-e2e pg-t compatibility security performance staging-config staging-smoke backup restore-drill restore-attestation-test restore-attestation beta-local beta agent-inspect
+.PHONY: help prepare build push release-manifest deploy ci-clean-images ops-config cicd-contract-test production-compose-smoke init fmt l dl t c pc docs-fmt docs-l rust-fmt rust-l rust-web-check rust-web-l rust-dl rust-t plan-runner-check plan-list devcontainer-up devcontainer-down up logs down reset server-r admin-lookup-id telegram-r db-up db-down db-migrate pdfjs-assets web-r prototype-r prototype-e2e pagination-spike-r pagination-spike-e2e ai-chat-spike-e2e stage0-spikes web-build e2e-fmt e2e-fmt-check e2e-l e2e-dl web-e2e pg-t compatibility security performance search-performance staging-config staging-smoke backup restore-drill restore-attestation-test restore-attestation beta-local beta agent-inspect
 
 help: ## Show available make targets
 	@awk 'BEGIN {FS = ":.*## "}; /^[a-zA-Z0-9_.-]+:.*## / {printf "  %-16s %s\n", $$1, $$2}' $(MAKEFILE_LIST)
@@ -389,6 +389,9 @@ security: ## Run import, session, ownership and transport security suites
 
 performance: db-up db-migrate ## Run release-mode beta performance budgets
 	LUMI_TEST_DATABASE_URL=$(DATABASE_URL) LUMI_PERFORMANCE=1 $(CARGO) test --release -p lumi-core -p lumi-server performance_
+
+search-performance: ## Run the 500k-chunk search quality and latency budget
+	LUMI_SEARCH_PERFORMANCE=1 $(CARGO) test --release -p lumi-server performance_search_ --lib -- --nocapture
 
 staging-config: ## Validate the executable staging Compose model
 	docker compose --env-file deployments/staging.env.example -f deployments/compose.staging.yaml config --quiet
