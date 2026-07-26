@@ -32,6 +32,42 @@ class ExecutePlanTests(unittest.TestCase):
         only = execute_plan.select_stages(None, "0.2.0/A1")
         self.assertEqual([stage.stage_id for stage in only], ["0.2.0/A1"])
 
+    def test_release_selection_starts_after_committed_stages(self) -> None:
+        release = execute_plan.select_stages(
+            None,
+            None,
+            "0.2.0",
+            completed_stage_ids={"0.2.0/A1", "0.2.0/A2"},
+        )
+        self.assertEqual(release[0].stage_id, "0.2.0/A3")
+        self.assertEqual(release[-1].stage_id, "0.2.0/release")
+        self.assertTrue(
+            all(stage.stage_id.startswith("0.2.0/") for stage in release)
+        )
+
+    def test_release_selection_reports_complete_and_unknown_release(self) -> None:
+        release_ids = {
+            stage.stage_id
+            for stage in execute_plan.STAGES
+            if stage.stage_id.startswith("0.3.0/")
+        }
+        self.assertEqual(
+            execute_plan.select_stages(
+                None,
+                None,
+                "0.3.0",
+                completed_stage_ids=release_ids,
+            ),
+            [],
+        )
+        with self.assertRaisesRegex(execute_plan.RunnerError, "Unknown release"):
+            execute_plan.select_stages(
+                None,
+                None,
+                "9.9.9",
+                completed_stage_ids=set(),
+            )
+
     def test_sensitive_path_detection(self) -> None:
         blocked = {
             ".devcontainer/Dockerfile": "automation control-plane path",

@@ -143,6 +143,24 @@ python3 scripts/execute_plan.py --from 0.2.0/A1
 python3 scripts/execute_plan.py --only 0.2.0/A1
 ```
 
+Продолжить с первого ещё не закоммиченного этапа до конца конкретного релиза:
+
+```sh
+python3 scripts/execute_plan.py --release 0.2.0
+```
+
+Граница текущего состояния определяется по commit trailer
+`Lumi-Plan-Stage: <stage-id>`. Runner находит первый этап выбранного релиза без
+такого commit и выполняет его вместе со всеми следующими этапами этого же
+релиза. Более поздние релизы не выбираются. Если весь релиз уже закрыт, runner
+завершается без Codex calls, gates и commits.
+
+Безопасно проверить вычисленную границу можно через:
+
+```sh
+python3 scripts/execute_plan.py --dry-run --release 0.2.0
+```
+
 Для долгого прогона удобно использовать `tmux`:
 
 ```sh

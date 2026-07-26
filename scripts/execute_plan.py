@@ -604,16 +604,49 @@ def validate_stage_definitions() -> None:
                 raise RunnerError(f"Stage {stage.stage_id} has an invalid gate command")
 
 
-def select_stages(from_stage: str | None, only_stage: str | None) -> list[Stage]:
-    if from_stage and only_stage:
-        raise RunnerError("--from and --only cannot be used together")
+def configured_releases() -> tuple[str, ...]:
+    return tuple(
+        dict.fromkeys(
+            stage.stage_id.split("/", maxsplit=1)[0] for stage in STAGES
+        )
+    )
+
+
+def select_stages(
+    from_stage: str | None,
+    only_stage: str | None,
+    release: str | None = None,
+    *,
+    completed_stage_ids: set[str] | None = None,
+) -> list[Stage]:
     if only_stage:
         return [stage_by_id(only_stage)]
-    if not from_stage:
+    if from_stage:
+        start = stage_by_id(from_stage)
+        index = STAGES.index(start)
+        return list(STAGES[index:])
+    if not release:
         return list(STAGES)
-    start = stage_by_id(from_stage)
-    index = STAGES.index(start)
-    return list(STAGES[index:])
+
+    release_stages = [
+        stage
+        for stage in STAGES
+        if stage.stage_id.split("/", maxsplit=1)[0] == release
+    ]
+    if not release_stages:
+        available = ", ".join(configured_releases())
+        raise RunnerError(f"Unknown release: {release}. Available releases: {available}")
+
+    if completed_stage_ids is None:
+        completed_stage_ids = {
+            stage.stage_id
+            for stage in release_stages
+            if stage_commit(stage.stage_id) is not None
+        }
+    for index, stage in enumerate(release_stages):
+        if stage.stage_id not in completed_stage_ids:
+            return release_stages[index:]
+    return []
 
 
 def stage_commit(stage_id: str) -> str | None:
@@ -1230,6 +1263,13 @@ def parse_args(argv: Sequence[str]) -> argparse.Namespace:
         metavar="STAGE",
         help="run exactly one stage",
     )
+    selection.add_argument(
+        "--release",
+        metavar="VERSION",
+        help=(
+            "continue from the first uncommitted stage through the end of VERSION"
+        ),
+    )
     parser.add_argument(
         "--resume",
         action="store_true",
@@ -1271,14 +1311,22 @@ def main(argv: Sequence[str] | None = None) -> int:
             for stage in STAGES:
                 print_stage(stage)
             return 0
-        if args.resume and (args.from_stage or args.only_stage):
-            raise RunnerError("--resume cannot be combined with --from or --only")
+        if args.resume and (args.from_stage or args.only_stage or args.release):
+            raise RunnerError(
+                "--resume cannot be combined with --from, --only or --release"
+            )
 
-        selected = select_stages(args.from_stage, args.only_stage)
+        selected = select_stages(args.from_stage, args.only_stage, args.release)
         if args.dry_run:
             print("Dry run; no Codex calls, gates or commits will run.\n")
+            if not selected:
+                print(f"Release {args.release} is already complete.")
+                return 0
             for stage in selected:
                 print_stage(stage)
+            return 0
+        if not selected:
+            print(f"Release {args.release} is already complete; nothing to run.")
             return 0
 
         state_file = args.state_root / "state.json"
