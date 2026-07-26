@@ -235,6 +235,13 @@ pub fn s1_schema_migrations() -> Vec<SchemaMigration> {
                 "Versioned FSRS schedules, ordered hint evidence and bounded Challenges projections."
                     .to_owned(),
         },
+        SchemaMigration {
+            id: "s1-0019-learning-ai".to_owned(),
+            schema_version: DOMAIN_SCHEMA_VERSION.to_owned(),
+            description:
+                "Source-backed generated drafts and immutable open-answer/explain-back evaluations."
+                    .to_owned(),
+        },
     ]);
     migrations
 }
@@ -1800,7 +1807,7 @@ mod tests {
     fn migrations_cover_s1_contract_groups() {
         let migrations = s1_schema_migrations();
 
-        assert_eq!(migrations.len(), 21);
+        assert_eq!(migrations.len(), 22);
         assert!(migrations
             .iter()
             .any(|migration| migration.id == "s1-0011-ai-contract-freeze-v1"));
@@ -1822,5 +1829,8 @@ mod tests {
         assert!(migrations
             .iter()
             .any(|migration| migration.id == "s1-0018-learning-scheduling"));
+        assert!(migrations
+            .iter()
+            .any(|migration| migration.id == "s1-0019-learning-ai"));
     }
 }

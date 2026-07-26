@@ -462,7 +462,7 @@ impl AppState {
     /// Run the durable internal AI task worker until shutdown.
     pub async fn run_ai_tasks(self, cancellation: tokio_util::sync::CancellationToken) {
         if let (Some(runtime), Some(imports)) = (self.ai, self.imports) {
-            ai::tasks::run_worker(runtime, imports, cancellation).await;
+            ai::tasks::run_worker(runtime, imports, self.learning, cancellation).await;
         } else {
             cancellation.cancelled().await;
         }
@@ -622,12 +622,24 @@ async fn capabilities(State(state): State<AppState>) -> Json<ServiceCapabilities
     capabilities
         .features
         .push("embedded-telegram-long-polling".to_owned());
-    capabilities
-        .features
-        .extend(state.ai_capabilities.advertised_feature_ids());
+    let ai_features = state.ai_capabilities.advertised_feature_ids();
+    let learning_ai_ready = ai_features.iter().any(|feature| feature == "ai-task-queue")
+        && ai_features
+            .iter()
+            .any(|feature| feature == "ai-explicit-context")
+        && ai_features
+            .iter()
+            .any(|feature| feature == "ai-provider-byok");
+    capabilities.features.extend(ai_features);
     capabilities.route_groups.push("learning".to_owned());
     capabilities.features.push("learning-core".to_owned());
     capabilities.features.push("learning-scheduling".to_owned());
+    if learning_ai_ready {
+        capabilities.features.push("learning-ai".to_owned());
+        capabilities
+            .features
+            .push("learning-explain-back".to_owned());
+    }
     Json(capabilities)
 }
 
@@ -2116,13 +2128,16 @@ mod tests {
         let migrations: Vec<SchemaMigration> =
             json_get(build_router(), "/api/v1/schema/migrations").await?;
 
-        assert_eq!(migrations.len(), 21);
+        assert_eq!(migrations.len(), 22);
         assert!(migrations
             .iter()
             .any(|migration| migration.id == "s1-0017-learning-core"));
         assert!(migrations
             .iter()
             .any(|migration| migration.id == "s1-0018-learning-scheduling"));
+        assert!(migrations
+            .iter()
+            .any(|migration| migration.id == "s1-0019-learning-ai"));
         Ok(())
     }
 

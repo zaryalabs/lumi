@@ -30,6 +30,18 @@
       "task_kind": "abridgement",
       "scope_kind": "material",
       "form": "outline"
+    },
+    {
+      "version": "learning.items.v1",
+      "task_kind": "generate_learning_items",
+      "scope_kind": "material",
+      "form": "outline"
+    },
+    {
+      "version": "learning.open-answer.v1",
+      "task_kind": "evaluate_open_answer",
+      "scope_kind": "material",
+      "form": "brief"
     }
   ],
   "outputs": [
@@ -54,6 +66,31 @@
         "profile",
         "chapters",
         "citation_ids"
+      ],
+      "additional_properties": false
+    },
+    {
+      "version": "question-set-artifact.v1",
+      "artifact_kind": "question_set_artifact",
+      "max_payload_bytes": 524288,
+      "required": [
+        "schema_version",
+        "items"
+      ],
+      "additional_properties": false
+    },
+    {
+      "version": "open-answer-evaluation.v1",
+      "artifact_kind": "open_answer_evaluation",
+      "max_payload_bytes": 131072,
+      "required": [
+        "schema_version",
+        "outcome",
+        "correct",
+        "missing",
+        "distorted",
+        "citation_ids",
+        "next_prompt"
       ],
       "additional_properties": false
     }

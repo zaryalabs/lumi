@@ -59,12 +59,14 @@ Knowledge Base, native full-copy replicas, Obsidian, plugin platform, будущ
 - `0.3.0 / E2`: ordered hints/source evidence, versioned FSRS schedules,
   bounded Challenges `Сегодня`, daily limit, pause/resume/snooze/manual-only
   без штрафного backlog;
+- `0.3.0 / E3`: typed source-backed generation, AI drafts, rubric-based
+  open-answer evaluation, iterative explain-back и self-check fallback;
 - release evidence A1 зафиксирован commit trailer
   `Lumi-Plan-Stage: 0.2.0/A1`.
 
 Ещё не готово:
 
-- AI/voice learning, общий learning release gate, Desk/search/RAG и Community
+- voice learning, общий learning release gate, Desk/search/RAG и Community
   Spaces.
 
 Persistent server публикует capabilities `ai-provider-openrouter`,
@@ -73,7 +75,7 @@ Persistent server публикует capabilities `ai-provider-openrouter`,
 `ai-abridged-lum`, а также route group `learning` и capability
 `learning-core`.
 
-После перехода на новую шкалу выполнено `6/18` продуктовых эпиков. Stage 0,
+После перехода на новую шкалу выполнено `7/18` продуктовых эпиков. Stage 0,
 Contract Freeze 1 и A1 остаются закрытыми prerequisites.
 
 Repository-side gates `make c`, PostgreSQL/compatibility/security/performance,
@@ -86,7 +88,7 @@ operator acceptance остаётся release gate окружения и не м�
 готовность. Поэтому новая шкала начинается с нуля завершённых end-to-end
 эпиков и отдельно сохраняет перечень уже готового foundation выше.
 
-Текущий следующий эпик — `0.3.0/E3: AI-обучение и explain-back`.
+Текущий следующий эпик — `0.3.0/E4: Голосовой контур`.
 
 ## Последовательность
 
@@ -123,7 +125,7 @@ operator gate.
    и reload/resume.
 2. [x] **E2 — Повторение и Challenges.** FSRS, hints/evidence, bounded
    `Сегодня`, pause/resume/snooze/manual-only и scheduling UX.
-3. [ ] **E3 — AI-обучение и explain-back.** Generated drafts, open-answer
+3. [x] **E3 — AI-обучение и explain-back.** Generated drafts, open-answer
    evaluation, iterative cited feedback и no-provider/self-check fallback.
 4. [ ] **E4 — Голосовой контур.** Generic audio attachment, browser recording,
    transcription, transcript review, grading/explain-back и retention/delete.

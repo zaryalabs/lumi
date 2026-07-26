@@ -1643,7 +1643,10 @@ fn artifact_slot_from_row(
     row: &sqlx_postgres::PgRow,
     result_kind: &str,
 ) -> Result<ArtifactSlot, AiRepositoryError> {
-    if result_kind == "abridgement_artifact" {
+    if matches!(
+        result_kind,
+        "abridgement_artifact" | "question_set_artifact" | "open_answer_evaluation"
+    ) {
         return Ok((None, None, None));
     }
     if result_kind != "summary_artifact" {
@@ -1682,6 +1685,47 @@ fn validate_artifact_slot_command(
     command: &CreateAiTaskCommand,
     result_kind: &str,
 ) -> Result<(), AiRepositoryError> {
+    if result_kind == "question_set_artifact" {
+        if command.kind != "generate_learning_items"
+            || command
+                .parameters
+                .get("source_id")
+                .and_then(Value::as_str)
+                .and_then(|value| Uuid::parse_str(value).ok())
+                .is_none()
+            || command
+                .parameters
+                .get("item_count")
+                .and_then(Value::as_u64)
+                .is_none_or(|count| !(1..=32).contains(&count))
+        {
+            return Err(AiRepositoryError::Invalid(
+                "learning generation requires source_id and bounded item_count".to_owned(),
+            ));
+        }
+        return Ok(());
+    }
+    if result_kind == "open_answer_evaluation" {
+        if command.kind != "evaluate_open_answer"
+            || command
+                .parameters
+                .get("session_id")
+                .and_then(Value::as_str)
+                .and_then(|value| Uuid::parse_str(value).ok())
+                .is_none()
+            || command
+                .parameters
+                .get("item_id")
+                .and_then(Value::as_str)
+                .and_then(|value| Uuid::parse_str(value).ok())
+                .is_none()
+        {
+            return Err(AiRepositoryError::Invalid(
+                "open-answer evaluation requires session and item identity".to_owned(),
+            ));
+        }
+        return Ok(());
+    }
     if result_kind == "abridgement_artifact" {
         if command.kind != "abridgement"
             || !matches!(command.source_scope, AiSourceScope::Material { .. })

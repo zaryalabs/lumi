@@ -27,6 +27,51 @@ pub type LearningSessionId = Uuid;
 /// Stable learning attempt identifier.
 pub type LearningAttemptId = Uuid;
 
+/// Request to generate source-backed learning drafts through the common AI queue.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct GenerateLearningItemsRequest {
+    /// Requested number of drafts, bounded by the server.
+    pub item_count: u16,
+    /// Whether to enqueue or immediately schedule the common internal worker.
+    pub execution_mode: crate::AiExecutionMode,
+    /// Request-level idempotency key.
+    pub idempotency_key: String,
+}
+
+/// Request to evaluate one free-form answer without overwriting its attempt.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct EvaluateOpenAnswerRequest {
+    /// Exact session containing the immutable item revision.
+    pub session_id: LearningSessionId,
+    /// Item answered by the user.
+    pub item_id: LearningItemId,
+    /// Submitted answer, treated as untrusted data by the prompt.
+    pub answer: String,
+    /// Queue or immediately schedule the common internal worker.
+    pub execution_mode: crate::AiExecutionMode,
+    /// Request-level idempotency key.
+    pub idempotency_key: String,
+}
+
+/// Immutable source-backed AI evaluation linked to a learning session turn.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct LearningAiEvaluation {
+    /// Stable evaluation record.
+    pub id: Uuid,
+    /// Session containing the evaluated turn.
+    pub session_id: LearningSessionId,
+    /// Immutable session item identity.
+    pub item_id: LearningItemId,
+    /// Common AI task that produced the result.
+    pub task_id: crate::AiTaskId,
+    /// Typed artifact containing provider provenance.
+    pub artifact_id: crate::AiArtifactId,
+    /// Validated source-backed feedback.
+    pub feedback: crate::OpenAnswerEvaluationPayload,
+    /// Creation timestamp.
+    pub created_at: TimestampMs,
+}
+
 /// One ordered assistance level attached to an immutable item revision.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct LearningHint {

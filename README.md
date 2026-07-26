@@ -77,6 +77,15 @@ manual-only, material pause/resume и session snooze сохраняют исто
 [`ADR 0027`](docs/adr/0027-fsrs-scheduling-challenges.md) и
 [`learning runbook`](docs/runbooks/learning.md).
 
+Для `0.3.0/E3` реализованы source-backed AI generation и open-answer
+evaluation поверх общей очереди/provider/context contracts `0.2.0`. Generated
+items проходят строгую schema/citation validation и появляются только как
+редактируемые черновики. Text explain-back использует durable learning session
+и последовательные immutable evaluation artifacts с
+`understood`/`partial`/`needs_review`/`not_evaluated`; при отсутствии provider
+остаётся честная self-check ветка. Решение описано в
+[`ADR 0028`](docs/adr/0028-learning-ai-evaluation-explain-back.md).
+
 ## Локальный запуск
 
 Для основного пути нужны Docker с Compose и `make`. Он собирает и запускает

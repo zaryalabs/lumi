@@ -28,6 +28,14 @@ pub const ABRIDGEMENT_ARTIFACT_SCHEMA_VERSION: &str = "abridgement-artifact.v1";
 pub const ABRIDGEMENT_CHAPTER_SCHEMA_VERSION: &str = "abridgement-chapter.v1";
 /// Version of the material abridgement prompt.
 pub const ABRIDGEMENT_MATERIAL_PROMPT_VERSION: &str = "abridgement.material.v1";
+/// Version of the source-backed learning item generation prompt.
+pub const LEARNING_ITEMS_PROMPT_VERSION: &str = "learning.items.v1";
+/// Version of the rubric-based open-answer evaluation prompt.
+pub const LEARNING_OPEN_ANSWER_PROMPT_VERSION: &str = "learning.open-answer.v1";
+/// Version of generated question-set artifacts.
+pub const QUESTION_SET_ARTIFACT_SCHEMA_VERSION: &str = "question-set-artifact.v1";
+/// Version of rubric-based open-answer evaluation artifacts.
+pub const OPEN_ANSWER_EVALUATION_SCHEMA_VERSION: &str = "open-answer-evaluation.v1";
 /// Version of the chapter brief summary prompt.
 pub const SUMMARY_CHAPTER_BRIEF_PROMPT_VERSION: &str = "summary.chapter.brief.v1";
 /// Version of the chapter outline summary prompt.
@@ -1299,6 +1307,150 @@ pub struct AbridgementArtifactPayload {
     pub citation_ids: Vec<String>,
 }
 
+/// One source-backed generated learning item awaiting user review.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct GeneratedLearningItem {
+    /// Exercise family accepted by the learning domain.
+    pub kind: String,
+    /// User-visible question.
+    pub prompt: String,
+    /// Typed [`crate::LearningAnswerSpec`] JSON.
+    pub answer_spec: Value,
+    /// Feedback shown after recall.
+    pub explanation: String,
+    /// Exact citation identifiers supporting the item.
+    pub citation_ids: Vec<String>,
+}
+
+/// Typed output of a learning item generation task.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct QuestionSetArtifactPayload {
+    /// Structured payload schema.
+    pub schema_version: String,
+    /// Generated draft items.
+    pub items: Vec<GeneratedLearningItem>,
+}
+
+impl QuestionSetArtifactPayload {
+    /// Maximum items accepted from one provider result.
+    pub const MAX_ITEMS: usize = 32;
+
+    /// Validate bounds, answer shapes and source grounding.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed error when any generated draft is incomplete, unsafe or
+    /// unsupported by a citation.
+    pub fn validate(&self) -> Result<(), AiContractError> {
+        require_version(&self.schema_version, QUESTION_SET_ARTIFACT_SCHEMA_VERSION)?;
+        if self.items.is_empty() || self.items.len() > Self::MAX_ITEMS {
+            return Err(AiContractError::InvalidStructuredOutput(
+                "question set item count is outside bounds",
+            ));
+        }
+        let mut prompts = std::collections::HashSet::new();
+        for item in &self.items {
+            require_non_empty("item.kind", &item.kind, 64)?;
+            require_non_empty("item.prompt", &item.prompt, 8 * 1024)?;
+            require_non_empty("item.explanation", &item.explanation, 32 * 1024)?;
+            if item.citation_ids.is_empty()
+                || item.citation_ids.iter().any(|id| id.trim().is_empty())
+                || !prompts.insert(item.prompt.trim().to_lowercase())
+            {
+                return Err(AiContractError::InvalidStructuredOutput(
+                    "generated item is duplicated or lacks citations",
+                ));
+            }
+            let answer: crate::LearningAnswerSpec =
+                serde_json::from_value(item.answer_spec.clone()).map_err(|_| {
+                    AiContractError::InvalidStructuredOutput(
+                        "generated item answer_spec is invalid",
+                    )
+                })?;
+            answer.validate().map_err(|_| {
+                AiContractError::InvalidStructuredOutput("generated item answer_spec is invalid")
+            })?;
+        }
+        Ok(())
+    }
+}
+
+/// Rubric-based outcome for an open answer or explain-back turn.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OpenAnswerEvaluationOutcome {
+    /// The expected concepts are explained without material distortion.
+    Understood,
+    /// The answer is useful but misses one or more expected concepts.
+    Partial,
+    /// The answer contains a material misconception or needs rereading.
+    NeedsReview,
+    /// Available source context cannot support a reliable judgment.
+    NotEvaluated,
+}
+
+/// Typed output of an open-answer evaluation task.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct OpenAnswerEvaluationPayload {
+    /// Structured payload schema.
+    pub schema_version: String,
+    /// Source-backed outcome; never interpreted as a numeric grade.
+    pub outcome: OpenAnswerEvaluationOutcome,
+    /// Correct concepts already present in the answer.
+    pub correct: Vec<String>,
+    /// Expected concepts absent from the answer.
+    pub missing: Vec<String>,
+    /// Material distortions or misconceptions.
+    pub distorted: Vec<String>,
+    /// Citation identifiers supporting factual feedback.
+    pub citation_ids: Vec<String>,
+    /// Optional next prompt for another explain-back turn.
+    pub next_prompt: Option<String>,
+}
+
+impl OpenAnswerEvaluationPayload {
+    /// Validate feedback grounding and bounded text.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed error for ungrounded factual feedback, oversized text or
+    /// contradictory `not_evaluated` output.
+    pub fn validate(&self) -> Result<(), AiContractError> {
+        require_version(&self.schema_version, OPEN_ANSWER_EVALUATION_SCHEMA_VERSION)?;
+        let sections = [&self.correct, &self.missing, &self.distorted];
+        if sections
+            .into_iter()
+            .flatten()
+            .any(|value| value.trim().is_empty() || value.len() > 8 * 1024)
+            || self
+                .next_prompt
+                .as_deref()
+                .is_some_and(|value| value.trim().is_empty() || value.len() > 8 * 1024)
+        {
+            return Err(AiContractError::InvalidStructuredOutput(
+                "evaluation feedback is empty or oversized",
+            ));
+        }
+        let has_feedback =
+            !self.correct.is_empty() || !self.missing.is_empty() || !self.distorted.is_empty();
+        if self.outcome == OpenAnswerEvaluationOutcome::NotEvaluated {
+            if has_feedback || !self.citation_ids.is_empty() {
+                return Err(AiContractError::InvalidStructuredOutput(
+                    "not_evaluated must not assert source facts",
+                ));
+            }
+        } else if !has_feedback
+            || self.citation_ids.is_empty()
+            || self.citation_ids.iter().any(|id| id.trim().is_empty())
+        {
+            return Err(AiContractError::InvalidStructuredOutput(
+                "evaluated feedback requires content and citations",
+            ));
+        }
+        Ok(())
+    }
+}
+
 impl AbridgementArtifactPayload {
     /// Maximum generated chapter count accepted at the executor boundary.
     pub const MAX_CHAPTERS: usize = 128;
@@ -1481,6 +1633,39 @@ pub fn ai_output_schema_registry() -> Vec<AiOutputSchemaDescriptor> {
             }),
             max_payload_bytes: AbridgementArtifactPayload::MAX_CONTENT_BYTES + 256 * 1024,
         },
+        AiOutputSchemaDescriptor {
+            version: QUESTION_SET_ARTIFACT_SCHEMA_VERSION,
+            artifact_kind: "question_set_artifact",
+            schema: json!({
+                "$id": QUESTION_SET_ARTIFACT_SCHEMA_VERSION,
+                "type": "object",
+                "required": ["schema_version", "items"],
+                "properties": {
+                    "schema_version": {"const": QUESTION_SET_ARTIFACT_SCHEMA_VERSION},
+                    "items": {
+                        "type": "array",
+                        "minItems": 1,
+                        "maxItems": QuestionSetArtifactPayload::MAX_ITEMS
+                    }
+                },
+                "additionalProperties": false
+            }),
+            max_payload_bytes: 512 * 1024,
+        },
+        AiOutputSchemaDescriptor {
+            version: OPEN_ANSWER_EVALUATION_SCHEMA_VERSION,
+            artifact_kind: "open_answer_evaluation",
+            schema: json!({
+                "$id": OPEN_ANSWER_EVALUATION_SCHEMA_VERSION,
+                "type": "object",
+                "required": ["schema_version", "outcome", "correct", "missing", "distorted", "citation_ids", "next_prompt"],
+                "properties": {
+                    "schema_version": {"const": OPEN_ANSWER_EVALUATION_SCHEMA_VERSION}
+                },
+                "additionalProperties": true
+            }),
+            max_payload_bytes: 128 * 1024,
+        },
     ]
 }
 
@@ -1527,6 +1712,24 @@ pub fn validate_ai_output(schema_version: &str, payload: &Value) -> Result<(), A
             ));
         }
         return abridgement.validate();
+    }
+    if schema_version == QUESTION_SET_ARTIFACT_SCHEMA_VERSION {
+        let artifact: QuestionSetArtifactPayload = serde_json::from_value(payload.clone())
+            .map_err(|_| {
+                AiContractError::InvalidStructuredOutput(
+                    "payload does not match question-set-artifact.v1",
+                )
+            })?;
+        return artifact.validate();
+    }
+    if schema_version == OPEN_ANSWER_EVALUATION_SCHEMA_VERSION {
+        let artifact: OpenAnswerEvaluationPayload = serde_json::from_value(payload.clone())
+            .map_err(|_| {
+                AiContractError::InvalidStructuredOutput(
+                    "payload does not match open-answer-evaluation.v1",
+                )
+            })?;
+        return artifact.validate();
     }
     let object = payload
         .as_object()
@@ -1592,7 +1795,7 @@ fn require_non_empty(
     }
 }
 
-const PROMPT_REGISTRY: [AiPromptDescriptor; 5] = [
+const PROMPT_REGISTRY: [AiPromptDescriptor; 7] = [
     AiPromptDescriptor {
         version: SUMMARY_CHAPTER_BRIEF_PROMPT_VERSION,
         task_kind: "summary",
@@ -1622,6 +1825,18 @@ const PROMPT_REGISTRY: [AiPromptDescriptor; 5] = [
         task_kind: "abridgement",
         scope: SummaryScopeKind::Material,
         form: SummaryForm::Outline,
+    },
+    AiPromptDescriptor {
+        version: LEARNING_ITEMS_PROMPT_VERSION,
+        task_kind: "generate_learning_items",
+        scope: SummaryScopeKind::Material,
+        form: SummaryForm::Outline,
+    },
+    AiPromptDescriptor {
+        version: LEARNING_OPEN_ANSWER_PROMPT_VERSION,
+        task_kind: "evaluate_open_answer",
+        scope: SummaryScopeKind::Material,
+        form: SummaryForm::Brief,
     },
 ];
 
@@ -1862,6 +2077,44 @@ mod tests {
 
         assert!(matches!(
             validate_ai_output(SUMMARY_ARTIFACT_SCHEMA_VERSION, &payload),
+            Err(AiContractError::InvalidStructuredOutput(_))
+        ));
+    }
+
+    #[test]
+    fn question_set_rejects_duplicate_prompts() {
+        let item = GeneratedLearningItem {
+            kind: "open_question".to_owned(),
+            prompt: "Почему это важно?".to_owned(),
+            answer_spec: json!({"type": "open_self_check", "sample_answer": "Потому что."}),
+            explanation: "Проверяем причинную связь.".to_owned(),
+            citation_ids: vec!["ctx:1".to_owned()],
+        };
+        let payload = QuestionSetArtifactPayload {
+            schema_version: QUESTION_SET_ARTIFACT_SCHEMA_VERSION.to_owned(),
+            items: vec![item.clone(), item],
+        };
+
+        assert!(matches!(
+            payload.validate(),
+            Err(AiContractError::InvalidStructuredOutput(_))
+        ));
+    }
+
+    #[test]
+    fn not_evaluated_rejects_factual_feedback() {
+        let payload = OpenAnswerEvaluationPayload {
+            schema_version: OPEN_ANSWER_EVALUATION_SCHEMA_VERSION.to_owned(),
+            outcome: OpenAnswerEvaluationOutcome::NotEvaluated,
+            correct: vec!["Указана причина.".to_owned()],
+            missing: Vec::new(),
+            distorted: Vec::new(),
+            citation_ids: vec!["ctx:1".to_owned()],
+            next_prompt: None,
+        };
+
+        assert!(matches!(
+            payload.validate(),
             Err(AiContractError::InvalidStructuredOutput(_))
         ));
     }

@@ -6,17 +6,18 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use lumi_core::{
     grade_learning_answer, now_timestamp_ms, ChangeLearningItemStatusCommand,
     CompleteReadingResponse, CompleteReadingScopeCommand, CreateLearningItemCommand,
-    CreateLearningSessionCommand, DocumentRevisionId, LearningAttempt, LearningChallengeCounts,
-    LearningChallengeGroup, LearningFeedback, LearningHintReveal, LearningItem, LearningItemId,
-    LearningItemKind, LearningItemOrigin, LearningItemPage, LearningItemRevision,
-    LearningItemStatus, LearningOffer, LearningOfferAction, LearningReviewRating, LearningSchedule,
-    LearningScheduleState, LearningScopeKind, LearningSession, LearningSessionId,
-    LearningSessionItem, LearningSessionKind, LearningSessionState, LearningSettings,
-    LearningSource, LearningSourceId, LearningSourceScheduleSettings, LearningToday,
-    LearningValidationError, MaterialId, ReadingCompletion, RecordLearningSourceOpenedCommand,
-    RevealLearningHintCommand, SchedulerReview, SnoozeLearningSessionCommand,
-    SubmitLearningAttemptCommand, UpdateLearningItemCommand, UpdateLearningOfferCommand,
-    UpdateLearningSettingsCommand, UserId,
+    CreateLearningSessionCommand, DocumentRevisionId, LearningAiEvaluation, LearningAttempt,
+    LearningChallengeCounts, LearningChallengeGroup, LearningFeedback, LearningHintReveal,
+    LearningItem, LearningItemId, LearningItemKind, LearningItemOrigin, LearningItemPage,
+    LearningItemRevision, LearningItemStatus, LearningOffer, LearningOfferAction,
+    LearningReviewRating, LearningSchedule, LearningScheduleState, LearningScopeKind,
+    LearningSession, LearningSessionId, LearningSessionItem, LearningSessionKind,
+    LearningSessionState, LearningSettings, LearningSource, LearningSourceId,
+    LearningSourceScheduleSettings, LearningToday, LearningValidationError, MaterialId,
+    OpenAnswerEvaluationPayload, QuestionSetArtifactPayload, ReadingCompletion,
+    RecordLearningSourceOpenedCommand, RevealLearningHintCommand, SchedulerReview,
+    SnoozeLearningSessionCommand, SubmitLearningAttemptCommand, UpdateLearningItemCommand,
+    UpdateLearningOfferCommand, UpdateLearningSettingsCommand, UserId,
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -124,6 +125,133 @@ impl LearningRuntime {
                 pg_offer(pool, user_id, material_id, source_id).await
             }
         }
+    }
+
+    pub(crate) async fn source(
+        &self,
+        user_id: UserId,
+        source_id: LearningSourceId,
+    ) -> Result<LearningSource, LearningStoreError> {
+        match &self.backend {
+            LearningBackend::Memory(data) => lock_memory(data)?
+                .sources
+                .get(&source_id)
+                .filter(|source| source.space_id == user_id)
+                .cloned()
+                .ok_or(LearningStoreError::NotFound),
+            LearningBackend::Postgres(pool) => {
+                let mut tx = pool.begin().await.map_err(log_pg)?;
+                let source = pg_source(&mut tx, user_id, source_id).await?;
+                tx.commit().await.map_err(log_pg)?;
+                Ok(source)
+            }
+        }
+    }
+
+    pub(crate) async fn publish_generated_drafts(
+        &self,
+        user_id: UserId,
+        source_id: LearningSourceId,
+        task_id: Uuid,
+        artifact_id: Uuid,
+        payload: &QuestionSetArtifactPayload,
+    ) -> Result<Vec<LearningItem>, LearningStoreError> {
+        payload
+            .validate()
+            .map_err(|error| LearningStoreError::InvalidDetail(error.to_string()))?;
+        match &self.backend {
+            LearningBackend::Memory(_) => Err(LearningStoreError::Unavailable),
+            LearningBackend::Postgres(pool) => {
+                pg_publish_generated_drafts(pool, user_id, source_id, task_id, artifact_id, payload)
+                    .await
+            }
+        }
+    }
+
+    pub(crate) async fn publish_open_answer_evaluation(
+        &self,
+        user_id: UserId,
+        session_id: LearningSessionId,
+        item_id: LearningItemId,
+        task_id: Uuid,
+        artifact_id: Uuid,
+        payload: &OpenAnswerEvaluationPayload,
+    ) -> Result<(), LearningStoreError> {
+        payload
+            .validate()
+            .map_err(|error| LearningStoreError::InvalidDetail(error.to_string()))?;
+        let LearningBackend::Postgres(pool) = &self.backend else {
+            return Err(LearningStoreError::Unavailable);
+        };
+        let inserted = query(
+            "INSERT INTO learning_ai_evaluations
+             (evaluation_id, owner_user_id, session_id, item_id, artifact_id, task_id, payload)
+             SELECT $1, $2, $3, $4, $5, $6, $7
+             WHERE EXISTS (
+                 SELECT 1 FROM learning_sessions session
+                 JOIN learning_session_items snapshot
+                   ON snapshot.session_id = session.session_id
+                  AND snapshot.item_id = $4
+                 JOIN ai_artifacts artifact
+                   ON artifact.artifact_id = $5
+                  AND artifact.task_id = $6
+                  AND artifact.user_id = $2
+                 WHERE session.session_id = $3 AND session.user_id = $2
+             )
+             ON CONFLICT (owner_user_id, artifact_id) DO NOTHING",
+        )
+        .bind(Uuid::now_v7())
+        .bind(user_id)
+        .bind(session_id)
+        .bind(item_id)
+        .bind(artifact_id)
+        .bind(task_id)
+        .bind(serde_json::to_value(payload).map_err(|_| LearningStoreError::Unavailable)?)
+        .execute(pool)
+        .await
+        .map_err(log_pg)?;
+        if inserted.rows_affected() == 0 {
+            return Err(LearningStoreError::NotFound);
+        }
+        Ok(())
+    }
+
+    pub(crate) async fn list_ai_evaluations(
+        &self,
+        user_id: UserId,
+        session_id: LearningSessionId,
+    ) -> Result<Vec<LearningAiEvaluation>, LearningStoreError> {
+        let LearningBackend::Postgres(pool) = &self.backend else {
+            return Ok(Vec::new());
+        };
+        let rows = query(
+            "SELECT evaluation_id, session_id, item_id, task_id, artifact_id, payload, created_at
+             FROM learning_ai_evaluations
+             WHERE owner_user_id = $1 AND session_id = $2
+             ORDER BY created_at, evaluation_id",
+        )
+        .bind(user_id)
+        .bind(session_id)
+        .fetch_all(pool)
+        .await
+        .map_err(log_pg)?;
+        rows.into_iter()
+            .map(|row| {
+                Ok(LearningAiEvaluation {
+                    id: row.try_get("evaluation_id").map_err(log_pg)?,
+                    session_id: row.try_get("session_id").map_err(log_pg)?,
+                    item_id: row.try_get("item_id").map_err(log_pg)?,
+                    task_id: row.try_get("task_id").map_err(log_pg)?,
+                    artifact_id: row.try_get("artifact_id").map_err(log_pg)?,
+                    feedback: serde_json::from_value(row.try_get("payload").map_err(log_pg)?)
+                        .map_err(|_| LearningStoreError::Unavailable)?,
+                    created_at: time_to_ms(
+                        row.try_get::<OffsetDateTime, _>("created_at")
+                            .map_err(log_pg)?,
+                    ),
+                })
+            })
+            .collect()
     }
 
     pub(crate) async fn update_offer(
@@ -1058,6 +1186,8 @@ fn memory_create_session(
             record.owner_user_id == user_id
                 && record.item.source_id == command.source_id
                 && record.item.status == LearningItemStatus::Active
+                && (command.kind != LearningSessionKind::ExplainBack
+                    || record.item.kind == LearningItemKind::ExplainBackPrompt)
                 && (command.kind != LearningSessionKind::ScheduledReview
                     || data
                         .schedules
@@ -2096,6 +2226,129 @@ async fn pg_create_item(
     Ok(item)
 }
 
+async fn pg_publish_generated_drafts(
+    pool: &PgPool,
+    user_id: UserId,
+    source_id: LearningSourceId,
+    task_id: Uuid,
+    artifact_id: Uuid,
+    payload: &QuestionSetArtifactPayload,
+) -> Result<Vec<LearningItem>, LearningStoreError> {
+    let mut tx = pool.begin().await.map_err(log_pg)?;
+    let source = pg_source(&mut tx, user_id, source_id).await?;
+    let artifact_owned: bool = query(
+        "SELECT EXISTS(
+            SELECT 1 FROM ai_artifacts
+            WHERE artifact_id = $1 AND task_id = $2 AND user_id = $3
+              AND kind = 'question_set_artifact' AND status = 'candidate'
+        ) AS owned",
+    )
+    .bind(artifact_id)
+    .bind(task_id)
+    .bind(user_id)
+    .fetch_one(&mut *tx)
+    .await
+    .map_err(log_pg)?
+    .try_get("owned")
+    .map_err(log_pg)?;
+    if !artifact_owned {
+        return Err(LearningStoreError::NotFound);
+    }
+    let mut drafts = Vec::with_capacity(payload.items.len());
+    for (index, generated) in payload.items.iter().enumerate() {
+        let answer_spec: lumi_core::LearningAnswerSpec =
+            serde_json::from_value(generated.answer_spec.clone())
+                .map_err(|_| LearningStoreError::InvalidDetail("invalid answer_spec".to_owned()))?;
+        let kind = parse_item_kind(&generated.kind)?;
+        let now = now_timestamp_ms();
+        let item_id = Uuid::now_v7();
+        let revision = LearningItemRevision {
+            id: Uuid::now_v7(),
+            item_id,
+            revision: 1,
+            prompt: generated.prompt.clone(),
+            answer_spec,
+            explanation: generated.explanation.clone(),
+            hints: Vec::new(),
+            source_anchor: source.anchor.clone(),
+            created_at: now,
+        };
+        revision.validate(source.document_revision_id)?;
+        if !item_kind_matches(kind, &revision) {
+            return Err(LearningStoreError::InvalidDetail(
+                "generated item kind does not match answer specification".to_owned(),
+            ));
+        }
+        let command_key = format!("ai-artifact:{artifact_id}:{index}");
+        let request_hash = Sha256::digest(
+            serde_json::to_vec(generated).map_err(|_| LearningStoreError::Unavailable)?,
+        );
+        let item = LearningItem {
+            id: item_id,
+            source_id,
+            kind,
+            status: LearningItemStatus::Draft,
+            origin: LearningItemOrigin::AiGenerated,
+            current_revision: revision.clone(),
+            object_revision: 1,
+            created_at: now,
+            updated_at: now,
+        };
+        query(
+            "INSERT INTO learning_items
+             (item_id, space_id, owner_user_id, source_id, kind, status, origin,
+              current_revision_id, command_key, request_hash)
+             VALUES ($1, $2, $3, $4, $5, 'draft', 'ai_generated', NULL, $6, $7)
+             ON CONFLICT (owner_user_id, command_key) DO NOTHING",
+        )
+        .bind(item.id)
+        .bind(source.space_id)
+        .bind(user_id)
+        .bind(source_id)
+        .bind(item_kind_key(kind))
+        .bind(&command_key)
+        .bind(request_hash.as_slice())
+        .execute(&mut *tx)
+        .await
+        .map_err(log_pg)?;
+        query(
+            "INSERT INTO learning_item_revisions
+             (item_revision_id, item_id, revision, payload)
+             VALUES ($1, $2, 1, $3)",
+        )
+        .bind(revision.id)
+        .bind(item.id)
+        .bind(serde_json::to_value(&revision).map_err(|_| LearningStoreError::Unavailable)?)
+        .execute(&mut *tx)
+        .await
+        .map_err(log_pg)?;
+        query("UPDATE learning_items SET current_revision_id = $2 WHERE item_id = $1")
+            .bind(item.id)
+            .bind(revision.id)
+            .execute(&mut *tx)
+            .await
+            .map_err(log_pg)?;
+        query(
+            "INSERT INTO learning_generated_item_provenance
+             (item_id, artifact_id, task_id, citation_ids)
+             VALUES ($1, $2, $3, $4)",
+        )
+        .bind(item.id)
+        .bind(artifact_id)
+        .bind(task_id)
+        .bind(
+            serde_json::to_value(&generated.citation_ids)
+                .map_err(|_| LearningStoreError::Unavailable)?,
+        )
+        .execute(&mut *tx)
+        .await
+        .map_err(log_pg)?;
+        drafts.push(item);
+    }
+    tx.commit().await.map_err(log_pg)?;
+    Ok(drafts)
+}
+
 async fn pg_get_item(
     pool: &PgPool,
     user_id: UserId,
@@ -2386,6 +2639,8 @@ async fn pg_create_session(
          WHERE li.owner_user_id = $1 AND li.source_id = $2
            AND li.status = 'active' AND li.deleted_at IS NULL
            AND (
+               ($3 <> 'explain_back' OR li.kind = 'explain_back_prompt')
+               AND
                $3 <> 'scheduled_review'
                OR EXISTS (
                    SELECT 1 FROM learning_schedules lsch

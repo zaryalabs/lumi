@@ -5,14 +5,16 @@ use std::collections::HashSet;
 use dioxus::prelude::*;
 use gloo_net::http::Request;
 use lumi_core::{
-    AiContextAttachment, AiSourceScope, ChangeLearningItemStatusCommand, CompleteReadingResponse,
-    CompleteReadingScopeCommand, CreateLearningItemCommand, CreateLearningSessionCommand,
-    LearningAnswer, LearningAnswerPresentation, LearningAnswerSpec, LearningAttempt,
-    LearningAttemptOutcome, LearningChallengeGroup, LearningHint, LearningHintReveal, LearningItem,
-    LearningItemKind, LearningItemPage, LearningItemStatus, LearningOffer, LearningOfferAction,
-    LearningOption, LearningReviewRating, LearningSession, LearningSessionId, LearningSessionKind,
-    LearningSessionState, LearningSettings, LearningSourceId, LearningSourceScheduleSettings,
-    LearningToday, MaterialId, MoveReadingPositionCommand, SelfCheckRating,
+    AiContextAttachment, AiExecutionMode, AiSourceScope, AiTask, AiTaskStatus,
+    ChangeLearningItemStatusCommand, CompleteReadingResponse, CompleteReadingScopeCommand,
+    CreateLearningItemCommand, CreateLearningSessionCommand, EvaluateOpenAnswerRequest,
+    GenerateLearningItemsRequest, LearningAiEvaluation, LearningAnswer, LearningAnswerPresentation,
+    LearningAnswerSpec, LearningAttempt, LearningAttemptOutcome, LearningChallengeGroup,
+    LearningHint, LearningHintReveal, LearningItem, LearningItemKind, LearningItemPage,
+    LearningItemStatus, LearningOffer, LearningOfferAction, LearningOption, LearningReviewRating,
+    LearningSession, LearningSessionId, LearningSessionKind, LearningSessionState,
+    LearningSettings, LearningSourceId, LearningSourceScheduleSettings, LearningToday, MaterialId,
+    MoveReadingPositionCommand, OpenAnswerEvaluationOutcome, SelfCheckRating,
     SnoozeLearningSessionCommand, SubmitLearningAttemptCommand, UpdateLearningItemCommand,
     UpdateLearningOfferCommand, UpdateLearningSettingsCommand,
 };
@@ -160,6 +162,7 @@ pub(crate) fn MaterialLearningPage(
     let mut hint_one = use_signal(String::new);
     let mut hint_two = use_signal(String::new);
     let mut schedule_settings = use_signal(|| None::<LearningSourceScheduleSettings>);
+    let mut generation_task = use_signal(|| None::<AiTask>);
     let csrf = use_signal(|| csrf_token);
     use_effect(move || {
         let _ = refresh();
@@ -184,6 +187,14 @@ pub(crate) fn MaterialLearningPage(
         .read()
         .iter()
         .filter(|item| item.status == LearningItemStatus::Active)
+        .count();
+    let explain_count = items
+        .read()
+        .iter()
+        .filter(|item| {
+            item.status == LearningItemStatus::Active
+                && item.kind == LearningItemKind::ExplainBackPrompt
+        })
         .count();
     let effective_source_id = source_id.or_else(|| {
         items
@@ -212,6 +223,31 @@ pub(crate) fn MaterialLearningPage(
                                 busy.set(false);
                             });
                         }, "Начать самопроверку ({active_count})" }
+                        button { class: "secondary-action", r#type: "button", disabled: busy(), onclick: move |_| {
+                            busy.set(true);
+                            spawn(async move {
+                                match generate_learning_drafts(source_id, &csrf.read()).await {
+                                    Ok(task) => {
+                                        generation_task.set(Some(task));
+                                        error.set(String::new());
+                                    }
+                                    Err(message) => error.set(message),
+                                }
+                                busy.set(false);
+                            });
+                        }, "Создать тест с AI" }
+                        if explain_count > 0 {
+                            button { class: "secondary-action", r#type: "button", disabled: busy(), onclick: move |_| {
+                                busy.set(true);
+                                spawn(async move {
+                                    match create_session(source_id, LearningSessionKind::ExplainBack, &csrf.read()).await {
+                                        Ok(session) => on_open_session.call(session.id),
+                                        Err(message) => error.set(message),
+                                    }
+                                    busy.set(false);
+                                });
+                            }, "Объяснить своими словами" }
+                        }
                         if let Some(settings) = schedule_settings.read().as_ref() {
                             {
                                 let paused = settings.paused_at.is_some();
@@ -234,6 +270,11 @@ pub(crate) fn MaterialLearningPage(
             }
             if !error().is_empty() {
                 p { class: "library-alert", role: "alert", "{error}" }
+            }
+            if let Some(task) = generation_task.read().as_ref() {
+                p { class: "capability-note", role: "status",
+                    "AI-задача поставлена в общую очередь. Черновики появятся здесь после проверки результата; они не активируются автоматически. Статус: {task_status_label(task.status)}."
+                }
             }
             section { class: "library-section learning-items-section", aria_label: "Сохранённые вопросы",
                 h2 { "Задания" }
@@ -589,6 +630,8 @@ pub(crate) fn LearningSessionPage(
     let mut self_check = use_signal(|| None::<SelfCheckRating>);
     let mut review_rating = use_signal(|| None::<LearningReviewRating>);
     let mut refresh = use_signal(|| 0_u64);
+    let mut ai_evaluations = use_signal(Vec::<LearningAiEvaluation>::new);
+    let mut evaluation_task = use_signal(|| None::<AiTask>);
     let csrf = use_signal(|| csrf_token);
     use_effect(move || {
         let _ = refresh();
@@ -602,6 +645,9 @@ pub(crate) fn LearningSessionPage(
                 }
                 Ok(value) => session.set(Some(value)),
                 Err(message) => error.set(message),
+            }
+            if let Ok(values) = load_ai_evaluations(session_id).await {
+                ai_evaluations.set(values);
             }
         });
     });
@@ -693,6 +739,34 @@ pub(crate) fn LearningSessionPage(
                             }
                         }
                         {answer_input(&item.answer, selected, text_answer)}
+                        if matches!(item.answer, LearningAnswerPresentation::OpenText | LearningAnswerPresentation::ExplainBack) {
+                            div { class: "learning-ai-evaluation",
+                                button { class: "secondary-action", r#type: "button", disabled: busy() || text_answer().trim().is_empty(), onclick: move |_| {
+                                    let answer = text_answer.read().clone();
+                                    let item_id = item.item_id;
+                                    busy.set(true);
+                                    spawn(async move {
+                                        match request_ai_evaluation(session_id, item_id, &answer, &csrf.read()).await {
+                                            Ok(task) => {
+                                                evaluation_task.set(Some(task));
+                                                error.set(String::new());
+                                            }
+                                            Err(message) => error.set(message),
+                                        }
+                                        busy.set(false);
+                                    });
+                                }, if value.kind == LearningSessionKind::ExplainBack { "Получить обратную связь AI" } else { "Проверить ответ с AI" } }
+                                if let Some(task) = evaluation_task.read().as_ref() {
+                                    p { class: "capability-note", role: "status",
+                                        "Оценка выполняется общей AI-очередью: {task_status_label(task.status)}. Можно сохранить self-check, не дожидаясь provider."
+                                    }
+                                    button { class: "text-action", r#type: "button", onclick: move |_| refresh += 1, "Обновить обратную связь" }
+                                }
+                                if let Some(evaluation) = ai_evaluations.read().iter().rev().find(|evaluation| evaluation.item_id == item.item_id) {
+                                    AiEvaluationFeedback { evaluation: evaluation.clone() }
+                                }
+                            }
+                        }
                         if matches!(item.answer, LearningAnswerPresentation::OpenText | LearningAnswerPresentation::Flashcard) {
                             if revealed_item.read().is_none() {
                                 button { class: "secondary-action", r#type: "button", disabled: busy() || (matches!(item.answer, LearningAnswerPresentation::OpenText) && text_answer().trim().is_empty()), onclick: move |_| {
@@ -786,6 +860,40 @@ pub(crate) fn LearningSessionPage(
                 }
             } else if error().is_empty() {
                 p { role: "status", aria_live: "polite", "Восстанавливаем сессию…" }
+            }
+        }
+    }
+}
+
+#[component]
+fn AiEvaluationFeedback(evaluation: LearningAiEvaluation) -> Element {
+    let feedback = evaluation.feedback;
+    rsx! {
+        aside { class: "learning-feedback neutral", aria_live: "polite",
+            h3 {
+                {match feedback.outcome {
+                    OpenAnswerEvaluationOutcome::Understood => "Смысл понят",
+                    OpenAnswerEvaluationOutcome::Partial => "Понимание частичное",
+                    OpenAnswerEvaluationOutcome::NeedsReview => "Стоит перечитать",
+                    OpenAnswerEvaluationOutcome::NotEvaluated => "Оценка невозможна",
+                }}
+            }
+            if feedback.outcome == OpenAnswerEvaluationOutcome::NotEvaluated {
+                p { "Контекста или provider-ответа недостаточно для честной оценки. Это не нулевая оценка — используйте self-check." }
+            } else {
+                if !feedback.correct.is_empty() {
+                    p { strong { "Верно: " } "{feedback.correct.join(\"; \")}" }
+                }
+                if !feedback.missing.is_empty() {
+                    p { strong { "Не хватает: " } "{feedback.missing.join(\"; \")}" }
+                }
+                if !feedback.distorted.is_empty() {
+                    p { strong { "Нужно уточнить: " } "{feedback.distorted.join(\"; \")}" }
+                }
+                p { small { "Source citations: {feedback.citation_ids.join(\", \")}" } }
+            }
+            if let Some(next) = feedback.next_prompt {
+                p { strong { "Следующий шаг: " } "{next}" }
             }
         }
     }
@@ -1255,6 +1363,59 @@ async fn create_session(
         csrf,
     )
     .await
+}
+
+async fn generate_learning_drafts(
+    source_id: LearningSourceId,
+    csrf: &str,
+) -> Result<AiTask, String> {
+    post_json(
+        &format!("/learning/sources/{source_id}/generation-tasks"),
+        &GenerateLearningItemsRequest {
+            item_count: 7,
+            execution_mode: AiExecutionMode::ExecuteNow,
+            idempotency_key: Uuid::now_v7().to_string(),
+        },
+        csrf,
+    )
+    .await
+}
+
+async fn request_ai_evaluation(
+    session_id: LearningSessionId,
+    item_id: Uuid,
+    answer: &str,
+    csrf: &str,
+) -> Result<AiTask, String> {
+    post_json(
+        "/learning/open-answer-evaluations",
+        &EvaluateOpenAnswerRequest {
+            session_id,
+            item_id,
+            answer: answer.to_owned(),
+            execution_mode: AiExecutionMode::ExecuteNow,
+            idempotency_key: Uuid::now_v7().to_string(),
+        },
+        csrf,
+    )
+    .await
+}
+
+async fn load_ai_evaluations(
+    session_id: LearningSessionId,
+) -> Result<Vec<LearningAiEvaluation>, String> {
+    get_json(&format!("/learning/sessions/{session_id}/ai-evaluations")).await
+}
+
+fn task_status_label(status: AiTaskStatus) -> &'static str {
+    match status {
+        AiTaskStatus::Queued => "в очереди",
+        AiTaskStatus::Running => "выполняется",
+        AiTaskStatus::NeedsInput => "нужна настройка provider",
+        AiTaskStatus::Succeeded => "готово",
+        AiTaskStatus::Failed => "ошибка",
+        AiTaskStatus::Cancelled => "отменено",
+    }
 }
 
 async fn load_session(session_id: LearningSessionId) -> Result<LearningSession, String> {

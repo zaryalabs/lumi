@@ -160,13 +160,15 @@ Status: accepted
 | AI-008 | Context policy, cost controls, user-visible context and source citations | foundation | AI-001, CORE-013, SEC-001 | `ai.md`, `security-privacy.md` |
 | AI-009 | Один active summary на главу/материал и отдельный сокращенный `.lum`-материал со связью с источником | product | AI-003, CORE-002, FMT-LUM-001 | `ai-summaries.md`, `ai.md`, `formats/lum.md` |
 
-Реализация `0.3.0/E1–E2` закрывает deterministic baseline `LRN-001`, `LRN-003`,
+Реализация `0.3.0/E1–E3` закрывает deterministic baseline `LRN-001`, `LRN-003`,
 `LRN-004` и части `LRN-005`: revision-bound ручные items, durable completion,
 immutable session snapshots, attempts, ordered hints/source evidence,
 versioned FSRS, bounded Challenges, pause/resume/snooze/manual-only, source
-jump и reload/resume. AI/voice расширения и общий mastery projection остаются
-за следующими эпиками; сервер публикует `learning-core` и
-`learning-scheduling`.
+jump и reload/resume, а также source-backed AI drafts, open-answer evaluation
+и iterative explain-back с self-check fallback. Voice и общий mastery
+projection остаются за следующими эпиками; сервер публикует `learning-core`,
+`learning-scheduling`, `learning-ai` и `learning-explain-back` при готовых AI
+prerequisites.
 
 ## Social And Plugins
 
