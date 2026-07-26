@@ -118,6 +118,11 @@ Community Web shell поддерживает создание и настрой�
 shared anchors, social search, generic images и автоматический fingerprint
 lifecycle перечислены в
 [`docs/tmp-plans/0.5.0-deferred-until-0.4.0.md`](docs/tmp-plans/0.5.0-deferred-until-0.4.0.md).
+Для независимой части `0.5.0/E3` реализованы material-level threads/replies,
+author edit/delete, moderation tombstones, cursor API и Community discussion
+surface. Persistent server публикует capability `material-discussions`, но не
+`shared-reading`: anchor comments, published highlights и Reader overlay
+остаются отложены до общего Records v2 target/provenance contract `0.4.0`.
 
 ## Локальный запуск
 

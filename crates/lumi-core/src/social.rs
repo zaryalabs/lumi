@@ -12,10 +12,18 @@ use crate::{DocumentRevisionId, MaterialId, SourceFormat, TimestampMs, UserId};
 
 /// Version of the first Community Space contract.
 pub const COMMUNITY_CONTRACT_VERSION: &str = "community-space.v1";
+/// Version of material-level Community discussions independent from private records.
+pub const MATERIAL_DISCUSSION_CONTRACT_VERSION: &str = "material-discussion.v1";
 /// Maximum Community Space name length in Unicode scalar values.
 pub const COMMUNITY_NAME_MAX_CHARS: usize = 120;
 /// Maximum Community Space description length in encoded UTF-8 bytes.
 pub const COMMUNITY_DESCRIPTION_MAX_BYTES: usize = 4 * 1024;
+/// Maximum stored comment body length in encoded UTF-8 bytes.
+pub const SHARED_COMMENT_BODY_MAX_BYTES: usize = 16 * 1024;
+/// Maximum moderation reason length in encoded UTF-8 bytes.
+pub const MODERATION_REASON_MAX_BYTES: usize = 1024;
+/// Maximum number of threads returned by one cursor page.
+pub const SHARED_THREAD_PAGE_MAX: u16 = 100;
 
 /// Stable product identifier of a Community Space.
 pub type CommunitySpaceId = Uuid;
@@ -29,6 +37,12 @@ pub type CommunityActivityEventId = Uuid;
 pub type SharedMaterialId = Uuid;
 /// Stable identifier of a user's claim connecting their private material copy.
 pub type UserMaterialClaimId = Uuid;
+/// Stable identifier of one material-level discussion thread.
+pub type SharedCommentThreadId = Uuid;
+/// Stable identifier of one shared comment or reply.
+pub type SharedCommentId = Uuid;
+/// Stable identifier of an append-only moderation decision.
+pub type ModerationActionId = Uuid;
 
 /// Discoverability supported by the first closed Community release.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -92,6 +106,177 @@ pub enum UserMaterialClaimStatus {
     Rejected,
     /// Evidence is plausible but cannot safely grant automatic access.
     ManualReview,
+}
+
+/// Scope supported before shared anchors from Records v2 become available.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SharedCommentThreadScope {
+    /// Discussion is about the shared material as a whole.
+    Material,
+}
+
+/// Reader-visible lifecycle of social content.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SocialContentState {
+    /// Content is visible to active Community members.
+    Visible,
+    /// Content is hidden by a moderator and its body is omitted for ordinary members.
+    Hidden,
+    /// Content is a durable tombstone and its body has been removed.
+    Deleted,
+}
+
+/// Social object kinds accepted by the moderation boundary.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ModerationTargetType {
+    /// Material-level discussion thread.
+    Thread,
+    /// Individual comment or reply.
+    Comment,
+}
+
+/// Moderation transition applied to one social object.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ModerationActionKind {
+    /// Hide content while preserving a reversible audit trail.
+    Hide,
+    /// Restore previously hidden content.
+    Restore,
+    /// Replace content with an irreversible tombstone.
+    Delete,
+}
+
+/// Material-level thread returned with a bounded comment projection.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct SharedCommentThread {
+    /// Stable thread identity.
+    pub id: SharedCommentThreadId,
+    /// Community Space containing the thread.
+    pub community_space_id: CommunitySpaceId,
+    /// Shared material discussed by the thread.
+    pub shared_material_id: SharedMaterialId,
+    /// Current scope. Anchor-bearing scopes are intentionally absent until Records v2.
+    pub scope: SharedCommentThreadScope,
+    /// Stable creator identity.
+    pub created_by_user_id: UserId,
+    /// Mutable display nickname, never used for authorization.
+    pub creator_nickname: Option<String>,
+    /// Current visibility/tombstone state.
+    pub state: SocialContentState,
+    /// Optimistic concurrency revision, also advanced by comment changes.
+    pub object_revision: u64,
+    /// Thread comments ordered by creation time.
+    pub comments: Vec<SharedComment>,
+    /// Creation timestamp.
+    pub created_at: TimestampMs,
+    /// Last thread or comment mutation timestamp.
+    pub updated_at: TimestampMs,
+}
+
+/// One shared material comment or a single-level reply.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct SharedComment {
+    /// Stable comment identity.
+    pub id: SharedCommentId,
+    /// Parent thread.
+    pub thread_id: SharedCommentThreadId,
+    /// Optional top-level comment being replied to.
+    pub parent_comment_id: Option<SharedCommentId>,
+    /// Stable author identity.
+    pub author_user_id: UserId,
+    /// Mutable display nickname, never used for authorization.
+    pub author_nickname: Option<String>,
+    /// Body is absent for hidden content unavailable to the caller and for tombstones.
+    pub body_markdown: Option<String>,
+    /// Current visibility/tombstone state.
+    pub state: SocialContentState,
+    /// Optimistic concurrency revision.
+    pub object_revision: u64,
+    /// Creation timestamp.
+    pub created_at: TimestampMs,
+    /// Last mutation timestamp.
+    pub updated_at: TimestampMs,
+}
+
+/// Cursor-paginated material discussion response.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct SharedDiscussionPage {
+    /// Threads ordered by `(updated_at, thread_id)`.
+    pub threads: Vec<SharedCommentThread>,
+    /// Opaque cursor for the next page or polling continuation.
+    pub next_cursor: Option<String>,
+}
+
+/// Input for starting a material-level discussion with its first comment.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct CreateSharedThreadRequest {
+    /// First comment body.
+    pub body_markdown: String,
+}
+
+/// Input for adding a top-level comment or a single-level reply.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct CreateSharedCommentRequest {
+    /// Optional top-level comment to reply to.
+    pub parent_comment_id: Option<SharedCommentId>,
+    /// Comment body.
+    pub body_markdown: String,
+}
+
+/// Input for editing an author's own comment.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct UpdateSharedCommentRequest {
+    /// Replacement body.
+    pub body_markdown: String,
+    /// Revision observed by the editor.
+    pub expected_revision: u64,
+}
+
+/// Input for deleting an author's own comment.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct DeleteSharedCommentRequest {
+    /// Revision observed by the author.
+    pub expected_revision: u64,
+}
+
+/// Input for an owner/admin moderation transition.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct ModerateSocialContentRequest {
+    /// Kind of object being moderated.
+    pub target_type: ModerationTargetType,
+    /// Target thread or comment id.
+    pub target_id: Uuid,
+    /// Requested transition.
+    pub action: ModerationActionKind,
+    /// Revision observed by the moderator.
+    pub expected_revision: u64,
+    /// Optional bounded audit reason.
+    pub reason: Option<String>,
+}
+
+/// Append-only moderation audit projection.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct ModerationAction {
+    /// Stable moderation action identity.
+    pub id: ModerationActionId,
+    /// Community Space containing the target.
+    pub community_space_id: CommunitySpaceId,
+    /// Stable moderator identity.
+    pub moderator_user_id: UserId,
+    /// Kind of moderated object.
+    pub target_type: ModerationTargetType,
+    /// Target object id.
+    pub target_id: Uuid,
+    /// Applied transition.
+    pub action: ModerationActionKind,
+    /// Optional bounded reason visible only inside the member boundary.
+    pub reason: Option<String>,
+    /// Creation timestamp.
+    pub created_at: TimestampMs,
 }
 
 /// Safe explanation of a claim decision without protected fingerprint values.
@@ -399,6 +584,10 @@ pub enum CommunityAction {
     AddMaterial,
     /// Remove a shared identity from the Space.
     RemoveMaterial,
+    /// Create a material-level thread or comment.
+    CreateDiscussion,
+    /// Hide, restore or delete another member's social content.
+    ModerateContent,
 }
 
 /// Domain validation or authorization failure.
@@ -428,6 +617,9 @@ pub enum CommunityContractError {
     /// Ownership requires a dedicated transfer operation.
     #[error("community ownership cannot be changed by this operation")]
     OwnershipTransferRequired,
+    /// Cursor page limit is outside the public range.
+    #[error("discussion page limit must be within 1..={SHARED_THREAD_PAGE_MAX}")]
+    InvalidPageLimit,
 }
 
 impl CreateCommunitySpaceRequest {
@@ -474,6 +666,91 @@ impl CreateCommunityAccessLinkRequest {
     }
 }
 
+impl CreateSharedThreadRequest {
+    /// Normalize and validate the initial comment.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed validation error for a blank or oversized body.
+    pub fn normalized(mut self) -> Result<Self, CommunityContractError> {
+        self.body_markdown = normalize_shared_comment(self.body_markdown)?;
+        Ok(self)
+    }
+}
+
+impl CreateSharedCommentRequest {
+    /// Normalize and validate a comment or reply.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed validation error for a blank or oversized body.
+    pub fn normalized(mut self) -> Result<Self, CommunityContractError> {
+        self.body_markdown = normalize_shared_comment(self.body_markdown)?;
+        Ok(self)
+    }
+}
+
+impl UpdateSharedCommentRequest {
+    /// Normalize the replacement body and validate optimistic concurrency input.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed validation error for revision zero or an invalid body.
+    pub fn normalized(mut self) -> Result<Self, CommunityContractError> {
+        validate_revision(self.expected_revision)?;
+        self.body_markdown = normalize_shared_comment(self.body_markdown)?;
+        Ok(self)
+    }
+}
+
+impl DeleteSharedCommentRequest {
+    /// Validate optimistic concurrency input.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CommunityContractError::InvalidRevision`] for revision zero.
+    pub fn validate(self) -> Result<Self, CommunityContractError> {
+        validate_revision(self.expected_revision)?;
+        Ok(self)
+    }
+}
+
+impl ModerateSocialContentRequest {
+    /// Normalize the optional reason and validate optimistic concurrency input.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed validation error for revision zero or an oversized reason.
+    pub fn normalized(mut self) -> Result<Self, CommunityContractError> {
+        validate_revision(self.expected_revision)?;
+        self.reason = self.reason.map(|value| value.trim().to_owned());
+        self.reason = self.reason.filter(|value| !value.is_empty());
+        if self
+            .reason
+            .as_ref()
+            .is_some_and(|value| value.len() > MODERATION_REASON_MAX_BYTES)
+        {
+            return Err(CommunityContractError::FieldTooLarge {
+                field: "moderation reason",
+            });
+        }
+        Ok(self)
+    }
+}
+
+/// Validate a caller-selected thread page size.
+///
+/// # Errors
+///
+/// Returns [`CommunityContractError::InvalidPageLimit`] outside `1..=100`.
+pub fn validate_shared_thread_page_limit(limit: u16) -> Result<u16, CommunityContractError> {
+    if (1..=SHARED_THREAD_PAGE_MAX).contains(&limit) {
+        Ok(limit)
+    } else {
+        Err(CommunityContractError::InvalidPageLimit)
+    }
+}
+
 /// Check one role/status action without storage or UI dependencies.
 ///
 /// # Errors
@@ -488,12 +765,16 @@ pub fn authorize_community_action(
         return Err(CommunityContractError::InactiveMembership);
     }
     let allowed = match action {
-        CommunityAction::View | CommunityAction::AddMaterial => true,
+        CommunityAction::View
+        | CommunityAction::AddMaterial
+        | CommunityAction::CreateDiscussion => true,
         CommunityAction::UpdateSpace | CommunityAction::ManageLinks => {
             matches!(role, CommunityRole::Owner | CommunityRole::Admin)
         }
         CommunityAction::ChangeRole | CommunityAction::DeleteSpace => role == CommunityRole::Owner,
-        CommunityAction::RemoveMember | CommunityAction::RemoveMaterial => {
+        CommunityAction::RemoveMember
+        | CommunityAction::RemoveMaterial
+        | CommunityAction::ModerateContent => {
             matches!(role, CommunityRole::Owner | CommunityRole::Admin)
         }
     };
@@ -575,6 +856,27 @@ fn normalize_description(value: Option<String>) -> Result<Option<String>, Commun
         });
     }
     Ok(value)
+}
+
+fn normalize_shared_comment(value: String) -> Result<String, CommunityContractError> {
+    let value = value.trim();
+    if value.is_empty() {
+        return Err(CommunityContractError::EmptyField("body_markdown"));
+    }
+    if value.len() > SHARED_COMMENT_BODY_MAX_BYTES {
+        return Err(CommunityContractError::FieldTooLarge {
+            field: "body_markdown",
+        });
+    }
+    Ok(value.to_owned())
+}
+
+fn validate_revision(value: u64) -> Result<(), CommunityContractError> {
+    if value == 0 {
+        Err(CommunityContractError::InvalidRevision)
+    } else {
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -661,5 +963,30 @@ mod tests {
         .validate();
 
         assert_eq!(result, Err(CommunityContractError::InvalidMaxUses));
+    }
+
+    #[test]
+    fn shared_comment_normalization_rejects_blank_body() {
+        let result = CreateSharedCommentRequest {
+            parent_comment_id: None,
+            body_markdown: " \n ".to_owned(),
+        }
+        .normalized();
+
+        assert_eq!(
+            result,
+            Err(CommunityContractError::EmptyField("body_markdown"))
+        );
+    }
+
+    #[test]
+    fn member_cannot_moderate_social_content() {
+        let result = authorize_community_action(
+            CommunityRole::Member,
+            CommunityMembershipStatus::Active,
+            CommunityAction::ModerateContent,
+        );
+
+        assert_eq!(result, Err(CommunityContractError::Forbidden));
     }
 }

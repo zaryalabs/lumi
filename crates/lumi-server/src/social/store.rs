@@ -28,7 +28,7 @@ mod sqlx {
 
 #[derive(Clone)]
 pub(super) struct PgSocialStore {
-    pool: PgPool,
+    pub(super) pool: PgPool,
     secrets: SecretStore,
 }
 
@@ -2112,7 +2112,7 @@ async fn detail_in_transaction(
     })
 }
 
-async fn membership_in_transaction(
+pub(super) async fn membership_in_transaction(
     transaction: &mut Transaction<'_, Postgres>,
     user_id: UserId,
     space_id: CommunitySpaceId,
@@ -2138,7 +2138,7 @@ async fn membership_in_transaction(
     membership_from_row(&row)
 }
 
-async fn nickname_in_transaction(
+pub(super) async fn nickname_in_transaction(
     transaction: &mut Transaction<'_, Postgres>,
     user_id: UserId,
 ) -> Result<Option<String>, SocialStoreError> {
@@ -2152,7 +2152,7 @@ async fn nickname_in_transaction(
         .map(Option::flatten)
 }
 
-async fn sync_space_id(
+pub(super) async fn sync_space_id(
     transaction: &mut Transaction<'_, Postgres>,
     space_id: CommunitySpaceId,
 ) -> Result<Uuid, SocialStoreError> {
@@ -2332,7 +2332,7 @@ async fn append_change<T: Serialize>(
     Ok(())
 }
 
-async fn append_activity(
+pub(super) async fn append_activity(
     transaction: &mut Transaction<'_, Postgres>,
     space_id: CommunitySpaceId,
     actor_user_id: Option<UserId>,
@@ -2360,7 +2360,7 @@ async fn append_activity(
     Ok(())
 }
 
-async fn load_retry<T: DeserializeOwned>(
+pub(super) async fn load_retry<T: DeserializeOwned>(
     transaction: &mut Transaction<'_, Postgres>,
     scope_id: Uuid,
     idempotency_key: &str,
@@ -2390,7 +2390,7 @@ async fn load_retry<T: DeserializeOwned>(
         .map_err(|_| SocialStoreError::Unavailable)
 }
 
-async fn save_retry<T: Serialize>(
+pub(super) async fn save_retry<T: Serialize>(
     transaction: &mut Transaction<'_, Postgres>,
     scope_id: Uuid,
     idempotency_key: &str,
@@ -2418,12 +2418,12 @@ async fn save_retry<T: Serialize>(
     Ok(())
 }
 
-fn request_hash<T: Serialize>(request: &T) -> Result<[u8; 32], SocialStoreError> {
+pub(super) fn request_hash<T: Serialize>(request: &T) -> Result<[u8; 32], SocialStoreError> {
     let encoded = serde_json::to_vec(request).map_err(|_| SocialStoreError::Unavailable)?;
     Ok(Sha256::digest(encoded).into())
 }
 
-fn timestamp_ms(value: OffsetDateTime) -> u64 {
+pub(super) fn timestamp_ms(value: OffsetDateTime) -> u64 {
     u64::try_from(value.unix_timestamp_nanos() / 1_000_000).unwrap_or(0)
 }
 
@@ -2432,14 +2432,14 @@ fn timestamp_from_ms(value: u64) -> Result<OffsetDateTime, SocialStoreError> {
         .map_err(|_| SocialStoreError::Invalid("expires_at is outside supported range".to_owned()))
 }
 
-fn i64_from_u64(value: u64) -> Result<i64, SocialStoreError> {
+pub(super) fn i64_from_u64(value: u64) -> Result<i64, SocialStoreError> {
     i64::try_from(value).map_err(|_| SocialStoreError::Invalid("revision is too large".to_owned()))
 }
 
-fn u64_from_i64(value: i64) -> Result<u64, SocialStoreError> {
+pub(super) fn u64_from_i64(value: i64) -> Result<u64, SocialStoreError> {
     u64::try_from(value).map_err(|_| SocialStoreError::Unavailable)
 }
 
-fn storage<T>(_error: T) -> SocialStoreError {
+pub(super) fn storage<T>(_error: T) -> SocialStoreError {
     SocialStoreError::Unavailable
 }

@@ -717,6 +717,11 @@ pub(crate) fn service_capabilities(state: &AppState) -> ServiceCapabilities {
     if state.social_runtime().supports_material_sharing() {
         capabilities.features.push("material-sharing".to_owned());
     }
+    if state.social_runtime().supports_material_discussions() {
+        capabilities
+            .features
+            .push("material-discussions".to_owned());
+    }
     capabilities
 }
 
@@ -2216,7 +2221,7 @@ mod tests {
         let migrations: Vec<SchemaMigration> =
             json_get(build_router(), "/api/v1/schema/migrations").await?;
 
-        assert_eq!(migrations.len(), 25);
+        assert_eq!(migrations.len(), 26);
         assert!(migrations
             .iter()
             .any(|migration| migration.id == "s1-0017-learning-core"));
@@ -2235,6 +2240,9 @@ mod tests {
         assert!(migrations
             .iter()
             .any(|migration| migration.id == "s1-0022-material-sharing-matching"));
+        assert!(migrations
+            .iter()
+            .any(|migration| migration.id == "s1-0023-material-discussions"));
         Ok(())
     }
 
@@ -3104,6 +3112,7 @@ mod tests {
             .await?;
         assert_eq!(forged.status(), StatusCode::NOT_FOUND);
         let source = app
+            .clone()
             .oneshot(
                 member.apply(
                     Request::builder()
@@ -3113,6 +3122,104 @@ mod tests {
             )
             .await?;
         assert_eq!(source.status(), StatusCode::NOT_FOUND);
+
+        let thread: lumi_core::SharedCommentThread = request_json_with_session_status(
+            app.clone(),
+            Request::builder()
+                .method("POST")
+                .uri(format!(
+                    "/api/v1/spaces/{}/materials/{}/threads",
+                    created.space.id, owner_shared.identity.id
+                ))
+                .header(header::CONTENT_TYPE, "application/json")
+                .header("idempotency-key", "discussion-create")
+                .body(json_body(&lumi_core::CreateSharedThreadRequest {
+                    body_markdown: "Первая тема без цитаты из личной копии".to_owned(),
+                })?)?,
+            &owner,
+            StatusCode::CREATED,
+        )
+        .await?;
+        let reply: lumi_core::SharedComment = request_json_with_session_status(
+            app.clone(),
+            Request::builder()
+                .method("POST")
+                .uri(format!(
+                    "/api/v1/spaces/{}/threads/{}/comments",
+                    created.space.id, thread.id
+                ))
+                .header(header::CONTENT_TYPE, "application/json")
+                .header("idempotency-key", "discussion-reply")
+                .body(json_body(&lumi_core::CreateSharedCommentRequest {
+                    parent_comment_id: thread.comments.first().map(|comment| comment.id),
+                    body_markdown: "Ответ участника".to_owned(),
+                })?)?,
+            &member,
+            StatusCode::CREATED,
+        )
+        .await?;
+        let edited: lumi_core::SharedComment = request_json_with_session(
+            app.clone(),
+            Request::builder()
+                .method("PATCH")
+                .uri(format!(
+                    "/api/v1/spaces/{}/comments/{}",
+                    created.space.id, reply.id
+                ))
+                .header(header::CONTENT_TYPE, "application/json")
+                .header("idempotency-key", "discussion-reply-edit")
+                .body(json_body(&lumi_core::UpdateSharedCommentRequest {
+                    body_markdown: "Исправленный ответ участника".to_owned(),
+                    expected_revision: reply.object_revision,
+                })?)?,
+            &member,
+        )
+        .await?;
+        let _: lumi_core::ModerationAction = request_json_with_session(
+            app.clone(),
+            Request::builder()
+                .method("POST")
+                .uri(format!(
+                    "/api/v1/spaces/{}/moderation/actions",
+                    created.space.id
+                ))
+                .header(header::CONTENT_TYPE, "application/json")
+                .header("idempotency-key", "discussion-reply-hide")
+                .body(json_body(&lumi_core::ModerateSocialContentRequest {
+                    target_type: lumi_core::ModerationTargetType::Comment,
+                    target_id: reply.id,
+                    action: lumi_core::ModerationActionKind::Hide,
+                    expected_revision: edited.object_revision,
+                    reason: Some("Проверка модерации".to_owned()),
+                })?)?,
+            &owner,
+        )
+        .await?;
+        let discussions: lumi_core::SharedDiscussionPage = request_json_with_session(
+            app,
+            Request::builder()
+                .uri(format!(
+                    "/api/v1/spaces/{}/materials/{}/threads?limit=50",
+                    created.space.id, owner_shared.identity.id
+                ))
+                .body(Body::empty())?,
+            &member,
+        )
+        .await?;
+        let hidden_reply = discussions
+            .threads
+            .first()
+            .and_then(|loaded_thread| {
+                loaded_thread
+                    .comments
+                    .iter()
+                    .find(|comment| comment.id == reply.id)
+            })
+            .ok_or_else(|| std::io::Error::other("hidden reply missing"))?;
+        assert_eq!(
+            (hidden_reply.state, hidden_reply.body_markdown.as_deref()),
+            (lumi_core::SocialContentState::Hidden, None)
+        );
         Ok(())
     }
 

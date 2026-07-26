@@ -7,9 +7,12 @@ use lumi_core::{
     ClaimSharedMaterialRequest, CommunityAccessLink, CommunityAccessLinkId, CommunityAction,
     CommunityLinkPreview, CommunityMembership, CommunityRole, CommunitySpace, CommunitySpaceDetail,
     CommunitySpaceId, CreateCommunityAccessLinkRequest, CreateCommunitySpaceRequest,
-    CreatedCommunityAccessLink, JoinCommunityLinkRequest, PreviewCommunityLinkRequest,
-    ShareMaterialRequest, SharedMaterial, SharedMaterialId, UpdateCommunityMemberRequest,
-    UpdateCommunitySpaceRequest, UserId,
+    CreateSharedCommentRequest, CreateSharedThreadRequest, CreatedCommunityAccessLink,
+    DeleteSharedCommentRequest, JoinCommunityLinkRequest, ModerateSocialContentRequest,
+    ModerationAction, PreviewCommunityLinkRequest, ShareMaterialRequest, SharedComment,
+    SharedCommentId, SharedCommentThread, SharedCommentThreadId, SharedDiscussionPage,
+    SharedMaterial, SharedMaterialId, UpdateCommunityMemberRequest, UpdateCommunitySpaceRequest,
+    UpdateSharedCommentRequest, UserId,
 };
 use rand::{rngs::OsRng, RngCore};
 use sha2::{Digest, Sha256};
@@ -90,6 +93,10 @@ impl SocialRuntime {
     }
 
     pub(crate) fn supports_material_sharing(&self) -> bool {
+        matches!(self.backend, SocialBackend::Postgres(_))
+    }
+
+    pub(crate) fn supports_material_discussions(&self) -> bool {
         matches!(self.backend, SocialBackend::Postgres(_))
     }
 
@@ -655,6 +662,168 @@ impl SocialRuntime {
                         shared_material_id,
                         idempotency_key,
                     )
+                    .await
+            }
+        }
+    }
+
+    pub(crate) async fn list_discussions(
+        &self,
+        user_id: UserId,
+        space_id: CommunitySpaceId,
+        shared_material_id: SharedMaterialId,
+        after: Option<&str>,
+        limit: u16,
+    ) -> Result<SharedDiscussionPage, SocialStoreError> {
+        let limit = lumi_core::validate_shared_thread_page_limit(limit)
+            .map_err(|error| SocialStoreError::Invalid(error.to_string()))?;
+        match &self.backend {
+            SocialBackend::Memory(_) => Err(SocialStoreError::Unavailable),
+            SocialBackend::Postgres(store) => {
+                store
+                    .list_discussions(user_id, space_id, shared_material_id, after, limit)
+                    .await
+            }
+        }
+    }
+
+    pub(crate) async fn create_thread(
+        &self,
+        user_id: UserId,
+        device_id: Uuid,
+        space_id: CommunitySpaceId,
+        shared_material_id: SharedMaterialId,
+        idempotency_key: &str,
+        request: CreateSharedThreadRequest,
+    ) -> Result<SharedCommentThread, SocialStoreError> {
+        validate_key(idempotency_key)?;
+        let request = request
+            .normalized()
+            .map_err(|error| SocialStoreError::Invalid(error.to_string()))?;
+        match &self.backend {
+            SocialBackend::Memory(_) => Err(SocialStoreError::Unavailable),
+            SocialBackend::Postgres(store) => {
+                store
+                    .create_thread(
+                        user_id,
+                        device_id,
+                        space_id,
+                        shared_material_id,
+                        idempotency_key,
+                        &request,
+                    )
+                    .await
+            }
+        }
+    }
+
+    pub(crate) async fn add_comment(
+        &self,
+        user_id: UserId,
+        device_id: Uuid,
+        space_id: CommunitySpaceId,
+        thread_id: SharedCommentThreadId,
+        idempotency_key: &str,
+        request: CreateSharedCommentRequest,
+    ) -> Result<SharedComment, SocialStoreError> {
+        validate_key(idempotency_key)?;
+        let request = request
+            .normalized()
+            .map_err(|error| SocialStoreError::Invalid(error.to_string()))?;
+        match &self.backend {
+            SocialBackend::Memory(_) => Err(SocialStoreError::Unavailable),
+            SocialBackend::Postgres(store) => {
+                store
+                    .add_comment(
+                        user_id,
+                        device_id,
+                        space_id,
+                        thread_id,
+                        idempotency_key,
+                        &request,
+                    )
+                    .await
+            }
+        }
+    }
+
+    pub(crate) async fn update_comment(
+        &self,
+        user_id: UserId,
+        device_id: Uuid,
+        space_id: CommunitySpaceId,
+        comment_id: SharedCommentId,
+        idempotency_key: &str,
+        request: UpdateSharedCommentRequest,
+    ) -> Result<SharedComment, SocialStoreError> {
+        validate_key(idempotency_key)?;
+        let request = request
+            .normalized()
+            .map_err(|error| SocialStoreError::Invalid(error.to_string()))?;
+        match &self.backend {
+            SocialBackend::Memory(_) => Err(SocialStoreError::Unavailable),
+            SocialBackend::Postgres(store) => {
+                store
+                    .update_comment(
+                        user_id,
+                        device_id,
+                        space_id,
+                        comment_id,
+                        idempotency_key,
+                        &request,
+                    )
+                    .await
+            }
+        }
+    }
+
+    pub(crate) async fn delete_comment(
+        &self,
+        user_id: UserId,
+        device_id: Uuid,
+        space_id: CommunitySpaceId,
+        comment_id: SharedCommentId,
+        idempotency_key: &str,
+        request: DeleteSharedCommentRequest,
+    ) -> Result<SharedComment, SocialStoreError> {
+        validate_key(idempotency_key)?;
+        let request = request
+            .validate()
+            .map_err(|error| SocialStoreError::Invalid(error.to_string()))?;
+        match &self.backend {
+            SocialBackend::Memory(_) => Err(SocialStoreError::Unavailable),
+            SocialBackend::Postgres(store) => {
+                store
+                    .delete_comment(
+                        user_id,
+                        device_id,
+                        space_id,
+                        comment_id,
+                        idempotency_key,
+                        request,
+                    )
+                    .await
+            }
+        }
+    }
+
+    pub(crate) async fn moderate_content(
+        &self,
+        user_id: UserId,
+        device_id: Uuid,
+        space_id: CommunitySpaceId,
+        idempotency_key: &str,
+        request: ModerateSocialContentRequest,
+    ) -> Result<ModerationAction, SocialStoreError> {
+        validate_key(idempotency_key)?;
+        let request = request
+            .normalized()
+            .map_err(|error| SocialStoreError::Invalid(error.to_string()))?;
+        match &self.backend {
+            SocialBackend::Memory(_) => Err(SocialStoreError::Unavailable),
+            SocialBackend::Postgres(store) => {
+                store
+                    .moderate_content(user_id, device_id, space_id, idempotency_key, &request)
                     .await
             }
         }

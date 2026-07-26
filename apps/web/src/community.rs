@@ -6,9 +6,12 @@ use lumi_core::{
     ClaimSharedMaterialRequest, CommunityAccessLink, CommunityAccessLinkStatus,
     CommunityLinkPreview, CommunityMembership, CommunityMembershipStatus, CommunityRole,
     CommunitySpace, CommunitySpaceDetail, CreateCommunityAccessLinkRequest,
-    CreateCommunitySpaceRequest, CreatedCommunityAccessLink, JoinCommunityLinkRequest,
-    LibraryEntry, MaterialImportStatus, PreviewCommunityLinkRequest, ShareMaterialRequest,
-    SharedMaterial, UpdateCommunityMemberRequest, UpdateCommunitySpaceRequest,
+    CreateCommunitySpaceRequest, CreateSharedCommentRequest, CreateSharedThreadRequest,
+    CreatedCommunityAccessLink, DeleteSharedCommentRequest, JoinCommunityLinkRequest, LibraryEntry,
+    MaterialImportStatus, ModerateSocialContentRequest, ModerationAction, ModerationActionKind,
+    ModerationTargetType, PreviewCommunityLinkRequest, ShareMaterialRequest, SharedComment,
+    SharedCommentThread, SharedDiscussionPage, SharedMaterial, SocialContentState,
+    UpdateCommunityMemberRequest, UpdateCommunitySpaceRequest, UpdateSharedCommentRequest,
     UserMaterialClaimStatus,
 };
 use uuid::Uuid;
@@ -24,6 +27,7 @@ pub(crate) fn CommunityPage(
     join_token: Option<String>,
     available: bool,
     material_sharing_available: bool,
+    material_discussions_available: bool,
     on_open_space: EventHandler<Uuid>,
     on_open_list: EventHandler<()>,
 ) -> Element {
@@ -55,6 +59,7 @@ pub(crate) fn CommunityPage(
                 csrf_token,
                 space_id,
                 material_sharing_available,
+                material_discussions_available,
                 on_close: move |_| on_open_list.call(()),
             }
         };
@@ -250,6 +255,7 @@ fn CommunityDetail(
     csrf_token: String,
     space_id: Uuid,
     material_sharing_available: bool,
+    material_discussions_available: bool,
     on_close: EventHandler<()>,
 ) -> Element {
     let csrf_token = use_signal(|| csrf_token);
@@ -463,6 +469,9 @@ fn CommunityDetail(
                                                 material,
                                                 space_id,
                                                 csrf_token: csrf_token(),
+                                                current_user_id,
+                                                can_moderate: matches!(current.membership.role, CommunityRole::Owner | CommunityRole::Admin),
+                                                discussions_available: material_discussions_available,
                                                 on_changed: move |_| generation += 1,
                                             }
                                         }
@@ -473,7 +482,12 @@ fn CommunityDetail(
                     }
                     article { class: "library-section",
                         h2 { "Обсуждение и чат" }
-                        p { "Совместное чтение и сообщения пока не включены capability-флагами." }
+                        if material_discussions_available {
+                            p { "Обсуждения материалов доступны в их карточках. Anchor-комментарии и опубликованные highlights появятся после общего Records v2 contract." }
+                        } else {
+                            p { "Обсуждения материалов пока не включены capability-флагом." }
+                        }
+                        p { "Общий чат относится к следующему социальному этапу." }
                     }
                     article { class: "library-section",
                         h2 { "Активность" }
@@ -651,6 +665,9 @@ fn CommunityMaterialCard(
     material: SharedMaterial,
     space_id: Uuid,
     csrf_token: String,
+    current_user_id: Uuid,
+    can_moderate: bool,
+    discussions_available: bool,
     on_changed: EventHandler<()>,
 ) -> Element {
     let creators = if material.identity.creators.is_empty() {
@@ -688,9 +705,492 @@ fn CommunityMaterialCard(
                 ClaimMaterialAction {
                     space_id,
                     shared_material_id: material.identity.id,
-                    csrf_token,
+                    csrf_token: csrf_token.clone(),
                     on_changed,
                 }
+            }
+            if discussions_available {
+                DiscussionPanel {
+                    title: material.identity.canonical_title.clone(),
+                    space_id,
+                    shared_material_id: material.identity.id,
+                    csrf_token,
+                    current_user_id,
+                    can_moderate,
+                }
+            }
+        }
+    }
+}
+
+#[component]
+fn DiscussionPanel(
+    title: String,
+    space_id: Uuid,
+    shared_material_id: Uuid,
+    csrf_token: String,
+    current_user_id: Uuid,
+    can_moderate: bool,
+) -> Element {
+    let mut open = use_signal(|| false);
+    let mut page = use_signal(|| Option::<SharedDiscussionPage>::None);
+    let mut new_body = use_signal(String::new);
+    let mut error = use_signal(String::new);
+    let mut busy = use_signal(|| false);
+    let mut generation = use_signal(|| 0_u64);
+    use_effect(move || {
+        let _ = generation();
+        if !open() {
+            return;
+        }
+        spawn(async move {
+            match load_discussions(space_id, shared_material_id, None).await {
+                Ok(loaded) => {
+                    page.set(Some(loaded));
+                    error.set(String::new());
+                }
+                Err(load_error) => error.set(load_error.to_string()),
+            }
+        });
+    });
+    rsx! {
+        button {
+            class: "text-action",
+            r#type: "button",
+            aria_expanded: open(),
+            onclick: move |_| open.toggle(),
+            if open() { "Скрыть обсуждение" } else { "Открыть обсуждение" }
+        }
+        if open() {
+            section {
+                class: "community-discussion",
+                aria_label: "Обсуждение материала {title}",
+                h4 { "Обсуждение" }
+                p { class: "community-discussion-note", "В этом срезе комментарии относятся ко всему материалу и не содержат цитат из личных копий." }
+                if !error().is_empty() {
+                    div { class: "library-alert", role: "alert",
+                        p { "{error}" }
+                        button { r#type: "button", onclick: move |_| generation += 1, "Повторить" }
+                    }
+                }
+                form {
+                    class: "community-comment-form",
+                    onsubmit: move |event| {
+                        event.prevent_default();
+                        let body = new_body();
+                        if body.trim().is_empty() {
+                            return;
+                        }
+                        let csrf = csrf_token.clone();
+                        busy.set(true);
+                        spawn(async move {
+                            match create_shared_thread(&csrf, space_id, shared_material_id, body).await {
+                                Ok(_) => {
+                                    new_body.set(String::new());
+                                    generation += 1;
+                                }
+                                Err(create_error) => error.set(create_error.to_string()),
+                            }
+                            busy.set(false);
+                        });
+                    },
+                    label { "Начать новое обсуждение"
+                        textarea {
+                            value: "{new_body}",
+                            maxlength: "16384",
+                            oninput: move |event| new_body.set(event.value()),
+                        }
+                    }
+                    button {
+                        class: "primary-action",
+                        r#type: "submit",
+                        disabled: busy() || new_body().trim().is_empty(),
+                        if busy() { "Публикуем…" } else { "Опубликовать" }
+                    }
+                }
+                match page.read().clone() {
+                    None => rsx! { p { role: "status", "Загружаем обсуждение…" } },
+                    Some(value) if value.threads.is_empty() => rsx! { p { "Пока нет обсуждений." } },
+                    Some(value) => rsx! {
+                        div { class: "community-thread-list",
+                            for thread in value.threads {
+                                DiscussionThreadView {
+                                    thread,
+                                    space_id,
+                                    csrf_token: csrf_token.clone(),
+                                    current_user_id,
+                                    can_moderate,
+                                    on_changed: move |_| generation += 1,
+                                }
+                            }
+                        }
+                        if let Some(cursor) = value.next_cursor {
+                            button {
+                                class: "secondary-action",
+                                r#type: "button",
+                                onclick: move |_| {
+                                    let cursor = cursor.clone();
+                                    spawn(async move {
+                                        match load_discussions(space_id, shared_material_id, Some(&cursor)).await {
+                                            Ok(mut loaded) => {
+                                                let current_page = { page.read().clone() };
+                                                if let Some(mut current) = current_page {
+                                                    for thread in loaded.threads.drain(..) {
+                                                        if let Some(index) = current.threads.iter().position(|item| item.id == thread.id) {
+                                                            current.threads[index] = thread;
+                                                        } else {
+                                                            current.threads.push(thread);
+                                                        }
+                                                    }
+                                                    current.next_cursor = loaded.next_cursor;
+                                                    page.set(Some(current));
+                                                }
+                                            }
+                                            Err(load_error) => error.set(load_error.to_string()),
+                                        }
+                                    });
+                                },
+                                "Загрузить ещё"
+                            }
+                        }
+                    },
+                }
+            }
+        }
+    }
+}
+
+#[component]
+fn DiscussionThreadView(
+    thread: SharedCommentThread,
+    space_id: Uuid,
+    csrf_token: String,
+    current_user_id: Uuid,
+    can_moderate: bool,
+    on_changed: EventHandler<()>,
+) -> Element {
+    let mut reply_to = use_signal(|| Option::<Uuid>::None);
+    let mut reply_body = use_signal(String::new);
+    let mut error = use_signal(String::new);
+    let mut busy = use_signal(|| false);
+    rsx! {
+        article { class: "community-thread", aria_label: "Ветка обсуждения",
+            header { class: "community-thread-heading",
+                strong { "{thread.creator_nickname.as_deref().unwrap_or(\"Участник\")}" }
+                span { "{social_state_label(thread.state)}" }
+            }
+            if can_moderate && thread.state != SocialContentState::Deleted {
+                div { class: "community-comment-actions",
+                    if thread.state == SocialContentState::Visible {
+                        button {
+                            r#type: "button",
+                            onclick: {
+                                let csrf = csrf_token.clone();
+                                let thread = thread.clone();
+                                move |_| {
+                                    let csrf = csrf.clone();
+                                    let thread = thread.clone();
+                                    spawn(async move {
+                                        match moderate_social_content(
+                                            &csrf,
+                                            space_id,
+                                            ModerationTargetType::Thread,
+                                            thread.id,
+                                            ModerationActionKind::Hide,
+                                            thread.object_revision,
+                                        ).await {
+                                            Ok(_) => on_changed.call(()),
+                                            Err(action_error) => error.set(action_error.to_string()),
+                                        }
+                                    });
+                                }
+                            },
+                            "Скрыть ветку"
+                        }
+                    } else if thread.state == SocialContentState::Hidden {
+                        button {
+                            r#type: "button",
+                            onclick: {
+                                let csrf = csrf_token.clone();
+                                let thread = thread.clone();
+                                move |_| {
+                                    let csrf = csrf.clone();
+                                    let thread = thread.clone();
+                                    spawn(async move {
+                                        match moderate_social_content(
+                                            &csrf,
+                                            space_id,
+                                            ModerationTargetType::Thread,
+                                            thread.id,
+                                            ModerationActionKind::Restore,
+                                            thread.object_revision,
+                                        ).await {
+                                            Ok(_) => on_changed.call(()),
+                                            Err(action_error) => error.set(action_error.to_string()),
+                                        }
+                                    });
+                                }
+                            },
+                            "Восстановить ветку"
+                        }
+                    }
+                    button {
+                        class: "danger-action",
+                        r#type: "button",
+                        onclick: {
+                            let csrf = csrf_token.clone();
+                            let thread = thread.clone();
+                            move |_| {
+                                let csrf = csrf.clone();
+                                let thread = thread.clone();
+                                spawn(async move {
+                                    match moderate_social_content(
+                                        &csrf,
+                                        space_id,
+                                        ModerationTargetType::Thread,
+                                        thread.id,
+                                        ModerationActionKind::Delete,
+                                        thread.object_revision,
+                                    ).await {
+                                        Ok(_) => on_changed.call(()),
+                                        Err(action_error) => error.set(action_error.to_string()),
+                                    }
+                                });
+                            }
+                        },
+                        "Удалить ветку"
+                    }
+                }
+            }
+            ol { class: "community-comment-list",
+                for comment in thread.comments.clone() {
+                    li { class: if comment.parent_comment_id.is_some() { "community-comment is-reply" } else { "community-comment" },
+                        DiscussionCommentView {
+                            comment: comment.clone(),
+                            space_id,
+                            csrf_token: csrf_token.clone(),
+                            current_user_id,
+                            can_moderate,
+                            on_reply: move |comment_id| reply_to.set(Some(comment_id)),
+                            on_changed,
+                        }
+                    }
+                }
+            }
+            if thread.state == SocialContentState::Visible {
+                form {
+                    class: "community-comment-form compact",
+                    onsubmit: {
+                        let thread_id = thread.id;
+                        move |event| {
+                            event.prevent_default();
+                            let body = reply_body();
+                            if body.trim().is_empty() {
+                                return;
+                            }
+                            let csrf = csrf_token.clone();
+                            let parent_comment_id = reply_to();
+                            busy.set(true);
+                            spawn(async move {
+                                match create_shared_comment(
+                                    &csrf,
+                                    space_id,
+                                    thread_id,
+                                    parent_comment_id,
+                                    body,
+                                ).await {
+                                    Ok(_) => {
+                                        reply_body.set(String::new());
+                                        reply_to.set(None);
+                                        on_changed.call(());
+                                    }
+                                    Err(create_error) => error.set(create_error.to_string()),
+                                }
+                                busy.set(false);
+                            });
+                        }
+                    },
+                    label {
+                        if reply_to().is_some() { "Ответить на комментарий" } else { "Добавить комментарий" }
+                        textarea {
+                            value: "{reply_body}",
+                            maxlength: "16384",
+                            oninput: move |event| reply_body.set(event.value()),
+                        }
+                    }
+                    div { class: "community-comment-actions",
+                        button {
+                            r#type: "submit",
+                            disabled: busy() || reply_body().trim().is_empty(),
+                            if busy() { "Отправляем…" } else if reply_to().is_some() { "Ответить" } else { "Добавить" }
+                        }
+                        if reply_to().is_some() {
+                            button { r#type: "button", onclick: move |_| reply_to.set(None), "Отменить ответ" }
+                        }
+                    }
+                }
+            }
+            if !error().is_empty() {
+                p { class: "account-error", role: "alert", "{error}" }
+            }
+        }
+    }
+}
+
+#[component]
+fn DiscussionCommentView(
+    comment: SharedComment,
+    space_id: Uuid,
+    csrf_token: String,
+    current_user_id: Uuid,
+    can_moderate: bool,
+    on_reply: EventHandler<Uuid>,
+    on_changed: EventHandler<()>,
+) -> Element {
+    let mut editing = use_signal(|| false);
+    let mut edited_body = use_signal(|| comment.body_markdown.clone().unwrap_or_default());
+    let mut error = use_signal(String::new);
+    let authored_by_current_user = comment.author_user_id == current_user_id;
+    let csrf_for_edit = csrf_token.clone();
+    let csrf_for_delete = csrf_token.clone();
+    let csrf_for_hide = csrf_token.clone();
+    let csrf_for_restore = csrf_token;
+    rsx! {
+        article { aria_label: "Комментарий {comment.author_nickname.as_deref().unwrap_or(\"участника\")}",
+            header { class: "community-comment-heading",
+                strong { "{comment.author_nickname.as_deref().unwrap_or(\"Участник\")}" }
+                span { "{social_state_label(comment.state)}" }
+            }
+            if editing() {
+                form {
+                    class: "community-comment-form compact",
+                    onsubmit: {
+                        let comment = comment.clone();
+                        move |event| {
+                            event.prevent_default();
+                            let body = edited_body();
+                            let csrf = csrf_for_edit.clone();
+                            let comment = comment.clone();
+                            spawn(async move {
+                                match update_shared_comment(
+                                    &csrf,
+                                    space_id,
+                                    comment.id,
+                                    comment.object_revision,
+                                    body,
+                                ).await {
+                                    Ok(_) => {
+                                        editing.set(false);
+                                        on_changed.call(());
+                                    }
+                                    Err(update_error) => error.set(update_error.to_string()),
+                                }
+                            });
+                        }
+                    },
+                    label { "Текст комментария"
+                        textarea {
+                            value: "{edited_body}",
+                            maxlength: "16384",
+                            oninput: move |event| edited_body.set(event.value()),
+                        }
+                    }
+                    div { class: "community-comment-actions",
+                        button { r#type: "submit", disabled: edited_body().trim().is_empty(), "Сохранить" }
+                        button { r#type: "button", onclick: move |_| editing.set(false), "Отмена" }
+                    }
+                }
+            } else if let Some(body) = &comment.body_markdown {
+                p { class: "community-comment-body", "{body}" }
+            } else {
+                p { class: "community-comment-placeholder", "{social_state_placeholder(comment.state)}" }
+            }
+            div { class: "community-comment-actions",
+                if comment.parent_comment_id.is_none() && comment.state == SocialContentState::Visible {
+                    button { r#type: "button", onclick: move |_| on_reply.call(comment.id), "Ответить" }
+                }
+                if authored_by_current_user && comment.state == SocialContentState::Visible {
+                    button { r#type: "button", onclick: move |_| editing.set(true), "Изменить" }
+                    button {
+                        class: "danger-action",
+                        r#type: "button",
+                        onclick: {
+                            let comment = comment.clone();
+                            move |_| {
+                                let csrf = csrf_for_delete.clone();
+                                let comment = comment.clone();
+                                spawn(async move {
+                                    match delete_shared_comment(
+                                        &csrf,
+                                        space_id,
+                                        comment.id,
+                                        comment.object_revision,
+                                    ).await {
+                                        Ok(_) => on_changed.call(()),
+                                        Err(delete_error) => error.set(delete_error.to_string()),
+                                    }
+                                });
+                            }
+                        },
+                        "Удалить"
+                    }
+                }
+                if can_moderate && comment.state != SocialContentState::Deleted {
+                    if comment.state == SocialContentState::Visible {
+                        button {
+                            r#type: "button",
+                            onclick: {
+                                let comment = comment.clone();
+                                move |_| {
+                                    let csrf = csrf_for_hide.clone();
+                                    let comment = comment.clone();
+                                    spawn(async move {
+                                        match moderate_social_content(
+                                            &csrf,
+                                            space_id,
+                                            ModerationTargetType::Comment,
+                                            comment.id,
+                                            ModerationActionKind::Hide,
+                                            comment.object_revision,
+                                        ).await {
+                                            Ok(_) => on_changed.call(()),
+                                            Err(action_error) => error.set(action_error.to_string()),
+                                        }
+                                    });
+                                }
+                            },
+                            "Скрыть"
+                        }
+                    } else if comment.state == SocialContentState::Hidden {
+                        button {
+                            r#type: "button",
+                            onclick: {
+                                let comment = comment.clone();
+                                move |_| {
+                                    let csrf = csrf_for_restore.clone();
+                                    let comment = comment.clone();
+                                    spawn(async move {
+                                        match moderate_social_content(
+                                            &csrf,
+                                            space_id,
+                                            ModerationTargetType::Comment,
+                                            comment.id,
+                                            ModerationActionKind::Restore,
+                                            comment.object_revision,
+                                        ).await {
+                                            Ok(_) => on_changed.call(()),
+                                            Err(action_error) => error.set(action_error.to_string()),
+                                        }
+                                    });
+                                }
+                            },
+                            "Восстановить"
+                        }
+                    }
+                }
+            }
+            if !error().is_empty() {
+                p { class: "account-error", role: "alert", "{error}" }
             }
         }
     }
@@ -776,6 +1276,109 @@ async fn load_spaces() -> Result<Vec<CommunitySpace>, ApiError> {
 
 async fn load_shared_materials(space_id: Uuid) -> Result<Vec<SharedMaterial>, ApiError> {
     api_get(&format!("/spaces/{space_id}/materials")).await
+}
+
+async fn load_discussions(
+    space_id: Uuid,
+    shared_material_id: Uuid,
+    after: Option<&str>,
+) -> Result<SharedDiscussionPage, ApiError> {
+    let cursor = after.map_or_else(String::new, |value| format!("&after={value}"));
+    api_get(&format!(
+        "/spaces/{space_id}/materials/{shared_material_id}/threads?limit=100{cursor}"
+    ))
+    .await
+}
+
+async fn create_shared_thread(
+    csrf: &str,
+    space_id: Uuid,
+    shared_material_id: Uuid,
+    body_markdown: String,
+) -> Result<SharedCommentThread, ApiError> {
+    api_json_mutation(
+        "POST",
+        &format!("/spaces/{space_id}/materials/{shared_material_id}/threads"),
+        csrf,
+        &CreateSharedThreadRequest { body_markdown },
+    )
+    .await
+}
+
+async fn create_shared_comment(
+    csrf: &str,
+    space_id: Uuid,
+    thread_id: Uuid,
+    parent_comment_id: Option<Uuid>,
+    body_markdown: String,
+) -> Result<SharedComment, ApiError> {
+    api_json_mutation(
+        "POST",
+        &format!("/spaces/{space_id}/threads/{thread_id}/comments"),
+        csrf,
+        &CreateSharedCommentRequest {
+            parent_comment_id,
+            body_markdown,
+        },
+    )
+    .await
+}
+
+async fn update_shared_comment(
+    csrf: &str,
+    space_id: Uuid,
+    comment_id: Uuid,
+    expected_revision: u64,
+    body_markdown: String,
+) -> Result<SharedComment, ApiError> {
+    api_json_mutation(
+        "PATCH",
+        &format!("/spaces/{space_id}/comments/{comment_id}"),
+        csrf,
+        &UpdateSharedCommentRequest {
+            body_markdown,
+            expected_revision,
+        },
+    )
+    .await
+}
+
+async fn delete_shared_comment(
+    csrf: &str,
+    space_id: Uuid,
+    comment_id: Uuid,
+    expected_revision: u64,
+) -> Result<SharedComment, ApiError> {
+    api_json_mutation(
+        "DELETE",
+        &format!("/spaces/{space_id}/comments/{comment_id}"),
+        csrf,
+        &DeleteSharedCommentRequest { expected_revision },
+    )
+    .await
+}
+
+async fn moderate_social_content(
+    csrf: &str,
+    space_id: Uuid,
+    target_type: ModerationTargetType,
+    target_id: Uuid,
+    action: ModerationActionKind,
+    expected_revision: u64,
+) -> Result<ModerationAction, ApiError> {
+    api_json_mutation(
+        "POST",
+        &format!("/spaces/{space_id}/moderation/actions"),
+        csrf,
+        &ModerateSocialContentRequest {
+            target_type,
+            target_id,
+            action,
+            expected_revision,
+            reason: None,
+        },
+    )
+    .await
 }
 
 async fn load_library_materials() -> Result<Vec<LibraryEntry>, ApiError> {
@@ -991,6 +1594,7 @@ where
     let builder = match method {
         "POST" => Request::post(&format!("{API_BASE}{path}")),
         "PATCH" => Request::patch(&format!("{API_BASE}{path}")),
+        "DELETE" => Request::delete(&format!("{API_BASE}{path}")),
         _ => return Err(ApiError::Message("Неподдерживаемая операция.".to_owned())),
     };
     let request = builder
@@ -1092,5 +1696,21 @@ fn link_status_label(status: CommunityAccessLinkStatus) -> &'static str {
     match status {
         CommunityAccessLinkStatus::Active => "Активна",
         CommunityAccessLinkStatus::Revoked => "Отозвана",
+    }
+}
+
+fn social_state_label(state: SocialContentState) -> &'static str {
+    match state {
+        SocialContentState::Visible => "Опубликовано",
+        SocialContentState::Hidden => "Скрыто модератором",
+        SocialContentState::Deleted => "Удалено",
+    }
+}
+
+fn social_state_placeholder(state: SocialContentState) -> &'static str {
+    match state {
+        SocialContentState::Visible => "",
+        SocialContentState::Hidden => "Содержимое скрыто модератором.",
+        SocialContentState::Deleted => "Комментарий удалён.",
     }
 }

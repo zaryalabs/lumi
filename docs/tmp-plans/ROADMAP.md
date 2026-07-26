@@ -75,13 +75,17 @@ Knowledge Base, native full-copy replicas, Obsidian, plugin platform, будущ
 - `0.5.0 / E2`: публикация metadata identity без source blob, versioned
   privacy-protected fingerprints, personal claims, conservative
   exact/similarity matching, manual review и import-own-copy UX;
+- `0.5.0 / E3 independent slice`: material-level threads/replies, author CRUD,
+  moderation tombstones, bounded cursor API и Community discussion Web surface
+  без anchor/quote/private-record данных;
 - release evidence A1 зафиксирован commit trailer
   `Lumi-Plan-Stage: 0.2.0/A1`.
 
 Ещё не готово:
 
 - Desk/search/RAG;
-- следующие social verticals: совместное чтение, коммуникации и выпуск.
+- завершение совместного чтения (shared anchors/highlights/Reader overlay),
+  коммуникации и выпуск.
   Lifecycle-интеграции E2 и зависимости social от ещё не
   завершённого `0.4.0` перечислены в
   [`0.5.0-deferred-until-0.4.0.md`](0.5.0-deferred-until-0.4.0.md).
@@ -93,8 +97,8 @@ Persistent server публикует capabilities `ai-provider-openrouter`,
 `ai-abridged-lum`, а также route group `learning` и capability
 `learning-core`, `learning-scheduling`, `learning-ai`,
 `learning-explain-back`, `learning-audio-attachments`, `learning-voice` и
-`learning-mcp`, а также `community-spaces`, `community-link-access` и
-`material-sharing` при готовых prerequisites.
+`learning-mcp`, а также `community-spaces`, `community-link-access`,
+`material-sharing` и `material-discussions` при готовых prerequisites.
 
 После перехода на новую шкалу выполнено `11/18` продуктовых эпиков. Stage 0,
 Contract Freeze 1 и A1 остаются закрытыми prerequisites.
@@ -193,8 +197,9 @@ record-scoped RAG без второго контура данных.
 2. [x] **E2 — Публикация и сопоставление материалов.** Share flow,
    fingerprints, shared identity, claims, conservative matching и
    import-own-copy.
-3. [ ] **E3 — Совместное чтение.** Shared anchors, discussions, explicit
-   published highlights, Reader social layer, moderation и unresolved states.
+3. [ ] **E3 — Совместное чтение.** Независимые material-level discussions и
+   moderation готовы; Shared anchors, explicit published highlights, Reader
+   social layer и unresolved mapping отложены до готовности `0.4.0`.
 4. [ ] **E4 — Коммуникации и выпуск.** Space chat, activity, social search
    events, MCP parity, polling, backup/restore и multi-account release
    acceptance.

@@ -1,7 +1,7 @@
 //! Typed Axum routes for Community Spaces and revocable access links.
 
 use axum::{
-    extract::{DefaultBodyLimit, Path, State},
+    extract::{DefaultBodyLimit, Path, Query, State},
     http::{HeaderMap, StatusCode},
     routing::{delete, get, patch, post},
     Extension, Json, Router,
@@ -9,11 +9,15 @@ use axum::{
 use lumi_core::{
     ClaimSharedMaterialRequest, CommunityAccessLink, CommunityAccessLinkId, CommunityLinkPreview,
     CommunityMembership, CommunitySpace, CommunitySpaceDetail, CommunitySpaceId,
-    CreateCommunityAccessLinkRequest, CreateCommunitySpaceRequest, CreatedCommunityAccessLink,
-    JoinCommunityLinkRequest, PreviewCommunityLinkRequest, ShareMaterialRequest, SharedMaterial,
-    SharedMaterialId, UpdateCommunityMemberRequest, UpdateCommunitySpaceRequest, UserId,
-    UserMaterialClaim,
+    CreateCommunityAccessLinkRequest, CreateCommunitySpaceRequest, CreateSharedCommentRequest,
+    CreateSharedThreadRequest, CreatedCommunityAccessLink, DeleteSharedCommentRequest,
+    JoinCommunityLinkRequest, ModerateSocialContentRequest, ModerationAction,
+    PreviewCommunityLinkRequest, ShareMaterialRequest, SharedComment, SharedCommentId,
+    SharedCommentThread, SharedCommentThreadId, SharedDiscussionPage, SharedMaterial,
+    SharedMaterialId, UpdateCommunityMemberRequest, UpdateCommunitySpaceRequest,
+    UpdateSharedCommentRequest, UserId, UserMaterialClaim,
 };
+use serde::Deserialize;
 
 use crate::{account::AuthenticatedSession, required_idempotency_key, AppError, AppState};
 
@@ -64,8 +68,30 @@ pub(crate) fn protected_routes() -> Router<AppState> {
             "/spaces/{space_id}/materials/{shared_material_id}/claim/recheck",
             post(recheck_material),
         )
+        .route(
+            "/spaces/{space_id}/materials/{shared_material_id}/threads",
+            get(list_discussions).post(create_thread),
+        )
+        .route(
+            "/spaces/{space_id}/threads/{thread_id}/comments",
+            post(add_comment),
+        )
+        .route(
+            "/spaces/{space_id}/comments/{comment_id}",
+            patch(update_comment).delete(delete_comment),
+        )
+        .route(
+            "/spaces/{space_id}/moderation/actions",
+            post(moderate_content),
+        )
         .route("/shares/community-link/join", post(join_link))
         .layer(DefaultBodyLimit::max(64 * 1024))
+}
+
+#[derive(Deserialize)]
+struct DiscussionQuery {
+    after: Option<String>,
+    limit: Option<u16>,
 }
 
 async fn preview_link(
@@ -453,6 +479,140 @@ async fn recheck_material(
             space_id,
             shared_material_id,
             idempotency_key,
+        )
+        .await
+        .map(Json)
+        .map_err(map_social_error)
+}
+
+async fn list_discussions(
+    State(state): State<AppState>,
+    Extension(session): Extension<AuthenticatedSession>,
+    Path((space_id, shared_material_id)): Path<(CommunitySpaceId, SharedMaterialId)>,
+    Query(query): Query<DiscussionQuery>,
+) -> Result<Json<SharedDiscussionPage>, AppError> {
+    state
+        .social_runtime()
+        .list_discussions(
+            session.user_id,
+            space_id,
+            shared_material_id,
+            query.after.as_deref(),
+            query.limit.unwrap_or(50),
+        )
+        .await
+        .map(Json)
+        .map_err(map_social_error)
+}
+
+async fn create_thread(
+    State(state): State<AppState>,
+    Extension(session): Extension<AuthenticatedSession>,
+    Path((space_id, shared_material_id)): Path<(CommunitySpaceId, SharedMaterialId)>,
+    headers: HeaderMap,
+    Json(request): Json<CreateSharedThreadRequest>,
+) -> Result<(StatusCode, Json<SharedCommentThread>), AppError> {
+    let idempotency_key = required_idempotency_key(&headers)?;
+    let thread = state
+        .social_runtime()
+        .create_thread(
+            session.user_id,
+            session.device_id,
+            space_id,
+            shared_material_id,
+            idempotency_key,
+            request,
+        )
+        .await
+        .map_err(map_social_error)?;
+    Ok((StatusCode::CREATED, Json(thread)))
+}
+
+async fn add_comment(
+    State(state): State<AppState>,
+    Extension(session): Extension<AuthenticatedSession>,
+    Path((space_id, thread_id)): Path<(CommunitySpaceId, SharedCommentThreadId)>,
+    headers: HeaderMap,
+    Json(request): Json<CreateSharedCommentRequest>,
+) -> Result<(StatusCode, Json<SharedComment>), AppError> {
+    let idempotency_key = required_idempotency_key(&headers)?;
+    let comment = state
+        .social_runtime()
+        .add_comment(
+            session.user_id,
+            session.device_id,
+            space_id,
+            thread_id,
+            idempotency_key,
+            request,
+        )
+        .await
+        .map_err(map_social_error)?;
+    Ok((StatusCode::CREATED, Json(comment)))
+}
+
+async fn update_comment(
+    State(state): State<AppState>,
+    Extension(session): Extension<AuthenticatedSession>,
+    Path((space_id, comment_id)): Path<(CommunitySpaceId, SharedCommentId)>,
+    headers: HeaderMap,
+    Json(request): Json<UpdateSharedCommentRequest>,
+) -> Result<Json<SharedComment>, AppError> {
+    let idempotency_key = required_idempotency_key(&headers)?;
+    state
+        .social_runtime()
+        .update_comment(
+            session.user_id,
+            session.device_id,
+            space_id,
+            comment_id,
+            idempotency_key,
+            request,
+        )
+        .await
+        .map(Json)
+        .map_err(map_social_error)
+}
+
+async fn delete_comment(
+    State(state): State<AppState>,
+    Extension(session): Extension<AuthenticatedSession>,
+    Path((space_id, comment_id)): Path<(CommunitySpaceId, SharedCommentId)>,
+    headers: HeaderMap,
+    Json(request): Json<DeleteSharedCommentRequest>,
+) -> Result<Json<SharedComment>, AppError> {
+    let idempotency_key = required_idempotency_key(&headers)?;
+    state
+        .social_runtime()
+        .delete_comment(
+            session.user_id,
+            session.device_id,
+            space_id,
+            comment_id,
+            idempotency_key,
+            request,
+        )
+        .await
+        .map(Json)
+        .map_err(map_social_error)
+}
+
+async fn moderate_content(
+    State(state): State<AppState>,
+    Extension(session): Extension<AuthenticatedSession>,
+    Path(space_id): Path<CommunitySpaceId>,
+    headers: HeaderMap,
+    Json(request): Json<ModerateSocialContentRequest>,
+) -> Result<Json<ModerationAction>, AppError> {
+    let idempotency_key = required_idempotency_key(&headers)?;
+    state
+        .social_runtime()
+        .moderate_content(
+            session.user_id,
+            session.device_id,
+            space_id,
+            idempotency_key,
+            request,
         )
         .await
         .map(Json)

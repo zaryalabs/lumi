@@ -7,6 +7,10 @@ boundary.
 DTO. Fixtures намеренно не содержат raw invite token, source blob, normalized
 package, protected fingerprint, private annotation или progress.
 
-Расширенный cross-revision backfill и anchor corpus появятся после
+`contracts/v1/material-discussions.json` фиксирует независимый E3 contract
+material-level threads/replies, masked moderation projection и отсутствие
+anchor/quote/private-record полей.
+
+Расширенный cross-revision backfill, shared highlights и anchor corpus появятся после
 prerequisites, перечисленных в
 `docs/tmp-plans/0.5.0-deferred-until-0.4.0.md`.

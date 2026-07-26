@@ -220,6 +220,22 @@ Social entities:
 Personal notes are not social comments. User can convert/share selected note или
 highlight explicitly.
 
+До готовности Records v2 отдельно выпускается material-level discussion
+contract из [`ADR 0032`](../adr/0032-material-discussions-and-moderation.md):
+
+- active member видит и создаёт discussion целого материала даже без matched
+  claim, потому что ответ не содержит quote или текст книги;
+- thread создаётся вместе с первым comment, replies имеют один уровень;
+- автор редактирует/удаляет своё с `expected_revision`;
+- owner/admin скрывает, восстанавливает или удаляет social content;
+- delete оставляет tombstone, hide маскирует body для обычного участника;
+- выдача cursor-paginated и не содержит anchor, source annotation, private
+  material/revision или normalized package.
+
+Эта capability называется `material-discussions`. Она не публикует
+`shared-reading`: anchor comments, shared highlights и Reader overlay остаются
+зависимыми от общего target/provenance contract `0.4.0`.
+
 Chat и comments имеют разные контексты:
 
 - comment является устойчивым обсуждением материала, главы или anchor;

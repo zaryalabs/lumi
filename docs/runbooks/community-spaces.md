@@ -2,10 +2,11 @@
 
 ## Назначение
 
-Runbook описывает локальную проверку `0.5.0/E1–E2`: закрытые Community Spaces,
+Runbook описывает локальную проверку `0.5.0/E1–E3 independent`: закрытые Community Spaces,
 membership/roles, доступ по отзывной ссылке, публикацию безопасной material
-identity и привязку собственной копии. Social Reader, сообщения и social
-search пока не входят в опубликованные capabilities.
+identity, привязку собственной копии и material-level discussions. Shared
+anchors/highlights, Social Reader overlay, chat и social search пока не входят
+в опубликованные capabilities.
 
 ## Capabilities
 
@@ -14,6 +15,9 @@ capabilities `community-spaces`, `community-link-access`. Только persisten
 server дополнительно публикует `material-sharing`, потому что matching требует
 PostgreSQL projection, normalized packages и versioned feature key. Web
 показывает действия публикации только после получения этой capability.
+Persistent server также публикует `material-discussions`: material-level
+threads не требуют claim и не содержат quote/source body. Capability
+`shared-reading` остаётся выключенной.
 
 ## Ручной сценарий
 
@@ -34,6 +38,12 @@ PostgreSQL projection, normalized packages и versioned feature key. Web
    получить `Есть ваша копия`.
 9. Третьим аккаунтом импортировать короткий другой текст с тем же названием:
    после подключения состояние должно быть `Нужно подтвердить`, а не matched.
+10. A открыть обсуждение material identity и создать thread. B должен увидеть
+    его даже без matched claim, ответить, изменить и удалить собственный
+    comment.
+11. Owner/admin скрывает reply: B видит tombstone-like placeholder без body.
+    Restore возвращает body, delete очищает его необратимо и сохраняет
+    moderation audit.
 
 Invitation передаётся как `#join/{token}`. Fragment не отправляется серверу
 браузером; Web передаёт token только в preview/join API и очищает route после
@@ -68,6 +78,10 @@ share → no-copy → exact match/manual-review.
   status нельзя подложить с клиента.
 - Raw/protected signatures не входят в HTTP DTO, sync payload или activity;
   source/package routes сохраняют personal-owner scope.
+- Discussion DTO не содержит anchor/quote/private record. Hidden body
+  маскируется для member; delete очищает body и оставляет tombstone.
+- Discussion mutations требуют idempotency и expected revision; moderation
+  разрешена только owner/admin и записывается append-only.
 - Rate limit возвращает `429`, invalid mutation — `422`.
 
 ## Отложенные зависимости

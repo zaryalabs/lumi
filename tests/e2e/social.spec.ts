@@ -200,6 +200,84 @@ test("shares metadata and matches only each participant's own copy", async ({
     memberMaterial.getByText("Есть ваша копия", { exact: true }),
   ).toBeVisible();
 
+  await owner.getByRole("link", { name: "Сообщества" }).click();
+  await owner
+    .getByRole("main", { name: "Сообщества Lumi" })
+    .getByRole("article")
+    .filter({ hasText: "Клубная полка" })
+    .getByRole("button", { name: "Открыть" })
+    .click();
+  const ownerMaterial = owner
+    .getByRole("main", { name: "Пространство сообщества" })
+    .getByRole("article", {
+      name: "Материал сообщества Клубная книга",
+    });
+  await ownerMaterial
+    .getByRole("button", { name: "Открыть обсуждение" })
+    .click();
+  const ownerDiscussion = ownerMaterial.getByRole("region", {
+    name: "Обсуждение материала Клубная книга",
+  });
+  await ownerDiscussion
+    .getByLabel("Начать новое обсуждение")
+    .fill("Что изменилось в вашем понимании главы?");
+  await ownerDiscussion.getByRole("button", { name: "Опубликовать" }).click();
+  await expect(
+    ownerDiscussion.getByText("Что изменилось в вашем понимании главы?"),
+  ).toBeVisible();
+
+  await memberMaterial
+    .getByRole("button", { name: "Открыть обсуждение" })
+    .click();
+  const memberDiscussion = memberMaterial.getByRole("region", {
+    name: "Обсуждение материала Клубная книга",
+  });
+  await expect(
+    memberDiscussion.getByText("Что изменилось в вашем понимании главы?"),
+  ).toBeVisible();
+  await memberDiscussion
+    .getByRole("article", { name: "Комментарий участника" })
+    .getByRole("button", { name: "Ответить", exact: true })
+    .click();
+  await memberDiscussion
+    .getByLabel("Ответить на комментарий")
+    .fill("Теперь лучше вижу связь между двумя тезисами.");
+  await memberDiscussion
+    .locator('button[type="submit"]')
+    .filter({ hasText: "Ответить" })
+    .click();
+  await expect(
+    memberDiscussion.getByText("Теперь лучше вижу связь между двумя тезисами."),
+  ).toBeVisible();
+
+  await owner.reload();
+  const reloadedOwnerMaterial = owner.getByRole("article", {
+    name: "Материал сообщества Клубная книга",
+  });
+  await reloadedOwnerMaterial
+    .getByRole("button", { name: "Открыть обсуждение" })
+    .click();
+  const reloadedOwnerDiscussion = reloadedOwnerMaterial.getByRole("region", {
+    name: "Обсуждение материала Клубная книга",
+  });
+  const memberReply = reloadedOwnerDiscussion
+    .getByText("Теперь лучше вижу связь между двумя тезисами.")
+    .locator("..");
+  await memberReply
+    .getByRole("button", { name: "Скрыть", exact: true })
+    .click();
+
+  await member.reload();
+  const reloadedMemberMaterial = member.getByRole("article", {
+    name: "Материал сообщества Клубная книга",
+  });
+  await reloadedMemberMaterial
+    .getByRole("button", { name: "Открыть обсуждение" })
+    .click();
+  await expect(
+    reloadedMemberMaterial.getByText("Содержимое скрыто модератором."),
+  ).toBeVisible();
+
   const reviewer = await register(reviewerContext);
   await importMarkdown(reviewer, ambiguousMarkdown);
   await joinByLink(reviewer, inviteUrl);

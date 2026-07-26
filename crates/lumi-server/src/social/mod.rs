@@ -1,6 +1,7 @@
 //! Community Space application boundary.
 
 pub(crate) mod api;
+mod discussion;
 mod matching;
 mod permissions;
 mod service;

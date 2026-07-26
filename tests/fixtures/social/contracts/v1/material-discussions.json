@@ -1,0 +1,42 @@
+{
+  "contract_version": "material-discussion.v1",
+  "thread": {
+    "id": "019c0000-0000-7000-8000-000000000301",
+    "community_space_id": "019c0000-0000-7000-8000-000000000101",
+    "shared_material_id": "019c0000-0000-7000-8000-000000000201",
+    "scope": "material",
+    "created_by_user_id": "019c0000-0000-7000-8000-000000000001",
+    "creator_nickname": "Читатель",
+    "state": "visible",
+    "object_revision": 2,
+    "comments": [
+      {
+        "id": "019c0000-0000-7000-8000-000000000302",
+        "thread_id": "019c0000-0000-7000-8000-000000000301",
+        "parent_comment_id": null,
+        "author_user_id": "019c0000-0000-7000-8000-000000000001",
+        "author_nickname": "Читатель",
+        "body_markdown": "Обсуждаем материал без публикации цитаты.",
+        "state": "visible",
+        "object_revision": 1,
+        "created_at": 1785024000000,
+        "updated_at": 1785024000000
+      }
+    ],
+    "created_at": 1785024000000,
+    "updated_at": 1785024001000
+  },
+  "hidden_projection": {
+    "state": "hidden",
+    "body_markdown": null
+  },
+  "forbidden_fields": [
+    "anchor",
+    "quote_excerpt",
+    "source_annotation_id",
+    "creator_material_id",
+    "creator_revision_id",
+    "private_annotations",
+    "normalized_package"
+  ]
+}
