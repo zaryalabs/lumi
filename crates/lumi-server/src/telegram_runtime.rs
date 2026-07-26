@@ -10,22 +10,21 @@ use lumi_core::{
     TelegramPhotoDescriptor, TelegramReply, TelegramUnsupportedAttachment, TelegramUpdate,
     TimestampMs,
 };
-use ring::{aead, rand as ring_rand};
-use sha2::{Digest, Sha256};
-use sqlx_core::row::Row;
-use sqlx_postgres::PgPool;
+use ring::aead;
+use sqlx_core::{row::Row, transaction::Transaction};
+use sqlx_postgres::{PgPool, Postgres};
 use teloxide_core::prelude::*;
 use teloxide_core::types::{
     Message, MessageEntity, MessageEntityKind, MessageOrigin, Update, UpdateKind,
 };
 use time::OffsetDateTime;
-use tokio::io::AsyncWriteExt;
 use tokio::sync::{watch, Mutex};
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 use zeroize::Zeroize;
 
 use crate::imports::ImportService;
+use crate::secrets::{SecretContext, SecretStore, SecretStoreError, SecretValue};
 use crate::telegram::{TelegramService, TelegramServiceError};
 
 mod sqlx {
@@ -35,6 +34,7 @@ mod sqlx {
 const MASTER_KEY_FILE: &str = "telegram-token.key";
 const MASTER_KEY_BYTES: usize = 32;
 const NONCE_BYTES: usize = 12;
+const TELEGRAM_SECRET_PURPOSE: &str = "telegram:bot-token";
 
 #[derive(Clone)]
 struct SecretString(String);
@@ -66,51 +66,97 @@ struct ConfiguredBot {
 #[derive(Clone)]
 struct TelegramSettingsStore {
     pool: PgPool,
-    key: Arc<aead::LessSafeKey>,
+    secrets: SecretStore,
+    legacy_key: Option<Arc<aead::LessSafeKey>>,
 }
 
 impl TelegramSettingsStore {
     async fn open(pool: PgPool, secret_root: &Path) -> Result<Self, TelegramRuntimeError> {
-        let key_bytes = load_or_create_master_key(secret_root).await?;
-        let unbound = aead::UnboundKey::new(&aead::AES_256_GCM, &key_bytes)
-            .map_err(|_| TelegramRuntimeError::SecretStore)?;
+        let secrets = SecretStore::open(pool.clone(), secret_root)
+            .await
+            .map_err(map_secret_store_error)?;
+        let legacy_key = load_legacy_master_key(secret_root).await?;
         Ok(Self {
             pool,
-            key: Arc::new(aead::LessSafeKey::new(unbound)),
+            secrets,
+            legacy_key,
         })
     }
 
     async fn load(&self) -> Result<Option<ConfiguredBot>, TelegramRuntimeError> {
-        let row = sqlx::query(
-            "SELECT encrypted_token, encryption_nonce, token_fingerprint, bot_id, bot_username, configured_by_user_id, configured_by_device_id, configuration_revision, last_validated_at FROM telegram_bot_settings WHERE singleton_id = TRUE",
-        )
-        .fetch_optional(&self.pool)
-        .await
-        .map_err(storage_error)?;
-        let Some(row) = row else {
-            return Ok(None);
-        };
-        let ciphertext: Vec<u8> = row.try_get("encrypted_token").map_err(storage_error)?;
-        let nonce: Vec<u8> = row.try_get("encryption_nonce").map_err(storage_error)?;
-        let token = self.decrypt(&ciphertext, &nonce)?;
-        let bot_id: i64 = row.try_get("bot_id").map_err(storage_error)?;
-        let revision: i64 = row
-            .try_get("configuration_revision")
+        for _ in 0..2 {
+            let row = sqlx::query(
+                "SELECT secret_id, encrypted_token, encryption_nonce, token_fingerprint, bot_id, bot_username, configured_by_user_id, configured_by_device_id, configuration_revision, last_validated_at FROM telegram_bot_settings WHERE singleton_id = TRUE",
+            )
+            .fetch_optional(&self.pool)
+            .await
             .map_err(storage_error)?;
-        Ok(Some(ConfiguredBot {
-            token: SecretString(token),
-            fingerprint: row.try_get("token_fingerprint").map_err(storage_error)?,
-            bot_id: u64::try_from(bot_id).map_err(|_| TelegramRuntimeError::Storage)?,
-            username: row.try_get("bot_username").map_err(storage_error)?,
-            owner_user_id: row
+            let Some(row) = row else {
+                return Ok(None);
+            };
+            let owner_user_id: Option<Uuid> = row
                 .try_get("configured_by_user_id")
-                .map_err(storage_error)?,
-            owner_device_id: row
-                .try_get("configured_by_device_id")
-                .map_err(storage_error)?,
-            revision: u64::try_from(revision).map_err(|_| TelegramRuntimeError::Storage)?,
-            last_validated_at: row.try_get("last_validated_at").map_err(storage_error)?,
-        }))
+                .map_err(storage_error)?;
+            let secret_id: Option<Uuid> = row.try_get("secret_id").map_err(storage_error)?;
+            let (token, fingerprint) = if let Some(secret_id) = secret_id {
+                let owner_id = owner_user_id.ok_or(TelegramRuntimeError::SecretStore)?;
+                let context = SecretContext::new(owner_id, TELEGRAM_SECRET_PURPOSE)
+                    .map_err(map_secret_store_error)?;
+                let secret = self
+                    .secrets
+                    .load(&context, secret_id)
+                    .await
+                    .map_err(map_secret_store_error)?;
+                (
+                    secret
+                        .expose_str()
+                        .map_err(map_secret_store_error)?
+                        .to_owned(),
+                    row.try_get("token_fingerprint").map_err(storage_error)?,
+                )
+            } else {
+                let ciphertext: Vec<u8> = row
+                    .try_get::<Option<Vec<u8>>, _>("encrypted_token")
+                    .map_err(storage_error)?
+                    .ok_or(TelegramRuntimeError::SecretStore)?;
+                let nonce: Vec<u8> = row
+                    .try_get::<Option<Vec<u8>>, _>("encryption_nonce")
+                    .map_err(storage_error)?
+                    .ok_or(TelegramRuntimeError::SecretStore)?;
+                let token = self.decrypt_legacy(&ciphertext, &nonce)?;
+                if let Some(owner_id) = owner_user_id {
+                    let migrated = self
+                        .migrate_legacy(owner_id, &token, &ciphertext, &nonce)
+                        .await?;
+                    let Some(stored) = migrated else {
+                        continue;
+                    };
+                    (token, stored.fingerprint)
+                } else {
+                    (
+                        token,
+                        row.try_get("token_fingerprint").map_err(storage_error)?,
+                    )
+                }
+            };
+            let bot_id: i64 = row.try_get("bot_id").map_err(storage_error)?;
+            let revision: i64 = row
+                .try_get("configuration_revision")
+                .map_err(storage_error)?;
+            return Ok(Some(ConfiguredBot {
+                token: SecretString(token),
+                fingerprint,
+                bot_id: u64::try_from(bot_id).map_err(|_| TelegramRuntimeError::Storage)?,
+                username: row.try_get("bot_username").map_err(storage_error)?,
+                owner_user_id,
+                owner_device_id: row
+                    .try_get("configured_by_device_id")
+                    .map_err(storage_error)?,
+                revision: u64::try_from(revision).map_err(|_| TelegramRuntimeError::Storage)?,
+                last_validated_at: row.try_get("last_validated_at").map_err(storage_error)?,
+            }));
+        }
+        Err(TelegramRuntimeError::Storage)
     }
 
     async fn save(
@@ -121,28 +167,57 @@ impl TelegramSettingsStore {
         user_id: Uuid,
         device_id: Uuid,
     ) -> Result<ConfiguredBot, TelegramRuntimeError> {
-        let (ciphertext, nonce) = self.encrypt(token)?;
-        let fingerprint = token_fingerprint(token);
+        let context =
+            SecretContext::new(user_id, TELEGRAM_SECRET_PURPOSE).map_err(map_secret_store_error)?;
         let bot_id = i64::try_from(bot_id).map_err(|_| TelegramRuntimeError::InvalidToken)?;
-        let row = sqlx::query(
-            "INSERT INTO telegram_bot_settings (singleton_id, encrypted_token, encryption_nonce, token_fingerprint, bot_id, bot_username, configuration_revision, configured_by_user_id, configured_by_device_id, configured_at, last_validated_at) VALUES (TRUE, $1, $2, $3, $4, $5, 1, $6, $7, now(), now()) ON CONFLICT (singleton_id) DO UPDATE SET encrypted_token = EXCLUDED.encrypted_token, encryption_nonce = EXCLUDED.encryption_nonce, token_fingerprint = EXCLUDED.token_fingerprint, bot_id = EXCLUDED.bot_id, bot_username = EXCLUDED.bot_username, configuration_revision = telegram_bot_settings.configuration_revision + 1, configured_by_user_id = EXCLUDED.configured_by_user_id, configured_by_device_id = EXCLUDED.configured_by_device_id, configured_at = now(), last_validated_at = now() RETURNING configuration_revision, last_validated_at",
+        let mut transaction = self.pool.begin().await.map_err(storage_error)?;
+        lock_telegram_settings(&mut transaction).await?;
+        let previous: Option<(Option<Uuid>, Option<Uuid>)> = sqlx::query(
+            "SELECT secret_id, configured_by_user_id FROM telegram_bot_settings WHERE singleton_id = TRUE FOR UPDATE",
         )
-        .bind(ciphertext)
-        .bind(nonce)
-        .bind(&fingerprint)
+        .fetch_optional(&mut *transaction)
+        .await
+        .map_err(storage_error)?
+        .map(|row| {
+            Ok((
+                row.try_get("secret_id").map_err(storage_error)?,
+                row.try_get("configured_by_user_id")
+                    .map_err(storage_error)?,
+            ))
+        })
+        .transpose()?;
+        let stored = self
+            .secrets
+            .store_in_transaction(&mut transaction, &context, &SecretValue::new(token))
+            .await
+            .map_err(map_secret_store_error)?;
+        let row = sqlx::query(
+            "INSERT INTO telegram_bot_settings (singleton_id, secret_id, encrypted_token, encryption_nonce, token_fingerprint, bot_id, bot_username, configuration_revision, configured_by_user_id, configured_by_device_id, configured_at, last_validated_at) VALUES (TRUE, $1, NULL, NULL, $2, $3, $4, 1, $5, $6, now(), now()) ON CONFLICT (singleton_id) DO UPDATE SET secret_id = EXCLUDED.secret_id, encrypted_token = NULL, encryption_nonce = NULL, token_fingerprint = EXCLUDED.token_fingerprint, bot_id = EXCLUDED.bot_id, bot_username = EXCLUDED.bot_username, configuration_revision = telegram_bot_settings.configuration_revision + 1, configured_by_user_id = EXCLUDED.configured_by_user_id, configured_by_device_id = EXCLUDED.configured_by_device_id, configured_at = now(), last_validated_at = now() RETURNING configuration_revision, last_validated_at",
+        )
+        .bind(stored.secret_id)
+        .bind(&stored.fingerprint)
         .bind(bot_id)
         .bind(username)
         .bind(user_id)
         .bind(device_id)
-        .fetch_one(&self.pool)
+        .fetch_one(&mut *transaction)
         .await
         .map_err(storage_error)?;
+        if let Some((Some(previous_secret_id), Some(previous_owner_id))) = previous {
+            let previous_context = SecretContext::new(previous_owner_id, TELEGRAM_SECRET_PURPOSE)
+                .map_err(map_secret_store_error)?;
+            self.secrets
+                .delete_in_transaction(&mut transaction, &previous_context, previous_secret_id)
+                .await
+                .map_err(map_secret_store_error)?;
+        }
+        transaction.commit().await.map_err(storage_error)?;
         let revision: i64 = row
             .try_get("configuration_revision")
             .map_err(storage_error)?;
         Ok(ConfiguredBot {
             token: SecretString(token.to_owned()),
-            fingerprint,
+            fingerprint: stored.fingerprint,
             bot_id: u64::try_from(bot_id).map_err(|_| TelegramRuntimeError::Storage)?,
             username: username.map(str::to_owned),
             owner_user_id: Some(user_id),
@@ -153,36 +228,83 @@ impl TelegramSettingsStore {
     }
 
     async fn delete(&self) -> Result<(), TelegramRuntimeError> {
-        sqlx::query("DELETE FROM telegram_bot_settings WHERE singleton_id = TRUE")
-            .execute(&self.pool)
+        let mut transaction = self.pool.begin().await.map_err(storage_error)?;
+        lock_telegram_settings(&mut transaction).await?;
+        let previous: Option<(Option<Uuid>, Option<Uuid>)> = sqlx::query(
+            "DELETE FROM telegram_bot_settings WHERE singleton_id = TRUE RETURNING secret_id, configured_by_user_id",
+        )
+        .fetch_optional(&mut *transaction)
+        .await
+        .map_err(storage_error)?
+        .map(|row| {
+            Ok((
+                row.try_get("secret_id").map_err(storage_error)?,
+                row.try_get("configured_by_user_id")
+                    .map_err(storage_error)?,
+            ))
+        })
+        .transpose()?;
+        if let Some((Some(secret_id), Some(owner_id))) = previous {
+            let context = SecretContext::new(owner_id, TELEGRAM_SECRET_PURPOSE)
+                .map_err(map_secret_store_error)?;
+            self.secrets
+                .delete_in_transaction(&mut transaction, &context, secret_id)
+                .await
+                .map_err(map_secret_store_error)?;
+        }
+        transaction.commit().await.map_err(storage_error)
+    }
+
+    async fn migrate_legacy(
+        &self,
+        owner_id: Uuid,
+        token: &str,
+        ciphertext: &[u8],
+        nonce: &[u8],
+    ) -> Result<Option<crate::secrets::StoredSecret>, TelegramRuntimeError> {
+        let context = SecretContext::new(owner_id, TELEGRAM_SECRET_PURPOSE)
+            .map_err(map_secret_store_error)?;
+        let mut transaction = self.pool.begin().await.map_err(storage_error)?;
+        lock_telegram_settings(&mut transaction).await?;
+        let stored = self
+            .secrets
+            .store_in_transaction(&mut transaction, &context, &SecretValue::new(token))
             .await
-            .map_err(storage_error)?;
-        Ok(())
+            .map_err(map_secret_store_error)?;
+        let updated = sqlx::query(
+            "UPDATE telegram_bot_settings SET secret_id = $1, encrypted_token = NULL, encryption_nonce = NULL, token_fingerprint = $2 WHERE singleton_id = TRUE AND secret_id IS NULL AND configured_by_user_id = $3 AND encrypted_token = $4 AND encryption_nonce = $5",
+        )
+        .bind(stored.secret_id)
+        .bind(&stored.fingerprint)
+        .bind(owner_id)
+        .bind(ciphertext)
+        .bind(nonce)
+        .execute(&mut *transaction)
+        .await
+        .map_err(storage_error)?;
+        if updated.rows_affected() == 1 {
+            transaction.commit().await.map_err(storage_error)?;
+            Ok(Some(stored))
+        } else {
+            transaction.rollback().await.map_err(storage_error)?;
+            Ok(None)
+        }
     }
 
-    fn encrypt(&self, token: &str) -> Result<(Vec<u8>, Vec<u8>), TelegramRuntimeError> {
-        let rng = ring_rand::SystemRandom::new();
-        let mut nonce_bytes = [0_u8; NONCE_BYTES];
-        ring_rand::SecureRandom::fill(&rng, &mut nonce_bytes)
-            .map_err(|_| TelegramRuntimeError::SecretStore)?;
-        let mut ciphertext = token.as_bytes().to_vec();
-        self.key
-            .seal_in_place_append_tag(
-                aead::Nonce::assume_unique_for_key(nonce_bytes),
-                aead::Aad::empty(),
-                &mut ciphertext,
-            )
-            .map_err(|_| TelegramRuntimeError::SecretStore)?;
-        Ok((ciphertext, nonce_bytes.to_vec()))
-    }
-
-    fn decrypt(&self, ciphertext: &[u8], nonce: &[u8]) -> Result<String, TelegramRuntimeError> {
+    fn decrypt_legacy(
+        &self,
+        ciphertext: &[u8],
+        nonce: &[u8],
+    ) -> Result<String, TelegramRuntimeError> {
+        let key = self
+            .legacy_key
+            .as_ref()
+            .ok_or(TelegramRuntimeError::SecretStore)?;
         let nonce: [u8; NONCE_BYTES] = nonce
             .try_into()
             .map_err(|_| TelegramRuntimeError::SecretStore)?;
         let mut plaintext = ciphertext.to_vec();
-        let plaintext = self
-            .key
+        let plaintext = key
             .open_in_place(
                 aead::Nonce::assume_unique_for_key(nonce),
                 aead::Aad::empty(),
@@ -191,6 +313,16 @@ impl TelegramSettingsStore {
             .map_err(|_| TelegramRuntimeError::SecretStore)?;
         String::from_utf8(plaintext.to_vec()).map_err(|_| TelegramRuntimeError::SecretStore)
     }
+}
+
+async fn lock_telegram_settings(
+    transaction: &mut Transaction<'_, Postgres>,
+) -> Result<(), TelegramRuntimeError> {
+    sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended('lumi.telegram_bot_settings', 0))")
+        .execute(&mut **transaction)
+        .await
+        .map_err(storage_error)?;
+    Ok(())
 }
 
 /// Coordinates the instance-wide Telegram settings and embedded listener.
@@ -837,69 +969,20 @@ fn validate_token_shape(token: &str) -> Result<(), TelegramRuntimeError> {
     Ok(())
 }
 
-fn token_fingerprint(token: &str) -> String {
-    let digest = Sha256::digest(token.as_bytes());
-    let suffix = digest[..6]
-        .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect::<String>();
-    format!("…{suffix}")
-}
-
-async fn load_or_create_master_key(secret_root: &Path) -> Result<Vec<u8>, TelegramRuntimeError> {
-    tokio::fs::create_dir_all(secret_root)
-        .await
-        .map_err(secret_store_error)?;
+async fn load_legacy_master_key(
+    secret_root: &Path,
+) -> Result<Option<Arc<aead::LessSafeKey>>, TelegramRuntimeError> {
     let path = secret_root.join(MASTER_KEY_FILE);
-    match tokio::fs::read(&path).await {
-        Ok(bytes) => return validate_master_key(bytes),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+    let mut bytes = match tokio::fs::read(path).await {
+        Ok(bytes) if bytes.len() == MASTER_KEY_BYTES => bytes,
+        Ok(_) => return Err(TelegramRuntimeError::SecretStore),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(error) => return Err(secret_store_error(error)),
-    }
-    let rng = ring_rand::SystemRandom::new();
-    let mut bytes = vec![0_u8; MASTER_KEY_BYTES];
-    ring_rand::SecureRandom::fill(&rng, &mut bytes)
+    };
+    let unbound = aead::UnboundKey::new(&aead::AES_256_GCM, &bytes)
         .map_err(|_| TelegramRuntimeError::SecretStore)?;
-    let mut options = tokio::fs::OpenOptions::new();
-    options.write(true).create_new(true);
-    #[cfg(unix)]
-    {
-        options.mode(0o600);
-    }
-    match options.open(&path).await {
-        Ok(mut file) => {
-            file.write_all(&bytes).await.map_err(secret_store_error)?;
-            file.sync_all().await.map_err(secret_store_error)?;
-            set_private_permissions(&path).await?;
-            Ok(bytes)
-        }
-        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
-            validate_master_key(tokio::fs::read(path).await.map_err(secret_store_error)?)
-        }
-        Err(error) => Err(secret_store_error(error)),
-    }
-}
-
-fn validate_master_key(bytes: Vec<u8>) -> Result<Vec<u8>, TelegramRuntimeError> {
-    if bytes.len() == MASTER_KEY_BYTES {
-        Ok(bytes)
-    } else {
-        Err(TelegramRuntimeError::SecretStore)
-    }
-}
-
-#[cfg(unix)]
-async fn set_private_permissions(path: &Path) -> Result<(), TelegramRuntimeError> {
-    use std::os::unix::fs::PermissionsExt;
-
-    tokio::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
-        .await
-        .map_err(secret_store_error)
-}
-
-#[cfg(not(unix))]
-async fn set_private_permissions(_path: &Path) -> Result<(), TelegramRuntimeError> {
-    Ok(())
+    bytes.zeroize();
+    Ok(Some(Arc::new(aead::LessSafeKey::new(unbound))))
 }
 
 fn clone_lock<T: Clone>(lock: &RwLock<T>) -> Result<T, TelegramRuntimeError> {
@@ -928,6 +1011,10 @@ fn secret_store_error(error: impl fmt::Display) -> TelegramRuntimeError {
     TelegramRuntimeError::SecretStore
 }
 
+fn map_secret_store_error(error: SecretStoreError) -> TelegramRuntimeError {
+    secret_store_error(error)
+}
+
 /// Failure exposed by the Telegram settings and listener boundary.
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum TelegramRuntimeError {
@@ -951,22 +1038,164 @@ pub(crate) enum TelegramRuntimeError {
 mod tests {
     use super::*;
 
-    fn test_store() -> Result<TelegramSettingsStore, Box<dyn std::error::Error>> {
-        let unbound = aead::UnboundKey::new(&aead::AES_256_GCM, &[7_u8; MASTER_KEY_BYTES])
-            .map_err(|_| std::io::Error::other("test encryption key rejected"))?;
+    #[tokio::test]
+    async fn postgres_telegram_secret_store_migrates_legacy_and_cleans_up(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let Ok(database_url) = std::env::var("LUMI_TEST_DATABASE_URL") else {
+            return Ok(());
+        };
+        let _settings_guard = crate::imports::POSTGRES_RECOVERY_TEST_LOCK.lock().await;
+        crate::run_migrations(&database_url).await?;
         let pool = sqlx_postgres::PgPoolOptions::new()
-            .connect_lazy("postgres://lumi:lumi@127.0.0.1/lumi")?;
-        Ok(TelegramSettingsStore {
-            pool,
-            key: Arc::new(aead::LessSafeKey::new(unbound)),
-        })
+            .max_connections(4)
+            .connect(&database_url)
+            .await?;
+        let owner_id = Uuid::now_v7();
+        let device_id = Uuid::now_v7();
+        sqlx::query("INSERT INTO accounts (user_id, status) VALUES ($1, 'active')")
+            .bind(owner_id)
+            .execute(&pool)
+            .await?;
+        sqlx::query("INSERT INTO sync_devices (device_id, user_id, name, kind) VALUES ($1, $2, 'Telegram secret test', 'web')")
+            .bind(device_id)
+            .bind(owner_id)
+            .execute(&pool)
+            .await?;
+
+        let secret_root =
+            std::env::temp_dir().join(format!("lumi-telegram-secret-{}", Uuid::now_v7()));
+        tokio::fs::create_dir_all(&secret_root).await?;
+        let legacy_key_bytes = [7_u8; MASTER_KEY_BYTES];
+        tokio::fs::write(secret_root.join(MASTER_KEY_FILE), legacy_key_bytes).await?;
+        let unbound = aead::UnboundKey::new(&aead::AES_256_GCM, &legacy_key_bytes)
+            .map_err(|_| std::io::Error::other("legacy test key rejected"))?;
+        let legacy_key = aead::LessSafeKey::new(unbound);
+        let legacy_nonce = [9_u8; NONCE_BYTES];
+        let legacy_token = "123456789:legacy-private-token";
+        let mut legacy_ciphertext = legacy_token.as_bytes().to_vec();
+        legacy_key
+            .seal_in_place_append_tag(
+                aead::Nonce::assume_unique_for_key(legacy_nonce),
+                aead::Aad::empty(),
+                &mut legacy_ciphertext,
+            )
+            .map_err(|_| std::io::Error::other("legacy test encryption failed"))?;
+        sqlx::query(
+            "INSERT INTO telegram_bot_settings (singleton_id, encrypted_token, encryption_nonce, token_fingerprint, bot_id, bot_username, configuration_revision, configured_by_user_id, configured_by_device_id) VALUES (TRUE, $1, $2, '…000000000000', 123456789, 'legacy_bot', 1, $3, $4)",
+        )
+        .bind(legacy_ciphertext)
+        .bind(legacy_nonce.to_vec())
+        .bind(owner_id)
+        .bind(device_id)
+        .execute(&pool)
+        .await?;
+
+        let store = TelegramSettingsStore::open(pool.clone(), &secret_root).await?;
+        let migrated = store
+            .load()
+            .await?
+            .ok_or_else(|| std::io::Error::other("migrated bot missing"))?;
+        assert_eq!(migrated.token.0, legacy_token);
+        let migrated_row = sqlx::query(
+            "SELECT secret_id, encrypted_token, encryption_nonce FROM telegram_bot_settings WHERE singleton_id = TRUE",
+        )
+        .fetch_one(&pool)
+        .await?;
+        let migrated_secret_id: Option<Uuid> = migrated_row.try_get("secret_id")?;
+        assert!(migrated_secret_id.is_some());
+        assert!(migrated_row
+            .try_get::<Option<Vec<u8>>, _>("encrypted_token")?
+            .is_none());
+        assert!(migrated_row
+            .try_get::<Option<Vec<u8>>, _>("encryption_nonce")?
+            .is_none());
+        let envelope_ciphertext: Vec<u8> =
+            sqlx::query("SELECT ciphertext FROM secret_envelopes WHERE secret_id = $1")
+                .bind(migrated_secret_id)
+                .fetch_one(&pool)
+                .await?
+                .try_get("ciphertext")?;
+        assert!(!envelope_ciphertext
+            .windows(legacy_token.len())
+            .any(|window| window == legacy_token.as_bytes()));
+
+        let replacement_token = "987654321:new-private-token";
+        let replacement = store
+            .save(
+                replacement_token,
+                987654321,
+                Some("replacement_bot"),
+                owner_id,
+                device_id,
+            )
+            .await?;
+        assert_eq!(replacement.token.0, replacement_token);
+        let reloaded = store
+            .load()
+            .await?
+            .ok_or_else(|| std::io::Error::other("replacement bot missing"))?;
+        assert_eq!(reloaded.token.0, replacement_token);
+        let left_store = store.clone();
+        let right_store = store.clone();
+        let (left, right) = tokio::join!(
+            left_store.save(
+                "111111111:concurrent-left-token",
+                111111111,
+                Some("concurrent_left"),
+                owner_id,
+                device_id,
+            ),
+            right_store.save(
+                "222222222:concurrent-right-token",
+                222222222,
+                Some("concurrent_right"),
+                owner_id,
+                device_id,
+            ),
+        );
+        left?;
+        right?;
+        let concurrent = store
+            .load()
+            .await?
+            .ok_or_else(|| std::io::Error::other("concurrent bot missing"))?;
+        assert!(
+            concurrent.token.0 == "111111111:concurrent-left-token"
+                || concurrent.token.0 == "222222222:concurrent-right-token"
+        );
+        let envelope_count: i64 = sqlx::query(
+            "SELECT count(*) AS total FROM secret_envelopes WHERE owner_user_id = $1 AND purpose = $2",
+        )
+        .bind(owner_id)
+        .bind(TELEGRAM_SECRET_PURPOSE)
+        .fetch_one(&pool)
+        .await?
+        .try_get("total")?;
+        assert_eq!(envelope_count, 1);
+
+        store.delete().await?;
+        let settings_count: i64 =
+            sqlx::query("SELECT count(*) AS total FROM telegram_bot_settings")
+                .fetch_one(&pool)
+                .await?
+                .try_get("total")?;
+        let envelope_count: i64 = sqlx::query(
+            "SELECT count(*) AS total FROM secret_envelopes WHERE owner_user_id = $1 AND purpose = $2",
+        )
+        .bind(owner_id)
+        .bind(TELEGRAM_SECRET_PURPOSE)
+        .fetch_one(&pool)
+        .await?
+        .try_get("total")?;
+        assert_eq!((settings_count, envelope_count), (0, 0));
+        tokio::fs::remove_dir_all(secret_root).await?;
+        Ok(())
     }
 
     #[test]
-    fn token_fingerprint_does_not_include_token() {
-        let token = "123456789:abcdefghijklmnopqrstuvwxyz";
-
-        assert!(!token_fingerprint(token).contains(token));
+    fn secret_string_diagnostics_are_redacted() {
+        let token = SecretString("123456789:abcdefghijklmnopqrstuvwxyz".to_owned());
+        assert_eq!(format!("{token:?}"), "SecretString([redacted])");
     }
 
     #[test]
@@ -994,17 +1223,6 @@ mod tests {
                 configuration_revision: 0,
             }
         );
-    }
-
-    #[tokio::test]
-    async fn encrypted_token_round_trips_without_plaintext_storage(
-    ) -> Result<(), Box<dyn std::error::Error>> {
-        let store = test_store()?;
-        let token = "123456789:abcdefghijklmnopqrstuvwxyz";
-        let (ciphertext, nonce) = store.encrypt(token)?;
-
-        assert_eq!(store.decrypt(&ciphertext, &nonce)?, token);
-        Ok(())
     }
 
     #[test]

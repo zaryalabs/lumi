@@ -111,6 +111,12 @@ claim fencing, retry, cancellation, progress and recovery use one common
 `Job` engine. A feature must not introduce a second execution lifecycle under
 the name `index_jobs`, `fingerprint_jobs` or `transcription_jobs`.
 
+Foundation `0.2.0/A1` реализует этот contract как общий `JobRuntime` с
+PostgreSQL adapter для `jobs` и совместимым adapter существующего
+`import_jobs`. Import table остаётся authoritative: shadow lifecycle и
+двойная запись запрещены. Операционные детали и migration перечислены в
+[`../runbooks/ai-persistence.md`](../runbooks/ai-persistence.md).
+
 ## Нефункциональные требования
 
 - **Explicit boundary.** Public/system APIs are reviewed contracts, not incidental

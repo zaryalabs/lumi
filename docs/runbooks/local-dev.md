@@ -89,6 +89,10 @@ make db-migrate
 
 Подробности — в [persistent-account.md](persistent-account.md).
 
+AI persistence, reusable secret envelopes и общий Job Runtime описаны в
+[ai-persistence.md](ai-persistence.md). Их наличие после migration не включает
+пользовательские AI/MCP capabilities.
+
 Настройка real EPUB import, blob root и restart recovery описана в
 [real-epub-import.md](real-epub-import.md).
 

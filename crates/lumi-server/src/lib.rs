@@ -10,8 +10,10 @@ mod api_routes;
 mod auth_api;
 mod blob;
 mod imports;
+pub mod jobs;
 mod mcp;
 mod pdf_engine;
+pub mod secrets;
 mod telegram;
 mod telegram_media;
 mod telegram_runtime;
@@ -240,6 +242,7 @@ pub struct AppState {
     security: SecurityConfig,
     imports: Option<Arc<ImportService>>,
     telegram: Option<Arc<TelegramRuntime>>,
+    ai_capabilities: ai::AiCapabilityReadiness,
 }
 
 impl AppState {
@@ -274,6 +277,7 @@ impl AppState {
             security: SecurityConfig::local(),
             imports: None,
             telegram: None,
+            ai_capabilities: ai::AiCapabilityReadiness::default(),
         }
     }
 
@@ -307,6 +311,10 @@ impl AppState {
                 .recover()
                 .await
                 .map_err(|error| anyhow::anyhow!(error))?;
+            ai::repository::PgAiRepository::new(accounts.pool().clone())
+                .recover_expired()
+                .await
+                .map_err(|error| anyhow::anyhow!(error))?;
         }
         let telegram = TelegramRuntime::open(
             accounts.pool().clone(),
@@ -321,6 +329,7 @@ impl AppState {
             security: SecurityConfig::from_app(config),
             imports: Some(imports),
             telegram: Some(telegram),
+            ai_capabilities: ai::AiCapabilityReadiness::a1_foundation(),
         })
     }
 
@@ -338,6 +347,7 @@ impl AppState {
             security: SecurityConfig::local(),
             imports: None,
             telegram: None,
+            ai_capabilities: ai::AiCapabilityReadiness::default(),
         }
     }
 
@@ -524,6 +534,9 @@ async fn capabilities(State(state): State<AppState>) -> Json<ServiceCapabilities
     capabilities
         .features
         .push("embedded-telegram-long-polling".to_owned());
+    capabilities
+        .features
+        .extend(state.ai_capabilities.advertised_feature_ids());
     Json(capabilities)
 }
 
@@ -1999,7 +2012,7 @@ mod tests {
         let migrations: Vec<SchemaMigration> =
             json_get(build_router(), "/api/v1/schema/migrations").await?;
 
-        assert_eq!(migrations.len(), 15);
+        assert_eq!(migrations.len(), 16);
         Ok(())
     }
 
@@ -2388,6 +2401,7 @@ mod tests {
         let Ok(database_url) = std::env::var("LUMI_TEST_DATABASE_URL") else {
             return Ok(());
         };
+        let _recovery_guard = crate::imports::POSTGRES_RECOVERY_TEST_LOCK.lock().await;
         run_migrations(&database_url).await?;
         let blob_root =
             std::env::temp_dir().join(format!("lumi-route-matrix-{}", uuid::Uuid::now_v7()));
@@ -2401,10 +2415,21 @@ mod tests {
         config.secret_root = secret_root.clone();
         config.bind_address = DEFAULT_BIND_ADDRESS.to_owned();
         config.deployment_mode = "local".to_owned();
-        config.admin_lookup_ids_raw = lumi_core::encode_auth_bytes(&[0x82; 32]);
+        let owner_signing_key = unique_test_auth_bytes();
+        let owner_lookup_id = unique_test_auth_bytes();
+        let foreign_signing_key = unique_test_auth_bytes();
+        let foreign_lookup_id = unique_test_auth_bytes();
+        config.admin_lookup_ids_raw = lumi_core::encode_auth_bytes(&owner_lookup_id);
         let app = build_router_with_state(AppState::persistent(&config).await?);
-        let owner = register_test_session(app.clone(), 0x81).await?;
-        let foreign = register_test_session(app.clone(), 0x82).await?;
+        let owner =
+            register_test_session_with_credentials(app.clone(), owner_signing_key, owner_lookup_id)
+                .await?;
+        let foreign = register_test_session_with_credentials(
+            app.clone(),
+            foreign_signing_key,
+            foreign_lookup_id,
+        )
+        .await?;
         let owner_settings = app
             .clone()
             .oneshot(
@@ -2891,13 +2916,21 @@ mod tests {
         app: Router,
         seed: u8,
     ) -> Result<TestSession, Box<dyn std::error::Error>> {
-        let signing_key = ed25519_dalek::SigningKey::from_bytes(&[seed; 32]);
+        register_test_session_with_credentials(app, [seed; 32], [seed.wrapping_add(1); 32]).await
+    }
+
+    async fn register_test_session_with_credentials(
+        app: Router,
+        signing_key_bytes: [u8; 32],
+        lookup_id: [u8; 32],
+    ) -> Result<TestSession, Box<dyn std::error::Error>> {
+        let signing_key = ed25519_dalek::SigningKey::from_bytes(&signing_key_bytes);
         let request = lumi_core::RegisterAccountRequest {
-            lookup_id: lumi_core::encode_auth_bytes(&[seed.wrapping_add(1); 32]),
+            lookup_id: lumi_core::encode_auth_bytes(&lookup_id),
             public_key: lumi_core::encode_auth_bytes(signing_key.verifying_key().as_bytes()),
             nickname: None,
             device_name: "Isolation browser".to_owned(),
-            idempotency_key: format!("register-{seed}"),
+            idempotency_key: format!("register-{}", uuid::Uuid::now_v7()),
         };
         let response = app
             .oneshot(
@@ -2909,6 +2942,15 @@ mod tests {
             )
             .await?;
         test_session_from_response(response).await
+    }
+
+    fn unique_test_auth_bytes() -> [u8; 32] {
+        let first = uuid::Uuid::now_v7();
+        let second = uuid::Uuid::now_v7();
+        let mut bytes = [0; 32];
+        bytes[..16].copy_from_slice(first.as_bytes());
+        bytes[16..].copy_from_slice(second.as_bytes());
+        bytes
     }
 
     async fn test_session_from_response(

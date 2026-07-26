@@ -22,6 +22,7 @@ use lumi_core::{
     LUM_SOURCE_MEDIA_TYPE,
 };
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use sha2::{Digest, Sha256};
 use sqlx_core::{row::Row, transaction::Transaction};
 use sqlx_postgres::{PgPool, PgRow, Postgres};
@@ -31,6 +32,7 @@ use uuid::Uuid;
 
 use crate::account::AuthenticatedSession;
 use crate::blob::{BlobStore, BlobStoreError, LocalBlobStore, StoredBlob};
+use crate::jobs::{ImportJobRepository, JobRuntime, JobRuntimeError};
 use crate::pdf_engine::{PdfEngine, PopplerPdfEngine};
 use crate::telegram_media::{
     RuntimeTelegramMediaCapture, TelegramMediaCapture, TelegramMediaRegistry,
@@ -57,7 +59,11 @@ const MAX_TELEGRAM_LINKS: usize = 8;
 const MAX_TELEGRAM_WEB_FETCHES: usize = 3;
 const WORKER_LEASE_SQL: &str = "30 minutes";
 const SOURCE_RESERVATION_LEASE_SQL: &str = "1 minute";
-const REQUIRED_MIGRATION_COUNT: i64 = 12;
+
+#[cfg(test)]
+pub(crate) static POSTGRES_RECOVERY_TEST_LOCK: tokio::sync::Mutex<()> =
+    tokio::sync::Mutex::const_new(());
+const REQUIRED_MIGRATION_COUNT: i64 = 15;
 #[cfg(not(test))]
 const HEARTBEAT_INTERVAL: std::time::Duration = std::time::Duration::from_secs(30);
 #[cfg(test)]
@@ -95,11 +101,19 @@ pub(crate) struct ImportService {
     worker_slots: Arc<Semaphore>,
     upload_slots: Arc<Semaphore>,
     account_upload_slots: Arc<Mutex<HashMap<Uuid, Arc<Semaphore>>>>,
+    job_runtime: JobRuntime<ImportJobRepository>,
 }
 
 pub(crate) struct UploadAdmission {
     _global: OwnedSemaphorePermit,
     _account: OwnedSemaphorePermit,
+}
+
+#[derive(Clone, Copy)]
+struct ImportWorkerClaim {
+    job_id: JobId,
+    claim_id: Uuid,
+    fence: i64,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -163,6 +177,7 @@ impl ImportService {
     pub(crate) fn local(pool: PgPool, blob_root: PathBuf) -> Self {
         let telegram_media_registry = TelegramMediaRegistry::new();
         Self {
+            job_runtime: JobRuntime::new(ImportJobRepository::new(pool.clone())),
             pool,
             blobs: Arc::new(LocalBlobStore::new(blob_root)),
             web_capture: Arc::new(BoundedWebFetcher::from_env()),
@@ -200,6 +215,7 @@ impl ImportService {
     ) -> Self {
         let telegram_media_registry = TelegramMediaRegistry::new();
         Self {
+            job_runtime: JobRuntime::new(ImportJobRepository::new(pool.clone())),
             pool,
             blobs: Arc::new(LocalBlobStore::new(blob_root)),
             web_capture: Arc::new(BoundedWebFetcher::fixtures(fixture_root)),
@@ -248,7 +264,7 @@ impl ImportService {
         self.recover_source_reservations().await?;
         let mut tx = self.pool.begin().await.map_err(log_storage_error)?;
         let cancelled = sqlx::query(
-            "UPDATE import_jobs SET status = 'cancelled', worker_claim_id = NULL, lease_expires_at = NULL, finished_at = now(), updated_at = now(), object_revision = object_revision + 1 WHERE status IN ('reserving_source', 'queued', 'running') AND cancellation_requested = true RETURNING result_material_id",
+            "UPDATE import_jobs SET status = 'cancelled', worker_claim_id = NULL, lease_expires_at = NULL, finished_at = now(), updated_at = now(), object_revision = object_revision + 1 WHERE status = 'reserving_source' AND cancellation_requested = true RETURNING result_material_id",
         )
         .fetch_all(&mut *tx)
         .await
@@ -265,42 +281,15 @@ impl ImportService {
                     .map_err(log_storage_error)?;
             }
         }
+        tx.commit().await.map_err(log_storage_error)?;
+        self.job_runtime
+            .recover_expired(None)
+            .await
+            .map_err(|_| ImportServiceError::Unavailable)?;
 
-        let exhausted = sqlx::query(
-            "UPDATE import_jobs SET status = 'failed', error_code = 'import_retry_exhausted', worker_claim_id = NULL, lease_expires_at = NULL, finished_at = now(), updated_at = now(), object_revision = object_revision + 1 WHERE attempt >= max_attempts AND (status = 'queued' OR (status = 'running' AND (lease_expires_at IS NULL OR lease_expires_at < now()))) RETURNING job_id, result_material_id, attempt",
-        )
-        .fetch_all(&mut *tx)
-        .await
-        .map_err(log_storage_error)?;
-        for row in exhausted {
-            let job_id: Uuid = row.try_get("job_id").map_err(log_storage_error)?;
-            let attempt: i32 = row.try_get("attempt").map_err(log_storage_error)?;
-            insert_diagnostic(
-                &mut tx,
-                job_id,
-                attempt.max(1),
-                &ImportDiagnostic {
-                    severity: DiagnosticSeverity::Error,
-                    code: "import_retry_exhausted".to_owned(),
-                    message: "Import recovery exhausted the configured retry budget.".to_owned(),
-                    source_path: None,
-                },
-            )
-            .await?;
-            let material_id: Option<Uuid> = row
-                .try_get("result_material_id")
-                .map_err(log_storage_error)?;
-            if let Some(material_id) = material_id {
-                sqlx::query("UPDATE materials SET import_status = 'failed', updated_at = now() WHERE material_id = $1")
-                    .bind(material_id)
-                    .execute(&mut *tx)
-                    .await
-                    .map_err(log_storage_error)?;
-            }
-        }
-
-        // Idempotent reconciliation makes startup recovery crash-safe even if a
-        // previous process stopped between the terminal job and material writes.
+        // Feature-specific projection reconciliation remains in ImportService;
+        // claim/lease/retry/cancel decisions above belong to the common runtime.
+        let mut tx = self.pool.begin().await.map_err(log_storage_error)?;
         sqlx::query(
             "UPDATE materials m SET import_status = j.status, updated_at = now() FROM import_jobs j WHERE j.result_material_id = m.material_id AND j.status IN ('failed', 'cancelled') AND m.import_status IS DISTINCT FROM j.status",
         )
@@ -309,13 +298,6 @@ impl ImportService {
         .map_err(log_storage_error)?;
         sqlx::query(
             "INSERT INTO import_diagnostics (job_id, severity, code, message, source_path, attempt) SELECT j.job_id, 'error', 'import_retry_exhausted', 'Import recovery exhausted the configured retry budget.', NULL, GREATEST(j.attempt, 1) FROM import_jobs j WHERE j.status = 'failed' AND j.error_code = 'import_retry_exhausted' AND NOT EXISTS (SELECT 1 FROM import_diagnostics d WHERE d.job_id = j.job_id AND d.code = 'import_retry_exhausted' AND d.attempt = GREATEST(j.attempt, 1))",
-        )
-        .execute(&mut *tx)
-        .await
-        .map_err(log_storage_error)?;
-
-        sqlx::query(
-            "UPDATE import_jobs SET status = 'queued', stage = 'source_accepted', started_at = NULL, worker_claim_id = NULL, lease_expires_at = NULL, updated_at = now(), object_revision = object_revision + 1 WHERE status = 'running' AND attempt < max_attempts AND cancellation_requested = false AND (lease_expires_at IS NULL OR lease_expires_at < now())",
         )
         .execute(&mut *tx)
         .await
@@ -2042,26 +2024,28 @@ impl ImportService {
         self: &Arc<Self>,
         job_id: JobId,
         claim_id: Uuid,
+        fence: u64,
         cancellation: Arc<AtomicBool>,
     ) -> tokio::task::JoinHandle<()> {
         let service = Arc::clone(self);
         tokio::spawn(async move {
+            let claim = crate::jobs::JobFence {
+                job_id,
+                claim_id,
+                fence,
+            };
             loop {
-                let row: Result<Option<bool>, _> = sqlx::query_scalar(
-                    "UPDATE import_jobs SET lease_expires_at = now() + $3::interval, updated_at = now() WHERE job_id = $1 AND worker_claim_id = $2 AND status = 'running' RETURNING cancellation_requested",
-                )
-                .bind(job_id)
-                .bind(claim_id)
-                .bind(WORKER_LEASE_SQL)
-                .fetch_optional(&service.pool)
-                .await;
-                match row {
-                    Ok(Some(cancelled)) => {
+                match service
+                    .job_runtime
+                    .heartbeat(None, &claim, std::time::Duration::from_secs(30 * 60))
+                    .await
+                {
+                    Ok(cancelled) => {
                         if cancelled {
                             cancellation.store(true, Ordering::Release);
                         }
                     }
-                    Ok(None) => {
+                    Err(JobRuntimeError::StaleClaim | JobRuntimeError::Conflict) => {
                         cancellation.store(true, Ordering::Release);
                         break;
                     }
@@ -2107,26 +2091,39 @@ impl ImportService {
             .acquire_owned()
             .await
             .map_err(|_| ImportServiceError::Unavailable)?;
-        let claim_id = Uuid::now_v7();
-        let row = sqlx::query(
-            "UPDATE import_jobs SET status = 'running', stage = 'source_accepted', attempt = import_jobs.attempt + 1, worker_claim_id = $2, lease_expires_at = now() + $3::interval, started_at = now(), updated_at = now(), object_revision = import_jobs.object_revision + 1 FROM materials m WHERE import_jobs.job_id = $1 AND import_jobs.status = 'queued' AND import_jobs.cancellation_requested = false AND import_jobs.attempt < import_jobs.max_attempts AND m.material_id = import_jobs.result_material_id RETURNING import_jobs.user_id, import_jobs.space_id, import_jobs.result_material_id, import_jobs.source_ref, import_jobs.attempt",
-        )
-        .bind(job_id)
-        .bind(claim_id)
-        .bind(WORKER_LEASE_SQL)
-        .fetch_optional(&self.pool)
-        .await
-        .map_err(log_storage_error)?;
-        let Some(row) = row else {
-            return Ok(());
+        let claim = match self
+            .job_runtime
+            .claim(None, job_id, std::time::Duration::from_secs(30 * 60))
+            .await
+        {
+            Ok(claim) => claim,
+            Err(JobRuntimeError::Conflict | JobRuntimeError::NotFound) => return Ok(()),
+            Err(_) => return Err(ImportServiceError::Unavailable),
         };
-        let user_id: Uuid = row.try_get("user_id").map_err(log_storage_error)?;
-        let space_id: Uuid = row.try_get("space_id").map_err(log_storage_error)?;
-        let material_id: Uuid = row
-            .try_get("result_material_id")
-            .map_err(log_storage_error)?;
-        let attempt: i32 = row.try_get("attempt").map_err(log_storage_error)?;
-        let source_ref = decode_source_ref(row.try_get("source_ref").map_err(log_storage_error)?)?;
+        let worker_claim = ImportWorkerClaim {
+            job_id,
+            claim_id: claim.claim.claim_id,
+            fence: i64::try_from(claim.claim.fence).map_err(|_| ImportServiceError::Unavailable)?,
+        };
+        let user_id = claim.job.owner_id;
+        let space_id = claim.job.space_id;
+        let material_id: Uuid = claim
+            .job
+            .payload_ref
+            .get("result_material_id")
+            .and_then(Value::as_str)
+            .and_then(|value| Uuid::parse_str(value).ok())
+            .ok_or(ImportServiceError::Unavailable)?;
+        let attempt =
+            i32::try_from(claim.job.attempt).map_err(|_| ImportServiceError::Unavailable)?;
+        let source_ref = decode_source_ref(
+            claim
+                .job
+                .payload_ref
+                .get("source_ref")
+                .cloned()
+                .ok_or(ImportServiceError::Unavailable)?,
+        )?;
         sqlx::query("UPDATE materials SET import_status = 'running', updated_at = now() WHERE material_id = $1")
             .bind(material_id)
             .execute(&self.pool)
@@ -2137,13 +2134,17 @@ impl ImportService {
             .lock()
             .map_err(|_| ImportServiceError::Unavailable)?
             .insert(job_id, Arc::clone(&cancellation));
-        let heartbeat = self.spawn_heartbeat(job_id, claim_id, Arc::clone(&cancellation));
+        let heartbeat = self.spawn_heartbeat(
+            job_id,
+            worker_claim.claim_id,
+            claim.claim.fence,
+            Arc::clone(&cancellation),
+        );
 
         let result = match source_ref {
             source_ref @ SourceRef::Epub { .. } => {
                 self.run_epub(
-                    job_id,
-                    claim_id,
+                    worker_claim,
                     user_id,
                     space_id,
                     material_id,
@@ -2155,8 +2156,7 @@ impl ImportService {
             }
             source_ref @ SourceRef::Pdf { .. } => {
                 self.run_pdf(
-                    job_id,
-                    claim_id,
+                    worker_claim,
                     user_id,
                     space_id,
                     material_id,
@@ -2168,8 +2168,7 @@ impl ImportService {
             }
             source_ref @ SourceRef::Markdown { .. } => {
                 self.run_markdown(
-                    job_id,
-                    claim_id,
+                    worker_claim,
                     user_id,
                     space_id,
                     material_id,
@@ -2181,8 +2180,7 @@ impl ImportService {
             }
             source_ref @ SourceRef::Lum { .. } => {
                 self.run_lum(
-                    job_id,
-                    claim_id,
+                    worker_claim,
                     user_id,
                     space_id,
                     material_id,
@@ -2194,8 +2192,7 @@ impl ImportService {
             }
             source_ref @ SourceRef::WebPage { .. } => {
                 self.run_web(
-                    job_id,
-                    claim_id,
+                    worker_claim,
                     user_id,
                     space_id,
                     material_id,
@@ -2207,8 +2204,7 @@ impl ImportService {
             }
             source_ref @ SourceRef::TelegramText { .. } => {
                 self.run_telegram(
-                    job_id,
-                    claim_id,
+                    worker_claim,
                     user_id,
                     space_id,
                     material_id,
@@ -2220,8 +2216,7 @@ impl ImportService {
             }
             source_ref @ SourceRef::TelegramComposite { .. } => {
                 self.run_telegram_composite(
-                    job_id,
-                    claim_id,
+                    worker_claim,
                     user_id,
                     space_id,
                     material_id,
@@ -2243,8 +2238,7 @@ impl ImportService {
     )]
     async fn run_epub(
         &self,
-        job_id: JobId,
-        claim_id: Uuid,
+        claim: ImportWorkerClaim,
         user_id: Uuid,
         space_id: Uuid,
         material_id: Uuid,
@@ -2260,15 +2254,13 @@ impl ImportService {
         else {
             return Err(ImportServiceError::Unavailable);
         };
-        self.set_stage(job_id, claim_id, "validating_container")
-            .await?;
+        self.set_stage(claim, "validating_container").await?;
         let source = match self.blobs.get(blob_hash).await {
             Ok(source) => source,
             Err(_) => {
                 return self
                     .fail(
-                        job_id,
-                        claim_id,
+                        claim,
                         material_id,
                         attempt,
                         source_unavailable_diagnostic("epub"),
@@ -2279,7 +2271,7 @@ impl ImportService {
         };
         self.persist_blob_parts(blob_hash, EPUB_SOURCE_MEDIA_TYPE, &source)
             .await?;
-        self.set_stage(job_id, claim_id, "normalizing").await?;
+        self.set_stage(claim, "normalizing").await?;
         let revision_id = Uuid::now_v7();
         let source_name = file_name.clone();
         let worker_cancellation = Arc::clone(&cancellation);
@@ -2301,8 +2293,7 @@ impl ImportService {
         match imported {
             Ok(imported) if !cancellation.load(Ordering::Acquire) => {
                 self.persist_success(
-                    job_id,
-                    claim_id,
+                    claim,
                     space_id,
                     &source_ref,
                     attempt,
@@ -2312,8 +2303,7 @@ impl ImportService {
             }
             Ok(_) => {
                 self.fail(
-                    job_id,
-                    claim_id,
+                    claim,
                     material_id,
                     attempt,
                     EpubImportError::Cancelled.diagnostic(),
@@ -2323,15 +2313,8 @@ impl ImportService {
             }
             Err(error) => {
                 let cancelled = matches!(error, EpubImportError::Cancelled);
-                self.fail(
-                    job_id,
-                    claim_id,
-                    material_id,
-                    attempt,
-                    error.diagnostic(),
-                    cancelled,
-                )
-                .await
+                self.fail(claim, material_id, attempt, error.diagnostic(), cancelled)
+                    .await
             }
         }
     }
@@ -2342,8 +2325,7 @@ impl ImportService {
     )]
     async fn run_markdown(
         &self,
-        job_id: JobId,
-        claim_id: Uuid,
+        claim: ImportWorkerClaim,
         user_id: Uuid,
         space_id: Uuid,
         material_id: Uuid,
@@ -2359,14 +2341,13 @@ impl ImportService {
         else {
             return Err(ImportServiceError::Unavailable);
         };
-        self.set_stage(job_id, claim_id, "normalizing").await?;
+        self.set_stage(claim, "normalizing").await?;
         let source = match self.blobs.get(blob_hash).await {
             Ok(source) => source,
             Err(_) => {
                 return self
                     .fail(
-                        job_id,
-                        claim_id,
+                        claim,
                         material_id,
                         attempt,
                         source_unavailable_diagnostic("markdown"),
@@ -2397,13 +2378,12 @@ impl ImportService {
         .map_err(|_| ImportServiceError::Unavailable)?;
         match imported {
             Ok(imported) if !cancellation.load(Ordering::Acquire) => {
-                self.persist_success(job_id, claim_id, space_id, &source_ref, attempt, imported)
+                self.persist_success(claim, space_id, &source_ref, attempt, imported)
                     .await
             }
             Ok(_) => {
                 self.fail(
-                    job_id,
-                    claim_id,
+                    claim,
                     material_id,
                     attempt,
                     MarkdownImportError::Cancelled.diagnostic(),
@@ -2413,15 +2393,8 @@ impl ImportService {
             }
             Err(error) => {
                 let cancelled = matches!(error, MarkdownImportError::Cancelled);
-                self.fail(
-                    job_id,
-                    claim_id,
-                    material_id,
-                    attempt,
-                    error.diagnostic(),
-                    cancelled,
-                )
-                .await
+                self.fail(claim, material_id, attempt, error.diagnostic(), cancelled)
+                    .await
             }
         }
     }
@@ -2432,8 +2405,7 @@ impl ImportService {
     )]
     async fn run_lum(
         &self,
-        job_id: JobId,
-        claim_id: Uuid,
+        claim: ImportWorkerClaim,
         user_id: Uuid,
         space_id: Uuid,
         material_id: Uuid,
@@ -2449,15 +2421,13 @@ impl ImportService {
         else {
             return Err(ImportServiceError::Unavailable);
         };
-        self.set_stage(job_id, claim_id, "validating_container")
-            .await?;
+        self.set_stage(claim, "validating_container").await?;
         let source = match self.blobs.get(blob_hash).await {
             Ok(source) => source,
             Err(_) => {
                 return self
                     .fail(
-                        job_id,
-                        claim_id,
+                        claim,
                         material_id,
                         attempt,
                         source_unavailable_diagnostic("lum"),
@@ -2468,7 +2438,7 @@ impl ImportService {
         };
         self.persist_blob_parts(blob_hash, LUM_SOURCE_MEDIA_TYPE, &source)
             .await?;
-        self.set_stage(job_id, claim_id, "normalizing").await?;
+        self.set_stage(claim, "normalizing").await?;
         let revision_id = Uuid::now_v7();
         let source_name = file_name.clone();
         let worker_cancellation = Arc::clone(&cancellation);
@@ -2489,13 +2459,12 @@ impl ImportService {
         .map_err(|_| ImportServiceError::Unavailable)?;
         match imported {
             Ok(imported) if !cancellation.load(Ordering::Acquire) => {
-                self.persist_success(job_id, claim_id, space_id, &source_ref, attempt, imported)
+                self.persist_success(claim, space_id, &source_ref, attempt, imported)
                     .await
             }
             Ok(_) => {
                 self.fail(
-                    job_id,
-                    claim_id,
+                    claim,
                     material_id,
                     attempt,
                     LumImportError::Cancelled.diagnostic(),
@@ -2505,15 +2474,8 @@ impl ImportService {
             }
             Err(error) => {
                 let cancelled = matches!(error, LumImportError::Cancelled);
-                self.fail(
-                    job_id,
-                    claim_id,
-                    material_id,
-                    attempt,
-                    error.diagnostic(),
-                    cancelled,
-                )
-                .await
+                self.fail(claim, material_id, attempt, error.diagnostic(), cancelled)
+                    .await
             }
         }
     }
@@ -2524,8 +2486,7 @@ impl ImportService {
     )]
     async fn run_pdf(
         &self,
-        job_id: JobId,
-        claim_id: Uuid,
+        claim: ImportWorkerClaim,
         user_id: Uuid,
         space_id: Uuid,
         material_id: Uuid,
@@ -2541,15 +2502,13 @@ impl ImportService {
         else {
             return Err(ImportServiceError::Unavailable);
         };
-        self.set_stage(job_id, claim_id, "inspecting_document")
-            .await?;
+        self.set_stage(claim, "inspecting_document").await?;
         let source = match self.blobs.get(blob_hash).await {
             Ok(source) => source,
             Err(_) => {
                 return self
                     .fail(
-                        job_id,
-                        claim_id,
+                        claim,
                         material_id,
                         attempt,
                         source_unavailable_diagnostic("pdf"),
@@ -2583,13 +2542,12 @@ impl ImportService {
         .map_err(|_| ImportServiceError::Unavailable)?;
         match imported {
             Ok(imported) if !cancellation.load(Ordering::Acquire) => {
-                self.persist_pdf_success(job_id, claim_id, space_id, &source_ref, attempt, imported)
+                self.persist_pdf_success(claim, space_id, &source_ref, attempt, imported)
                     .await
             }
             Ok(_) => {
                 self.fail(
-                    job_id,
-                    claim_id,
+                    claim,
                     material_id,
                     attempt,
                     lumi_core::PdfImportError::Cancelled.diagnostic(),
@@ -2599,15 +2557,8 @@ impl ImportService {
             }
             Err(error) => {
                 let cancelled = matches!(error, lumi_core::PdfImportError::Cancelled);
-                self.fail(
-                    job_id,
-                    claim_id,
-                    material_id,
-                    attempt,
-                    error.diagnostic(),
-                    cancelled,
-                )
-                .await
+                self.fail(claim, material_id, attempt, error.diagnostic(), cancelled)
+                    .await
             }
         }
     }
@@ -2618,8 +2569,7 @@ impl ImportService {
     )]
     async fn run_web(
         &self,
-        job_id: JobId,
-        claim_id: Uuid,
+        claim: ImportWorkerClaim,
         user_id: Uuid,
         space_id: Uuid,
         material_id: Uuid,
@@ -2637,8 +2587,7 @@ impl ImportService {
                 Err(_) => {
                     return self
                         .fail(
-                            job_id,
-                            claim_id,
+                            claim,
                             material_id,
                             attempt,
                             source_unavailable_diagnostic("web"),
@@ -2654,8 +2603,7 @@ impl ImportService {
                 Err(_) => {
                     return self
                         .fail(
-                            job_id,
-                            claim_id,
+                            claim,
                             material_id,
                             attempt,
                             source_import_diagnostic("web", "stored snapshot is invalid"),
@@ -2668,24 +2616,16 @@ impl ImportService {
             let SourceRef::WebPage { url, .. } = &source_ref else {
                 return Err(ImportServiceError::Unavailable);
             };
-            self.set_stage(job_id, claim_id, "fetching_source").await?;
+            self.set_stage(claim, "fetching_source").await?;
             let snapshot = match self.web_capture.capture(url).await {
                 Ok(snapshot) => snapshot,
                 Err(error) => {
                     return self
-                        .fail(
-                            job_id,
-                            claim_id,
-                            material_id,
-                            attempt,
-                            error.diagnostic(),
-                            false,
-                        )
+                        .fail(claim, material_id, attempt, error.diagnostic(), false)
                         .await;
                 }
             };
-            self.set_stage(job_id, claim_id, "capturing_snapshot")
-                .await?;
+            self.set_stage(claim, "capturing_snapshot").await?;
             let bytes =
                 serde_json::to_vec(&snapshot).map_err(|_| ImportServiceError::Unavailable)?;
             let hash = content_hash(&bytes);
@@ -2709,10 +2649,11 @@ impl ImportService {
                 *snapshot_blob_hash = Some(hash);
             }
             let updated = sqlx::query(
-                "UPDATE import_jobs SET source_ref = $3, lease_expires_at = now() + $4::interval, updated_at = now() WHERE job_id = $1 AND worker_claim_id = $2 AND status = 'running'",
+                "UPDATE import_jobs SET source_ref = $4, lease_expires_at = now() + $5::interval, updated_at = now() WHERE job_id = $1 AND worker_claim_id = $2 AND worker_fence = $3 AND status = 'running' AND lease_expires_at > now()",
             )
-            .bind(job_id)
-            .bind(claim_id)
+            .bind(claim.job_id)
+            .bind(claim.claim_id)
+            .bind(claim.fence)
             .bind(serde_json::to_value(&source_ref).map_err(|_| ImportServiceError::Unavailable)?)
             .bind(WORKER_LEASE_SQL)
             .execute(&mut *tx)
@@ -2727,18 +2668,10 @@ impl ImportService {
         };
         if cancellation.load(Ordering::Acquire) {
             return self
-                .fail(
-                    job_id,
-                    claim_id,
-                    material_id,
-                    attempt,
-                    cancelled_diagnostic(),
-                    true,
-                )
+                .fail(claim, material_id, attempt, cancelled_diagnostic(), true)
                 .await;
         }
-        self.set_stage(job_id, claim_id, "extracting_content")
-            .await?;
+        self.set_stage(claim, "extracting_content").await?;
         let imported = tokio::task::spawn_blocking(move || {
             import_web_snapshot(user_id, material_id, Uuid::now_v7(), &snapshot)
         })
@@ -2746,31 +2679,16 @@ impl ImportService {
         .map_err(|_| ImportServiceError::Unavailable)?;
         match imported {
             Ok(publication) if !cancellation.load(Ordering::Acquire) => {
-                self.persist_success(
-                    job_id,
-                    claim_id,
-                    space_id,
-                    &source_ref,
-                    attempt,
-                    publication,
-                )
-                .await
+                self.persist_success(claim, space_id, &source_ref, attempt, publication)
+                    .await
             }
             Ok(_) => {
-                self.fail(
-                    job_id,
-                    claim_id,
-                    material_id,
-                    attempt,
-                    cancelled_diagnostic(),
-                    true,
-                )
-                .await
+                self.fail(claim, material_id, attempt, cancelled_diagnostic(), true)
+                    .await
             }
             Err(error) => {
                 self.fail(
-                    job_id,
-                    claim_id,
+                    claim,
                     material_id,
                     attempt,
                     source_import_diagnostic("web", &error.to_string()),
@@ -2787,8 +2705,7 @@ impl ImportService {
     )]
     async fn run_telegram(
         &self,
-        job_id: JobId,
-        claim_id: Uuid,
+        claim: ImportWorkerClaim,
         user_id: Uuid,
         space_id: Uuid,
         material_id: Uuid,
@@ -2804,8 +2721,7 @@ impl ImportService {
             Err(_) => {
                 return self
                     .fail(
-                        job_id,
-                        claim_id,
+                        claim,
                         material_id,
                         attempt,
                         source_unavailable_diagnostic("telegram"),
@@ -2821,8 +2737,7 @@ impl ImportService {
             Err(_) => {
                 return self
                     .fail(
-                        job_id,
-                        claim_id,
+                        claim,
                         material_id,
                         attempt,
                         source_import_diagnostic("telegram", "stored message snapshot is invalid"),
@@ -2833,17 +2748,10 @@ impl ImportService {
         };
         if cancellation.load(Ordering::Acquire) {
             return self
-                .fail(
-                    job_id,
-                    claim_id,
-                    material_id,
-                    attempt,
-                    cancelled_diagnostic(),
-                    true,
-                )
+                .fail(claim, material_id, attempt, cancelled_diagnostic(), true)
                 .await;
         }
-        self.set_stage(job_id, claim_id, "normalizing").await?;
+        self.set_stage(claim, "normalizing").await?;
         let imported = tokio::task::spawn_blocking(move || {
             import_telegram_text(user_id, material_id, Uuid::now_v7(), &snapshot)
         })
@@ -2851,31 +2759,16 @@ impl ImportService {
         .map_err(|_| ImportServiceError::Unavailable)?;
         match imported {
             Ok(publication) if !cancellation.load(Ordering::Acquire) => {
-                self.persist_success(
-                    job_id,
-                    claim_id,
-                    space_id,
-                    &source_ref,
-                    attempt,
-                    publication,
-                )
-                .await
+                self.persist_success(claim, space_id, &source_ref, attempt, publication)
+                    .await
             }
             Ok(_) => {
-                self.fail(
-                    job_id,
-                    claim_id,
-                    material_id,
-                    attempt,
-                    cancelled_diagnostic(),
-                    true,
-                )
-                .await
+                self.fail(claim, material_id, attempt, cancelled_diagnostic(), true)
+                    .await
             }
             Err(error) => {
                 self.fail(
-                    job_id,
-                    claim_id,
+                    claim,
                     material_id,
                     attempt,
                     source_import_diagnostic("telegram", &error.to_string()),
@@ -2892,8 +2785,7 @@ impl ImportService {
     )]
     async fn run_telegram_composite(
         &self,
-        job_id: JobId,
-        claim_id: Uuid,
+        claim: ImportWorkerClaim,
         user_id: Uuid,
         space_id: Uuid,
         material_id: Uuid,
@@ -2925,8 +2817,7 @@ impl ImportService {
         let bot_id = *bot_id;
         let mut diagnostics = Vec::new();
 
-        self.set_stage(job_id, claim_id, "capturing_telegram_media")
-            .await?;
+        self.set_stage(claim, "capturing_telegram_media").await?;
         let mut total_image_bytes = 0_usize;
         let image_count = match &source_ref {
             SourceRef::TelegramComposite { image_blobs, .. } => image_blobs.len(),
@@ -2935,14 +2826,7 @@ impl ImportService {
         for index in 0..image_count {
             if cancellation.load(Ordering::Acquire) {
                 return self
-                    .fail(
-                        job_id,
-                        claim_id,
-                        material_id,
-                        attempt,
-                        cancelled_diagnostic(),
-                        true,
-                    )
+                    .fail(claim, material_id, attempt, cancelled_diagnostic(), true)
                     .await;
             }
             if index >= MAX_TELEGRAM_IMAGES {
@@ -2953,8 +2837,7 @@ impl ImportService {
                 );
                 set_image_diagnostic(&mut source_ref, index, diagnostic.clone())?;
                 diagnostics.push(diagnostic);
-                self.persist_running_source_ref(job_id, claim_id, &source_ref)
-                    .await?;
+                self.persist_running_source_ref(claim, &source_ref).await?;
                 continue;
             }
             let existing = match &source_ref {
@@ -2978,8 +2861,7 @@ impl ImportService {
                 } else {
                     total_image_bytes += bytes.len();
                 }
-                self.persist_running_source_ref(job_id, claim_id, &source_ref)
-                    .await?;
+                self.persist_running_source_ref(claim, &source_ref).await?;
                 continue;
             }
             let descriptor = match &source_ref {
@@ -3024,12 +2906,10 @@ impl ImportService {
                     diagnostics.push(diagnostic);
                 }
             }
-            self.persist_running_source_ref(job_id, claim_id, &source_ref)
-                .await?;
+            self.persist_running_source_ref(claim, &source_ref).await?;
         }
 
-        self.set_stage(job_id, claim_id, "fetching_linked_sources")
-            .await?;
+        self.set_stage(claim, "fetching_linked_sources").await?;
         let web_jobs = match &source_ref {
             SourceRef::TelegramComposite { web_snapshots, .. } => web_snapshots
                 .iter()
@@ -3084,8 +2964,7 @@ impl ImportService {
                     diagnostics.push(diagnostic);
                 }
             }
-            self.persist_running_source_ref(job_id, claim_id, &source_ref)
-                .await?;
+            self.persist_running_source_ref(claim, &source_ref).await?;
         }
         if let SourceRef::TelegramComposite { web_snapshots, .. } = &mut source_ref {
             for (index, artifact) in web_snapshots
@@ -3102,13 +2981,12 @@ impl ImportService {
                 diagnostics.push(diagnostic);
             }
         }
-        self.persist_running_source_ref(job_id, claim_id, &source_ref)
-            .await?;
+        self.persist_running_source_ref(claim, &source_ref).await?;
 
         let (images, web_sections) = self
             .load_telegram_composite_artifacts(&source_ref, &mut diagnostics)
             .await?;
-        self.set_stage(job_id, claim_id, "normalizing").await?;
+        self.set_stage(claim, "normalizing").await?;
         let imported = tokio::task::spawn_blocking(move || {
             import_telegram_composite(
                 user_id,
@@ -3124,31 +3002,16 @@ impl ImportService {
         .map_err(|_| ImportServiceError::Unavailable)?;
         match imported {
             Ok(publication) if !cancellation.load(Ordering::Acquire) => {
-                self.persist_success(
-                    job_id,
-                    claim_id,
-                    space_id,
-                    &source_ref,
-                    attempt,
-                    publication,
-                )
-                .await
+                self.persist_success(claim, space_id, &source_ref, attempt, publication)
+                    .await
             }
             Ok(_) => {
-                self.fail(
-                    job_id,
-                    claim_id,
-                    material_id,
-                    attempt,
-                    cancelled_diagnostic(),
-                    true,
-                )
-                .await
+                self.fail(claim, material_id, attempt, cancelled_diagnostic(), true)
+                    .await
             }
             Err(error) => {
                 self.fail(
-                    job_id,
-                    claim_id,
+                    claim,
                     material_id,
                     attempt,
                     source_import_diagnostic("telegram", &error.to_string()),
@@ -3183,15 +3046,15 @@ impl ImportService {
 
     async fn persist_running_source_ref(
         &self,
-        job_id: JobId,
-        claim_id: Uuid,
+        claim: ImportWorkerClaim,
         source_ref: &SourceRef,
     ) -> Result<(), ImportServiceError> {
         let updated = sqlx::query(
-            "UPDATE import_jobs SET source_ref = $3, lease_expires_at = now() + $4::interval, updated_at = now() WHERE job_id = $1 AND worker_claim_id = $2 AND status = 'running'",
+            "UPDATE import_jobs SET source_ref = $4, lease_expires_at = now() + $5::interval, updated_at = now() WHERE job_id = $1 AND worker_claim_id = $2 AND worker_fence = $3 AND status = 'running' AND lease_expires_at > now()",
         )
-        .bind(job_id)
-        .bind(claim_id)
+        .bind(claim.job_id)
+        .bind(claim.claim_id)
+        .bind(claim.fence)
         .bind(serde_json::to_value(source_ref).map_err(|_| ImportServiceError::Unavailable)?)
         .bind(WORKER_LEASE_SQL)
         .execute(&self.pool)
@@ -3259,13 +3122,13 @@ impl ImportService {
 
     async fn set_stage(
         &self,
-        job_id: JobId,
-        claim_id: Uuid,
+        claim: ImportWorkerClaim,
         stage: &str,
     ) -> Result<(), ImportServiceError> {
-        let result = sqlx::query("UPDATE import_jobs SET stage = $3, lease_expires_at = now() + $4::interval, updated_at = now() WHERE job_id = $1 AND worker_claim_id = $2 AND status = 'running'")
-            .bind(job_id)
-            .bind(claim_id)
+        let result = sqlx::query("UPDATE import_jobs SET stage = $4, lease_expires_at = now() + $5::interval, updated_at = now() WHERE job_id = $1 AND worker_claim_id = $2 AND worker_fence = $3 AND status = 'running' AND lease_expires_at > now()")
+            .bind(claim.job_id)
+            .bind(claim.claim_id)
+            .bind(claim.fence)
             .bind(stage)
             .bind(WORKER_LEASE_SQL)
             .execute(&self.pool)
@@ -3361,42 +3224,39 @@ impl ImportService {
 
     async fn persist_success(
         &self,
-        job_id: JobId,
-        claim_id: Uuid,
+        claim: ImportWorkerClaim,
         space_id: Uuid,
         source_ref: &SourceRef,
         attempt: i32,
         imported: ImportedPublication,
     ) -> Result<(), ImportServiceError> {
         let publication = PersistablePublication::from_reflowable(imported)?;
-        self.persist_publication(job_id, claim_id, space_id, source_ref, attempt, publication)
+        self.persist_publication(claim, space_id, source_ref, attempt, publication)
             .await
     }
 
     async fn persist_pdf_success(
         &self,
-        job_id: JobId,
-        claim_id: Uuid,
+        claim: ImportWorkerClaim,
         space_id: Uuid,
         source_ref: &SourceRef,
         attempt: i32,
         imported: ImportedPdf,
     ) -> Result<(), ImportServiceError> {
         let publication = PersistablePublication::from_pdf(imported)?;
-        self.persist_publication(job_id, claim_id, space_id, source_ref, attempt, publication)
+        self.persist_publication(claim, space_id, source_ref, attempt, publication)
             .await
     }
 
     async fn persist_publication(
         &self,
-        job_id: JobId,
-        claim_id: Uuid,
+        claim: ImportWorkerClaim,
         space_id: Uuid,
         source_ref: &SourceRef,
         attempt: i32,
         mut imported: PersistablePublication,
     ) -> Result<(), ImportServiceError> {
-        self.set_stage(job_id, claim_id, "persisting").await?;
+        self.set_stage(claim, "persisting").await?;
         let mut stored_resources = Vec::with_capacity(imported.resources.len());
         for resource in &imported.resources {
             let stored = self
@@ -3419,10 +3279,11 @@ impl ImportService {
         let now = OffsetDateTime::now_utc();
         let mut tx = self.pool.begin().await.map_err(log_storage_error)?;
         let may_publish: bool = sqlx::query_scalar(
-            "SELECT status = 'running' AND cancellation_requested = false AND worker_claim_id = $2 AND lease_expires_at > now() FROM import_jobs WHERE job_id = $1 FOR UPDATE",
+            "SELECT status = 'running' AND cancellation_requested = false AND worker_claim_id = $2 AND worker_fence = $3 AND lease_expires_at > now() FROM import_jobs WHERE job_id = $1 FOR UPDATE",
         )
-        .bind(job_id)
-        .bind(claim_id)
+        .bind(claim.job_id)
+        .bind(claim.claim_id)
+        .bind(claim.fence)
         .fetch_optional(&mut *tx)
         .await
         .map_err(log_storage_error)?
@@ -3431,8 +3292,7 @@ impl ImportService {
             tx.rollback().await.map_err(log_storage_error)?;
             return self
                 .fail(
-                    job_id,
-                    claim_id,
+                    claim,
                     imported.revision.material_id,
                     attempt,
                     cancelled_diagnostic(),
@@ -3543,25 +3403,30 @@ impl ImportService {
         .await
         .map_err(log_storage_error)?;
         for diagnostic in &imported.revision.diagnostics {
-            insert_diagnostic(&mut tx, job_id, attempt, diagnostic).await?;
+            insert_diagnostic(&mut tx, claim.job_id, attempt, diagnostic).await?;
         }
-        sqlx::query(
-            "UPDATE import_jobs SET status = 'succeeded', stage = 'committed', revision_id = $3, error_code = NULL, worker_claim_id = NULL, lease_expires_at = NULL, finished_at = $4, updated_at = $4, object_revision = object_revision + 1 WHERE job_id = $1 AND worker_claim_id = $2 AND status = 'running' AND cancellation_requested = false",
+        let completed = sqlx::query(
+            "UPDATE import_jobs SET status = 'succeeded', stage = 'committed', revision_id = $4, error_code = NULL, worker_claim_id = NULL, lease_expires_at = NULL, finished_at = $5, updated_at = $5, object_revision = object_revision + 1 WHERE job_id = $1 AND worker_claim_id = $2 AND worker_fence = $3 AND status = 'running' AND cancellation_requested = false AND lease_expires_at > now()",
         )
-        .bind(job_id)
-        .bind(claim_id)
+        .bind(claim.job_id)
+        .bind(claim.claim_id)
+        .bind(claim.fence)
         .bind(imported.revision.id)
         .bind(now)
         .execute(&mut *tx)
         .await
         .map_err(log_storage_error)?;
+        if completed.rows_affected() != 1 {
+            tx.rollback().await.map_err(log_storage_error)?;
+            return Err(ImportServiceError::Conflict);
+        }
         append_import_change(
             &mut tx,
             ImportChange {
                 space_id,
                 object_id: imported.revision.material_id,
                 device_id: source_ref.device_id(),
-                idempotency_key: &format!("{job_id}:complete"),
+                idempotency_key: &format!("{}:complete", claim.job_id),
                 change_kind: "blob_ref",
                 payload: serde_json::json!({
                     "revision_id": imported.revision.id,
@@ -3577,8 +3442,7 @@ impl ImportService {
 
     async fn fail(
         &self,
-        job_id: JobId,
-        claim_id: Uuid,
+        claim: ImportWorkerClaim,
         material_id: MaterialId,
         attempt: i32,
         diagnostic: ImportDiagnostic,
@@ -3587,10 +3451,11 @@ impl ImportService {
         let now = OffsetDateTime::now_utc();
         let mut tx = self.pool.begin().await.map_err(log_storage_error)?;
         let cancellation_requested: bool = sqlx::query_scalar(
-            "SELECT cancellation_requested FROM import_jobs WHERE job_id = $1 AND worker_claim_id = $2 AND status = 'running' FOR UPDATE",
+            "SELECT cancellation_requested FROM import_jobs WHERE job_id = $1 AND worker_claim_id = $2 AND worker_fence = $3 AND status = 'running' AND lease_expires_at > now() FOR UPDATE",
         )
-        .bind(job_id)
-        .bind(claim_id)
+        .bind(claim.job_id)
+        .bind(claim.claim_id)
+        .bind(claim.fence)
         .fetch_optional(&mut *tx)
         .await
         .map_err(log_storage_error)?
@@ -3598,10 +3463,11 @@ impl ImportService {
         let cancelled = cancelled || cancellation_requested;
         let status = if cancelled { "cancelled" } else { "failed" };
         let result = sqlx::query(
-            "UPDATE import_jobs SET status = $3, error_code = $4, worker_claim_id = NULL, lease_expires_at = NULL, finished_at = $5, updated_at = $5, object_revision = object_revision + 1 WHERE job_id = $1 AND worker_claim_id = $2 AND status = 'running'",
+            "UPDATE import_jobs SET status = $4, error_code = $5, worker_claim_id = NULL, lease_expires_at = NULL, finished_at = $6, updated_at = $6, object_revision = object_revision + 1 WHERE job_id = $1 AND worker_claim_id = $2 AND worker_fence = $3 AND status = 'running' AND lease_expires_at > now()",
         )
-        .bind(job_id)
-        .bind(claim_id)
+        .bind(claim.job_id)
+        .bind(claim.claim_id)
+        .bind(claim.fence)
         .bind(status)
         .bind(&diagnostic.code)
         .bind(now)
@@ -3612,7 +3478,7 @@ impl ImportService {
             tx.rollback().await.map_err(log_storage_error)?;
             return Err(ImportServiceError::Conflict);
         }
-        insert_diagnostic(&mut tx, job_id, attempt, &diagnostic).await?;
+        insert_diagnostic(&mut tx, claim.job_id, attempt, &diagnostic).await?;
         sqlx::query(
             "UPDATE materials SET import_status = $2, updated_at = $3 WHERE material_id = $1",
         )
@@ -5429,6 +5295,7 @@ mod tests {
         let Ok(database_url) = std::env::var("LUMI_TEST_DATABASE_URL") else {
             return Ok(());
         };
+        let _recovery_guard = POSTGRES_RECOVERY_TEST_LOCK.lock().await;
         crate::run_migrations(&database_url).await?;
         let pool = sqlx_postgres::PgPoolOptions::new()
             .max_connections(8)
@@ -5492,14 +5359,17 @@ mod tests {
             .bind(cancel_material).bind(space_id).bind(user_id)
             .bind(serde_json::json!({"format":"epub","source_name":"cancel.epub","source_hash":"cancel"}))
             .execute(&pool).await?;
-        sqlx::query("INSERT INTO import_jobs (job_id, user_id, space_id, status, stage, source_ref, result_material_id, idempotency_key, source_kind, worker_claim_id, lease_expires_at, cancellation_requested) VALUES ($1, $2, $3, 'running', 'normalizing', $4, $5, 'lease-cancel', 'epub', $6, now() + interval '20 minutes', true)")
+        sqlx::query("INSERT INTO import_jobs (job_id, user_id, space_id, status, stage, source_ref, result_material_id, idempotency_key, source_kind, worker_claim_id, worker_fence, lease_expires_at, cancellation_requested) VALUES ($1, $2, $3, 'running', 'normalizing', $4, $5, 'lease-cancel', 'epub', $6, 1, now() + interval '20 minutes', true)")
             .bind(cancel_job).bind(user_id).bind(space_id)
             .bind(serde_json::json!({"kind":"epub","blob_hash":"missing","file_name":"cancel.epub","media_type":"application/epub+zip","device_id":device_id}))
             .bind(cancel_material).bind(cancel_claim).execute(&pool).await?;
         service
             .fail(
-                cancel_job,
-                cancel_claim,
+                ImportWorkerClaim {
+                    job_id: cancel_job,
+                    claim_id: cancel_claim,
+                    fence: 1,
+                },
                 cancel_material,
                 1,
                 source_unavailable_diagnostic("epub"),
@@ -5549,6 +5419,7 @@ mod tests {
         let Ok(database_url) = std::env::var("LUMI_TEST_DATABASE_URL") else {
             return Ok(());
         };
+        let _recovery_guard = POSTGRES_RECOVERY_TEST_LOCK.lock().await;
         crate::run_migrations(&database_url).await?;
         let pool = sqlx_postgres::PgPoolOptions::new()
             .max_connections(8)
@@ -5789,11 +5660,17 @@ mod tests {
             Arc::clone(&heartbeat_service).run(heartbeat_job).await,
             Err(ImportServiceError::Unavailable)
         ));
-        let old_claim: Uuid =
-            sqlx::query_scalar("SELECT worker_claim_id FROM import_jobs WHERE job_id = $1")
-                .bind(heartbeat_job)
-                .fetch_one(&pool)
-                .await?;
+        let (old_claim, old_fence): (Uuid, i64) = sqlx::query_as(
+            "SELECT worker_claim_id, worker_fence FROM import_jobs WHERE job_id = $1",
+        )
+        .bind(heartbeat_job)
+        .fetch_one(&pool)
+        .await?;
+        let stale_claim = ImportWorkerClaim {
+            job_id: heartbeat_job,
+            claim_id: old_claim,
+            fence: old_fence,
+        };
         let lease_after_exit: OffsetDateTime =
             sqlx::query_scalar("SELECT lease_expires_at FROM import_jobs WHERE job_id = $1")
                 .bind(heartbeat_job)
@@ -5833,16 +5710,13 @@ mod tests {
                 .await?;
         assert_eq!(recovered, ("failed".to_owned(), None));
         assert!(matches!(
-            heartbeat_service
-                .set_stage(heartbeat_job, old_claim, "persisting")
-                .await,
+            heartbeat_service.set_stage(stale_claim, "persisting").await,
             Err(ImportServiceError::Conflict)
         ));
         assert!(matches!(
             heartbeat_service
                 .fail(
-                    heartbeat_job,
-                    old_claim,
+                    stale_claim,
                     heartbeat_material,
                     1,
                     source_unavailable_diagnostic("epub"),

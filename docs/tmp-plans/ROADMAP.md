@@ -2,7 +2,7 @@
 
 Status: `active`
 
-Последнее обновление: 2026-07-25
+Последнее обновление: 2026-07-26
 
 ## Назначение
 
@@ -25,9 +25,11 @@ Status: `active`
 Для `0.2.0` уже завершены:
 
 - Stage 0: spikes, ADR, threat review и release scope;
-- Contract Freeze 1: общие AI/MCP contracts, fixtures, mocks и router seams.
+- Contract Freeze 1: общие AI/MCP contracts, fixtures, mocks и router seams;
+- A1: AI persistence, `SecretStore`, общий fenced `Job` runtime и проверенные
+  owner/idempotency/transactional publication invariants.
 
-Текущий следующий этап — `0.2.0 / A1: Persistence и общая инфраструктура`.
+Текущий следующий этап — `0.2.0 / A2: Explicit source context и context packs`.
 
 ## Последовательность
 
@@ -38,7 +40,7 @@ Status: `active`
 
 1. [x] Stage 0 — решения, spikes и threat review.
 2. [x] Contract Freeze 1 — общие contracts и fixtures.
-3. [ ] A1 — AI persistence, `SecretStore` и общий `Job` runtime.
+3. [x] A1 — AI persistence, `SecretStore` и общий `Job` runtime.
 4. [ ] A2 — bounded explicit source context и context packs.
 5. [ ] A3 — BYOK settings и OpenRouter provider.
 6. [ ] B1 — Web AI shell, settings и fixture-backed states.

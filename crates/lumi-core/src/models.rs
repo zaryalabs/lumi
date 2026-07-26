@@ -193,6 +193,13 @@ pub fn s1_schema_migrations() -> Vec<SchemaMigration> {
                 "Versioned AI task, context, artifact, provider event and MCP claim contracts."
                     .to_owned(),
         },
+        SchemaMigration {
+            id: "s1-0012-ai-persistence-job-runtime".to_owned(),
+            schema_version: DOMAIN_SCHEMA_VERSION.to_owned(),
+            description:
+                "AI task/run/context/artifact persistence, reusable secret envelopes and common Job runtime."
+                    .to_owned(),
+        },
     ]);
     migrations
 }
@@ -1736,9 +1743,12 @@ mod tests {
     fn migrations_cover_s1_contract_groups() {
         let migrations = s1_schema_migrations();
 
-        assert_eq!(migrations.len(), 15);
+        assert_eq!(migrations.len(), 16);
         assert!(migrations
             .iter()
             .any(|migration| migration.id == "s1-0011-ai-contract-freeze-v1"));
+        assert!(migrations
+            .iter()
+            .any(|migration| migration.id == "s1-0012-ai-persistence-job-runtime"));
     }
 }

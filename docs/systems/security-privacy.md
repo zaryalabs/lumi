@@ -83,6 +83,12 @@ Native clients can disable cloud replica for private vault:
 - Telegram bot token проверяется через provider, хранится как AEAD-шифротекст и
   не возвращается через API; отдельный local master key не хранится в
   PostgreSQL. Встроенный long polling использует durable idempotent handler.
+- Provider и transport secrets используют общий account/purpose-bound
+  `SecretStore`: AES-256-GCM AAD включает instance/account/secret/purpose/key
+  version, fingerprint является keyed HMAC, а versioned key ring хранится вне
+  PostgreSQL. Legacy Telegram envelope мигрирует лениво без повторного показа
+  plaintext; operator procedure описана в
+  [`../runbooks/ai-persistence.md`](../runbooks/ai-persistence.md).
 - Readiness проверяет migration compatibility и bounded blob
   write/rename/read/delete sentinel; backup связывает quiesced PostgreSQL и blob
   artifacts manifest/checksums и проверяется disposable restore drill.

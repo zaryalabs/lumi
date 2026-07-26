@@ -48,7 +48,7 @@ LUMI_BLOB_ROOT ?= .local/blob-store
 LUMI_PROTOTYPE_PORT ?= 4173
 RUSTUP_TOOLCHAIN_BIN ?= $(shell if command -v rustup >/dev/null 2>&1; then dirname "$$(rustup which rustc 2>/dev/null)"; fi)
 RUSTUP_PATH_ENV := $(if $(RUSTUP_TOOLCHAIN_BIN),PATH=$(RUSTUP_TOOLCHAIN_BIN):$$PATH,)
-CARGO ?= $(if $(RUSTUP_TOOLCHAIN_BIN),$(RUSTUP_TOOLCHAIN_BIN)/cargo,cargo)
+CARGO ?= $(if $(RUSTUP_TOOLCHAIN_BIN),PATH=$(RUSTUP_TOOLCHAIN_BIN):$$PATH $(RUSTUP_TOOLCHAIN_BIN)/cargo,cargo)
 
 .DEFAULT_GOAL := help
 

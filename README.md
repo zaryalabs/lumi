@@ -39,6 +39,13 @@ Repository-side production contract и main-only self-hosted CI/CD описан�
 наличие не означает, что server bootstrap, DNS или первый production deploy уже
 выполнены.
 
+Для `0.2.0` также реализован выключенный до следующих вертикальных этапов
+foundation A1: AI PostgreSQL persistence, reusable encrypted `SecretStore` и
+общий fenced `JobRuntime` с adapter существующего import pipeline. Операционный
+контракт описан в
+[docs/runbooks/ai-persistence.md](docs/runbooks/ai-persistence.md); AI/MCP
+product capabilities этот foundation сам по себе не включает.
+
 ## Локальный запуск
 
 Для основного пути нужны Docker с Compose и `make`. Он собирает и запускает
