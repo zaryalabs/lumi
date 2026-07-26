@@ -2375,3 +2375,140 @@ h6.reading-heading {
     width: 100%;
   }
 }
+
+.learning-offer {
+  width: min(720px, calc(100% - 2rem));
+  margin: 1rem auto 2rem;
+  padding: 1.25rem;
+  border: 1px solid color-mix(in srgb, var(--sage-500, #708a72) 42%, transparent);
+  border-radius: 1.1rem;
+  background: color-mix(in srgb, var(--paper, #f8f3e8) 94%, #dce8d8);
+  box-shadow: 0 18px 48px rgb(45 55 42 / 12%);
+}
+
+.learning-offer.compact {
+  padding: 0.75rem 1rem;
+}
+
+.learning-offer h2,
+.learning-question-card h2,
+.learning-complete-card h2 {
+  margin: 0.2rem 0 0.65rem;
+}
+
+.learning-manage-view,
+.learning-session-view {
+  min-height: 100vh;
+  padding: clamp(1rem, 3vw, 2.5rem);
+  background: var(--paper, #f4f0e8);
+}
+
+.learning-items-section,
+.learning-editor,
+.learning-question-card,
+.learning-complete-card,
+.learning-feedback {
+  width: min(780px, 100%);
+  margin: 1rem auto;
+  padding: clamp(1rem, 3vw, 1.75rem);
+  border: 1px solid rgb(91 105 86 / 22%);
+  border-radius: 1rem;
+  background: rgb(255 253 247 / 92%);
+}
+
+.learning-editor {
+  display: grid;
+  gap: 0.85rem;
+}
+
+.learning-editor label,
+.learning-text-answer {
+  display: grid;
+  gap: 0.35rem;
+  font-weight: 650;
+}
+
+.learning-editor input,
+.learning-editor select,
+.learning-editor textarea,
+.learning-text-answer textarea {
+  width: 100%;
+  padding: 0.75rem;
+  border: 1px solid rgb(91 105 86 / 35%);
+  border-radius: 0.65rem;
+  background: #fffdf7;
+  color: inherit;
+  font: inherit;
+}
+
+.learning-item-list {
+  display: grid;
+  gap: 0.8rem;
+  padding: 0;
+  list-style: none;
+}
+
+.learning-item-list li {
+  padding: 1rem;
+  border: 1px solid rgb(91 105 86 / 18%);
+  border-radius: 0.8rem;
+}
+
+.learning-item-list li > div:first-child,
+.learning-session-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+}
+
+.learning-session-header {
+  width: min(900px, 100%);
+  margin: 0 auto 1rem;
+}
+
+.learning-options {
+  display: grid;
+  gap: 0.65rem;
+  margin: 1rem 0;
+  padding: 0;
+  border: 0;
+}
+
+.learning-options label {
+  display: flex;
+  gap: 0.65rem;
+  align-items: flex-start;
+  padding: 0.8rem;
+  border: 1px solid rgb(91 105 86 / 24%);
+  border-radius: 0.75rem;
+  cursor: pointer;
+}
+
+.learning-reveal {
+  margin: 1rem 0;
+  padding: 1rem;
+  border-radius: 0.8rem;
+  background: #edf2e9;
+}
+
+.learning-feedback.correct {
+  border-color: #6c966e;
+}
+
+.learning-feedback.incorrect {
+  border-color: #b07a6c;
+}
+
+@media (max-width: 720px) {
+  .learning-session-header {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .learning-offer .dialog-actions,
+  .learning-question-card .dialog-actions {
+    align-items: stretch;
+    flex-direction: column;
+  }
+}

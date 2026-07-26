@@ -57,6 +57,17 @@ external AI worker поверх тех же application services. Сокраще
 Настройка внешнего агента описана в
 [`docs/runbooks/mcp-external-agents.md`](docs/runbooks/mcp-external-agents.md).
 
+Для `0.3.0/E1` реализован первый deterministic learning vertical без
+обязательного AI provider: durable completion после сохранения reading progress,
+одно необязательное предложение в Reader, ручные versioned questions,
+детерминированная проверка закрытых ответов и explicit self-check открытых,
+immutable session snapshots, durable attempts, source jump и продолжение после
+reload. В карточке материала доступен ручной вход в learning, а сервер публикует
+только готовую capability `learning-core`. Scheduling/Challenges, AI
+evaluation/explain-back, voice и общий release gate остаются следующими эпиками
+`0.3.0`. Контракт описан в
+[`docs/adr/0026-learning-completion-items-sessions.md`](docs/adr/0026-learning-completion-items-sessions.md).
+
 ## Локальный запуск
 
 Для основного пути нужны Docker с Compose и `make`. Он собирает и запускает

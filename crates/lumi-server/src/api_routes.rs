@@ -36,6 +36,7 @@ pub(crate) fn public_routes() -> Router<AppState> {
 pub(crate) fn protected_routes(state: &AppState) -> Router<AppState> {
     existing_product_routes()
         .merge(ai::routes::protected_routes())
+        .merge(crate::learning::routes::protected_routes())
         .merge(mcp::management_routes())
         .layer(DefaultBodyLimit::max(201 * 1024 * 1024))
         .route_layer(middleware::from_fn_with_state(

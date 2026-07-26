@@ -29,7 +29,9 @@ enum AppRoute {
     AiQueue,
     Connections,
     Settings,
-    Reader(Uuid),
+    Reader(Uuid, Option<Uuid>),
+    LearningSession(Uuid),
+    MaterialLearning(Uuid, Option<Uuid>),
 }
 
 fn initial_route() -> AppRoute {
@@ -45,9 +47,26 @@ fn initial_route() -> AppRoute {
     if hash == "#ai-queue" {
         return AppRoute::AiQueue;
     }
+    if let Some(value) = hash.strip_prefix("#learn/session/") {
+        return Uuid::parse_str(value)
+            .map(AppRoute::LearningSession)
+            .unwrap_or(AppRoute::Library);
+    }
+    if let Some(value) = hash.strip_prefix("#material/") {
+        if let Some((material, query)) = value.split_once("/learning") {
+            let source_id = query
+                .strip_prefix("?source=")
+                .and_then(|id| Uuid::parse_str(id).ok());
+            return Uuid::parse_str(material)
+                .map(|id| AppRoute::MaterialLearning(id, source_id))
+                .unwrap_or(AppRoute::Library);
+        }
+    }
     hash.strip_prefix("#reader/")
-        .and_then(|id| Uuid::parse_str(id).ok())
-        .map_or(AppRoute::Library, AppRoute::Reader)
+        .and_then(parse_reader_route)
+        .map_or(AppRoute::Library, |(material_id, return_to)| {
+            AppRoute::Reader(material_id, return_to)
+        })
 }
 
 fn set_browser_route(route: AppRoute) {
@@ -56,11 +75,30 @@ fn set_browser_route(route: AppRoute) {
         AppRoute::AiQueue => "ai-queue".to_owned(),
         AppRoute::Connections => "connections".to_owned(),
         AppRoute::Settings => "settings".to_owned(),
-        AppRoute::Reader(material_id) => format!("reader/{material_id}"),
+        AppRoute::Reader(material_id, return_to) => return_to.map_or_else(
+            || format!("reader/{material_id}"),
+            |session_id| format!("reader/{material_id}?return_to={session_id}"),
+        ),
+        AppRoute::LearningSession(session_id) => format!("learn/session/{session_id}"),
+        AppRoute::MaterialLearning(material_id, source_id) => source_id.map_or_else(
+            || format!("material/{material_id}/learning"),
+            |source_id| format!("material/{material_id}/learning?source={source_id}"),
+        ),
     };
     if let Some(window) = web_sys::window() {
         let _ = window.location().set_hash(&hash);
     }
+}
+
+fn parse_reader_route(value: &str) -> Option<(Uuid, Option<Uuid>)> {
+    let (material, query) = value
+        .split_once('?')
+        .map_or((value, None), |(material, query)| (material, Some(query)));
+    let material_id = Uuid::parse_str(material).ok()?;
+    let return_to = query
+        .and_then(|query| query.strip_prefix("return_to="))
+        .and_then(|id| Uuid::parse_str(id).ok());
+    Some((material_id, return_to))
 }
 
 fn browser_requests_system_settings() -> bool {
@@ -129,7 +167,9 @@ pub(crate) fn AccountGate() -> Element {
             AppRoute::AiQueue => "AI-задачи — Lumi",
             AppRoute::Connections => "Подключения — Lumi",
             AppRoute::Settings => "Администрирование — Lumi",
-            AppRoute::Reader(_) => "Чтение — Lumi",
+            AppRoute::Reader(_, _) => "Чтение — Lumi",
+            AppRoute::LearningSession(_) => "Самопроверка — Lumi",
+            AppRoute::MaterialLearning(_, _) => "Обучение — Lumi",
         };
         if let Some(document) = web_sys::window().and_then(|window| window.document()) {
             document.set_title(title);
@@ -198,7 +238,7 @@ pub(crate) fn AccountGate() -> Element {
             rsx! {
                 div { class: "library-app",
                     a { class: "skip-link", href: "#main-content", "Перейти к содержанию" }
-                    if !matches!(route(), AppRoute::Reader(_)) {
+                    if !matches!(route(), AppRoute::Reader(_, _) | AppRoute::LearningSession(_)) {
                     header { class: "library-topbar",
                         a { class: "library-brand", href: "#library", aria_label: "Lumi — библиотека", onclick: move |_| {
                             set_browser_route(AppRoute::Library);
@@ -245,14 +285,50 @@ pub(crate) fn AccountGate() -> Element {
                         }
                     }
                     }
-                    if let AppRoute::Reader(material_id) = route() {
+                    if let AppRoute::Reader(material_id, return_to) = route() {
                         crate::pdf_reader::ReaderRoute {
                             material_id,
                             csrf_token: csrf.read().clone(),
                             on_close: move |_| {
+                                let next = return_to.map_or(AppRoute::Library, AppRoute::LearningSession);
+                                set_browser_route(next);
+                                route.set(next);
+                            },
+                            on_open_learning_session: move |session_id| {
+                                let next = AppRoute::LearningSession(session_id);
+                                set_browser_route(next);
+                                route.set(next);
+                            },
+                            on_manage_learning: move |(material_id, source_id)| {
+                                let next = AppRoute::MaterialLearning(material_id, Some(source_id));
+                                set_browser_route(next);
+                                route.set(next);
+                            },
+                        }
+                    } else if let AppRoute::LearningSession(session_id) = route() {
+                        crate::learning::LearningSessionPage {
+                            session_id,
+                            csrf_token: csrf.read().clone(),
+                            on_open_source: move |(material_id, session_id)| {
+                                let next = AppRoute::Reader(material_id, Some(session_id));
+                                set_browser_route(next);
+                                route.set(next);
+                            },
+                            on_close: move |_| {
                                 set_browser_route(AppRoute::Library);
                                 route.set(AppRoute::Library);
-                            }
+                            },
+                        }
+                    } else if let AppRoute::MaterialLearning(material_id, source_id) = route() {
+                        crate::learning::MaterialLearningPage {
+                            material_id,
+                            source_id,
+                            csrf_token: csrf.read().clone(),
+                            on_open_session: move |session_id| {
+                                let next = AppRoute::LearningSession(session_id);
+                                set_browser_route(next);
+                                route.set(next);
+                            },
                         }
                     } else if route() == AppRoute::Connections {
                         ConnectionsApp { csrf_token: csrf.read().clone() }
@@ -264,7 +340,12 @@ pub(crate) fn AccountGate() -> Element {
                         LibraryApp {
                             csrf_token: csrf.read().clone(),
                             on_open_reader: move |material_id| {
-                                let next = AppRoute::Reader(material_id);
+                                let next = AppRoute::Reader(material_id, None);
+                                set_browser_route(next);
+                                route.set(next);
+                            },
+                            on_open_learning: move |material_id| {
+                                let next = AppRoute::MaterialLearning(material_id, None);
                                 set_browser_route(next);
                                 route.set(next);
                             }
@@ -761,7 +842,11 @@ fn ConnectionsApp(csrf_token: String) -> Element {
 }
 
 #[component]
-fn LibraryApp(csrf_token: String, on_open_reader: EventHandler<Uuid>) -> Element {
+fn LibraryApp(
+    csrf_token: String,
+    on_open_reader: EventHandler<Uuid>,
+    on_open_learning: EventHandler<Uuid>,
+) -> Element {
     let entries = use_signal(|| Option::<Vec<LibraryEntry>>::None);
     let mut error = use_signal(String::new);
     let mut add_open = use_signal(|| false);
@@ -933,6 +1018,7 @@ fn LibraryApp(csrf_token: String, on_open_reader: EventHandler<Uuid>) -> Element
                                 on_details: move |entry| details.set(Some(entry)),
                                 on_delete: move |entry| delete_candidate.set(Some(entry)),
                                 on_open_reader,
+                                on_open_learning,
                                 on_error: move |message| error.set(message),
                             }
                         }
@@ -963,6 +1049,7 @@ fn LibraryApp(csrf_token: String, on_open_reader: EventHandler<Uuid>) -> Element
                                 on_details: move |entry| details.set(Some(entry)),
                                 on_delete: move |entry| delete_candidate.set(Some(entry)),
                                 on_open_reader,
+                                on_open_learning,
                                 on_error: move |message| error.set(message),
                             }
                         }
@@ -1043,6 +1130,7 @@ fn MaterialCard(
     on_details: EventHandler<LibraryEntry>,
     on_delete: EventHandler<LibraryEntry>,
     on_open_reader: EventHandler<Uuid>,
+    on_open_learning: EventHandler<Uuid>,
     on_error: EventHandler<String>,
 ) -> Element {
     let status_label = material_status_label(entry.import_status);
@@ -1098,6 +1186,7 @@ fn MaterialCard(
                 div { class: "material-actions",
                     if entry.import_status == MaterialImportStatus::Ready && !archived {
                         button { class: "read-action", r#type: "button", onclick: move |_| on_open_reader.call(material_id), "Читать" }
+                        button { class: "secondary-action", r#type: "button", onclick: move |_| on_open_learning.call(material_id), "Учиться" }
                     }
                     details { class: "material-more",
                         summary {

@@ -11,6 +11,7 @@ mod auth_api;
 mod blob;
 mod imports;
 pub mod jobs;
+mod learning;
 mod mcp;
 mod pdf_engine;
 pub mod secrets;
@@ -255,6 +256,7 @@ pub struct AppState {
     imports: Option<Arc<ImportService>>,
     telegram: Option<Arc<TelegramRuntime>>,
     ai: Option<Arc<ai::AiRuntime>>,
+    learning: Arc<learning::LearningRuntime>,
     mcp: Arc<mcp::McpRuntime>,
     ai_capabilities: ai::AiCapabilityReadiness,
 }
@@ -292,6 +294,7 @@ impl AppState {
             imports: None,
             telegram: None,
             ai: None,
+            learning: Arc::new(learning::LearningRuntime::memory()),
             mcp: Arc::new(mcp::McpRuntime::memory()),
             ai_capabilities: ai::AiCapabilityReadiness::default(),
         }
@@ -351,6 +354,7 @@ impl AppState {
         .await
         .map_err(|error| anyhow::anyhow!(error))?;
         let mcp = Arc::new(mcp::McpRuntime::postgres(accounts.pool().clone()));
+        let learning = Arc::new(learning::LearningRuntime::postgres(accounts.pool().clone()));
         Ok(Self {
             repository: Arc::new(RwLock::new(Repository::default())),
             accounts: Arc::new(accounts),
@@ -358,6 +362,7 @@ impl AppState {
             imports: Some(imports),
             telegram: Some(telegram),
             ai: Some(Arc::new(ai)),
+            learning,
             mcp,
             ai_capabilities: ai::AiCapabilityReadiness::e4_release(),
         })
@@ -378,6 +383,7 @@ impl AppState {
             imports: None,
             telegram: None,
             ai: None,
+            learning: Arc::new(learning::LearningRuntime::memory()),
             mcp: Arc::new(mcp::McpRuntime::memory()),
             ai_capabilities: ai::AiCapabilityReadiness::default(),
         }
@@ -409,6 +415,38 @@ impl AppState {
 
     fn mcp_runtime(&self) -> &mcp::McpRuntime {
         self.mcp.as_ref()
+    }
+
+    fn learning_runtime(&self) -> &learning::LearningRuntime {
+        self.learning.as_ref()
+    }
+
+    fn learning_material_context(
+        &self,
+        user_id: UserId,
+        command: &lumi_core::CompleteReadingScopeCommand,
+    ) -> Result<Option<learning::LearningMaterialContext>, AppError> {
+        if self.imports.is_some() {
+            return Ok(None);
+        }
+        let repository = read_repository(self)?;
+        let material = repository.material_owned_by(user_id, command.material_id)?;
+        if material.active_revision_id != command.revision_id {
+            return Err(AppError::NotFound("revision"));
+        }
+        let package = repository
+            .packages_by_revision
+            .get(&command.revision_id)
+            .ok_or(AppError::NotFound("normalized package"))?;
+        Ok(Some(learning::LearningMaterialContext {
+            space_id: user_id,
+            owner_user_id: user_id,
+            material_id: material.id,
+            active_revision_id: material.active_revision_id,
+            source_hash: material.source_identity.source_hash.clone(),
+            title: material.display_title().to_owned(),
+            content_unit_ids: package.units.iter().map(|unit| unit.id.clone()).collect(),
+        }))
     }
 
     /// Run the embedded Telegram listener until `cancellation` is triggered.
@@ -586,6 +624,8 @@ async fn capabilities(State(state): State<AppState>) -> Json<ServiceCapabilities
     capabilities
         .features
         .extend(state.ai_capabilities.advertised_feature_ids());
+    capabilities.route_groups.push("learning".to_owned());
+    capabilities.features.push("learning-core".to_owned());
     Json(capabilities)
 }
 
@@ -2010,6 +2050,14 @@ mod tests {
             .features
             .iter()
             .any(|feature| feature == "lum-import"));
+        assert!(capabilities
+            .features
+            .iter()
+            .any(|feature| feature == "learning-core"));
+        assert!(capabilities
+            .route_groups
+            .iter()
+            .any(|group| group == "learning"));
         assert!(!capabilities
             .features
             .iter()
@@ -2062,7 +2110,10 @@ mod tests {
         let migrations: Vec<SchemaMigration> =
             json_get(build_router(), "/api/v1/schema/migrations").await?;
 
-        assert_eq!(migrations.len(), 19);
+        assert_eq!(migrations.len(), 20);
+        assert!(migrations
+            .iter()
+            .any(|migration| migration.id == "s1-0017-learning-core"));
         Ok(())
     }
 
@@ -2084,6 +2135,121 @@ mod tests {
         .await?;
 
         assert_eq!(document.title, "Architecture Notes for Readers");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn learning_http_flow_completes_reads_and_resumes_a_deterministic_session(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let app = build_router();
+        let materials: Vec<LibraryEntry> = json_get(app.clone(), "/api/v1/materials").await?;
+        let material = materials
+            .first()
+            .ok_or_else(|| std::io::Error::other("seeded material missing"))?;
+        let revision_id = material
+            .active_revision_id
+            .ok_or_else(|| std::io::Error::other("seeded revision missing"))?;
+        let package: NormalizedContentPackage = json_get(
+            app.clone(),
+            &format!("/api/v1/revisions/{revision_id}/package"),
+        )
+        .await?;
+        let content_unit_id = package
+            .units
+            .first()
+            .ok_or_else(|| std::io::Error::other("seeded content unit missing"))?
+            .id
+            .clone();
+
+        let completion: lumi_core::CompleteReadingResponse = json_post(
+            app.clone(),
+            &format!("/api/v1/materials/{}/reading-completions", material.id),
+            json_body(&lumi_core::CompleteReadingScopeCommand {
+                material_id: material.id,
+                revision_id,
+                scope_kind: lumi_core::LearningScopeKind::ContentUnit,
+                content_unit_id: Some(content_unit_id),
+                anchor: None,
+                trigger: lumi_core::ReadingCompletionTrigger::ReaderBoundary,
+            })?,
+        )
+        .await?;
+        assert!(completion.created);
+        assert!(completion.offer.should_offer);
+
+        let closed: lumi_core::LearningItem = json_post(
+            app.clone(),
+            "/api/v1/learning/items",
+            json_body(&lumi_core::CreateLearningItemCommand {
+                source_id: completion.offer.source.id,
+                kind: lumi_core::LearningItemKind::QuizTrueFalse,
+                status: lumi_core::LearningItemStatus::Active,
+                prompt: "Reader core не зависит от DOM?".to_owned(),
+                answer_spec: lumi_core::LearningAnswerSpec::TrueFalse { correct: true },
+                explanation: "Reader core остаётся platform-independent.".to_owned(),
+                source_anchor: None,
+            })?,
+        )
+        .await?;
+        let _open: lumi_core::LearningItem = json_post(
+            app.clone(),
+            "/api/v1/learning/items",
+            json_body(&lumi_core::CreateLearningItemCommand {
+                source_id: completion.offer.source.id,
+                kind: lumi_core::LearningItemKind::OpenQuestion,
+                status: lumi_core::LearningItemStatus::Active,
+                prompt: "Сформулируйте главный архитектурный принцип.".to_owned(),
+                answer_spec: lumi_core::LearningAnswerSpec::OpenSelfCheck {
+                    sample_answer: "Доменная модель не зависит от UI.".to_owned(),
+                },
+                explanation: "Ответ оценивает сам пользователь.".to_owned(),
+                source_anchor: None,
+            })?,
+        )
+        .await?;
+
+        let offered: lumi_core::LearningSession = json_post(
+            app.clone(),
+            "/api/v1/learning/sessions",
+            json_body(&lumi_core::CreateLearningSessionCommand {
+                source_id: completion.offer.source.id,
+                kind: lumi_core::LearningSessionKind::ImmediateRecall,
+            })?,
+        )
+        .await?;
+        assert_eq!(offered.items.len(), 2);
+
+        let started: lumi_core::LearningSession = json_post(
+            app.clone(),
+            &format!("/api/v1/learning/sessions/{}/start", offered.id),
+            Body::empty(),
+        )
+        .await?;
+        assert_eq!(started.state, lumi_core::LearningSessionState::InProgress);
+
+        let attempt: lumi_core::LearningAttempt = json_post(
+            app.clone(),
+            &format!(
+                "/api/v1/learning/sessions/{}/items/{}/attempts",
+                offered.id, closed.id
+            ),
+            json_body(&lumi_core::SubmitLearningAttemptCommand {
+                answer: lumi_core::LearningAnswer::TrueFalse { value: true },
+                self_check: None,
+                elapsed_ms: 400,
+            })?,
+        )
+        .await?;
+        assert_eq!(
+            attempt.feedback.outcome,
+            lumi_core::LearningAttemptOutcome::Correct
+        );
+
+        let resumed: lumi_core::LearningSession =
+            json_get(app, &format!("/api/v1/learning/sessions/{}", offered.id)).await?;
+        assert_eq!(resumed.state, lumi_core::LearningSessionState::InProgress);
+        assert_eq!(resumed.attempts.len(), 1);
+        assert_eq!(resumed.items, offered.items);
         Ok(())
     }
 

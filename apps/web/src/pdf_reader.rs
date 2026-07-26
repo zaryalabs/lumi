@@ -52,6 +52,8 @@ pub(crate) fn ReaderRoute(
     material_id: Uuid,
     csrf_token: String,
     on_close: EventHandler<()>,
+    on_open_learning_session: EventHandler<Uuid>,
+    on_manage_learning: EventHandler<(Uuid, Uuid)>,
 ) -> Element {
     let mut state = use_signal(|| ReaderRouteState::Resolving);
     use_effect(move || {
@@ -73,6 +75,8 @@ pub(crate) fn ReaderRoute(
                 material_id,
                 csrf_token,
                 on_close,
+                on_open_learning_session,
+                on_manage_learning,
             }
         },
         ReaderRouteState::Pdf => rsx! {
@@ -80,6 +84,8 @@ pub(crate) fn ReaderRoute(
                 material_id,
                 csrf_token,
                 on_close,
+                on_open_learning_session,
+                on_manage_learning,
             }
         },
         ReaderRouteState::Failed(error) => rsx! {
@@ -93,7 +99,13 @@ pub(crate) fn ReaderRoute(
 }
 
 #[component]
-fn PdfReaderApp(material_id: Uuid, csrf_token: String, on_close: EventHandler<()>) -> Element {
+fn PdfReaderApp(
+    material_id: Uuid,
+    csrf_token: String,
+    on_close: EventHandler<()>,
+    on_open_learning_session: EventHandler<Uuid>,
+    on_manage_learning: EventHandler<(Uuid, Uuid)>,
+) -> Element {
     let mut state = use_signal(|| PdfReaderState::Loading);
     let mut annotations = use_signal(Vec::<Annotation>::new);
     let mut current_page = use_signal(|| 0_u32);
@@ -365,6 +377,30 @@ fn PdfReaderApp(material_id: Uuid, csrf_token: String, on_close: EventHandler<()
                                         }
                                     }
                                 }
+                            }
+                        }
+                    }
+                    if current_page() as usize + 1 == page_count {
+                        if let Some(locator) = anchor_for_page(&data, current_page()) {
+                            crate::learning::CompletionOffer {
+                                key: "{data.document.revision_id}:material",
+                                progress: MoveReadingPositionCommand {
+                                    material_id: data.entry.id,
+                                    revision_id: data.document.revision_id,
+                                    locator,
+                                    progress_fraction: 1.0,
+                                },
+                                completion: lumi_core::CompleteReadingScopeCommand {
+                                    material_id: data.entry.id,
+                                    revision_id: data.document.revision_id,
+                                    scope_kind: lumi_core::LearningScopeKind::Material,
+                                    content_unit_id: None,
+                                    anchor: None,
+                                    trigger: lumi_core::ReadingCompletionTrigger::ReaderBoundary,
+                                },
+                                csrf_token: csrf.read().clone(),
+                                on_open_session: on_open_learning_session,
+                                on_manage_items: on_manage_learning,
                             }
                         }
                     }

@@ -117,6 +117,8 @@ pub(crate) fn ReaderApp(
     material_id: Uuid,
     csrf_token: String,
     on_close: EventHandler<()>,
+    on_open_learning_session: EventHandler<Uuid>,
+    on_manage_learning: EventHandler<(Uuid, Uuid)>,
 ) -> Element {
     let mut state = use_signal(|| ReaderState::Loading);
     let csrf = use_signal(|| csrf_token);
@@ -233,16 +235,12 @@ pub(crate) fn ReaderApp(
             let page = view.page_map.pages.get(current_page).cloned();
             let current_unit = page
                 .as_ref()
-                .and_then(|page| page.fragments.first())
-                .and_then(|fragment| fragment.node_path.first())
-                .cloned();
+                .and_then(|page| page_unit_id(&view.document, page));
             let next_unit = view
                 .page_map
                 .pages
                 .get(current_page.saturating_add(1))
-                .and_then(|page| page.fragments.first())
-                .and_then(|fragment| fragment.node_path.first())
-                .cloned();
+                .and_then(|page| page_unit_id(&view.document, page));
             let chapter_end = current_unit.is_some() && current_unit != next_unit;
             let title = view.document.title.clone();
             let creators = if view.document.creators.is_empty() {
@@ -419,9 +417,26 @@ pub(crate) fn ReaderApp(
                                             material_id: view.entry.id,
                                             revision_id: view.document.revision_id,
                                             scope_kind: lumi_core::SummaryScopeKind::Chapter,
-                                            scope_ref,
+                                            scope_ref: scope_ref.clone(),
                                             label: "Создать или открыть саммари главы".to_owned(),
                                             csrf_token: csrf.read().clone(),
+                                        }
+                                    }
+                                    if let Some(progress) = current_progress_command(&view) {
+                                        crate::learning::CompletionOffer {
+                                            key: "{view.document.revision_id}:{scope_ref}",
+                                            progress,
+                                            completion: lumi_core::CompleteReadingScopeCommand {
+                                                material_id: view.entry.id,
+                                                revision_id: view.document.revision_id,
+                                                scope_kind: lumi_core::LearningScopeKind::ContentUnit,
+                                                content_unit_id: Some(scope_ref),
+                                                anchor: None,
+                                                trigger: lumi_core::ReadingCompletionTrigger::ReaderBoundary,
+                                            },
+                                            csrf_token: csrf.read().clone(),
+                                            on_open_session: on_open_learning_session,
+                                            on_manage_items: on_manage_learning,
                                         }
                                     }
                                 }
@@ -809,6 +824,7 @@ fn apply_ai_reader_target(view: &mut ReaderView) {
             Some("Источник ответа относится к другой версии материала.".to_owned());
         return;
     }
+    let learning_source = target.kind == "learning_source";
     match target.scope {
         AiSourceScope::Selection { anchor, .. } => match view.plan.resolve_anchor(&anchor) {
             AnchorResolution::Resolved { anchor, .. } => {
@@ -825,22 +841,41 @@ fn apply_ai_reader_target(view: &mut ReaderView) {
             }
         },
         AiSourceScope::Chapter { scope_ref, .. } => {
-            if let Some(page) = view.page_map.pages.iter().position(|page| {
-                page.fragments
-                    .first()
-                    .and_then(|fragment| fragment.node_path.first())
-                    == Some(&scope_ref)
-            }) {
+            if let Some(page) =
+                view.page_map.pages.iter().position(|page| {
+                    page_unit_id(&view.document, page).as_ref() == Some(&scope_ref)
+                })
+            {
                 view.navigation.jump_to(page, view.page_map.pages.len());
-                view.annotation_message = Some("Открыт источник саммари.".to_owned());
+                view.annotation_message = Some(
+                    if learning_source {
+                        "Открыт источник задания."
+                    } else {
+                        "Открыт источник саммари."
+                    }
+                    .to_owned(),
+                );
             } else {
-                view.annotation_message =
-                    Some("Не удалось найти главу источника саммари.".to_owned());
+                view.annotation_message = Some(
+                    if learning_source {
+                        "Не удалось найти раздел источника задания."
+                    } else {
+                        "Не удалось найти главу источника саммари."
+                    }
+                    .to_owned(),
+                );
             }
         }
         AiSourceScope::Material { .. } => {
             view.navigation.jump_to(0, view.page_map.pages.len());
-            view.annotation_message = Some("Открыт материал источника саммари.".to_owned());
+            view.annotation_message = Some(
+                if learning_source {
+                    "Открыт материал источника задания."
+                } else {
+                    "Открыт материал источника саммари."
+                }
+                .to_owned(),
+            );
         }
     }
 }
@@ -1991,24 +2026,8 @@ fn persist_current(
     mut in_flight: Signal<bool>,
     save_state: Signal<SaveState>,
 ) {
-    let Some(page) = current.page_map.pages.get(current.navigation.current()) else {
+    let Some(command) = current_progress_command(current) else {
         return;
-    };
-    let Some(block) = current.plan.block(&page.start.node_path) else {
-        return;
-    };
-    let mut locator = block.anchor.clone();
-    locator.text_range = Some(TextRange {
-        start: page.start.offset,
-        end: page.start.offset,
-    });
-    locator.quote.clear();
-    let page_count = current.page_map.pages.len().max(1);
-    let command = MoveReadingPositionCommand {
-        material_id: current.entry.id,
-        revision_id: current.document.revision_id,
-        locator,
-        progress_fraction: (current.navigation.current() + 1) as f32 / page_count as f32,
     };
     let csrf_token = csrf.read().clone();
     let next_generation = generation().saturating_add(1);
@@ -2032,6 +2051,33 @@ fn persist_current(
             finish_save(save_state, "progress", Ok(()));
         }
     });
+}
+
+fn current_progress_command(current: &ReaderView) -> Option<MoveReadingPositionCommand> {
+    let page = current.page_map.pages.get(current.navigation.current())?;
+    let block = current.plan.block(&page.start.node_path)?;
+    let mut locator = block.anchor.clone();
+    locator.text_range = Some(TextRange {
+        start: page.start.offset,
+        end: page.start.offset,
+    });
+    locator.quote.clear();
+    let page_count = current.page_map.pages.len().max(1);
+    Some(MoveReadingPositionCommand {
+        material_id: current.entry.id,
+        revision_id: current.document.revision_id,
+        locator,
+        progress_fraction: (current.navigation.current() + 1) as f32 / page_count as f32,
+    })
+}
+
+fn page_unit_id(document: &ReadingDocument, page: &ReaderPage) -> Option<String> {
+    let root_path = page.fragments.first()?.node_path.first()?;
+    document
+        .nodes
+        .iter()
+        .find(|node| node.path.first() == Some(root_path))
+        .map(|node| node.id.clone())
 }
 
 async fn load_reader(

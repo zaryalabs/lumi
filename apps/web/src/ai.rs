@@ -1267,6 +1267,19 @@ fn open_source(attachment: &AiContextAttachment) {
     }
 }
 
+pub(crate) fn stage_reader_target(attachment: &AiContextAttachment) -> Result<(), String> {
+    let window = web_sys::window().ok_or_else(|| "Browser window недоступен.".to_owned())?;
+    let storage = window
+        .local_storage()
+        .map_err(|_| "Browser storage недоступен.".to_owned())?
+        .ok_or_else(|| "Browser storage отключён.".to_owned())?;
+    let payload = serde_json::to_string(attachment)
+        .map_err(|_| "Не удалось подготовить source target.".to_owned())?;
+    storage
+        .set_item(READER_TARGET_STORAGE_KEY, &payload)
+        .map_err(|_| "Не удалось сохранить source target.".to_owned())
+}
+
 pub(crate) fn take_reader_target(material_id: Uuid) -> Option<AiContextAttachment> {
     let storage = web_sys::window()?.local_storage().ok()??;
     let payload = storage.get_item(READER_TARGET_STORAGE_KEY).ok()??;

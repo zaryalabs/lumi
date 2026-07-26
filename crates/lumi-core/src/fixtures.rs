@@ -6,11 +6,13 @@ use uuid::Uuid;
 
 use crate::{
     content_hash, short_content_hash, AccountProfile, AccountStatus, BlobManifest, BlobManifestId,
-    BlobRef, BlobRole, ContentBlock, ContentUnit, DiagnosticSeverity, DocumentRevision,
-    EpubSourceLocator, HighlightStyle, ImportDiagnostic, Job, JobKind, JobStage, JobStatus,
-    LibraryState, Material, MaterialKind, NavigationItem, NormalizedContentPackage,
-    NormalizedPackageManifest, ReadingDocument, ReadingNode, ReadingNodeKind, SeedAuthAlgorithm,
-    SeedAuthPrototype, SourceFormat, SourceIdentity, SourceLocator, UserId, WebAccount,
+    BlobRef, BlobRole, ContentBlock, ContentUnit, CreateLearningItemCommand, DiagnosticSeverity,
+    DocumentRevision, EpubSourceLocator, HighlightStyle, ImportDiagnostic, Job, JobKind, JobStage,
+    JobStatus, LearningAnswer, LearningAnswerSpec, LearningAttemptOutcome, LearningItemKind,
+    LearningItemStatus, LearningOption, LearningScopeKind, LearningSource, LibraryState, Material,
+    MaterialKind, NavigationItem, NormalizedContentPackage, NormalizedPackageManifest,
+    ReadingDocument, ReadingNode, ReadingNodeKind, SeedAuthAlgorithm, SeedAuthPrototype,
+    SelfCheckRating, SourceFormat, SourceIdentity, SourceLocator, UserId, WebAccount,
     DOMAIN_SCHEMA_VERSION, EPUB_FIXTURE_IMPORTER_ID, EPUB_FIXTURE_IMPORTER_VERSION,
     NORMALIZED_PACKAGE_VERSION,
 };
@@ -108,6 +110,28 @@ pub struct EpubFixtureResource {
 /// Aggregate produced by importing a fixture.
 pub type ImportedFixture = crate::ImportedMaterial;
 
+/// One deterministic exercise and the expected grading evidence.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct LearningFixtureItem {
+    /// Item create command bound to one fixture source.
+    pub command: CreateLearningItemCommand,
+    /// Answer submitted by the fixture test.
+    pub answer: LearningAnswer,
+    /// Explicit self-check for open or hinted questions.
+    pub self_check: Option<SelfCheckRating>,
+    /// Expected deterministic grading outcome.
+    pub expected_outcome: LearningAttemptOutcome,
+}
+
+/// Offline learning fixture spanning two source-backed chapters.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct LearningFixture {
+    /// Immutable chapter sources.
+    pub sources: Vec<LearningSource>,
+    /// Closed, open and hinted exercises with expected outcomes.
+    pub items: Vec<LearningFixtureItem>,
+}
+
 /// Importer errors for S0 fixtures.
 #[derive(Debug, Error, Eq, PartialEq)]
 pub enum ImportError {
@@ -177,6 +201,125 @@ pub fn rich_epub_fixture() -> EpubFixture {
             alt_text: "Diagram placeholder showing anchors from source to reader.".to_owned(),
         }],
     }
+}
+
+/// Build a deterministic two-chapter learning fixture over an imported EPUB fixture.
+#[must_use]
+pub fn sample_learning_fixture(imported: &ImportedFixture) -> Option<LearningFixture> {
+    let first_node = imported.reading_document.nodes.first()?;
+    let second_node = imported.reading_document.nodes.get(1)?;
+    let first_unit = imported.package.units.first()?;
+    let second_unit = imported.package.units.get(1)?;
+    let revision_id = imported.revision.id;
+    let source_hash = imported.material.source_identity.source_hash.clone();
+    let source = |id, unit: &ContentUnit, title: &str| LearningSource {
+        id,
+        space_id: imported.material.owner_id,
+        material_id: imported.material.id,
+        document_revision_id: revision_id,
+        scope_kind: LearningScopeKind::ContentUnit,
+        scope_key: LearningSource::scope_key(
+            revision_id,
+            LearningScopeKind::ContentUnit,
+            Some(&unit.id),
+            None,
+        ),
+        content_unit_id: Some(unit.id.clone()),
+        anchor: None,
+        source_hash: source_hash.clone(),
+        title: title.to_owned(),
+        created_at: 0,
+    };
+    let first_source = source(
+        Uuid::from_u128(0x019f_9eb8_0000_7000_8000_0000_0000_0001),
+        first_unit,
+        "A Reader Starts With Sources",
+    );
+    let second_source = source(
+        Uuid::from_u128(0x019f_9eb8_0000_7000_8000_0000_0000_0002),
+        second_unit,
+        "Page-like Reading Without Format Lock-in",
+    );
+    let first_anchor = crate::Anchor::for_node(
+        revision_id,
+        first_node.children.get(1).unwrap_or(first_node),
+    );
+    let second_anchor = crate::Anchor::for_node(
+        revision_id,
+        second_node.children.get(1).unwrap_or(second_node),
+    );
+    let active = LearningItemStatus::Active;
+    Some(LearningFixture {
+        sources: vec![first_source.clone(), second_source.clone()],
+        items: vec![
+            LearningFixtureItem {
+                command: CreateLearningItemCommand {
+                    source_id: first_source.id,
+                    kind: LearningItemKind::QuizSingleChoice,
+                    status: active,
+                    prompt: "Что сохраняет immutable imported content?".to_owned(),
+                    answer_spec: LearningAnswerSpec::SingleChoice {
+                        options: vec![
+                            LearningOption {
+                                id: "material".to_owned(),
+                                label: "Material".to_owned(),
+                            },
+                            LearningOption {
+                                id: "revision".to_owned(),
+                                label: "DocumentRevision".to_owned(),
+                            },
+                        ],
+                        correct_option_id: "revision".to_owned(),
+                    },
+                    explanation: "Material хранит identity, revision — immutable content."
+                        .to_owned(),
+                    source_anchor: Some(first_anchor.clone()),
+                },
+                answer: LearningAnswer::SingleChoice {
+                    option_id: "revision".to_owned(),
+                },
+                self_check: None,
+                expected_outcome: LearningAttemptOutcome::Correct,
+            },
+            LearningFixtureItem {
+                command: CreateLearningItemCommand {
+                    source_id: second_source.id,
+                    kind: LearningItemKind::OpenQuestion,
+                    status: active,
+                    prompt: "Почему pagination остаётся shared boundary?".to_owned(),
+                    answer_spec: LearningAnswerSpec::OpenSelfCheck {
+                        sample_answer:
+                            "Platform adapter измеряет layout поверх общего reader core.".to_owned(),
+                    },
+                    explanation: "Открытый ответ оценивает пользователь.".to_owned(),
+                    source_anchor: Some(second_anchor),
+                },
+                answer: LearningAnswer::Text {
+                    text: "Layout измеряет platform adapter.".to_owned(),
+                },
+                self_check: Some(SelfCheckRating::Recalled),
+                expected_outcome: LearningAttemptOutcome::SelfChecked,
+            },
+            LearningFixtureItem {
+                command: CreateLearningItemCommand {
+                    source_id: first_source.id,
+                    kind: LearningItemKind::HintedQuestion,
+                    status: active,
+                    prompt: "Из чего состоит устойчивый anchor?".to_owned(),
+                    answer_spec: LearningAnswerSpec::HintedSelfCheck {
+                        sample_answer: "Из path, quote context, hash и source locator.".to_owned(),
+                    },
+                    explanation: "Anchor остаётся source-backed.".to_owned(),
+                    source_anchor: Some(first_anchor),
+                },
+                answer: LearningAnswer::Text {
+                    text: "Из пути, цитаты и source locator.".to_owned(),
+                },
+                self_check: Some(SelfCheckRating::Partial),
+                expected_outcome: LearningAttemptOutcome::SelfChecked,
+            },
+        ],
+    })
 }
 
 /// Import a DRM-free EPUB fixture into the S0 domain chain.
@@ -558,6 +701,39 @@ mod tests {
         let command = sample_fixture_highlight(&imported).ok_or(ImportError::EmptyFixture)?;
 
         assert!(!command.anchor.node_path.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn learning_fixture_spans_two_chapters_and_has_expected_feedback() -> Result<(), ImportError> {
+        let imported = import_epub_fixture(Uuid::now_v7(), &rich_epub_fixture())?;
+        let fixture = sample_learning_fixture(&imported).ok_or(ImportError::EmptyFixture)?;
+
+        assert_eq!(fixture.sources.len(), 2);
+        assert_eq!(fixture.items.len(), 3);
+        assert!(fixture
+            .items
+            .iter()
+            .all(|item| item.command.source_anchor.is_some()));
+        assert!(fixture
+            .items
+            .iter()
+            .any(|item| item.command.kind == LearningItemKind::HintedQuestion));
+        for item in fixture.items {
+            let revision = crate::LearningItemRevision {
+                id: Uuid::now_v7(),
+                item_id: Uuid::now_v7(),
+                revision: 1,
+                prompt: item.command.prompt,
+                answer_spec: item.command.answer_spec,
+                explanation: item.command.explanation,
+                source_anchor: item.command.source_anchor,
+                created_at: 0,
+            };
+            let feedback = crate::grade_learning_answer(&revision, &item.answer, item.self_check)
+                .map_err(|_| ImportError::EmptyFixture)?;
+            assert_eq!(feedback.outcome, item.expected_outcome);
+        }
         Ok(())
     }
 }

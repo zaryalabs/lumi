@@ -166,6 +166,15 @@ Personal SyncSpace принадлежит одному пользователю.
   получают новую revision.
 - Append-only сущности вроде reading events, attempts, comments and activity
   events не конфликтуют по содержанию.
+- `LearningItem` и material learning settings используют optimistic
+  `object_revision`; новая редакция item создаёт immutable
+  `LearningItemRevision`.
+- `ReadingCompletion`, `LearningAttempt` и learning evidence events
+  append-only. `LearningSession` сохраняет точные item revision snapshots, а
+  lifecycle transition записывает новую object revision.
+- Server-side Web baseline пишет learning mutations в существующий personal
+  `sync_changes`. Полный native reducer/snapshot contract поставляется вместе с
+  native replica, не меняя owner/source/item/session identity.
 - LWW допустим для слабых preference fields: reader settings, view options,
   non-critical flags.
 - Для заметок, KB Markdown документов и plugin-owned текстовых документов нужен

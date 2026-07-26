@@ -39,6 +39,9 @@ plugin, AI, search and account/auth boundaries.
   `.lum`-материалов.
 - [`0025`](0025-openai-whisper-transcription.md) — встроенная транскрибация
   через OpenAI Audio Transcriptions API и модель `whisper-1`.
+- [`0026`](0026-learning-completion-items-sessions.md) — revision-bound
+  learning sources, durable completion, versioned items и immutable session
+  snapshots.
 
 ## Template
 

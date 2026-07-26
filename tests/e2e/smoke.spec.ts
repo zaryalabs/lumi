@@ -309,6 +309,92 @@ test("switches EPUB reader pages through user clicks", async ({ page }) => {
   ).toBeVisible();
 });
 
+test("offers a reload-safe deterministic session after reading", async ({
+  page,
+}) => {
+  test.setTimeout(60_000);
+  await page.goto("/");
+  await page
+    .getByRole("button", { name: "Создать фразу восстановления" })
+    .click();
+  await page.getByText("Я сохранил(а) все 24 слова", { exact: false }).click();
+  await page.getByRole("button", { name: "Создать аккаунт" }).click();
+
+  await page
+    .getByRole("button", { name: "＋ Добавить материал", exact: true })
+    .click();
+  const uploadDialog = page.getByRole("dialog", {
+    name: "Добавить материал",
+  });
+  await uploadDialog.getByLabel("Файл EPUB").setInputFiles({
+    name: "learning-after-reading.epub",
+    mimeType: "application/epub+zip",
+    buffer: createReaderEpub(),
+  });
+  await uploadDialog
+    .getByRole("button", { name: "Добавить в библиотеку" })
+    .click();
+  const readerCard = page.getByRole("article", {
+    name: "Материал Stage Four Reader",
+  });
+  await expect(readerCard.getByText("Готово", { exact: true })).toBeVisible();
+  await readerCard.getByRole("button", { name: "Читать" }).click();
+
+  const offer = page.getByRole("complementary", {
+    name: "Обучение после чтения",
+  });
+  const next = page
+    .getByRole("navigation", { name: "Навигация по страницам" })
+    .getByRole("button", { name: "Дальше" });
+  for (let pageNumber = 0; pageNumber < 100; pageNumber += 1) {
+    if (await offer.isVisible()) {
+      break;
+    }
+    if (await next.isDisabled()) {
+      await expect(offer).toBeVisible();
+      break;
+    }
+    await next.click();
+  }
+  await expect(offer).toBeVisible();
+  await expect(offer.getByText("Закрепить прочитанное?")).toBeVisible();
+  await offer.getByRole("button", { name: "Создать вопрос" }).click();
+
+  const editor = page.getByRole("region", { name: "Редактор вопроса" });
+  await editor.getByLabel("Вопрос").fill("От чего не зависит reader core?");
+  await editor.getByLabel("Вариант A").fill("От DOM и Dioxus");
+  await editor.getByLabel("Вариант B").fill("От доменных контрактов");
+  await editor
+    .getByLabel("Пояснение")
+    .fill("Reader core остаётся platform-independent.");
+  await editor.getByRole("button", { name: "Создать", exact: true }).click();
+  await expect(
+    page
+      .getByRole("region", { name: "Сохранённые вопросы" })
+      .getByText("От чего не зависит reader core?"),
+  ).toBeVisible();
+  await page.getByRole("button", { name: "Начать самопроверку (1)" }).click();
+
+  const session = page.getByRole("main", { name: "Сессия самопроверки" });
+  await expect(session.getByText("0 / 1")).toBeVisible();
+  await session.getByRole("button", { name: "Открыть источник" }).click();
+  await expect(
+    page.getByRole("main", { name: "Чтение Stage Four Reader" }),
+  ).toBeVisible();
+  await page.getByRole("button", { name: "Вернуться в библиотеку" }).click();
+  await expect(session.getByText("0 / 1")).toBeVisible();
+
+  await page.reload();
+  await expect(session.getByText("0 / 1")).toBeVisible();
+  await session.getByLabel("От DOM и Dioxus").check();
+  await session.getByRole("button", { name: "Ответить" }).click();
+  await expect(session.getByText("Верно.")).toBeVisible();
+  await expect(session.getByText("Все задания пройдены")).toBeVisible();
+  await session.getByRole("button", { name: "Завершить" }).click();
+  await expect(session.getByText("Сессия завершена")).toBeVisible();
+  await expect(session.getByText("Ответов сохранено: 1")).toBeVisible();
+});
+
 test("imports Markdown through the shared reflowable reader", async ({
   page,
 }) => {

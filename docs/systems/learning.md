@@ -96,6 +96,24 @@ explain-back. Завершение чтения не должно ждать г�
 завершения source допустима только при явно включенной пользователем политике и
 с соблюдением AI context/privacy policy.
 
+#### Реализованный baseline `0.3.0/E1`
+
+Web Reader фиксирует progress до `ReadingCompletion`, после чего один раз
+показывает offer для immutable material/content-unit scope. Offer можно закрыть,
+отложить или отключить для материала; ручной вход через карточку материала
+остаётся доступен.
+
+Ручные active items формируют immediate-recall session с immutable ordered
+snapshot. Закрытые задания оцениваются детерминированно, открытые используют
+явную self-check. Session и attempts читаются по стабильному hash route, поэтому
+reload не теряет ответов. `Открыть источник` записывает evidence event,
+передаёт revision-bound target в Reader и сохраняет route возврата.
+
+Точные persistence/API решения закреплены в
+[`ADR 0026`](../adr/0026-learning-completion-items-sessions.md). Scheduling,
+AI generation/evaluation, explain-back и voice не объявляются capability
+`learning-core` и поставляются следующими эпиками.
+
 ### Типы упражнений
 
 Базовые exercise families:

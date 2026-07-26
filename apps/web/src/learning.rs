@@ -1,0 +1,987 @@
+//! Deterministic post-reading learning surfaces.
+
+use std::collections::HashSet;
+
+use dioxus::prelude::*;
+use gloo_net::http::Request;
+use lumi_core::{
+    AiContextAttachment, AiSourceScope, ChangeLearningItemStatusCommand, CompleteReadingResponse,
+    CompleteReadingScopeCommand, CreateLearningItemCommand, CreateLearningSessionCommand,
+    LearningAnswer, LearningAnswerPresentation, LearningAnswerSpec, LearningAttempt,
+    LearningAttemptOutcome, LearningItem, LearningItemKind, LearningItemPage, LearningItemStatus,
+    LearningOffer, LearningOfferAction, LearningOption, LearningSession, LearningSessionId,
+    LearningSessionKind, LearningSessionState, LearningSourceId, MaterialId,
+    MoveReadingPositionCommand, SelfCheckRating, SubmitLearningAttemptCommand,
+    UpdateLearningItemCommand, UpdateLearningOfferCommand,
+};
+use uuid::Uuid;
+use web_sys::RequestCredentials;
+
+use super::account::{notify_session_expired, API_BASE};
+
+#[derive(Clone, PartialEq)]
+enum CompletionOfferState {
+    Saving,
+    Hidden,
+    Ready(LearningOffer),
+    Busy(LearningOffer),
+    Failed(String),
+}
+
+/// Save the semantic boundary and show at most one non-blocking offer.
+#[component]
+pub(crate) fn CompletionOffer(
+    progress: MoveReadingPositionCommand,
+    completion: CompleteReadingScopeCommand,
+    csrf_token: String,
+    on_open_session: EventHandler<LearningSessionId>,
+    on_manage_items: EventHandler<(MaterialId, LearningSourceId)>,
+) -> Element {
+    let mut state = use_signal(|| CompletionOfferState::Saving);
+    let csrf = use_signal(|| csrf_token);
+    let initial_progress = progress.clone();
+    let initial_completion = completion.clone();
+    use_effect(move || {
+        state.set(CompletionOfferState::Saving);
+        let progress = initial_progress.clone();
+        let completion = initial_completion.clone();
+        spawn(async move {
+            match complete_after_progress(&progress, &completion, &csrf.read()).await {
+                Ok(response) if response.offer.should_offer => {
+                    state.set(CompletionOfferState::Ready(response.offer));
+                }
+                Ok(_) => state.set(CompletionOfferState::Hidden),
+                Err(message) => state.set(CompletionOfferState::Failed(message)),
+            }
+        });
+    });
+    let snapshot = state.read().clone();
+    let busy_state = matches!(&snapshot, CompletionOfferState::Busy(_));
+    match snapshot {
+        CompletionOfferState::Saving | CompletionOfferState::Hidden => rsx! {},
+        CompletionOfferState::Failed(message) => rsx! {
+            div { class: "learning-offer compact", role: "status",
+                p { "Чтение сохранено. Предложение для самопроверки сейчас недоступно." }
+                button { class: "text-action", r#type: "button", onclick: move |_| {
+                    state.set(CompletionOfferState::Saving);
+                    let progress = progress.clone();
+                    let completion = completion.clone();
+                    spawn(async move {
+                        match complete_after_progress(&progress, &completion, &csrf.read()).await {
+                            Ok(response) if response.offer.should_offer => state.set(CompletionOfferState::Ready(response.offer)),
+                            Ok(_) => state.set(CompletionOfferState::Hidden),
+                            Err(error) => state.set(CompletionOfferState::Failed(error)),
+                        }
+                    });
+                }, "Повторить" }
+                span { class: "sr-only", "{message}" }
+            }
+        },
+        CompletionOfferState::Ready(offer) | CompletionOfferState::Busy(offer) => {
+            let busy = busy_state;
+            let session_offer = offer.clone();
+            let dismiss_offer = offer.clone();
+            let later_offer = offer.clone();
+            let disable_offer = offer.clone();
+            rsx! {
+                aside { class: "learning-offer", aria_label: "Обучение после чтения",
+                    p { class: "eyebrow", "Глава завершена" }
+                    h2 { "Закрепить прочитанное?" }
+                    p {
+                        if offer.active_item_count > 0 {
+                            "Короткая самопроверка: до {offer.active_item_count.min(7)} заданий. Можно остановиться в любой момент."
+                        } else {
+                            "Готовых вопросов по этой главе пока нет. Создайте свой — без подключения AI."
+                        }
+                    }
+                    div { class: "dialog-actions",
+                        if offer.active_item_count > 0 {
+                            button { class: "primary-action", r#type: "button", disabled: busy, onclick: move |_| {
+                                state.set(CompletionOfferState::Busy(session_offer.clone()));
+                                let source_id = session_offer.source.id;
+                                spawn(async move {
+                                    match create_session(source_id, LearningSessionKind::ImmediateRecall, &csrf.read()).await {
+                                        Ok(session) => on_open_session.call(session.id),
+                                        Err(message) => state.set(CompletionOfferState::Failed(message)),
+                                    }
+                                });
+                            }, "Проверить себя" }
+                        } else {
+                            button { class: "primary-action", r#type: "button", disabled: busy, onclick: move |_| {
+                                on_manage_items.call((offer.source.material_id, offer.source.id));
+                            }, "Создать вопрос" }
+                        }
+                        button { class: "secondary-action", r#type: "button", disabled: busy, onclick: move |_| dismiss_offer_action(later_offer.clone(), LearningOfferAction::RemindLater, csrf, state), "Напомнить позже" }
+                        button { class: "secondary-action", r#type: "button", disabled: busy, onclick: move |_| dismiss_offer_action(dismiss_offer.clone(), LearningOfferAction::NotNow, csrf, state), "Не сейчас" }
+                        button { class: "text-action", r#type: "button", disabled: busy, onclick: move |_| dismiss_offer_action(disable_offer.clone(), LearningOfferAction::DisableMaterialOffers, csrf, state), "Не предлагать для материала" }
+                    }
+                }
+            }
+        }
+    }
+}
+
+fn dismiss_offer_action(
+    offer: LearningOffer,
+    action: LearningOfferAction,
+    csrf: Signal<String>,
+    mut state: Signal<CompletionOfferState>,
+) {
+    state.set(CompletionOfferState::Busy(offer.clone()));
+    spawn(async move {
+        match update_offer(&offer, action, &csrf.read()).await {
+            Ok(_) => state.set(CompletionOfferState::Hidden),
+            Err(message) => state.set(CompletionOfferState::Failed(message)),
+        }
+    });
+}
+
+/// Material-level item list, creation and revision editor.
+#[component]
+pub(crate) fn MaterialLearningPage(
+    material_id: MaterialId,
+    source_id: Option<LearningSourceId>,
+    csrf_token: String,
+    on_open_session: EventHandler<LearningSessionId>,
+) -> Element {
+    let mut items = use_signal(Vec::<LearningItem>::new);
+    let mut error = use_signal(String::new);
+    let mut busy = use_signal(|| false);
+    let mut refresh = use_signal(|| 0_u64);
+    let mut editing = use_signal(|| None::<LearningItem>);
+    let mut kind = use_signal(|| "single".to_owned());
+    let mut prompt = use_signal(String::new);
+    let mut answer_a = use_signal(String::new);
+    let mut answer_b = use_signal(String::new);
+    let mut correct = use_signal(|| "a".to_owned());
+    let mut explanation = use_signal(String::new);
+    let csrf = use_signal(|| csrf_token);
+    use_effect(move || {
+        let _ = refresh();
+        spawn(async move {
+            match load_items(material_id).await {
+                Ok(page) => items.set(page.items),
+                Err(message) => error.set(message),
+            }
+        });
+    });
+    let active_count = items
+        .read()
+        .iter()
+        .filter(|item| item.status == LearningItemStatus::Active)
+        .count();
+    let effective_source_id = source_id.or_else(|| {
+        items
+            .read()
+            .iter()
+            .find(|item| item.status == LearningItemStatus::Active)
+            .map(|item| item.source_id)
+    });
+    rsx! {
+        main { id: "main-content", class: "library-view learning-manage-view", aria_label: "Обучение по материалу",
+            header { class: "library-hero compact",
+                div {
+                    p { class: "eyebrow", "Learning core" }
+                    h1 { "Вопросы по материалу" }
+                    p { class: "library-lead", "Вопросы версионируются, а начатые сессии сохраняют исходную формулировку." }
+                }
+                if let Some(source_id) = effective_source_id {
+                    button { class: "primary-action", r#type: "button", disabled: active_count == 0 || busy(), onclick: move |_| {
+                        busy.set(true);
+                        spawn(async move {
+                            match create_session(source_id, LearningSessionKind::ManualPractice, &csrf.read()).await {
+                                Ok(session) => on_open_session.call(session.id),
+                                Err(message) => error.set(message),
+                            }
+                            busy.set(false);
+                        });
+                    }, "Начать самопроверку ({active_count})" }
+                }
+            }
+            if !error().is_empty() {
+                p { class: "library-alert", role: "alert", "{error}" }
+            }
+            section { class: "library-section learning-items-section", aria_label: "Сохранённые вопросы",
+                h2 { "Задания" }
+                if items.read().is_empty() {
+                    p { class: "capability-note", "Заданий пока нет." }
+                } else {
+                    ol { class: "learning-item-list",
+                        for item in items.read().clone() {
+                            {
+                                let edit_item = item.clone();
+                                let status_item = item.clone();
+                                rsx! {
+                                    li {
+                                        div {
+                                            strong { "{item.current_revision.prompt}" }
+                                            span { class: "status-pill ready", "{item_status_label(item.status)}" }
+                                        }
+                                        p { "{item.current_revision.explanation}" }
+                                        div { class: "dialog-actions",
+                                            button { class: "secondary-action", r#type: "button", onclick: move |_| {
+                                                fill_editor(&edit_item, &mut kind, &mut prompt, &mut answer_a, &mut answer_b, &mut correct, &mut explanation);
+                                                editing.set(Some(edit_item.clone()));
+                                            }, "Редактировать" }
+                                            button { class: "text-action", r#type: "button", onclick: move |_| {
+                                                let item = status_item.clone();
+                                                let target = if item.status == LearningItemStatus::Active { LearningItemStatus::Archived } else { LearningItemStatus::Active };
+                                                spawn(async move {
+                                                    match change_status(&item, target, &csrf.read()).await {
+                                                        Ok(_) => refresh += 1,
+                                                        Err(message) => error.set(message),
+                                                    }
+                                                });
+                                            }, if item.status == LearningItemStatus::Active { "Архивировать" } else { "Активировать" } }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            section { class: "library-section learning-editor", aria_label: "Редактор вопроса",
+                h2 { if editing.read().is_some() { "Новая версия задания" } else { "Создать задание" } }
+                if effective_source_id.is_none() {
+                    p { class: "capability-note", "Откройте этот экран из предложения после завершённой главы, чтобы привязать новый вопрос к точной версии источника." }
+                } else {
+                    label { "Тип",
+                        select { value: "{kind}", onchange: move |event| kind.set(event.value()),
+                            option { value: "single", "Один вариант" }
+                            option { value: "open", "Открытый ответ с самопроверкой" }
+                            option { value: "true_false", "Верно / неверно" }
+                        }
+                    }
+                    label { "Вопрос",
+                        textarea { rows: "3", value: "{prompt}", oninput: move |event| prompt.set(event.value()) }
+                    }
+                    if kind() == "single" {
+                        label { "Вариант A", input { value: "{answer_a}", oninput: move |event| answer_a.set(event.value()) } }
+                        label { "Вариант B", input { value: "{answer_b}", oninput: move |event| answer_b.set(event.value()) } }
+                        label { "Правильный вариант",
+                            select { value: "{correct}", onchange: move |event| correct.set(event.value()),
+                                option { value: "a", "A" }
+                                option { value: "b", "B" }
+                            }
+                        }
+                    } else if kind() == "open" {
+                        label { "Пример ответа",
+                            textarea { rows: "3", value: "{answer_a}", oninput: move |event| answer_a.set(event.value()) }
+                        }
+                    } else {
+                        label { "Правильный ответ",
+                            select { value: "{correct}", onchange: move |event| correct.set(event.value()),
+                                option { value: "a", "Верно" }
+                                option { value: "b", "Неверно" }
+                            }
+                        }
+                    }
+                    label { "Пояснение",
+                        textarea { rows: "3", value: "{explanation}", oninput: move |event| explanation.set(event.value()) }
+                    }
+                    div { class: "dialog-actions",
+                        button { class: "primary-action", r#type: "button", disabled: busy() || prompt().trim().is_empty(), onclick: move |_| {
+                            let Some(source_id) = effective_source_id else { return; };
+                            let edit = editing.read().clone();
+                            let command = item_command(source_id, &kind(), &prompt(), &answer_a(), &answer_b(), &correct(), &explanation());
+                            busy.set(true);
+                            spawn(async move {
+                                let result = match (edit, command) {
+                                    (_, Err(message)) => Err(message),
+                                    (Some(item), Ok(command)) => update_item(&item, command, &csrf.read()).await,
+                                    (None, Ok(command)) => create_item(&command, &csrf.read()).await,
+                                };
+                                match result {
+                                    Ok(_) => {
+                                        editing.set(None);
+                                        prompt.set(String::new());
+                                        answer_a.set(String::new());
+                                        answer_b.set(String::new());
+                                        explanation.set(String::new());
+                                        refresh += 1;
+                                    }
+                                    Err(message) => error.set(message),
+                                }
+                                busy.set(false);
+                            });
+                        }, if editing.read().is_some() { "Сохранить новую версию" } else { "Создать" } }
+                        if editing.read().is_some() {
+                            button { class: "secondary-action", r#type: "button", onclick: move |_| editing.set(None), "Отмена" }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Reload-safe deterministic learning session runner.
+#[component]
+pub(crate) fn LearningSessionPage(
+    session_id: LearningSessionId,
+    csrf_token: String,
+    on_open_source: EventHandler<(MaterialId, LearningSessionId)>,
+    on_close: EventHandler<()>,
+) -> Element {
+    let mut session = use_signal(|| None::<LearningSession>);
+    let mut error = use_signal(String::new);
+    let mut busy = use_signal(|| false);
+    let mut selected = use_signal(HashSet::<String>::new);
+    let mut text_answer = use_signal(String::new);
+    let mut revealed_item = use_signal(|| None::<LearningItem>);
+    let mut self_check = use_signal(|| None::<SelfCheckRating>);
+    let mut refresh = use_signal(|| 0_u64);
+    let csrf = use_signal(|| csrf_token);
+    use_effect(move || {
+        let _ = refresh();
+        spawn(async move {
+            match load_session(session_id).await {
+                Ok(value) if value.state == LearningSessionState::Offered => {
+                    match transition_session(session_id, "start", &csrf.read()).await {
+                        Ok(started) => session.set(Some(started)),
+                        Err(message) => error.set(message),
+                    }
+                }
+                Ok(value) => session.set(Some(value)),
+                Err(message) => error.set(message),
+            }
+        });
+    });
+    let current = session
+        .read()
+        .as_ref()
+        .and_then(|value| {
+            value.items.iter().find(|item| {
+                !value
+                    .attempts
+                    .iter()
+                    .any(|attempt| attempt.item_id == item.item_id)
+            })
+        })
+        .cloned();
+    let last_attempt = session
+        .read()
+        .as_ref()
+        .and_then(|value| value.attempts.last())
+        .cloned();
+    let session_snapshot = session.read().clone();
+    rsx! {
+        main { id: "main-content", class: "learning-session-view", aria_label: "Сессия самопроверки",
+            header { class: "learning-session-header",
+                button { class: "secondary-action", r#type: "button", onclick: move |_| on_close.call(()), "Сохранить и выйти" }
+                div {
+                    p { class: "eyebrow", "Самопроверка" }
+                    h1 { if let Some(value) = session.read().as_ref() { "{value.source.title}" } else { "Загружаем…" } }
+                }
+                if let Some(value) = session.read().as_ref() {
+                    span { role: "status", "{value.attempts.len()} / {value.items.len()}" }
+                }
+            }
+            if !error().is_empty() {
+                p { class: "library-alert", role: "alert", "{error}" }
+            }
+            if let Some(value) = session_snapshot {
+                if value.state == LearningSessionState::Completed {
+                    section { class: "learning-complete-card",
+                        h2 { "Сессия завершена" }
+                        p { "Ответов сохранено: {value.attempts.len()}. Неотвеченные задания не оценивались." }
+                        button { class: "primary-action", r#type: "button", onclick: move |_| on_close.call(()), "Готово" }
+                    }
+                } else if let Some(item) = current.clone() {
+                    {
+                    let submit_item = item.clone();
+                    let source_item = item.clone();
+                    let source_session = value.clone();
+                    let source_material_id = value.source.material_id;
+                    rsx! {
+                    section { class: "learning-question-card", aria_label: "Задание {item.position + 1}",
+                        p { class: "eyebrow", "Задание {item.position + 1} из {value.items.len()}" }
+                        h2 { "{item.prompt}" }
+                        {answer_input(&item.answer, selected, text_answer)}
+                        if matches!(item.answer, LearningAnswerPresentation::OpenText | LearningAnswerPresentation::Flashcard) {
+                            if revealed_item.read().is_none() {
+                                button { class: "secondary-action", r#type: "button", disabled: busy() || (matches!(item.answer, LearningAnswerPresentation::OpenText) && text_answer().trim().is_empty()), onclick: move |_| {
+                                    busy.set(true);
+                                    spawn(async move {
+                                        match load_item(item.item_id).await {
+                                            Ok(value) => revealed_item.set(Some(value)),
+                                            Err(message) => error.set(message),
+                                        }
+                                        busy.set(false);
+                                    });
+                                }, "Показать ответ и оценить себя" }
+                            } else if let Some(revealed) = revealed_item.read().as_ref() {
+                                div { class: "learning-reveal", role: "region", aria_label: "Ответ для самопроверки",
+                                    strong { "Пример ответа" }
+                                    p { "{revealed_answer(revealed)}" }
+                                    fieldset {
+                                        legend { "Как получилось вспомнить?" }
+                                        label { input { r#type: "radio", name: "self-check", checked: self_check() == Some(SelfCheckRating::Recalled), onchange: move |_| self_check.set(Some(SelfCheckRating::Recalled)) } "Вспомнил" }
+                                        label { input { r#type: "radio", name: "self-check", checked: self_check() == Some(SelfCheckRating::Partial), onchange: move |_| self_check.set(Some(SelfCheckRating::Partial)) } "Частично" }
+                                        label { input { r#type: "radio", name: "self-check", checked: self_check() == Some(SelfCheckRating::NotRecalled), onchange: move |_| self_check.set(Some(SelfCheckRating::NotRecalled)) } "Не вспомнил" }
+                                    }
+                                }
+                            }
+                        }
+                        div { class: "dialog-actions",
+                            button { class: "primary-action", r#type: "button", disabled: busy() || !answer_ready(&item.answer, &selected.read(), &text_answer(), self_check()), onclick: move |_| {
+                                let command = build_attempt(&submit_item.answer, &selected.read(), &text_answer(), self_check());
+                                let Some(command) = command else { return; };
+                                busy.set(true);
+                                spawn(async move {
+                                    match submit_attempt(session_id, submit_item.item_id, &command, &csrf.read()).await {
+                                        Ok(_) => {
+                                            selected.set(HashSet::new());
+                                            text_answer.set(String::new());
+                                            revealed_item.set(None);
+                                            self_check.set(None);
+                                            refresh += 1;
+                                        }
+                                        Err(message) => error.set(message),
+                                    }
+                                    busy.set(false);
+                                });
+                            }, "Ответить" }
+                            button { class: "secondary-action", r#type: "button", disabled: busy(), onclick: move |_| {
+                                let attachment = source_attachment(&source_session, &source_item);
+                                match crate::ai::stage_reader_target(&attachment) {
+                                    Ok(()) => {
+                                        let csrf_token = csrf.read().clone();
+                                        spawn(async move {
+                                            let _ = record_source_opened(session_id, source_item.item_id, &csrf_token).await;
+                                            on_open_source.call((source_material_id, session_id));
+                                        });
+                                    }
+                                    Err(message) => error.set(message),
+                                }
+                            }, "Открыть источник" }
+                        }
+                    }
+                    }
+                    }
+                    if let Some(attempt) = last_attempt.clone() {
+                        AttemptFeedback { attempt }
+                    }
+                } else {
+                    if let Some(attempt) = last_attempt {
+                        AttemptFeedback { attempt }
+                    }
+                    section { class: "learning-complete-card",
+                        h2 { "Все задания пройдены" }
+                        p { "Завершите сессию, чтобы сохранить итог. Неотвеченных заданий нет." }
+                        button { class: "primary-action", r#type: "button", disabled: busy(), onclick: move |_| {
+                            busy.set(true);
+                            spawn(async move {
+                                match transition_session(session_id, "complete", &csrf.read()).await {
+                                    Ok(value) => session.set(Some(value)),
+                                    Err(message) => error.set(message),
+                                }
+                                busy.set(false);
+                            });
+                        }, "Завершить" }
+                    }
+                }
+            } else if error().is_empty() {
+                p { role: "status", aria_live: "polite", "Восстанавливаем сессию…" }
+            }
+        }
+    }
+}
+
+#[component]
+fn AttemptFeedback(attempt: LearningAttempt) -> Element {
+    let class = match attempt.feedback.outcome {
+        LearningAttemptOutcome::Correct => "correct",
+        LearningAttemptOutcome::Incorrect => "incorrect",
+        LearningAttemptOutcome::SelfChecked | LearningAttemptOutcome::NotGraded => "neutral",
+    };
+    rsx! {
+        aside { class: "learning-feedback {class}", aria_live: "polite",
+            h2 { "{attempt.feedback.message}" }
+            if !attempt.feedback.correct_answers.is_empty() {
+                p { strong { "Ответ: " } "{attempt.feedback.correct_answers.join(\", \")}" }
+            }
+            p { "{attempt.feedback.explanation}" }
+            if attempt.source_opened {
+                small { "Источник был открыт до ответа." }
+            }
+        }
+    }
+}
+
+fn answer_input(
+    answer: &LearningAnswerPresentation,
+    mut selected: Signal<HashSet<String>>,
+    mut text_answer: Signal<String>,
+) -> Element {
+    match answer {
+        LearningAnswerPresentation::SingleChoice { options } => rsx! {
+            fieldset { class: "learning-options",
+                legend { class: "sr-only", "Выберите один ответ" }
+                for option in options.clone() {
+                    label {
+                        input { r#type: "radio", name: "learning-answer", checked: selected.read().contains(&option.id), onchange: move |_| selected.set(HashSet::from([option.id.clone()])) }
+                        span { "{option.label}" }
+                    }
+                }
+            }
+        },
+        LearningAnswerPresentation::MultipleChoice { options } => rsx! {
+            fieldset { class: "learning-options",
+                legend { "Выберите все подходящие ответы" }
+                for option in options.clone() {
+                    label {
+                        input { r#type: "checkbox", checked: selected.read().contains(&option.id), onchange: move |event| {
+                            if event.checked() { selected.write().insert(option.id.clone()); } else { selected.write().remove(&option.id); }
+                        } }
+                        span { "{option.label}" }
+                    }
+                }
+            }
+        },
+        LearningAnswerPresentation::TrueFalse => rsx! {
+            fieldset { class: "learning-options",
+                legend { class: "sr-only", "Выберите верно или неверно" }
+                label { input { r#type: "radio", name: "learning-answer", checked: selected.read().contains("true"), onchange: move |_| selected.set(HashSet::from(["true".to_owned()])) } "Верно" }
+                label { input { r#type: "radio", name: "learning-answer", checked: selected.read().contains("false"), onchange: move |_| selected.set(HashSet::from(["false".to_owned()])) } "Неверно" }
+            }
+        },
+        LearningAnswerPresentation::OpenText | LearningAnswerPresentation::Cloze => rsx! {
+            label { class: "learning-text-answer", "Ваш ответ",
+                textarea { rows: "6", value: "{text_answer}", oninput: move |event| text_answer.set(event.value()) }
+            }
+        },
+        LearningAnswerPresentation::Flashcard => rsx! {
+            p { class: "capability-note", "Сформулируйте ответ про себя, затем откройте обратную сторону." }
+        },
+        LearningAnswerPresentation::ExplainBack | LearningAnswerPresentation::Reflection => rsx! {
+            label { class: "learning-text-answer", "Ваш ответ",
+                textarea { rows: "6", value: "{text_answer}", oninput: move |event| text_answer.set(event.value()) }
+            }
+        },
+    }
+}
+
+fn answer_ready(
+    answer: &LearningAnswerPresentation,
+    selected: &HashSet<String>,
+    text: &str,
+    self_check: Option<SelfCheckRating>,
+) -> bool {
+    match answer {
+        LearningAnswerPresentation::SingleChoice { .. }
+        | LearningAnswerPresentation::MultipleChoice { .. }
+        | LearningAnswerPresentation::TrueFalse => !selected.is_empty(),
+        LearningAnswerPresentation::OpenText => !text.trim().is_empty() && self_check.is_some(),
+        LearningAnswerPresentation::Flashcard => self_check.is_some(),
+        LearningAnswerPresentation::Cloze
+        | LearningAnswerPresentation::ExplainBack
+        | LearningAnswerPresentation::Reflection => !text.trim().is_empty(),
+    }
+}
+
+fn build_attempt(
+    answer: &LearningAnswerPresentation,
+    selected: &HashSet<String>,
+    text: &str,
+    self_check: Option<SelfCheckRating>,
+) -> Option<SubmitLearningAttemptCommand> {
+    let answer = match answer {
+        LearningAnswerPresentation::SingleChoice { .. } => LearningAnswer::SingleChoice {
+            option_id: selected.iter().next()?.clone(),
+        },
+        LearningAnswerPresentation::MultipleChoice { .. } => LearningAnswer::MultipleChoice {
+            option_ids: selected.iter().cloned().collect(),
+        },
+        LearningAnswerPresentation::TrueFalse => LearningAnswer::TrueFalse {
+            value: selected.contains("true"),
+        },
+        LearningAnswerPresentation::Flashcard => LearningAnswer::Revealed,
+        LearningAnswerPresentation::OpenText
+        | LearningAnswerPresentation::Cloze
+        | LearningAnswerPresentation::ExplainBack
+        | LearningAnswerPresentation::Reflection => LearningAnswer::Text {
+            text: text.to_owned(),
+        },
+    };
+    Some(SubmitLearningAttemptCommand {
+        answer,
+        self_check,
+        elapsed_ms: 0,
+    })
+}
+
+fn source_attachment(
+    session: &LearningSession,
+    item: &lumi_core::LearningSessionItem,
+) -> AiContextAttachment {
+    let scope = item.source_anchor.as_ref().map_or_else(
+        || match session.source.scope_kind {
+            lumi_core::LearningScopeKind::ContentUnit => AiSourceScope::Chapter {
+                material_id: session.source.material_id,
+                revision_id: session.source.document_revision_id,
+                scope_ref: session.source.content_unit_id.clone().unwrap_or_default(),
+            },
+            _ => AiSourceScope::Material {
+                material_id: session.source.material_id,
+                revision_id: session.source.document_revision_id,
+            },
+        },
+        |anchor| AiSourceScope::Selection {
+            material_id: session.source.material_id,
+            revision_id: session.source.document_revision_id,
+            anchor: Box::new(anchor.clone()),
+        },
+    );
+    AiContextAttachment {
+        kind: "learning_source".to_owned(),
+        material_id: session.source.material_id,
+        revision_id: session.source.document_revision_id,
+        scope,
+        display_label: format!("Источник задания {}", item.position + 1),
+    }
+}
+
+fn item_command(
+    source_id: LearningSourceId,
+    kind: &str,
+    prompt: &str,
+    answer_a: &str,
+    answer_b: &str,
+    correct: &str,
+    explanation: &str,
+) -> Result<CreateLearningItemCommand, String> {
+    let (item_kind, answer_spec) = match kind {
+        "single" => {
+            if answer_a.trim().is_empty() || answer_b.trim().is_empty() {
+                return Err("Заполните оба варианта ответа.".to_owned());
+            }
+            (
+                LearningItemKind::QuizSingleChoice,
+                LearningAnswerSpec::SingleChoice {
+                    options: vec![
+                        LearningOption {
+                            id: "a".to_owned(),
+                            label: answer_a.trim().to_owned(),
+                        },
+                        LearningOption {
+                            id: "b".to_owned(),
+                            label: answer_b.trim().to_owned(),
+                        },
+                    ],
+                    correct_option_id: correct.to_owned(),
+                },
+            )
+        }
+        "open" => (
+            LearningItemKind::OpenQuestion,
+            LearningAnswerSpec::OpenSelfCheck {
+                sample_answer: answer_a.trim().to_owned(),
+            },
+        ),
+        _ => (
+            LearningItemKind::QuizTrueFalse,
+            LearningAnswerSpec::TrueFalse {
+                correct: correct == "a",
+            },
+        ),
+    };
+    Ok(CreateLearningItemCommand {
+        source_id,
+        kind: item_kind,
+        status: LearningItemStatus::Active,
+        prompt: prompt.trim().to_owned(),
+        answer_spec,
+        explanation: explanation.trim().to_owned(),
+        source_anchor: None,
+    })
+}
+
+fn fill_editor(
+    item: &LearningItem,
+    kind: &mut Signal<String>,
+    prompt: &mut Signal<String>,
+    answer_a: &mut Signal<String>,
+    answer_b: &mut Signal<String>,
+    correct: &mut Signal<String>,
+    explanation: &mut Signal<String>,
+) {
+    prompt.set(item.current_revision.prompt.clone());
+    explanation.set(item.current_revision.explanation.clone());
+    match &item.current_revision.answer_spec {
+        LearningAnswerSpec::SingleChoice {
+            options,
+            correct_option_id,
+        } => {
+            kind.set("single".to_owned());
+            answer_a.set(
+                options
+                    .first()
+                    .map(|value| value.label.clone())
+                    .unwrap_or_default(),
+            );
+            answer_b.set(
+                options
+                    .get(1)
+                    .map(|value| value.label.clone())
+                    .unwrap_or_default(),
+            );
+            correct.set(correct_option_id.clone());
+        }
+        LearningAnswerSpec::OpenSelfCheck { sample_answer } => {
+            kind.set("open".to_owned());
+            answer_a.set(sample_answer.clone());
+            answer_b.set(String::new());
+        }
+        LearningAnswerSpec::TrueFalse { correct: value } => {
+            kind.set("true_false".to_owned());
+            correct.set(if *value { "a" } else { "b" }.to_owned());
+        }
+        _ => {}
+    }
+}
+
+fn revealed_answer(item: &LearningItem) -> String {
+    match &item.current_revision.answer_spec {
+        LearningAnswerSpec::OpenSelfCheck { sample_answer }
+        | LearningAnswerSpec::HintedSelfCheck { sample_answer } => sample_answer.clone(),
+        LearningAnswerSpec::Flashcard { back } => back.clone(),
+        _ => String::new(),
+    }
+}
+
+fn item_status_label(status: LearningItemStatus) -> &'static str {
+    match status {
+        LearningItemStatus::Draft => "Черновик",
+        LearningItemStatus::Active => "Активно",
+        LearningItemStatus::Archived => "Архив",
+        LearningItemStatus::Rejected => "Отклонено",
+    }
+}
+
+async fn complete_after_progress(
+    progress: &MoveReadingPositionCommand,
+    completion: &CompleteReadingScopeCommand,
+    csrf: &str,
+) -> Result<CompleteReadingResponse, String> {
+    put_json(
+        &format!("/materials/{}/progress", progress.material_id),
+        progress,
+        csrf,
+    )
+    .await?;
+    post_json(
+        &format!("/materials/{}/reading-completions", completion.material_id),
+        completion,
+        csrf,
+    )
+    .await
+}
+
+async fn update_offer(
+    offer: &LearningOffer,
+    action: LearningOfferAction,
+    csrf: &str,
+) -> Result<LearningOffer, String> {
+    patch_json(
+        &format!("/materials/{}/learning-settings", offer.source.material_id),
+        &UpdateLearningOfferCommand {
+            completion_id: offer.completion.id,
+            action,
+        },
+        csrf,
+    )
+    .await
+}
+
+async fn load_items(material_id: MaterialId) -> Result<LearningItemPage, String> {
+    get_json(&format!(
+        "/learning/items?material_id={material_id}&limit=100"
+    ))
+    .await
+}
+
+async fn create_item(
+    command: &CreateLearningItemCommand,
+    csrf: &str,
+) -> Result<LearningItem, String> {
+    post_json("/learning/items", command, csrf).await
+}
+
+async fn update_item(
+    item: &LearningItem,
+    command: CreateLearningItemCommand,
+    csrf: &str,
+) -> Result<LearningItem, String> {
+    patch_json(
+        &format!("/learning/items/{}", item.id),
+        &UpdateLearningItemCommand {
+            expected_revision: item.object_revision,
+            prompt: command.prompt,
+            answer_spec: command.answer_spec,
+            explanation: command.explanation,
+            source_anchor: command.source_anchor,
+        },
+        csrf,
+    )
+    .await
+}
+
+async fn change_status(
+    item: &LearningItem,
+    status: LearningItemStatus,
+    csrf: &str,
+) -> Result<LearningItem, String> {
+    post_json(
+        &format!(
+            "/learning/items/{}/{}",
+            item.id,
+            if status == LearningItemStatus::Active {
+                "activate"
+            } else {
+                "archive"
+            }
+        ),
+        &ChangeLearningItemStatusCommand {
+            expected_revision: item.object_revision,
+        },
+        csrf,
+    )
+    .await
+}
+
+async fn create_session(
+    source_id: LearningSourceId,
+    kind: LearningSessionKind,
+    csrf: &str,
+) -> Result<LearningSession, String> {
+    post_json(
+        "/learning/sessions",
+        &CreateLearningSessionCommand { source_id, kind },
+        csrf,
+    )
+    .await
+}
+
+async fn load_session(session_id: LearningSessionId) -> Result<LearningSession, String> {
+    get_json(&format!("/learning/sessions/{session_id}")).await
+}
+
+async fn load_item(item_id: Uuid) -> Result<LearningItem, String> {
+    get_json(&format!("/learning/items/{item_id}")).await
+}
+
+async fn transition_session(
+    session_id: LearningSessionId,
+    action: &str,
+    csrf: &str,
+) -> Result<LearningSession, String> {
+    post_empty(&format!("/learning/sessions/{session_id}/{action}"), csrf).await
+}
+
+async fn record_source_opened(
+    session_id: LearningSessionId,
+    item_id: Uuid,
+    csrf: &str,
+) -> Result<LearningSession, String> {
+    post_empty(
+        &format!("/learning/sessions/{session_id}/items/{item_id}/source-opened"),
+        csrf,
+    )
+    .await
+}
+
+async fn submit_attempt(
+    session_id: LearningSessionId,
+    item_id: Uuid,
+    command: &SubmitLearningAttemptCommand,
+    csrf: &str,
+) -> Result<LearningAttempt, String> {
+    post_json(
+        &format!("/learning/sessions/{session_id}/items/{item_id}/attempts"),
+        command,
+        csrf,
+    )
+    .await
+}
+
+async fn get_json<T: for<'de> serde::Deserialize<'de>>(path: &str) -> Result<T, String> {
+    let response = Request::get(&format!("{API_BASE}{path}"))
+        .credentials(RequestCredentials::Include)
+        .send()
+        .await
+        .map_err(|error| format!("Сеть/API недоступны: {error}"))?;
+    parse_response(response).await
+}
+
+async fn post_json<T: serde::Serialize, R: for<'de> serde::Deserialize<'de>>(
+    path: &str,
+    payload: &T,
+    csrf: &str,
+) -> Result<R, String> {
+    let request = Request::post(&format!("{API_BASE}{path}"))
+        .credentials(RequestCredentials::Include)
+        .header("X-Lumi-CSRF", csrf)
+        .header("Idempotency-Key", &Uuid::now_v7().to_string())
+        .json(payload)
+        .map_err(|error| error.to_string())?;
+    parse_response(request.send().await.map_err(|error| error.to_string())?).await
+}
+
+async fn put_json<T: serde::Serialize>(
+    path: &str,
+    payload: &T,
+    csrf: &str,
+) -> Result<serde_json::Value, String> {
+    let request = Request::put(&format!("{API_BASE}{path}"))
+        .credentials(RequestCredentials::Include)
+        .header("X-Lumi-CSRF", csrf)
+        .header("Idempotency-Key", &Uuid::now_v7().to_string())
+        .json(payload)
+        .map_err(|error| error.to_string())?;
+    parse_response(request.send().await.map_err(|error| error.to_string())?).await
+}
+
+async fn patch_json<T: serde::Serialize, R: for<'de> serde::Deserialize<'de>>(
+    path: &str,
+    payload: &T,
+    csrf: &str,
+) -> Result<R, String> {
+    let request = Request::patch(&format!("{API_BASE}{path}"))
+        .credentials(RequestCredentials::Include)
+        .header("X-Lumi-CSRF", csrf)
+        .header("Idempotency-Key", &Uuid::now_v7().to_string())
+        .json(payload)
+        .map_err(|error| error.to_string())?;
+    parse_response(request.send().await.map_err(|error| error.to_string())?).await
+}
+
+async fn post_empty<R: for<'de> serde::Deserialize<'de>>(
+    path: &str,
+    csrf: &str,
+) -> Result<R, String> {
+    let response = Request::post(&format!("{API_BASE}{path}"))
+        .credentials(RequestCredentials::Include)
+        .header("X-Lumi-CSRF", csrf)
+        .header("Idempotency-Key", &Uuid::now_v7().to_string())
+        .send()
+        .await
+        .map_err(|error| error.to_string())?;
+    parse_response(response).await
+}
+
+async fn parse_response<R: for<'de> serde::Deserialize<'de>>(
+    response: gloo_net::http::Response,
+) -> Result<R, String> {
+    if response.status() == 401 {
+        notify_session_expired();
+    }
+    if !response.ok() {
+        return Err(format!("Lumi API вернул HTTP {}.", response.status()));
+    }
+    response
+        .json()
+        .await
+        .map_err(|error| format!("Некорректный learning API response: {error}"))
+}

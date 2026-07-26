@@ -1,0 +1,1185 @@
+//! Platform-independent contracts for deterministic learning after reading.
+//!
+//! The module owns source identity, versioned items, immutable session
+//! snapshots, append-only attempts and deterministic grading. Persistence,
+//! HTTP and browser concerns stay outside `lumi-core`.
+
+use std::collections::HashSet;
+
+use serde::{Deserialize, Serialize};
+use thiserror::Error;
+use uuid::Uuid;
+
+use crate::{
+    content_hash, now_timestamp_ms, Anchor, DocumentRevisionId, MaterialId, TimestampMs, UserId,
+};
+
+/// Stable learning source identifier.
+pub type LearningSourceId = Uuid;
+/// Stable reading completion identifier.
+pub type ReadingCompletionId = Uuid;
+/// Stable learning item identifier.
+pub type LearningItemId = Uuid;
+/// Stable immutable item revision identifier.
+pub type LearningItemRevisionId = Uuid;
+/// Stable learning session identifier.
+pub type LearningSessionId = Uuid;
+/// Stable learning attempt identifier.
+pub type LearningAttemptId = Uuid;
+
+/// Immutable source scope used by learning items and sessions.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LearningScopeKind {
+    /// The complete immutable document revision.
+    Material,
+    /// One normalized content unit such as a chapter.
+    ContentUnit,
+    /// One exact source-backed anchor.
+    Anchor,
+}
+
+/// Immutable source identity for learning data.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct LearningSource {
+    /// Stable source id.
+    pub id: LearningSourceId,
+    /// Personal space containing the source.
+    pub space_id: Uuid,
+    /// Material containing the source.
+    pub material_id: MaterialId,
+    /// Exact immutable document revision.
+    pub document_revision_id: DocumentRevisionId,
+    /// Scope discriminator.
+    pub scope_kind: LearningScopeKind,
+    /// Deterministic deduplication key derived from revision and scope.
+    pub scope_key: String,
+    /// Normalized unit id for a content-unit scope.
+    pub content_unit_id: Option<String>,
+    /// Exact source anchor for an anchor scope.
+    pub anchor: Option<Anchor>,
+    /// Source revision hash.
+    pub source_hash: String,
+    /// Reader-facing source title.
+    pub title: String,
+    /// Creation timestamp.
+    pub created_at: TimestampMs,
+}
+
+impl LearningSource {
+    /// Build the stable hash used to deduplicate one revision-bound scope.
+    #[must_use]
+    pub fn scope_key(
+        revision_id: DocumentRevisionId,
+        scope_kind: LearningScopeKind,
+        content_unit_id: Option<&str>,
+        anchor: Option<&Anchor>,
+    ) -> String {
+        let anchor_json = anchor
+            .and_then(|value| serde_json::to_string(value).ok())
+            .unwrap_or_default();
+        content_hash(
+            format!(
+                "{revision_id}:{scope_kind:?}:{}:{anchor_json}",
+                content_unit_id.unwrap_or_default()
+            )
+            .as_bytes(),
+        )
+    }
+}
+
+/// Cause of an explicit reading completion.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReadingCompletionTrigger {
+    /// A reader adapter reached the semantic end of a scope.
+    ReaderBoundary,
+    /// The user explicitly marked the scope complete.
+    ExplicitUserAction,
+}
+
+/// Durable completion fixed before any optional learning offer.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct ReadingCompletion {
+    /// Stable completion id.
+    pub id: ReadingCompletionId,
+    /// Personal space containing this completion.
+    pub space_id: Uuid,
+    /// Account that completed the scope.
+    pub user_id: UserId,
+    /// Immutable source that was completed.
+    pub source_id: LearningSourceId,
+    /// Revision-bound completion generation.
+    pub completion_generation: u32,
+    /// Cause of completion.
+    pub trigger: ReadingCompletionTrigger,
+    /// Completion timestamp.
+    pub completed_at: TimestampMs,
+    /// Timestamp at which the optional offer was dismissed.
+    pub offer_dismissed_at: Option<TimestampMs>,
+    /// Timestamp at which this generation was first delivered to a reader.
+    pub offer_presented_at: Option<TimestampMs>,
+}
+
+/// Command emitted by a semantic reader boundary.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct CompleteReadingScopeCommand {
+    /// Material containing the completed scope.
+    pub material_id: MaterialId,
+    /// Exact active revision rendered by the reader.
+    pub revision_id: DocumentRevisionId,
+    /// Completed scope kind.
+    pub scope_kind: LearningScopeKind,
+    /// Normalized unit id for a content-unit scope.
+    pub content_unit_id: Option<String>,
+    /// Source-backed anchor for an exact anchor scope.
+    pub anchor: Option<Anchor>,
+    /// Cause of completion.
+    pub trigger: ReadingCompletionTrigger,
+}
+
+impl CompleteReadingScopeCommand {
+    /// Validate the scope shape without relying on a DOM or platform handle.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`LearningValidationError`] when scope-specific fields are
+    /// missing, contradictory or target another revision.
+    pub fn validate(&self) -> Result<(), LearningValidationError> {
+        match self.scope_kind {
+            LearningScopeKind::Material => {
+                if self.content_unit_id.is_some() || self.anchor.is_some() {
+                    return Err(LearningValidationError::InvalidScope);
+                }
+            }
+            LearningScopeKind::ContentUnit => {
+                if self
+                    .content_unit_id
+                    .as_deref()
+                    .is_none_or(|value| value.trim().is_empty())
+                    || self.anchor.is_some()
+                {
+                    return Err(LearningValidationError::InvalidScope);
+                }
+            }
+            LearningScopeKind::Anchor => {
+                let anchor = self
+                    .anchor
+                    .as_ref()
+                    .ok_or(LearningValidationError::InvalidScope)?;
+                if self.content_unit_id.is_some()
+                    || anchor.revision_id != self.revision_id
+                    || anchor.node_path.is_empty()
+                {
+                    return Err(LearningValidationError::InvalidScope);
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+/// One answer option with a stable identifier.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct LearningOption {
+    /// Stable option identifier within one item revision.
+    pub id: String,
+    /// User-visible option label.
+    pub label: String,
+}
+
+/// Typed authoritative answer definition for one item revision.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum LearningAnswerSpec {
+    /// Exactly one option is correct.
+    SingleChoice {
+        /// Available options.
+        options: Vec<LearningOption>,
+        /// Correct option id.
+        correct_option_id: String,
+    },
+    /// One or more options are correct.
+    MultipleChoice {
+        /// Available options.
+        options: Vec<LearningOption>,
+        /// Complete set of correct option ids.
+        correct_option_ids: Vec<String>,
+    },
+    /// Boolean answer.
+    TrueFalse {
+        /// Authoritative boolean value.
+        correct: bool,
+    },
+    /// Open answer graded by explicit user self-check in deterministic mode.
+    OpenSelfCheck {
+        /// Sample answer shown only after recall.
+        sample_answer: String,
+    },
+    /// Flashcard back shown only after recall.
+    Flashcard {
+        /// Card back.
+        back: String,
+    },
+    /// Text with one or more accepted normalized answers.
+    Cloze {
+        /// Accepted answers after whitespace and case normalization.
+        accepted_answers: Vec<String>,
+    },
+    /// Hinted question using deterministic self-check in the E1 slice.
+    HintedSelfCheck {
+        /// Sample answer shown after recall.
+        sample_answer: String,
+    },
+    /// Explain-back prompt reserved for the later AI vertical.
+    ExplainBack,
+    /// Non-graded reflection prompt.
+    Reflection,
+}
+
+impl LearningAnswerSpec {
+    /// Validate internal option and answer invariants.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`LearningValidationError`] for empty, duplicate or dangling
+    /// answer definitions.
+    pub fn validate(&self) -> Result<(), LearningValidationError> {
+        match self {
+            Self::SingleChoice {
+                options,
+                correct_option_id,
+            } => {
+                validate_options(options)?;
+                if !options.iter().any(|option| option.id == *correct_option_id) {
+                    return Err(LearningValidationError::UnknownCorrectOption);
+                }
+            }
+            Self::MultipleChoice {
+                options,
+                correct_option_ids,
+            } => {
+                validate_options(options)?;
+                let correct = correct_option_ids.iter().collect::<HashSet<_>>();
+                if correct.is_empty()
+                    || correct.len() != correct_option_ids.len()
+                    || correct
+                        .iter()
+                        .any(|id| !options.iter().any(|option| option.id == ***id))
+                {
+                    return Err(LearningValidationError::UnknownCorrectOption);
+                }
+            }
+            Self::OpenSelfCheck { sample_answer }
+            | Self::Flashcard {
+                back: sample_answer,
+            }
+            | Self::HintedSelfCheck { sample_answer } => {
+                if sample_answer.trim().is_empty() {
+                    return Err(LearningValidationError::EmptyAnswer);
+                }
+            }
+            Self::Cloze { accepted_answers } => {
+                if accepted_answers.is_empty()
+                    || accepted_answers
+                        .iter()
+                        .any(|answer| answer.trim().is_empty())
+                {
+                    return Err(LearningValidationError::EmptyAnswer);
+                }
+            }
+            Self::TrueFalse { .. } | Self::ExplainBack | Self::Reflection => {}
+        }
+        Ok(())
+    }
+
+    /// Return a presentation-safe answer shape without authoritative answers.
+    #[must_use]
+    pub fn presentation(&self) -> LearningAnswerPresentation {
+        match self {
+            Self::SingleChoice { options, .. } => LearningAnswerPresentation::SingleChoice {
+                options: options.clone(),
+            },
+            Self::MultipleChoice { options, .. } => LearningAnswerPresentation::MultipleChoice {
+                options: options.clone(),
+            },
+            Self::TrueFalse { .. } => LearningAnswerPresentation::TrueFalse,
+            Self::OpenSelfCheck { .. } => LearningAnswerPresentation::OpenText,
+            Self::Flashcard { .. } => LearningAnswerPresentation::Flashcard,
+            Self::Cloze { .. } => LearningAnswerPresentation::Cloze,
+            Self::HintedSelfCheck { .. } => LearningAnswerPresentation::OpenText,
+            Self::ExplainBack => LearningAnswerPresentation::ExplainBack,
+            Self::Reflection => LearningAnswerPresentation::Reflection,
+        }
+    }
+}
+
+fn validate_options(options: &[LearningOption]) -> Result<(), LearningValidationError> {
+    let ids = options
+        .iter()
+        .map(|option| &option.id)
+        .collect::<HashSet<_>>();
+    if options.len() < 2
+        || ids.len() != options.len()
+        || options
+            .iter()
+            .any(|option| option.id.trim().is_empty() || option.label.trim().is_empty())
+    {
+        return Err(LearningValidationError::InvalidOptions);
+    }
+    Ok(())
+}
+
+/// Presentation-safe answer input rendered by a session client.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum LearningAnswerPresentation {
+    /// Radio-style option input.
+    SingleChoice {
+        /// Available options.
+        options: Vec<LearningOption>,
+    },
+    /// Checkbox-style option input.
+    MultipleChoice {
+        /// Available options.
+        options: Vec<LearningOption>,
+    },
+    /// Boolean input.
+    TrueFalse,
+    /// Free-form text followed by explicit self-check.
+    OpenText,
+    /// Flashcard reveal and self-check.
+    Flashcard,
+    /// Bounded text input.
+    Cloze,
+    /// Explain-back input reserved for the AI vertical.
+    ExplainBack,
+    /// Non-graded text reflection.
+    Reflection,
+}
+
+/// Supported learning item family.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LearningItemKind {
+    /// Single-choice quiz.
+    QuizSingleChoice,
+    /// Multiple-choice quiz.
+    QuizMultipleChoice,
+    /// True/false quiz.
+    QuizTrueFalse,
+    /// Open question.
+    OpenQuestion,
+    /// Front/back flashcard.
+    Flashcard,
+    /// Cloze item.
+    Cloze,
+    /// Question with ordered hints.
+    HintedQuestion,
+    /// Explain-back prompt.
+    ExplainBackPrompt,
+    /// Non-graded reflection.
+    ReflectionPrompt,
+}
+
+/// Lifecycle state of a learning item.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LearningItemStatus {
+    /// Editable item not selected for ordinary sessions.
+    Draft,
+    /// Item available to sessions.
+    Active,
+    /// Item retained in history but not selected.
+    Archived,
+    /// Invalid or explicitly rejected generated item.
+    Rejected,
+}
+
+/// Origin of a learning item.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LearningItemOrigin {
+    /// Created by the account owner.
+    User,
+    /// Supplied by a material author.
+    Author,
+    /// Generated by an AI artifact workflow.
+    AiGenerated,
+    /// Converted from a personal annotation.
+    ConvertedAnnotation,
+}
+
+/// Immutable editable payload shown in one session snapshot.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct LearningItemRevision {
+    /// Stable revision id.
+    pub id: LearningItemRevisionId,
+    /// Parent item id.
+    pub item_id: LearningItemId,
+    /// Monotonic revision number.
+    pub revision: u64,
+    /// User-visible prompt.
+    pub prompt: String,
+    /// Typed answer definition.
+    pub answer_spec: LearningAnswerSpec,
+    /// Feedback explanation shown after submission.
+    pub explanation: String,
+    /// Optional exact source anchor.
+    pub source_anchor: Option<Anchor>,
+    /// Creation timestamp.
+    pub created_at: TimestampMs,
+}
+
+impl LearningItemRevision {
+    /// Validate prompt, answer and source revision invariants.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`LearningValidationError`] when the revision cannot be shown or
+    /// graded safely.
+    pub fn validate(
+        &self,
+        source_revision_id: DocumentRevisionId,
+    ) -> Result<(), LearningValidationError> {
+        if self.prompt.trim().is_empty() {
+            return Err(LearningValidationError::EmptyPrompt);
+        }
+        self.answer_spec.validate()?;
+        if self
+            .source_anchor
+            .as_ref()
+            .is_some_and(|anchor| anchor.revision_id != source_revision_id)
+        {
+            return Err(LearningValidationError::SourceRevisionMismatch);
+        }
+        Ok(())
+    }
+}
+
+/// Versioned learning item identity.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct LearningItem {
+    /// Stable item id.
+    pub id: LearningItemId,
+    /// Immutable source id.
+    pub source_id: LearningSourceId,
+    /// Exercise family.
+    pub kind: LearningItemKind,
+    /// Lifecycle state.
+    pub status: LearningItemStatus,
+    /// Item origin.
+    pub origin: LearningItemOrigin,
+    /// Current immutable revision.
+    pub current_revision: LearningItemRevision,
+    /// Optimistic object revision.
+    pub object_revision: u64,
+    /// Creation timestamp.
+    pub created_at: TimestampMs,
+    /// Last metadata or revision update timestamp.
+    pub updated_at: TimestampMs,
+}
+
+/// Command for creating a versioned item.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct CreateLearningItemCommand {
+    /// Existing immutable source id.
+    pub source_id: LearningSourceId,
+    /// Exercise family.
+    pub kind: LearningItemKind,
+    /// Initial lifecycle state.
+    pub status: LearningItemStatus,
+    /// User-visible prompt.
+    pub prompt: String,
+    /// Typed answer definition.
+    pub answer_spec: LearningAnswerSpec,
+    /// Feedback explanation.
+    pub explanation: String,
+    /// Optional source anchor.
+    pub source_anchor: Option<Anchor>,
+}
+
+/// Command for creating a new immutable revision.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct UpdateLearningItemCommand {
+    /// Expected optimistic object revision.
+    pub expected_revision: u64,
+    /// Replacement prompt.
+    pub prompt: String,
+    /// Replacement typed answer definition.
+    pub answer_spec: LearningAnswerSpec,
+    /// Replacement feedback explanation.
+    pub explanation: String,
+    /// Replacement optional source anchor.
+    pub source_anchor: Option<Anchor>,
+}
+
+/// Cursor-paginated item list.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct LearningItemPage {
+    /// Items in stable id order.
+    pub items: Vec<LearningItem>,
+    /// Opaque cursor for the next page.
+    pub next_cursor: Option<String>,
+}
+
+/// Item lifecycle mutation.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct ChangeLearningItemStatusCommand {
+    /// Expected optimistic object revision.
+    pub expected_revision: u64,
+}
+
+/// Optional learning offer projected from a durable completion.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct LearningOffer {
+    /// Completed immutable source.
+    pub source: LearningSource,
+    /// Durable completion created before this projection.
+    pub completion: ReadingCompletion,
+    /// Number of active source-matching items.
+    pub active_item_count: usize,
+    /// Whether the reader should display this generation automatically.
+    pub should_offer: bool,
+    /// Whether automatic offers remain enabled for the material.
+    pub offers_enabled: bool,
+}
+
+/// Completion response returned after the completion write commits.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct CompleteReadingResponse {
+    /// Optional offer projected after the completion commit.
+    pub offer: LearningOffer,
+    /// Whether this command created the completion instead of deduplicating it.
+    pub created: bool,
+}
+
+/// Reader offer action that does not affect reading progress.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LearningOfferAction {
+    /// Dismiss this completion generation.
+    NotNow,
+    /// Dismiss this generation while preserving later scheduling options.
+    RemindLater,
+    /// Disable automatic completion offers for this material.
+    DisableMaterialOffers,
+}
+
+/// Command for dismissing or disabling a learning offer.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct UpdateLearningOfferCommand {
+    /// Completion whose offer is being handled.
+    pub completion_id: ReadingCompletionId,
+    /// Selected action.
+    pub action: LearningOfferAction,
+}
+
+/// Supported learning session kind.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LearningSessionKind {
+    /// Immediate recall after reading.
+    ImmediateRecall,
+    /// Scheduled review reserved for E2.
+    ScheduledReview,
+    /// Explain-back reserved for E3.
+    ExplainBack,
+    /// User-launched practice.
+    ManualPractice,
+}
+
+/// Durable learning session lifecycle.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LearningSessionState {
+    /// Session exists but has not started.
+    Offered,
+    /// Session has at least been opened.
+    InProgress,
+    /// User completed the bounded session.
+    Completed,
+    /// Optional offered session was dismissed.
+    Dismissed,
+    /// User explicitly stopped the session.
+    Abandoned,
+}
+
+/// Immutable presentation snapshot for one session position.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct LearningSessionItem {
+    /// Stable item identity.
+    pub item_id: LearningItemId,
+    /// Exact immutable item revision shown.
+    pub item_revision_id: LearningItemRevisionId,
+    /// Stable zero-based order.
+    pub position: u16,
+    /// Exercise family.
+    pub kind: LearningItemKind,
+    /// User-visible prompt.
+    pub prompt: String,
+    /// Presentation-safe answer input.
+    pub answer: LearningAnswerPresentation,
+    /// Exact source anchor available for source navigation.
+    pub source_anchor: Option<Anchor>,
+}
+
+/// User answer payload submitted to deterministic grading.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum LearningAnswer {
+    /// One selected option id.
+    SingleChoice {
+        /// Selected option id.
+        option_id: String,
+    },
+    /// Selected option ids.
+    MultipleChoice {
+        /// Selected option ids.
+        option_ids: Vec<String>,
+    },
+    /// Boolean answer.
+    TrueFalse {
+        /// Selected value.
+        value: bool,
+    },
+    /// Free-form text answer.
+    Text {
+        /// Submitted text.
+        text: String,
+    },
+    /// Explicit reveal without a textual answer, used by flashcards.
+    Revealed,
+}
+
+/// Explicit deterministic self-check rating.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SelfCheckRating {
+    /// The recalled answer matched the revealed answer.
+    Recalled,
+    /// The recalled answer was materially incomplete.
+    Partial,
+    /// The answer was not recalled.
+    NotRecalled,
+}
+
+/// Deterministic attempt outcome.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LearningAttemptOutcome {
+    /// Authoritative closed answer matched.
+    Correct,
+    /// Authoritative closed answer did not match.
+    Incorrect,
+    /// User supplied an explicit self-check rating.
+    SelfChecked,
+    /// Reflection or a later-capability item was intentionally not graded.
+    NotGraded,
+}
+
+/// Feedback returned only after an answer has been submitted.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct LearningFeedback {
+    /// Deterministic outcome.
+    pub outcome: LearningAttemptOutcome,
+    /// Concise user-facing result.
+    pub message: String,
+    /// Correct option labels or sample answers revealed after recall.
+    pub correct_answers: Vec<String>,
+    /// Item explanation.
+    pub explanation: String,
+}
+
+/// Append-only durable learning attempt.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct LearningAttempt {
+    /// Stable attempt id.
+    pub id: LearningAttemptId,
+    /// Parent session.
+    pub session_id: LearningSessionId,
+    /// Item identity.
+    pub item_id: LearningItemId,
+    /// Exact immutable item revision shown.
+    pub item_revision_id: LearningItemRevisionId,
+    /// Submitted answer.
+    pub answer: LearningAnswer,
+    /// Optional explicit self-check rating.
+    pub self_check: Option<SelfCheckRating>,
+    /// Deterministic feedback.
+    pub feedback: LearningFeedback,
+    /// Client-measured elapsed time, bounded by the server.
+    pub elapsed_ms: u64,
+    /// Whether the source was opened before submission.
+    pub source_opened: bool,
+    /// Creation timestamp.
+    pub created_at: TimestampMs,
+}
+
+/// Durable learning session with immutable items and append-only attempts.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct LearningSession {
+    /// Stable session id.
+    pub id: LearningSessionId,
+    /// Account owning the session.
+    pub user_id: UserId,
+    /// Immutable learning source.
+    pub source: LearningSource,
+    /// Session kind.
+    pub kind: LearningSessionKind,
+    /// Lifecycle state.
+    pub state: LearningSessionState,
+    /// Immutable ordered item snapshots.
+    pub items: Vec<LearningSessionItem>,
+    /// Append-only attempts made in this session.
+    pub attempts: Vec<LearningAttempt>,
+    /// Creation timestamp.
+    pub created_at: TimestampMs,
+    /// Last lifecycle or attempt update timestamp.
+    pub updated_at: TimestampMs,
+}
+
+impl LearningSession {
+    /// Start an offered session idempotently.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`LearningValidationError`] for terminal sessions.
+    pub fn start(&mut self) -> Result<(), LearningValidationError> {
+        match self.state {
+            LearningSessionState::Offered | LearningSessionState::InProgress => {
+                self.state = LearningSessionState::InProgress;
+                self.updated_at = now_timestamp_ms();
+                Ok(())
+            }
+            LearningSessionState::Completed
+            | LearningSessionState::Dismissed
+            | LearningSessionState::Abandoned => {
+                Err(LearningValidationError::InvalidSessionTransition)
+            }
+        }
+    }
+
+    /// Complete a started session without grading unanswered items.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`LearningValidationError`] unless the session is in progress.
+    pub fn complete(&mut self) -> Result<(), LearningValidationError> {
+        if self.state != LearningSessionState::InProgress {
+            return Err(LearningValidationError::InvalidSessionTransition);
+        }
+        self.state = LearningSessionState::Completed;
+        self.updated_at = now_timestamp_ms();
+        Ok(())
+    }
+
+    /// Stop a non-terminal session without grading unanswered items.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`LearningValidationError`] for terminal sessions.
+    pub fn abandon(&mut self) -> Result<(), LearningValidationError> {
+        if matches!(
+            self.state,
+            LearningSessionState::Completed
+                | LearningSessionState::Dismissed
+                | LearningSessionState::Abandoned
+        ) {
+            return Err(LearningValidationError::InvalidSessionTransition);
+        }
+        self.state = LearningSessionState::Abandoned;
+        self.updated_at = now_timestamp_ms();
+        Ok(())
+    }
+}
+
+/// Command for creating a bounded source-backed session.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct CreateLearningSessionCommand {
+    /// Source whose active items should be snapshotted.
+    pub source_id: LearningSourceId,
+    /// Session kind.
+    pub kind: LearningSessionKind,
+}
+
+/// Command for one idempotent answer submission.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct SubmitLearningAttemptCommand {
+    /// Submitted answer.
+    pub answer: LearningAnswer,
+    /// Explicit rating required by self-check item families.
+    pub self_check: Option<SelfCheckRating>,
+    /// Client-measured elapsed time.
+    pub elapsed_ms: u64,
+}
+
+/// Evidence command recorded when the user opens the source before answering.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct RecordLearningSourceOpenedCommand {
+    /// Item whose source was opened.
+    pub item_id: LearningItemId,
+}
+
+/// Deterministically grade one answer against an immutable item revision.
+///
+/// # Errors
+///
+/// Returns [`LearningValidationError`] for a mismatched answer shape, missing
+/// self-check rating or empty text.
+pub fn grade_learning_answer(
+    revision: &LearningItemRevision,
+    answer: &LearningAnswer,
+    self_check: Option<SelfCheckRating>,
+) -> Result<LearningFeedback, LearningValidationError> {
+    revision.answer_spec.validate()?;
+    let (outcome, correct_answers, message) = match (&revision.answer_spec, answer) {
+        (
+            LearningAnswerSpec::SingleChoice {
+                options,
+                correct_option_id,
+            },
+            LearningAnswer::SingleChoice { option_id },
+        ) => {
+            if !options.iter().any(|option| option.id == *option_id) {
+                return Err(LearningValidationError::InvalidAnswer);
+            }
+            let correct = option_id == correct_option_id;
+            (
+                correctness_outcome(correct),
+                option_labels(options, std::slice::from_ref(correct_option_id)),
+                correctness_message(correct),
+            )
+        }
+        (
+            LearningAnswerSpec::MultipleChoice {
+                options,
+                correct_option_ids,
+            },
+            LearningAnswer::MultipleChoice { option_ids },
+        ) => {
+            let selected = option_ids.iter().collect::<HashSet<_>>();
+            if selected.len() != option_ids.len()
+                || selected
+                    .iter()
+                    .any(|id| !options.iter().any(|option| option.id == ***id))
+            {
+                return Err(LearningValidationError::InvalidAnswer);
+            }
+            let expected = correct_option_ids.iter().collect::<HashSet<_>>();
+            let correct = selected == expected;
+            (
+                correctness_outcome(correct),
+                option_labels(options, correct_option_ids),
+                correctness_message(correct),
+            )
+        }
+        (LearningAnswerSpec::TrueFalse { correct }, LearningAnswer::TrueFalse { value }) => {
+            let is_correct = correct == value;
+            (
+                correctness_outcome(is_correct),
+                vec![if *correct {
+                    "Верно"
+                } else {
+                    "Неверно"
+                }
+                .to_owned()],
+                correctness_message(is_correct),
+            )
+        }
+        (LearningAnswerSpec::Cloze { accepted_answers }, LearningAnswer::Text { text }) => {
+            let normalized = normalize_answer(text)?;
+            let correct = accepted_answers
+                .iter()
+                .filter_map(|candidate| normalize_answer(candidate).ok())
+                .any(|candidate| candidate == normalized);
+            (
+                correctness_outcome(correct),
+                accepted_answers.clone(),
+                correctness_message(correct),
+            )
+        }
+        (
+            LearningAnswerSpec::OpenSelfCheck { sample_answer }
+            | LearningAnswerSpec::HintedSelfCheck { sample_answer },
+            LearningAnswer::Text { text },
+        ) => {
+            normalize_answer(text)?;
+            (
+                self_checked_outcome(self_check)?,
+                vec![sample_answer.clone()],
+                "Самопроверка сохранена.".to_owned(),
+            )
+        }
+        (LearningAnswerSpec::Flashcard { back }, LearningAnswer::Revealed) => (
+            self_checked_outcome(self_check)?,
+            vec![back.clone()],
+            "Самопроверка сохранена.".to_owned(),
+        ),
+        (LearningAnswerSpec::Reflection, LearningAnswer::Text { text }) => {
+            normalize_answer(text)?;
+            (
+                LearningAttemptOutcome::NotGraded,
+                Vec::new(),
+                "Ответ сохранён без оценки.".to_owned(),
+            )
+        }
+        (LearningAnswerSpec::ExplainBack, LearningAnswer::Text { text }) => {
+            normalize_answer(text)?;
+            (
+                LearningAttemptOutcome::NotGraded,
+                Vec::new(),
+                "Ответ сохранён без AI-оценки.".to_owned(),
+            )
+        }
+        _ => return Err(LearningValidationError::InvalidAnswer),
+    };
+
+    Ok(LearningFeedback {
+        outcome,
+        message,
+        correct_answers,
+        explanation: revision.explanation.clone(),
+    })
+}
+
+fn correctness_outcome(correct: bool) -> LearningAttemptOutcome {
+    if correct {
+        LearningAttemptOutcome::Correct
+    } else {
+        LearningAttemptOutcome::Incorrect
+    }
+}
+
+fn correctness_message(correct: bool) -> String {
+    if correct {
+        "Верно.".to_owned()
+    } else {
+        "Ответ не совпал. Сверьтесь с источником и объяснением.".to_owned()
+    }
+}
+
+fn self_checked_outcome(
+    self_check: Option<SelfCheckRating>,
+) -> Result<LearningAttemptOutcome, LearningValidationError> {
+    self_check
+        .map(|_| LearningAttemptOutcome::SelfChecked)
+        .ok_or(LearningValidationError::SelfCheckRequired)
+}
+
+fn option_labels(options: &[LearningOption], ids: &[String]) -> Vec<String> {
+    ids.iter()
+        .filter_map(|id| {
+            options
+                .iter()
+                .find(|option| option.id == *id)
+                .map(|option| option.label.clone())
+        })
+        .collect()
+}
+
+fn normalize_answer(answer: &str) -> Result<String, LearningValidationError> {
+    let normalized = answer.split_whitespace().collect::<Vec<_>>().join(" ");
+    if normalized.is_empty() {
+        Err(LearningValidationError::EmptyAnswer)
+    } else {
+        Ok(normalized.to_lowercase())
+    }
+}
+
+/// Scheduling input contract implemented by the later FSRS adapter.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct SchedulerReview {
+    /// Attempt outcome.
+    pub outcome: LearningAttemptOutcome,
+    /// Explicit self-check rating, when present.
+    pub self_check: Option<SelfCheckRating>,
+    /// Whether source assistance was used.
+    pub source_opened: bool,
+}
+
+/// Versioned scheduler output stored outside core.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SchedulerDecision {
+    /// Algorithm identifier.
+    pub algorithm: String,
+    /// Algorithm version.
+    pub version: String,
+    /// Next due timestamp.
+    pub due_at: TimestampMs,
+    /// Opaque versioned algorithm state.
+    pub payload: serde_json::Value,
+}
+
+/// Replaceable scheduling boundary without PostgreSQL or UI dependencies.
+pub trait Scheduler: Send + Sync {
+    /// Produce the next schedule state from explicit review evidence.
+    ///
+    /// # Errors
+    ///
+    /// Implementations return [`LearningValidationError`] when evidence or
+    /// algorithm state cannot be processed safely.
+    fn review(&self, review: SchedulerReview)
+        -> Result<SchedulerDecision, LearningValidationError>;
+}
+
+/// Validation errors shared by core, API and clients.
+#[derive(Clone, Copy, Debug, Eq, Error, PartialEq)]
+pub enum LearningValidationError {
+    /// Scope-specific fields are missing or contradictory.
+    #[error("learning source scope is invalid")]
+    InvalidScope,
+    /// Prompt is empty.
+    #[error("learning item prompt is empty")]
+    EmptyPrompt,
+    /// Answer or sample answer is empty.
+    #[error("learning answer is empty")]
+    EmptyAnswer,
+    /// Options are empty, duplicated or malformed.
+    #[error("learning options are invalid")]
+    InvalidOptions,
+    /// Authoritative answer refers to a missing option.
+    #[error("correct answer refers to an unknown option")]
+    UnknownCorrectOption,
+    /// Source anchor targets another revision.
+    #[error("source anchor targets another revision")]
+    SourceRevisionMismatch,
+    /// Submitted answer does not match the expected input shape.
+    #[error("submitted answer is invalid for this item")]
+    InvalidAnswer,
+    /// Open answer or flashcard requires an explicit self-check.
+    #[error("self-check rating is required")]
+    SelfCheckRequired,
+    /// Session lifecycle transition is invalid.
+    #[error("learning session transition is invalid")]
+    InvalidSessionTransition,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn revision(answer_spec: LearningAnswerSpec) -> LearningItemRevision {
+        LearningItemRevision {
+            id: Uuid::now_v7(),
+            item_id: Uuid::now_v7(),
+            revision: 1,
+            prompt: "Проверка".to_owned(),
+            answer_spec,
+            explanation: "Пояснение".to_owned(),
+            source_anchor: None,
+            created_at: 1,
+        }
+    }
+
+    #[test]
+    fn single_choice_grading_is_deterministic() -> Result<(), LearningValidationError> {
+        let item = revision(LearningAnswerSpec::SingleChoice {
+            options: vec![
+                LearningOption {
+                    id: "a".to_owned(),
+                    label: "A".to_owned(),
+                },
+                LearningOption {
+                    id: "b".to_owned(),
+                    label: "B".to_owned(),
+                },
+            ],
+            correct_option_id: "b".to_owned(),
+        });
+
+        let feedback = grade_learning_answer(
+            &item,
+            &LearningAnswer::SingleChoice {
+                option_id: "b".to_owned(),
+            },
+            None,
+        )?;
+
+        assert_eq!(feedback.outcome, LearningAttemptOutcome::Correct);
+        Ok(())
+    }
+
+    #[test]
+    fn multiple_choice_requires_the_exact_set() -> Result<(), LearningValidationError> {
+        let item = revision(LearningAnswerSpec::MultipleChoice {
+            options: vec![
+                LearningOption {
+                    id: "a".to_owned(),
+                    label: "A".to_owned(),
+                },
+                LearningOption {
+                    id: "b".to_owned(),
+                    label: "B".to_owned(),
+                },
+                LearningOption {
+                    id: "c".to_owned(),
+                    label: "C".to_owned(),
+                },
+            ],
+            correct_option_ids: vec!["a".to_owned(), "c".to_owned()],
+        });
+
+        let feedback = grade_learning_answer(
+            &item,
+            &LearningAnswer::MultipleChoice {
+                option_ids: vec!["a".to_owned()],
+            },
+            None,
+        )?;
+
+        assert_eq!(feedback.outcome, LearningAttemptOutcome::Incorrect);
+        Ok(())
+    }
+
+    #[test]
+    fn open_answer_requires_explicit_self_check() {
+        let item = revision(LearningAnswerSpec::OpenSelfCheck {
+            sample_answer: "Ожидаемые понятия".to_owned(),
+        });
+
+        let result = grade_learning_answer(
+            &item,
+            &LearningAnswer::Text {
+                text: "Мой ответ".to_owned(),
+            },
+            None,
+        );
+
+        assert_eq!(result, Err(LearningValidationError::SelfCheckRequired));
+    }
+
+    #[test]
+    fn completing_session_does_not_create_attempts_for_unanswered_items(
+    ) -> Result<(), LearningValidationError> {
+        let mut session = LearningSession {
+            id: Uuid::now_v7(),
+            user_id: Uuid::now_v7(),
+            source: LearningSource {
+                id: Uuid::now_v7(),
+                space_id: Uuid::now_v7(),
+                material_id: Uuid::now_v7(),
+                document_revision_id: Uuid::now_v7(),
+                scope_kind: LearningScopeKind::Material,
+                scope_key: "scope".to_owned(),
+                content_unit_id: None,
+                anchor: None,
+                source_hash: "hash".to_owned(),
+                title: "Source".to_owned(),
+                created_at: 1,
+            },
+            kind: LearningSessionKind::ImmediateRecall,
+            state: LearningSessionState::Offered,
+            items: Vec::new(),
+            attempts: Vec::new(),
+            created_at: 1,
+            updated_at: 1,
+        };
+
+        session.start()?;
+        session.complete()?;
+
+        assert!(session.attempts.is_empty());
+        Ok(())
+    }
+}
