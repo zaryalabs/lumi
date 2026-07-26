@@ -506,6 +506,11 @@ fn request_from_query(query: SearchQuery) -> Result<SearchRequest, AppError> {
         },
         Some(_) => return Err(AppError::BadRequest("unknown search scope".to_owned())),
     };
+    let ranking = match scope {
+        SearchScope::Material { .. } => SearchRankingProfile::Reader,
+        SearchScope::Records => SearchRankingProfile::Records,
+        SearchScope::Personal => SearchRankingProfile::Global,
+    };
     Ok(SearchRequest {
         query: query.q,
         scope,
@@ -514,7 +519,7 @@ fn request_from_query(query: SearchQuery) -> Result<SearchRequest, AppError> {
             .tag
             .map(|tags| tags.split(',').map(str::to_owned).collect())
             .unwrap_or_default(),
-        ranking: SearchRankingProfile::Global,
+        ranking,
         cursor: query.cursor,
         limit: query.limit.unwrap_or(DEFAULT_PAGE_SIZE),
     })

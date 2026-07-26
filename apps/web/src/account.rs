@@ -18,99 +18,15 @@ use wasm_bindgen::JsCast;
 use wasm_bindgen_futures::JsFuture;
 use web_sys::RequestCredentials;
 
+use crate::routing::{
+    browser_requests_system_settings, initial_route, set_browser_route, AppRoute, DeskRoute,
+    SearchRoute,
+};
+
 pub(crate) const API_BASE: &str = match option_env!("LUMI_API_BASE") {
     Some(value) => value,
     None => "/api/v1",
 };
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum AppRoute {
-    Library,
-    Challenges,
-    AiQueue,
-    Connections,
-    Settings,
-    Reader(Uuid, Option<Uuid>),
-    LearningSession(Uuid),
-    MaterialLearning(Uuid, Option<Uuid>),
-}
-
-fn initial_route() -> AppRoute {
-    let hash = web_sys::window()
-        .and_then(|window| window.location().hash().ok())
-        .unwrap_or_default();
-    if hash == "#settings" {
-        return AppRoute::Settings;
-    }
-    if hash == "#challenges" {
-        return AppRoute::Challenges;
-    }
-    if hash == "#connections" {
-        return AppRoute::Connections;
-    }
-    if hash == "#ai-queue" {
-        return AppRoute::AiQueue;
-    }
-    if let Some(value) = hash.strip_prefix("#learn/session/") {
-        return Uuid::parse_str(value)
-            .map(AppRoute::LearningSession)
-            .unwrap_or(AppRoute::Library);
-    }
-    if let Some(value) = hash.strip_prefix("#material/") {
-        if let Some((material, query)) = value.split_once("/learning") {
-            let source_id = query
-                .strip_prefix("?source=")
-                .and_then(|id| Uuid::parse_str(id).ok());
-            return Uuid::parse_str(material)
-                .map(|id| AppRoute::MaterialLearning(id, source_id))
-                .unwrap_or(AppRoute::Library);
-        }
-    }
-    hash.strip_prefix("#reader/")
-        .and_then(parse_reader_route)
-        .map_or(AppRoute::Library, |(material_id, return_to)| {
-            AppRoute::Reader(material_id, return_to)
-        })
-}
-
-fn set_browser_route(route: AppRoute) {
-    let hash = match route {
-        AppRoute::Library => "library".to_owned(),
-        AppRoute::Challenges => "challenges".to_owned(),
-        AppRoute::AiQueue => "ai-queue".to_owned(),
-        AppRoute::Connections => "connections".to_owned(),
-        AppRoute::Settings => "settings".to_owned(),
-        AppRoute::Reader(material_id, return_to) => return_to.map_or_else(
-            || format!("reader/{material_id}"),
-            |session_id| format!("reader/{material_id}?return_to={session_id}"),
-        ),
-        AppRoute::LearningSession(session_id) => format!("learn/session/{session_id}"),
-        AppRoute::MaterialLearning(material_id, source_id) => source_id.map_or_else(
-            || format!("material/{material_id}/learning"),
-            |source_id| format!("material/{material_id}/learning?source={source_id}"),
-        ),
-    };
-    if let Some(window) = web_sys::window() {
-        let _ = window.location().set_hash(&hash);
-    }
-}
-
-fn parse_reader_route(value: &str) -> Option<(Uuid, Option<Uuid>)> {
-    let (material, query) = value
-        .split_once('?')
-        .map_or((value, None), |(material, query)| (material, Some(query)));
-    let material_id = Uuid::parse_str(material).ok()?;
-    let return_to = query
-        .and_then(|query| query.strip_prefix("return_to="))
-        .and_then(|id| Uuid::parse_str(id).ok());
-    Some((material_id, return_to))
-}
-
-fn browser_requests_system_settings() -> bool {
-    web_sys::window()
-        .and_then(|window| window.location().hash().ok())
-        .is_some_and(|hash| hash == "#settings")
-}
 
 #[derive(Clone)]
 enum AccountState {
@@ -173,9 +89,11 @@ pub(crate) fn AccountGate() -> Element {
             AppRoute::AiQueue => "AI-задачи — Lumi",
             AppRoute::Connections => "Подключения — Lumi",
             AppRoute::Settings => "Администрирование — Lumi",
-            AppRoute::Reader(_, _) => "Чтение — Lumi",
+            AppRoute::Reader(_, _, _) => "Чтение — Lumi",
             AppRoute::LearningSession(_) => "Самопроверка — Lumi",
             AppRoute::MaterialLearning(_, _) => "Обучение — Lumi",
+            AppRoute::Desk(_) => "Desk — Lumi",
+            AppRoute::Search(_) => "Поиск — Lumi",
         };
         if let Some(document) = web_sys::window().and_then(|window| window.document()) {
             document.set_title(title);
@@ -190,7 +108,7 @@ pub(crate) fn AccountGate() -> Element {
                     if account.instance_role != InstanceRole::Admin
                         && (route() == AppRoute::Settings || browser_requests_system_settings())
                     {
-                        set_browser_route(AppRoute::Library);
+                        set_browser_route(&AppRoute::Library);
                         route.set(AppRoute::Library);
                     }
                     state.set(AccountState::SignedIn(account));
@@ -216,7 +134,7 @@ pub(crate) fn AccountGate() -> Element {
                     if session.account.instance_role != InstanceRole::Admin
                         && (route() == AppRoute::Settings || browser_requests_system_settings())
                     {
-                        set_browser_route(AppRoute::Library);
+                        set_browser_route(&AppRoute::Library);
                         route.set(AppRoute::Library);
                     }
                     state.set(AccountState::SignedIn(session.account));
@@ -244,10 +162,10 @@ pub(crate) fn AccountGate() -> Element {
             rsx! {
                 div { class: "library-app",
                     a { class: "skip-link", href: "#main-content", "Перейти к содержанию" }
-                    if !matches!(route(), AppRoute::Reader(_, _) | AppRoute::LearningSession(_)) {
+                    if !matches!(route(), AppRoute::Reader(_, _, _) | AppRoute::LearningSession(_)) {
                     header { class: "library-topbar",
                         a { class: "library-brand", href: "#library", aria_label: "Lumi — библиотека", onclick: move |_| {
-                            set_browser_route(AppRoute::Library);
+                            set_browser_route(&AppRoute::Library);
                             route.set(AppRoute::Library);
                         },
                             span { class: "brand-mark", aria_hidden: "true", "L" }
@@ -255,24 +173,34 @@ pub(crate) fn AccountGate() -> Element {
                         }
                         nav { aria_label: "Основная навигация",
                             a { href: "#library", aria_current: if route() == AppRoute::Library { "page" } else { "false" }, onclick: move |_| {
-                                set_browser_route(AppRoute::Library);
+                                set_browser_route(&AppRoute::Library);
                                 route.set(AppRoute::Library);
                             }, "Библиотека" }
+                            a { href: "#desk", aria_current: if matches!(route(), AppRoute::Desk(_)) { "page" } else { "false" }, onclick: move |_| {
+                                let next = AppRoute::Desk(DeskRoute::default());
+                                set_browser_route(&next);
+                                route.set(next);
+                            }, "Desk" }
+                            a { href: "#search", aria_current: if matches!(route(), AppRoute::Search(_)) { "page" } else { "false" }, onclick: move |_| {
+                                let next = AppRoute::Search(SearchRoute::default());
+                                set_browser_route(&next);
+                                route.set(next);
+                            }, "Поиск" }
                             a { href: "#challenges", aria_current: if route() == AppRoute::Challenges { "page" } else { "false" }, onclick: move |_| {
-                                set_browser_route(AppRoute::Challenges);
+                                set_browser_route(&AppRoute::Challenges);
                                 route.set(AppRoute::Challenges);
                             }, "Челленджи" }
                             a { href: "#ai-queue", aria_current: if route() == AppRoute::AiQueue { "page" } else { "false" }, onclick: move |_| {
-                                set_browser_route(AppRoute::AiQueue);
+                                set_browser_route(&AppRoute::AiQueue);
                                 route.set(AppRoute::AiQueue);
                             }, "AI-задачи" }
                             a { href: "#connections", aria_current: if route() == AppRoute::Connections { "page" } else { "false" }, onclick: move |_| {
-                                set_browser_route(AppRoute::Connections);
+                                set_browser_route(&AppRoute::Connections);
                                 route.set(AppRoute::Connections);
                             }, "Подключения" }
                             if is_admin {
                                 a { href: "#settings", aria_current: if route() == AppRoute::Settings { "page" } else { "false" }, onclick: move |_| {
-                                    set_browser_route(AppRoute::Settings);
+                                    set_browser_route(&AppRoute::Settings);
                                     route.set(AppRoute::Settings);
                                 }, "Администрирование" }
                             }
@@ -295,23 +223,24 @@ pub(crate) fn AccountGate() -> Element {
                         }
                     }
                     }
-                    if let AppRoute::Reader(material_id, return_to) = route() {
+                    if let AppRoute::Reader(material_id, return_to, anchor) = route() {
                         crate::pdf_reader::ReaderRoute {
                             material_id,
+                            initial_anchor: anchor,
                             csrf_token: csrf.read().clone(),
                             on_close: move |_| {
                                 let next = return_to.map_or(AppRoute::Library, AppRoute::LearningSession);
-                                set_browser_route(next);
+                                set_browser_route(&next);
                                 route.set(next);
                             },
                             on_open_learning_session: move |session_id| {
                                 let next = AppRoute::LearningSession(session_id);
-                                set_browser_route(next);
+                                set_browser_route(&next);
                                 route.set(next);
                             },
                             on_manage_learning: move |(material_id, source_id)| {
                                 let next = AppRoute::MaterialLearning(material_id, Some(source_id));
-                                set_browser_route(next);
+                                set_browser_route(&next);
                                 route.set(next);
                             },
                         }
@@ -320,12 +249,12 @@ pub(crate) fn AccountGate() -> Element {
                             session_id,
                             csrf_token: csrf.read().clone(),
                             on_open_source: move |(material_id, session_id)| {
-                                let next = AppRoute::Reader(material_id, Some(session_id));
-                                set_browser_route(next);
+                                let next = AppRoute::Reader(material_id, Some(session_id), None);
+                                set_browser_route(&next);
                                 route.set(next);
                             },
                             on_close: move |_| {
-                                set_browser_route(AppRoute::Library);
+                                set_browser_route(&AppRoute::Library);
                                 route.set(AppRoute::Library);
                             },
                         }
@@ -336,7 +265,7 @@ pub(crate) fn AccountGate() -> Element {
                             csrf_token: csrf.read().clone(),
                             on_open_session: move |session_id| {
                                 let next = AppRoute::LearningSession(session_id);
-                                set_browser_route(next);
+                                set_browser_route(&next);
                                 route.set(next);
                             },
                         }
@@ -347,27 +276,49 @@ pub(crate) fn AccountGate() -> Element {
                             csrf_token: csrf.read().clone(),
                             on_open_session: move |session_id| {
                                 let next = AppRoute::LearningSession(session_id);
-                                set_browser_route(next);
+                                set_browser_route(&next);
                                 route.set(next);
                             },
                         }
                     } else if route() == AppRoute::AiQueue {
                         crate::ai::AiQueuePage { csrf_token: csrf.read().clone() }
+                    } else if let AppRoute::Desk(desk_route) = route() {
+                        crate::desk::DeskPage {
+                            route: desk_route,
+                            csrf_token: csrf.read().clone(),
+                            on_route: move |next| {
+                                set_browser_route(&next);
+                                route.set(next);
+                            },
+                        }
+                    } else if let AppRoute::Search(search_route) = route() {
+                        crate::search_ui::GlobalSearchPage {
+                            route: search_route,
+                            on_open: move |target| crate::search_ui::open_search_target(&target),
+                        }
                     } else if route() == AppRoute::Settings && is_admin {
                         SettingsApp { csrf_token: csrf.read().clone() }
                     } else {
                         LibraryApp {
                             csrf_token: csrf.read().clone(),
                             on_open_reader: move |material_id| {
-                                let next = AppRoute::Reader(material_id, None);
-                                set_browser_route(next);
+                                let next = AppRoute::Reader(material_id, None, None);
+                                set_browser_route(&next);
                                 route.set(next);
                             },
                             on_open_learning: move |material_id| {
                                 let next = AppRoute::MaterialLearning(material_id, None);
-                                set_browser_route(next);
+                                set_browser_route(&next);
                                 route.set(next);
-                            }
+                            },
+                            on_search: move |query| {
+                                let next = AppRoute::Search(SearchRoute {
+                                    query,
+                                    ..SearchRoute::default()
+                                });
+                                set_browser_route(&next);
+                                route.set(next);
+                            },
                         }
                     }
                     crate::ai::GlobalAiChat { csrf_token: csrf.read().clone() }
@@ -865,6 +816,7 @@ fn LibraryApp(
     csrf_token: String,
     on_open_reader: EventHandler<Uuid>,
     on_open_learning: EventHandler<Uuid>,
+    on_search: EventHandler<String>,
 ) -> Element {
     let entries = use_signal(|| Option::<Vec<LibraryEntry>>::None);
     let mut error = use_signal(String::new);
@@ -956,6 +908,7 @@ fn LibraryApp(
                     "＋ Добавить материал"
                 }
             }
+            crate::search_ui::LibrarySearch { on_submit: on_search }
 
             if !error().is_empty() {
                 div { class: "library-alert", role: "alert",

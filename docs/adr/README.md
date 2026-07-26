@@ -52,6 +52,8 @@ plugin, AI, search and account/auth boundaries.
   wikilinks, ambiguous/unresolved states и backlinks.
 - [`0033`](0033-search-chunks-tantivy-fasttext.md) — source-aware chunks,
   Tantivy BM25, fastText rerank, общий indexing job и retrieval API.
+- [`0034`](0034-desk-projection-and-search-surfaces.md) — rebuildable Desk
+  projection, типизированные routes и единые Web/MCP search surfaces.
 
 ## Template
 

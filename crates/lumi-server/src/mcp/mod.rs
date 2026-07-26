@@ -14,11 +14,13 @@ use axum::{
 };
 use lumi_core::{
     mcp_tool_schema_contracts, AiExecutorKind, AiPage, AiTaskClaim, AiTaskClaimFence,
-    CompleteAiTaskRequest, CreateFlashcardTaskRequest, CreateMcpConnectionRequest,
-    GenerateLearningItemsRequest, ListLearningItemsRequest, McpAiTaskProgressRequest,
-    McpConnection, McpConnectionId, McpConnectionStatus, McpConnectionTokenResponse,
-    RevokeMcpConnectionRequest, RotateMcpConnectionRequest, SubmitLearningAnswerRequest,
-    SubmitLearningAttemptCommand, UserId, MCP_CONTROL_REQUEST_MAX_BYTES,
+    CompleteAiTaskRequest, CreateFlashcardTaskRequest, CreateMcpConnectionRequest, DeskItemFilter,
+    DeskLearningState, DeskObjectType, DeskSort, GenerateLearningItemsRequest,
+    ListLearningItemsRequest, MaterialDesk, McpAiTaskProgressRequest, McpConnection,
+    McpConnectionId, McpConnectionStatus, McpConnectionTokenResponse, RetrievalContextPolicy,
+    RetrievalRequest, RevokeMcpConnectionRequest, RotateMcpConnectionRequest, SearchRankingProfile,
+    SearchRequest, SearchScope, SearchSourceType, SubmitLearningAnswerRequest,
+    SubmitLearningAttemptCommand, UserId, MAX_SEARCH_QUERY_BYTES, MCP_CONTROL_REQUEST_MAX_BYTES,
     MCP_INLINE_RESULT_MAX_BYTES, MCP_LIST_PAGE_MAX_ITEMS, MCP_PROTOCOL_VERSION,
     MCP_TOOL_CONTRACT_VERSION,
 };
@@ -807,7 +809,12 @@ fn tool_enabled(state: &AppState, name: &str) -> bool {
         | "update_annotation"
         | "delete_annotation"
         | "list_learning_items"
-        | "submit_learning_answer" => true,
+        | "submit_learning_answer"
+        | "list_desk_materials"
+        | "get_material_desk"
+        | "list_desk_items"
+        | "get_desk_item"
+        | "resolve_desk_link" => true,
         "import_url" | "import_text" | "get_import_status" => state.imports.is_some(),
         "get_source_context"
         | "create_summary_task"
@@ -827,6 +834,9 @@ fn tool_enabled(state: &AppState, name: &str) -> bool {
                     .features
                     .iter()
                     .any(|feature| feature == "learning-ai")
+        }
+        "search" | "search_material" | "search_notes" | "get_search_result_context" => {
+            state.search.is_query_ready()
         }
         _ => false,
     }
@@ -1480,8 +1490,287 @@ async fn call_tool(
                 .map_err(map_learning_tool)?;
             Ok(json!(attempt))
         }
+        "list_desk_materials" => {
+            let limit = page_limit(&arguments)?;
+            let page = state
+                .desk
+                .list_materials(
+                    principal.user_id,
+                    arguments.get("cursor").and_then(Value::as_str),
+                    limit,
+                )
+                .await
+                .map_err(map_desk_tool)?;
+            Ok(json!(page))
+        }
+        "get_material_desk" => {
+            let material_id = uuid_arg(&arguments, "material_id")?;
+            let material = state
+                .desk
+                .material(principal.user_id, material_id)
+                .await
+                .map_err(map_desk_tool)?;
+            let items = state
+                .desk
+                .list_items(
+                    principal.user_id,
+                    DeskItemFilter {
+                        material_id: Some(material_id),
+                        limit: DEFAULT_PAGE_SIZE,
+                        ..DeskItemFilter::default()
+                    },
+                )
+                .await
+                .map_err(map_desk_tool)?;
+            Ok(json!(MaterialDesk { material, items }))
+        }
+        "list_desk_items" => {
+            let filter = desk_filter_from_tool(&arguments)?;
+            let page = state
+                .desk
+                .list_items(principal.user_id, filter)
+                .await
+                .map_err(map_desk_tool)?;
+            Ok(json!(page))
+        }
+        "get_desk_item" | "resolve_desk_link" => {
+            let object_type = desk_object_type_arg(&arguments)?;
+            let object_id = uuid_arg(&arguments, "object_id")?;
+            let item = state
+                .desk
+                .item(principal.user_id, object_type, object_id)
+                .await
+                .map_err(map_desk_tool)?;
+            if name == "resolve_desk_link" {
+                Ok(json!({
+                    "object_type": item.object_type,
+                    "object_id": item.object_id,
+                    "open_target": item.open_target
+                }))
+            } else {
+                Ok(json!(item))
+            }
+        }
+        "search" => {
+            let request = search_request_from_tool(
+                &arguments,
+                SearchScope::Personal,
+                SearchRankingProfile::Global,
+                Vec::new(),
+            )?;
+            state
+                .search
+                .search(principal.user_id, request)
+                .await
+                .map(|page| json!(page))
+                .map_err(map_search_tool)
+        }
+        "search_material" => {
+            let material_id = uuid_arg(&arguments, "material_id")?;
+            let request = search_request_from_tool(
+                &arguments,
+                SearchScope::Material { material_id },
+                SearchRankingProfile::Reader,
+                Vec::new(),
+            )?;
+            state
+                .search
+                .search(principal.user_id, request)
+                .await
+                .map(|page| json!(page))
+                .map_err(map_search_tool)
+        }
+        "search_notes" => {
+            let request = search_request_from_tool(
+                &arguments,
+                SearchScope::Records,
+                SearchRankingProfile::Records,
+                vec![
+                    SearchSourceType::Highlight,
+                    SearchSourceType::Note,
+                    SearchSourceType::MarginNote,
+                    SearchSourceType::VoiceTranscript,
+                ],
+            )?;
+            state
+                .search
+                .search(principal.user_id, request)
+                .await
+                .map(|page| json!(page))
+                .map_err(map_search_tool)
+        }
+        "get_search_result_context" => {
+            let top_k = arguments
+                .get("top_k")
+                .and_then(Value::as_u64)
+                .and_then(|value| usize::try_from(value).ok())
+                .unwrap_or(8);
+            let request = RetrievalRequest {
+                search: search_request_from_tool(
+                    &arguments,
+                    SearchScope::Records,
+                    SearchRankingProfile::AiRetrieval,
+                    Vec::new(),
+                )?,
+                top_k,
+                context_policy: RetrievalContextPolicy {
+                    max_bytes: arguments
+                        .get("max_bytes")
+                        .and_then(Value::as_u64)
+                        .and_then(|value| usize::try_from(value).ok())
+                        .unwrap_or(24 * 1024),
+                    max_chunks_per_source: 2,
+                    include_surrounding_context: false,
+                },
+            };
+            state
+                .search
+                .retrieve(principal.user_id, request)
+                .await
+                .map(|chunks| json!(chunks))
+                .map_err(map_search_tool)
+        }
         _ => Err(ToolError::NotFound),
     }
+}
+
+fn desk_filter_from_tool(arguments: &Value) -> Result<DeskItemFilter, ToolError> {
+    let limit = page_limit(arguments)?;
+    let object_types = arguments
+        .get("object_types")
+        .and_then(Value::as_array)
+        .map(|values| {
+            values
+                .iter()
+                .map(|value| {
+                    value
+                        .as_str()
+                        .ok_or(ToolError::Invalid)
+                        .and_then(desk_object_type)
+                })
+                .collect::<Result<Vec<_>, _>>()
+        })
+        .transpose()?
+        .unwrap_or_default();
+    let learning_state = arguments
+        .get("learning_state")
+        .and_then(Value::as_str)
+        .map(|value| match value {
+            "scheduled" => Ok(DeskLearningState::Scheduled),
+            "due" => Ok(DeskLearningState::Due),
+            "missed" => Ok(DeskLearningState::Missed),
+            "skipped" => Ok(DeskLearningState::Skipped),
+            "completed" => Ok(DeskLearningState::Completed),
+            _ => Err(ToolError::Invalid),
+        })
+        .transpose()?;
+    let sort = match arguments.get("sort").and_then(Value::as_str) {
+        None | Some("updated") => DeskSort::Updated,
+        Some("created") => DeskSort::Created,
+        Some("material_title") => DeskSort::MaterialTitle,
+        Some("source_order") => DeskSort::SourceOrder,
+        Some(_) => return Err(ToolError::Invalid),
+    };
+    Ok(DeskItemFilter {
+        material_id: optional_uuid_arg(arguments, "material_id")?,
+        object_types,
+        status: arguments
+            .get("status")
+            .and_then(Value::as_str)
+            .map(str::to_owned),
+        tag: arguments
+            .get("tag")
+            .and_then(Value::as_str)
+            .map(str::to_owned),
+        learning_state,
+        attention_only: arguments
+            .get("attention_only")
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
+        sort,
+        cursor: arguments
+            .get("cursor")
+            .and_then(Value::as_str)
+            .map(str::to_owned),
+        limit,
+    })
+}
+
+fn desk_object_type_arg(arguments: &Value) -> Result<DeskObjectType, ToolError> {
+    arguments
+        .get("object_type")
+        .and_then(Value::as_str)
+        .ok_or(ToolError::Invalid)
+        .and_then(desk_object_type)
+}
+
+fn desk_object_type(value: &str) -> Result<DeskObjectType, ToolError> {
+    match value {
+        "annotation" => Ok(DeskObjectType::Annotation),
+        "learning_item" => Ok(DeskObjectType::LearningItem),
+        "ai_artifact" => Ok(DeskObjectType::AiArtifact),
+        _ => Err(ToolError::Invalid),
+    }
+}
+
+fn search_request_from_tool(
+    arguments: &Value,
+    scope: SearchScope,
+    ranking: SearchRankingProfile,
+    default_source_types: Vec<SearchSourceType>,
+) -> Result<SearchRequest, ToolError> {
+    let query = search_query_arg(arguments)?.trim().to_owned();
+    let limit = page_limit(arguments)?;
+    let source_types = arguments
+        .get("source_types")
+        .and_then(Value::as_array)
+        .map(|values| {
+            values
+                .iter()
+                .map(|value| match value.as_str() {
+                    Some("material") => Ok(SearchSourceType::Material),
+                    Some("highlight") => Ok(SearchSourceType::Highlight),
+                    Some("note") => Ok(SearchSourceType::Note),
+                    Some("margin_note") => Ok(SearchSourceType::MarginNote),
+                    Some("voice_transcript") => Ok(SearchSourceType::VoiceTranscript),
+                    Some("ai_artifact") => Ok(SearchSourceType::AiArtifact),
+                    Some("learning_item") => Ok(SearchSourceType::LearningItem),
+                    _ => Err(ToolError::Invalid),
+                })
+                .collect::<Result<Vec<_>, _>>()
+        })
+        .transpose()?
+        .unwrap_or(default_source_types);
+    let tags = arguments
+        .get("tags")
+        .and_then(Value::as_array)
+        .map(|values| {
+            values
+                .iter()
+                .map(|value| value.as_str().map(str::to_owned).ok_or(ToolError::Invalid))
+                .collect::<Result<Vec<_>, _>>()
+        })
+        .transpose()?
+        .unwrap_or_default();
+    Ok(SearchRequest {
+        query,
+        scope,
+        source_types,
+        tags,
+        ranking,
+        cursor: arguments
+            .get("cursor")
+            .and_then(Value::as_str)
+            .map(str::to_owned),
+        limit,
+    })
+}
+
+fn optional_uuid_arg(arguments: &Value, name: &str) -> Result<Option<Uuid>, ToolError> {
+    arguments
+        .get(name)
+        .map(|_| uuid_arg(arguments, name))
+        .transpose()
 }
 
 async fn reading_document(
@@ -1571,12 +1860,38 @@ fn string_arg<'a>(arguments: &'a Value, name: &str) -> Result<&'a str, ToolError
         .ok_or(ToolError::Invalid)
 }
 
+fn search_query_arg(arguments: &Value) -> Result<&str, ToolError> {
+    arguments
+        .get("query")
+        .and_then(Value::as_str)
+        .filter(|value| !value.trim().is_empty() && value.len() <= MAX_SEARCH_QUERY_BYTES)
+        .ok_or(ToolError::Invalid)
+}
+
 fn map_import_tool(error: crate::imports::ImportServiceError) -> ToolError {
     match error {
         crate::imports::ImportServiceError::NotFound => ToolError::NotFound,
         crate::imports::ImportServiceError::Conflict => ToolError::Conflict,
         crate::imports::ImportServiceError::BadRequest(_) => ToolError::Invalid,
         _ => ToolError::Unavailable,
+    }
+}
+
+fn map_desk_tool(error: crate::desk::DeskError) -> ToolError {
+    match error {
+        crate::desk::DeskError::Invalid => ToolError::Invalid,
+        crate::desk::DeskError::NotFound => ToolError::NotFound,
+        crate::desk::DeskError::Storage => ToolError::Unavailable,
+    }
+}
+
+fn map_search_tool(error: crate::search::SearchError) -> ToolError {
+    match error {
+        crate::search::SearchError::InvalidRequest => ToolError::Invalid,
+        crate::search::SearchError::Unavailable => ToolError::Unavailable,
+        crate::search::SearchError::Index(_) | crate::search::SearchError::Storage => {
+            ToolError::Unavailable
+        }
     }
 }
 
@@ -1817,6 +2132,70 @@ mod tests {
         assert!(names.iter().any(|name| name == "list_learning_items"));
         assert!(names.iter().any(|name| name == "submit_learning_answer"));
         assert!(!names.iter().any(|name| name == "create_flashcard_task"));
+    }
+
+    #[test]
+    fn desk_and_search_tools_follow_capability_readiness() {
+        let state = AppState::seeded();
+        let names = enabled_tools(&state)
+            .into_iter()
+            .filter_map(|tool| tool["name"].as_str().map(ToOwned::to_owned))
+            .collect::<Vec<_>>();
+
+        assert!(names.iter().any(|name| name == "list_desk_items"));
+        assert!(names.iter().any(|name| name == "search_material"));
+    }
+
+    #[tokio::test]
+    async fn mcp_search_reuses_web_query_service() -> Result<(), Box<dyn std::error::Error>> {
+        let state = AppState::seeded();
+        let (owner_id, device_id) = {
+            let repository = crate::read_repository(&state)
+                .map_err(|_| std::io::Error::other("seeded repository unavailable"))?;
+            let material = repository
+                .materials
+                .values()
+                .next()
+                .ok_or_else(|| std::io::Error::other("seeded material unavailable"))?;
+            (material.owner_id, Uuid::now_v7())
+        };
+        let request = SearchRequest {
+            query: "глава".to_owned(),
+            scope: SearchScope::Personal,
+            source_types: Vec::new(),
+            tags: Vec::new(),
+            ranking: SearchRankingProfile::Global,
+            cursor: None,
+            limit: 10,
+        };
+        let web = state.search.search(owner_id, request).await?;
+        let principal = McpPrincipal {
+            connection_id: Uuid::now_v7(),
+            user_id: owner_id,
+            device_id,
+        };
+
+        let value = call_tool(
+            &state,
+            principal,
+            "search",
+            json!({"query": "глава", "limit": 10}),
+        )
+        .await
+        .map_err(|_| std::io::Error::other("MCP search failed"))?;
+        let mcp: lumi_core::SearchPage = serde_json::from_value(value)?;
+
+        assert_eq!(
+            mcp.items
+                .iter()
+                .map(|item| &item.chunk_id)
+                .collect::<Vec<_>>(),
+            web.items
+                .iter()
+                .map(|item| &item.chunk_id)
+                .collect::<Vec<_>>()
+        );
+        Ok(())
     }
 
     #[tokio::test]

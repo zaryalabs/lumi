@@ -77,12 +77,18 @@ Knowledge Base, native full-copy replicas, Obsidian, plugin platform, будущ
   fallback, durable byte-range playback, safe refcount/GC и export manifest;
   stable `LinkTarget`, wikilinks, explicit ambiguous/unresolved resolution,
   backlinks и rebuildable link projection;
+- `0.4.0 / E3`: owner-filtered source-aware Tantivy/fastText search core,
+  incremental indexing, full rebuild, retrieval/status API и performance
+  corpus;
+- `0.4.0 / E4`: rebuildable Desk projection, material/cross-material Web
+  surfaces, единый Global/Library/Reader/Desk search, typed direct routes,
+  inline Annotation edit и MCP parity `mcp-tools.v3`;
 - release evidence A1 зафиксирован commit trailer
   `Lumi-Plan-Stage: 0.2.0/A1`.
 
 Ещё не готово:
 
-- Desk/search/RAG и Community Spaces. Внешний staging operator acceptance
+- record-scoped RAG и Community Spaces. Внешний staging operator acceptance
   остаётся gate конкретного окружения.
 
 Persistent server публикует capabilities `ai-provider-openrouter`,
@@ -95,9 +101,11 @@ Persistent server публикует capabilities `ai-provider-openrouter`,
 `records-v2`, `annotation-targets`, `rich-highlights`, `margin-notes` и
 `annotation-tags-status`. Этап E2 добавляет `voice-notes`,
 `stable-link-targets`, `annotation-wikilinks`, `annotation-backlinks` и route
-groups `audio`, `links`.
+groups `audio`, `links`. Этапы E3–E4 добавляют `search-index`,
+`search-query`, `ai-retrieval`, `desk-projection`, `desk-query`,
+`desk-inline-edit`, `desk-mcp`, `search-mcp` и route groups `search`, `desk`.
 
-После перехода на новую шкалу выполнено `12/18` продуктовых эпиков. Stage 0,
+После перехода на новую шкалу выполнено `13/18` продуктовых эпиков. Stage 0,
 Contract Freeze 1 и A1 остаются закрытыми prerequisites.
 
 Repository-side gates `make c`, PostgreSQL/compatibility/security/performance,
@@ -110,7 +118,7 @@ operator acceptance остаётся release gate окружения и не м�
 готовность. Поэтому новая шкала начинается с нуля завершённых end-to-end
 эпиков и отдельно сохраняет перечень уже готового foundation выше.
 
-Текущий следующий эпик — `0.4.0/E4: Desk и единый поиск`.
+Текущий следующий эпик — `0.4.0/E5: RAG по записям и выпуск`.
 
 ## Последовательность
 
@@ -172,7 +180,7 @@ operator gate.
    stable `LinkTarget`, wikilinks, unresolved/ambiguous links и backlinks.
 3. [x] **E3 — Поисковое ядро.** BM25 + fastText, source-aware chunks,
    indexing/rebuild jobs, permission-aware query/retrieval API и benchmarks.
-4. [ ] **E4 — Desk и единый поиск.** Desk projection/surfaces, global,
+4. [x] **E4 — Desk и единый поиск.** Desk projection/surfaces, global,
    library, Reader и Desk search, routing, inline edit и MCP parity.
 5. [ ] **E5 — RAG по записям и выпуск.** Record-scoped retrieval в общем
    AI-чате, citations, сквозной Reader → Desk → Search → Chat flow и release

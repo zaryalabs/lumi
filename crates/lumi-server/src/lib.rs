@@ -10,6 +10,7 @@ mod api_routes;
 mod audio;
 mod auth_api;
 mod blob;
+mod desk;
 mod imports;
 pub mod jobs;
 mod learning;
@@ -320,6 +321,7 @@ pub struct AppState {
     audio: Option<Arc<audio::AudioRuntime>>,
     mcp: Arc<mcp::McpRuntime>,
     search: Arc<search::SearchRuntime>,
+    desk: Arc<desk::DeskRuntime>,
     ai_capabilities: ai::AiCapabilityReadiness,
 }
 
@@ -363,6 +365,7 @@ impl AppState {
             audio: None,
             mcp: Arc::new(mcp::McpRuntime::memory()),
             search: Arc::new(search::SearchRuntime::empty_memory()),
+            desk: Arc::new(desk::DeskRuntime::empty_memory()),
             ai_capabilities: ai::AiCapabilityReadiness::default(),
         }
     }
@@ -437,6 +440,7 @@ impl AppState {
             )
             .await,
         );
+        let desk = Arc::new(desk::DeskRuntime::postgres(accounts.pool().clone()));
         Ok(Self {
             repository: Arc::new(RwLock::new(Repository::default())),
             accounts: Arc::new(accounts),
@@ -451,6 +455,7 @@ impl AppState {
             audio,
             mcp,
             search,
+            desk,
             ai_capabilities: ai::AiCapabilityReadiness::e4_release(),
         })
     }
@@ -461,6 +466,7 @@ impl AppState {
         accounts: Arc<dyn AccountStore>,
     ) -> Self {
         let search = Arc::new(search::SearchRuntime::memory(&imported));
+        let desk = Arc::new(desk::DeskRuntime::memory(&imported));
         let mut repository = Repository::default();
         repository.insert_imported_with_source(imported, source);
 
@@ -478,6 +484,7 @@ impl AppState {
             audio: None,
             mcp: Arc::new(mcp::McpRuntime::memory()),
             search,
+            desk,
             ai_capabilities: ai::AiCapabilityReadiness::default(),
         }
     }
@@ -771,7 +778,13 @@ pub(crate) fn service_capabilities(state: &AppState) -> ServiceCapabilities {
         capabilities.features.push("search-index".to_owned());
         capabilities.features.push("search-query".to_owned());
         capabilities.features.push("ai-retrieval".to_owned());
+        capabilities.features.push("search-mcp".to_owned());
     }
+    capabilities.route_groups.push("desk".to_owned());
+    capabilities.features.push("desk-projection".to_owned());
+    capabilities.features.push("desk-query".to_owned());
+    capabilities.features.push("desk-inline-edit".to_owned());
+    capabilities.features.push("desk-mcp".to_owned());
     if learning_ai_ready {
         capabilities.features.push("learning-ai".to_owned());
         capabilities
@@ -2296,6 +2309,17 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn desk_route_lists_seeded_material_with_projection_metadata(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let page: lumi_core::DeskMaterialPage =
+            json_get(build_router(), "/api/v1/desk/materials").await?;
+
+        assert_eq!(page.projection_version, lumi_core::DESK_PROJECTION_VERSION);
+        assert_eq!(page.items.len(), 1);
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn telegram_settings_require_an_authenticated_session(
     ) -> Result<(), Box<dyn std::error::Error>> {
         let response = build_router()
@@ -2340,7 +2364,7 @@ mod tests {
         let migrations: Vec<SchemaMigration> =
             json_get(build_router(), "/api/v1/schema/migrations").await?;
 
-        assert_eq!(migrations.len(), 26);
+        assert_eq!(migrations.len(), 27);
         assert!(migrations
             .iter()
             .any(|migration| migration.id == "s1-0017-learning-core"));
@@ -2362,6 +2386,9 @@ mod tests {
         assert!(migrations
             .iter()
             .any(|migration| migration.id == "s1-0023-search-core"));
+        assert!(migrations
+            .iter()
+            .any(|migration| migration.id == "s1-0024-desk-projection"));
         Ok(())
     }
 

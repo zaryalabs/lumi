@@ -144,6 +144,7 @@ enum NotesFilter {
 #[component]
 pub(crate) fn ReaderApp(
     material_id: Uuid,
+    initial_anchor: Option<String>,
     csrf_token: String,
     on_close: EventHandler<()>,
     on_open_learning_session: EventHandler<Uuid>,
@@ -175,6 +176,7 @@ pub(crate) fn ReaderApp(
     use_effect(move || {
         let _ = reload_generation();
         state.set(ReaderState::Loading);
+        let initial_anchor = initial_anchor.clone();
         spawn(async move {
             match load_reader(material_id).await {
                 Ok((
@@ -254,6 +256,22 @@ pub(crate) fn ReaderApp(
                                 conflict_draft: None,
                                 annotation_message: None,
                             };
+                            if let Some(anchor_id) = initial_anchor.as_deref() {
+                                if let Some(block) = view
+                                    .plan
+                                    .blocks
+                                    .iter()
+                                    .find(|block| block.node_id == anchor_id)
+                                {
+                                    if let Some(page) =
+                                        view.page_map.page_for_boundary(&block.node_path, 0)
+                                    {
+                                        view.navigation.jump_to(page, view.page_map.pages.len());
+                                        view.annotation_message =
+                                            Some("Открыт результат поиска.".to_owned());
+                                    }
+                                }
+                            }
                             apply_ai_reader_target(&mut view);
                             state.set(ReaderState::Ready(Box::new(view)));
                         }
@@ -366,6 +384,7 @@ pub(crate) fn ReaderApp(
                             span { "{creators}" }
                         }
                         div { class: "reader-tools", role: "toolbar", aria_label: "Инструменты чтения",
+                            crate::search_ui::ReaderSearch { material_id }
                             button { id: "reader-toc-button", r#type: "button", aria_expanded: view.toc_open, aria_controls: "reader-toc-panel", onclick: move |_| toggle_reader_panel(state, ReaderPanel::Toc), "Оглавление" }
                             button { id: "reader-settings-button", r#type: "button", aria_expanded: view.settings_open, aria_controls: "reader-settings-panel", onclick: move |_| toggle_reader_panel(state, ReaderPanel::Settings), "Настройки" }
                             button { id: "reader-margin-note-button", r#type: "button", onclick: move |_| start_margin_note(state, current_page), "Запись на полях" }

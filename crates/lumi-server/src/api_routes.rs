@@ -39,6 +39,7 @@ pub(crate) fn protected_routes(state: &AppState) -> Router<AppState> {
         .merge(crate::learning::routes::protected_routes())
         .merge(crate::audio::protected_routes())
         .merge(crate::links::protected_routes())
+        .merge(crate::desk::protected_routes())
         .merge(crate::search::protected_routes())
         .merge(mcp::management_routes())
         .layer(DefaultBodyLimit::max(201 * 1024 * 1024))

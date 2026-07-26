@@ -250,8 +250,9 @@ SearchChunk {
 
 ## Реализация
 
-Web personal search foundation реализован в `0.4.0/E3` по
-[`ADR 0033`](../adr/0033-search-chunks-tantivy-fasttext.md):
+Web personal search foundation реализован в `0.4.0/E3`, а поверхности и MCP
+parity — в `0.4.0/E4` по [`ADR 0033`](../adr/0033-search-chunks-tantivy-fasttext.md)
+и [`ADR 0034`](../adr/0034-desk-projection-and-search-surfaces.md):
 
 - `search.contract.v1` и `search.chunker.v1` находятся в `lumi-core`;
 - Tantivy `0.26` выполняет BM25 с owner/material/type/tag filters до stored
@@ -262,13 +263,18 @@ Web personal search foundation реализован в `0.4.0/E3` по
 - incremental replace/delete, restart recovery и full owner rebuild используют
   один worker/runtime;
 - `/api/v1/search`, `/search/retrieve`, `/search/status` и `/search/rebuild`
-  являются общим Web/будущим MCP application boundary.
+  являются общим Web/MCP application boundary;
 - status различает `ready`/`partial`/`rebuilding`/`failed` и отдельно сообщает
-  количество source documents без searchable text.
+  количество source documents без searchable text;
+- Global page, Library form, Reader material search и Desk filter/search
+  используют один `SearchRuntime`, exact open targets и типизированные
+  reload-safe routes;
+- `mcp-tools.v3` добавляет global/material/records search и bounded context
+  retrieval с теми же capability, permission и cursor rules.
 
 Отсутствие model/checksum не включает BM25 fallback: status становится
-`failed`, а capabilities не публикуются. Global/Library/Reader/Desk UI и MCP
-adapters принадлежат следующему эпику и не дублируют query service.
+`failed`, а capabilities не публикуются. Desk и primary CRUD при этом остаются
+доступны; Search UI показывает failure вместо пустого успешного результата.
 
 ### Libraries
 

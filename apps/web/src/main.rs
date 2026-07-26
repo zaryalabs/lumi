@@ -5,11 +5,17 @@ mod account;
 #[cfg(target_arch = "wasm32")]
 mod ai;
 #[cfg(target_arch = "wasm32")]
+mod desk;
+#[cfg(target_arch = "wasm32")]
 mod learning;
 #[cfg(target_arch = "wasm32")]
 mod pdf_reader;
 #[cfg(target_arch = "wasm32")]
 mod reader;
+#[cfg(target_arch = "wasm32")]
+mod routing;
+#[cfg(target_arch = "wasm32")]
+mod search_ui;
 #[cfg(target_arch = "wasm32")]
 mod voice;
 

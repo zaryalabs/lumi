@@ -590,6 +590,100 @@ test("imports Markdown through the shared reflowable reader", async ({
   ).toHaveAttribute("rel", /noopener/);
 });
 
+test("keeps Desk and unified search routes reload-safe", async ({ page }) => {
+  await page.goto("/");
+  await page
+    .getByRole("button", { name: "Создать фразу восстановления" })
+    .click();
+  await page.getByText("Я сохранил(а) все 24 слова", { exact: false }).click();
+  await page.getByRole("button", { name: "Создать аккаунт" }).click();
+
+  await page
+    .getByRole("button", { name: "＋ Добавить материал", exact: true })
+    .click();
+  const uploadDialog = page.getByRole("dialog", {
+    name: "Добавить материал",
+  });
+  await uploadDialog.getByRole("tab", { name: "Markdown" }).click();
+  await uploadDialog.getByLabel("Файл Markdown").setInputFiles({
+    name: "supported.md",
+    mimeType: "text/markdown",
+    buffer: supportedMarkdown,
+  });
+  await uploadDialog
+    .getByRole("button", { name: "Добавить в библиотеку" })
+    .click();
+  await expect(
+    page.getByRole("article", { name: "Материал Руководство Lumi" }),
+  ).toBeVisible();
+
+  await page.getByRole("link", { name: "Desk", exact: true }).click();
+  const desk = page.getByRole("main", { name: "Desk" });
+  await expect(desk.getByRole("heading", { name: "Desk" })).toBeVisible();
+  await expect(
+    desk.getByText("Руководство Lumi", { exact: true }),
+  ).toBeVisible();
+  await page.reload();
+  await expect(page.getByRole("main", { name: "Desk" })).toBeVisible();
+
+  await desk.getByRole("button", { name: "Открыть материал" }).click();
+  await expect(page).toHaveURL(/#desk\/material\/[0-9a-f-]+$/);
+  const materialId = page.url().split("/").at(-1);
+  expect(materialId).toMatch(/^[0-9a-f-]{36}$/);
+  await page.route("**/api/v1/search/status", async (route) => {
+    await route.fulfill({
+      contentType: "application/json",
+      body: JSON.stringify({
+        state: "ready",
+        index_version: "tantivy.v1",
+        chunker_version: "search.chunker.v1",
+        model_version: "fixture.fasttext.v1",
+        index_generation: 7,
+        document_count: 1,
+        chunk_count: 1,
+        no_text_document_count: 0,
+        pending_jobs: 0,
+      }),
+    });
+  });
+  await page.route(/\/api\/v1\/search\?.*q=/, async (route) => {
+    await route.fulfill({
+      contentType: "application/json",
+      body: JSON.stringify({
+        items: [
+          {
+            chunk_id: "fixture-search-result",
+            source_type: "material",
+            source_id: materialId,
+            material_id: materialId,
+            title: "Руководство Lumi",
+            heading_path: ["Введение"],
+            snippet: "Импортировать Markdown через единый индекс",
+            open_target: { kind: "material", material_id: materialId },
+            score: { bm25: 2.5, fasttext: 0.8, boost: 0.2, total: 3.5 },
+          },
+        ],
+        index_generation: 7,
+      }),
+    });
+  });
+
+  await page.goto("/#search?q=Markdown&type=material");
+  const search = page.getByRole("main", { name: "Единый поиск" });
+  await expect(
+    search.getByRole("heading", { name: "Поиск по Lumi" }),
+  ).toBeVisible();
+  await expect(
+    search.getByText("Импортировать Markdown", { exact: false }),
+  ).toBeVisible();
+  await page.reload();
+  await expect(search.getByLabel("Что найти")).toHaveValue("Markdown");
+  await search.getByRole("button", { name: "Открыть" }).click();
+  await expect(page).toHaveURL(new RegExp(`#desk/material/${materialId}$`));
+  await page.goBack();
+  await expect(page).toHaveURL(/#search\?q=Markdown&type=material$/);
+});
+
 test("imports a multi-chapter LUM package through the shared reader", async ({
   page,
 }) => {

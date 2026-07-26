@@ -14,7 +14,7 @@ use crate::{
 /// Frozen MCP protocol snapshot.
 pub const MCP_PROTOCOL_VERSION: &str = "2025-06-18";
 /// Version of Lumi MCP tool schemas and DTOs.
-pub const MCP_TOOL_CONTRACT_VERSION: &str = "mcp-tools.v2";
+pub const MCP_TOOL_CONTRACT_VERSION: &str = "mcp-tools.v3";
 /// Maximum MCP control request body.
 pub const MCP_CONTROL_REQUEST_MAX_BYTES: usize = 1024 * 1024;
 /// Maximum ordinary inline MCP tool result.
@@ -379,6 +379,15 @@ pub const MCP_TOOL_NAMES: &[&str] = &[
     "list_learning_items",
     "create_flashcard_task",
     "submit_learning_answer",
+    "list_desk_materials",
+    "get_material_desk",
+    "list_desk_items",
+    "get_desk_item",
+    "resolve_desk_link",
+    "search",
+    "search_material",
+    "search_notes",
+    "get_search_result_context",
 ];
 
 const MCP_TOOL_SCHEMAS: &[McpToolSchemaContract] = &[
@@ -557,6 +566,51 @@ const MCP_TOOL_SCHEMAS: &[McpToolSchemaContract] = &[
         input_schema: "submit-learning-answer.input.v1",
         output_schema: "learning-attempt.output.v1",
     },
+    McpToolSchemaContract {
+        name: "list_desk_materials",
+        input_schema: "desk-material-page.input.v1",
+        output_schema: "desk-material-page.output.v1",
+    },
+    McpToolSchemaContract {
+        name: "get_material_desk",
+        input_schema: "material-id.input.v1",
+        output_schema: "material-desk.output.v1",
+    },
+    McpToolSchemaContract {
+        name: "list_desk_items",
+        input_schema: "desk-item-page.input.v1",
+        output_schema: "desk-item-page.output.v1",
+    },
+    McpToolSchemaContract {
+        name: "get_desk_item",
+        input_schema: "desk-item-id.input.v1",
+        output_schema: "desk-item.output.v1",
+    },
+    McpToolSchemaContract {
+        name: "resolve_desk_link",
+        input_schema: "desk-link.input.v1",
+        output_schema: "search-open-target.output.v1",
+    },
+    McpToolSchemaContract {
+        name: "search",
+        input_schema: "search-request.input.v1",
+        output_schema: "search-page.output.v1",
+    },
+    McpToolSchemaContract {
+        name: "search_material",
+        input_schema: "search-material.input.v1",
+        output_schema: "search-page.output.v1",
+    },
+    McpToolSchemaContract {
+        name: "search_notes",
+        input_schema: "search-notes.input.v1",
+        output_schema: "search-page.output.v1",
+    },
+    McpToolSchemaContract {
+        name: "get_search_result_context",
+        input_schema: "retrieval-request.input.v1",
+        output_schema: "retrieved-chunks.output.v1",
+    },
 ];
 
 const MCP_HTTP_ROUTES: [McpHttpRouteContract; 4] = [
@@ -651,7 +705,7 @@ mod tests {
     #[test]
     fn frozen_mcp_tool_snapshot_matches_allowlist() -> Result<(), Box<dyn std::error::Error>> {
         let registry: Value = serde_json::from_str(include_str!(
-            "../../../tests/fixtures/mcp/contracts/v2/tool-registry.json"
+            "../../../tests/fixtures/mcp/contracts/v3/tool-registry.json"
         ))?;
         let tools = registry["tools"]
             .as_array()

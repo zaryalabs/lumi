@@ -132,6 +132,17 @@ BM25-only деградации. Решение и эксплуатация оп�
 [`ADR 0033`](docs/adr/0033-search-chunks-tantivy-fasttext.md) и
 [`search runbook`](docs/runbooks/search-index.md).
 
+Для `0.4.0/E4` реализованы Desk и единые поисковые поверхности. Rebuildable
+owner-scoped projection собирает material counters, Annotation v2, learning
+state и accepted AI artifacts без копирования primary payload. Web получил
+top-level Desk, material/cross-material views, inline edit через общий
+annotation command, типизированные direct routes и Global/Library/Reader/Desk
+search поверх одного query service. MCP registry `mcp-tools.v3` добавляет Desk,
+global/material/records search и bounded context tools с теми же permissions,
+cursors и open targets. Решение и эксплуатация описаны в
+[`ADR 0034`](docs/adr/0034-desk-projection-and-search-surfaces.md) и
+[`Desk runbook`](docs/runbooks/desk-projection.md).
+
 ## Локальный запуск
 
 Для основного пути нужны Docker с Compose и `make`. Он собирает и запускает

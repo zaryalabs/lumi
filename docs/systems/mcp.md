@@ -439,3 +439,20 @@ account fixtures находятся в `tests/fixtures/mcp/contracts/v2`.
 
 Операторский smoke и пример клиентской конфигурации:
 [`../runbooks/mcp-external-agents.md`](../runbooks/mcp-external-agents.md).
+
+## Расширение `0.4.0/E4`: Desk и search parity
+
+Registry `mcp-tools.v3` сохраняет все инструменты v2 и добавляет:
+
+- `list_desk_materials`, `get_material_desk`, `list_desk_items`,
+  `get_desk_item`, `resolve_desk_link`;
+- `search`, `search_material`, `search_notes`,
+  `get_search_result_context`.
+
+Desk tools используют owner-scoped `DeskRuntime`, projection generation,
+bounded cursors и те же open targets, что Web. Search tools публикуются только
+при готовом `search-query`; material/records/global profiles вызывают общий
+`SearchRuntime`, а context tool применяет bounded retrieval policy. Adapter не
+возвращает raw chat, rejected drafts, foreign items, BYOK secrets или
+неограниченный source payload. Frozen registry:
+`tests/fixtures/mcp/contracts/v3/tool-registry.json`.

@@ -401,6 +401,24 @@ DeskItemProjection {
 
 ## Реализация
 
+Web-срез `0.4.0/E4` реализован по
+[`ADR 0034`](../adr/0034-desk-projection-and-search-surfaces.md):
+
+- `desk.contract.v1` находится в `lumi-core`;
+- migration `20260726290000_desk_projection.sql` создаёт versioned
+  owner-scoped material/item projection и deterministic rebuild;
+- `/api/v1/desk/materials`, `/desk/items` и detail routes возвращают bounded
+  cursor pages, exact open targets и читают отображаемый payload из primary
+  objects;
+- Web публикует top-level Desk, material/records/learning/artifact/item
+  direct routes, filters/sorts, inline Annotation edit и переходы в Reader/
+  Challenges;
+- MCP registry `mcp-tools.v3` использует тот же `DeskRuntime`, account scope,
+  cursors и limits.
+
+Эксплуатация и rebuild описаны в
+[`Desk runbook`](../runbooks/desk-projection.md).
+
 ### Query boundary
 
 Backend/application layer должен предоставлять material-centered read queries,

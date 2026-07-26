@@ -51,6 +51,7 @@ struct PdfSelection {
 #[component]
 pub(crate) fn ReaderRoute(
     material_id: Uuid,
+    initial_anchor: Option<String>,
     csrf_token: String,
     on_close: EventHandler<()>,
     on_open_learning_session: EventHandler<Uuid>,
@@ -74,6 +75,7 @@ pub(crate) fn ReaderRoute(
         ReaderRouteState::Reflowable => rsx! {
             crate::reader::ReaderApp {
                 material_id,
+                initial_anchor: initial_anchor.clone(),
                 csrf_token,
                 on_close,
                 on_open_learning_session,
@@ -83,6 +85,7 @@ pub(crate) fn ReaderRoute(
         ReaderRouteState::Pdf => rsx! {
             PdfReaderApp {
                 material_id,
+                initial_anchor,
                 csrf_token,
                 on_close,
                 on_open_learning_session,
@@ -102,6 +105,7 @@ pub(crate) fn ReaderRoute(
 #[component]
 fn PdfReaderApp(
     material_id: Uuid,
+    initial_anchor: Option<String>,
     csrf_token: String,
     on_close: EventHandler<()>,
     on_open_learning_session: EventHandler<Uuid>,
@@ -153,6 +157,7 @@ fn PdfReaderApp(
 
     use_effect(move || {
         state.set(PdfReaderState::Loading);
+        let initial_anchor = initial_anchor.clone();
         spawn(async move {
             match load_pdf_reader(material_id).await {
                 Ok((data, progress, loaded_annotations)) => {
@@ -188,6 +193,15 @@ fn PdfReaderApp(
                     current_page.set(initial_page);
                     selected_anchor.set(target_anchor);
                     annotations.set(loaded_annotations);
+                    if let Some(page_index) = initial_anchor
+                        .as_deref()
+                        .and_then(|value| value.strip_prefix("page-"))
+                        .and_then(|value| value.parse::<u32>().ok())
+                    {
+                        current_page.set(
+                            page_index.min(data.document.pages.len().saturating_sub(1) as u32),
+                        );
+                    }
                     state.set(PdfReaderState::Ready(Box::new(data)));
                     mount_config.set(Some(config));
                 }
@@ -268,6 +282,7 @@ fn PdfReaderApp(
                         }
                         span { class: "reader-save-state saved", aria_live: "polite", "{save_message}" }
                         div { class: "reader-tools", aria_label: "Управление PDF",
+                            crate::search_ui::ReaderSearch { material_id }
                             button { r#type: "button", aria_label: "Предыдущая страница", disabled: current_page() == 0, onclick: move |_| {
                                 let page = current_page().saturating_sub(1);
                                 current_page.set(page);
