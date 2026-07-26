@@ -1,6 +1,6 @@
 CREATE TABLE audio_uploads (
     id uuid PRIMARY KEY,
-    owner_id uuid NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+    owner_id uuid NOT NULL REFERENCES accounts(user_id) ON DELETE CASCADE,
     media_type text NOT NULL,
     byte_length bigint NOT NULL CHECK (byte_length > 0 AND byte_length <= 26214400),
     checksum_sha256 text NOT NULL CHECK (checksum_sha256 ~ '^[0-9a-f]{64}$'),
@@ -13,7 +13,7 @@ CREATE TABLE audio_uploads (
 
 CREATE TABLE audio_attachments (
     id uuid PRIMARY KEY,
-    owner_id uuid NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+    owner_id uuid NOT NULL REFERENCES accounts(user_id) ON DELETE CASCADE,
     upload_id uuid NOT NULL REFERENCES audio_uploads(id),
     media_type text NOT NULL,
     byte_length bigint NOT NULL,
@@ -26,9 +26,9 @@ CREATE TABLE audio_attachments (
 
 CREATE TABLE learning_attachment_refs (
     attachment_id uuid PRIMARY KEY REFERENCES audio_attachments(id) ON DELETE CASCADE,
-    owner_id uuid NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
-    session_id uuid NOT NULL REFERENCES learning_sessions(id) ON DELETE CASCADE,
-    item_id uuid NOT NULL REFERENCES learning_items(id),
+    owner_id uuid NOT NULL REFERENCES accounts(user_id) ON DELETE CASCADE,
+    session_id uuid NOT NULL REFERENCES learning_sessions(session_id) ON DELETE CASCADE,
+    item_id uuid NOT NULL REFERENCES learning_items(item_id),
     idempotency_key text NOT NULL,
     created_at timestamptz NOT NULL DEFAULT now(),
     UNIQUE (owner_id, idempotency_key)
@@ -36,7 +36,7 @@ CREATE TABLE learning_attachment_refs (
 
 CREATE TABLE transcript_artifacts (
     id uuid PRIMARY KEY,
-    owner_id uuid NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+    owner_id uuid NOT NULL REFERENCES accounts(user_id) ON DELETE CASCADE,
     attachment_id uuid NOT NULL REFERENCES audio_attachments(id) ON DELETE CASCADE,
     revision integer NOT NULL CHECK (revision > 0),
     status text NOT NULL CHECK (status IN ('pending', 'processing', 'needs_review', 'accepted', 'failed', 'cancelled')),

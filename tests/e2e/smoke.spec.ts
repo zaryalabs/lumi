@@ -407,6 +407,14 @@ test("offers a reload-safe deterministic session after reading", async ({
   await expect(
     session.getByText("Вспомните границу platform-independent domain."),
   ).toBeVisible();
+  await page.setViewportSize({ width: 390, height: 844 });
+  expect(
+    await page.evaluate(
+      () => document.documentElement.scrollWidth <= window.innerWidth,
+    ),
+  ).toBe(true);
+  await session.getByLabel("Ваш ответ").focus();
+  await expect(session.getByLabel("Ваш ответ")).toBeFocused();
   await session.getByLabel("Ваш ответ").fill("От DOM и Dioxus.");
   await session
     .getByRole("button", { name: "Показать ответ и оценить себя" })

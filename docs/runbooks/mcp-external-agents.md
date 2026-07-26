@@ -45,6 +45,8 @@ Lumi `0.2.0/E3–E4` предоставляет account-scoped MCP Streamable HT
 - создание summary task и чтение summary/artifact;
 - создание abridgement task через `create_abridgement_task`;
 - list/claim/context/progress/complete/fail/release AI tasks.
+- list learning items, source-backed flashcard task и idempotent submit learning
+  answer; AI-dependent tool публикуется только при `learning-ai`.
 
 `tools/list` публикует только операции, реально доступные на этом экземпляре.
 Нереализованные search и bookmark tools не имитируются. Для abridgement

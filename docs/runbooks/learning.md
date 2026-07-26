@@ -2,7 +2,9 @@
 
 ## Назначение
 
-Runbook описывает repository-side проверку learning verticals `0.3.0/E1–E4`.
+Runbook описывает repository-side проверку learning verticals `0.3.0/E1–E4` и
+platform slice `0.3.0/E5`. Полный release acceptance остаётся открытым до
+browser/provider voice vertical E4.
 
 ## Capability и маршруты
 
@@ -25,9 +27,12 @@ credential или provider обычный text input остаётся досту
 
 - route group `learning`;
 - `learning-core`;
-- `learning-scheduling`.
+- `learning-scheduling`;
 - `learning-ai` и `learning-explain-back`, когда доступны общие AI provider,
-  queue и explicit-context prerequisites.
+  queue и explicit-context prerequisites;
+- `learning-audio-attachments`;
+- `learning-mcp`; AI-dependent `create_flashcard_task` появляется в
+  `tools/list` только вместе с `learning-ai`.
 
 Проверка:
 
@@ -85,6 +90,53 @@ AI journey:
 Без provider шаги deterministic learning продолжают работать. AI task получает
 provider failure/needs-input state; attempt не становится incorrect.
 
+## Local fake provider
+
+Обычный `make web-e2e` сам запускает
+`tests/e2e/openrouter-mock.mjs` и направляет сервер на его localhost endpoint.
+Для ручной сессии mock можно поднять отдельно:
+
+```sh
+LUMI_E2E_OPENROUTER_PORT=19090 node tests/e2e/openrouter-mock.mjs
+LUMI_OPENROUTER_ENDPOINT=http://127.0.0.1:19090/api/v1/chat/completions make server-r
+```
+
+Mock принимает только тестовый credential и возвращает bounded deterministic
+responses. Он не должен использоваться вне local/E2E окружения.
+
+## MCP learning smoke
+
+Создайте и скопируйте account token по
+[`mcp-external-agents.md`](mcp-external-agents.md), затем проверьте registry:
+
+```sh
+curl -sS http://127.0.0.1:8080/mcp \
+  -H 'Authorization: Bearer lumi_mcp_REDACTED' \
+  -H 'Content-Type: application/json' \
+  -H 'MCP-Protocol-Version: 2025-06-18' \
+  --data '{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}'
+```
+
+`list_learning_items` и `submit_learning_answer` используют owner-scoped
+`LearningRuntime`; повтор submit с тем же idempotency key возвращает тот же
+attempt. `create_flashcard_task` использует общий
+`generate_learning_items`/`question-set-artifact.v1` task, а не отдельный MCP
+worker. Foreign-account ids возвращают typed `not_found`; provider credentials,
+raw audio и conversation runtime через MCP не выдаются.
+
+## Восстановление после ошибок
+
+- `rate_limited`/HTTP `429`: дождаться следующего минутного окна; не менять key
+  при безопасном повторе той же mutation.
+- `unavailable`/provider timeout: deterministic session остаётся доступной;
+  AI task проверяется в общей очереди и повторяется штатным retry.
+- transcription failure: сохранить attachment, оставить text fallback и
+  повторить transcription после восстановления provider; grading до accepted
+  transcript не запускать.
+- stale/concurrent attempt: перечитать session; уникальность
+  `(session_id, item_id)` и mutation key не обходить.
+- после отзыва MCP token любые повторы выполняются только новым connection.
+
 ## Диагностика PostgreSQL
 
 ```sql
@@ -107,6 +159,16 @@ ORDER BY li.created_at;
 SELECT session_id, item_id, task_id, artifact_id, payload, created_at
 FROM learning_ai_evaluations
 ORDER BY created_at;
+
+SELECT attachment.id, attachment.owner_id, ref.session_id, ref.item_id,
+       attachment.retention, attachment.audio_deleted_at, attachment.created_at
+FROM audio_attachments attachment
+JOIN learning_attachment_refs ref ON ref.attachment_id = attachment.id
+ORDER BY attachment.created_at;
+
+SELECT id, attachment_id, revision, status, provider, model, accepted_at
+FROM transcript_artifacts
+ORDER BY attachment_id, revision;
 ```
 
 `due_at` хранится в UTC. Paused schedules не должны попадать в due projection.

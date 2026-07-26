@@ -165,10 +165,13 @@ Status: accepted
 immutable session snapshots, attempts, ordered hints/source evidence,
 versioned FSRS, bounded Challenges, pause/resume/snooze/manual-only, source
 jump и reload/resume, а также source-backed AI drafts, open-answer evaluation
-и iterative explain-back с self-check fallback. Voice и общий mastery
-projection остаются за следующими эпиками; сервер публикует `learning-core`,
-`learning-scheduling`, `learning-ai` и `learning-explain-back` при готовых AI
-prerequisites.
+и iterative explain-back с self-check fallback. Platform slice `0.3.0/E5`
+добавляет `learning-mcp`: list/create-flashcard-task/submit используют те же
+owner-scoped learning services и AI queue, capability filtering и idempotency,
+что Web. Voice browser/provider vertical и общий mastery projection остаются
+незавершёнными; сервер публикует `learning-core`, `learning-scheduling`,
+`learning-ai`, `learning-explain-back`, `learning-audio-attachments` и
+`learning-mcp` только при готовых prerequisites.
 
 ## Social And Plugins
 

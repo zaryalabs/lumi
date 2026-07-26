@@ -4428,6 +4428,106 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn performance_learning_projection_session_and_attempt_fit_release_budget(
+    ) -> Result<(), LearningStoreError> {
+        let runtime = LearningRuntime::memory();
+        let user_id = Uuid::now_v7();
+        let device_id = Uuid::now_v7();
+        let material_id = Uuid::now_v7();
+        let revision_id = Uuid::now_v7();
+        let completion = runtime
+            .complete_reading(
+                user_id,
+                device_id,
+                Some(context(user_id, material_id, revision_id)),
+                &CompleteReadingScopeCommand {
+                    material_id,
+                    revision_id,
+                    scope_kind: LearningScopeKind::ContentUnit,
+                    content_unit_id: Some("chapter-1".to_owned()),
+                    anchor: None,
+                    trigger: ReadingCompletionTrigger::ReaderBoundary,
+                },
+                "performance-completion",
+            )
+            .await?;
+        for index in 0..100 {
+            runtime
+                .create_item(
+                    user_id,
+                    device_id,
+                    &CreateLearningItemCommand {
+                        source_id: completion.offer.source.id,
+                        kind: LearningItemKind::QuizTrueFalse,
+                        status: LearningItemStatus::Active,
+                        prompt: format!("Performance item {index}"),
+                        answer_spec: LearningAnswerSpec::TrueFalse { correct: true },
+                        explanation: "Bounded fixture.".to_owned(),
+                        hints: Vec::new(),
+                        source_anchor: None,
+                    },
+                    &format!("performance-item-{index}"),
+                )
+                .await?;
+        }
+
+        let session_started = std::time::Instant::now();
+        let learning_session = runtime
+            .create_session(
+                user_id,
+                device_id,
+                CreateLearningSessionCommand {
+                    source_id: completion.offer.source.id,
+                    kind: LearningSessionKind::ManualPractice,
+                },
+                "performance-session",
+            )
+            .await?;
+        let session_elapsed = session_started.elapsed();
+        runtime
+            .transition_session(
+                user_id,
+                device_id,
+                learning_session.id,
+                SessionTransition::Start,
+                "performance-start",
+            )
+            .await?;
+        let first_item = learning_session
+            .items
+            .first()
+            .ok_or(LearningStoreError::NotFound)?;
+        let attempt_started = std::time::Instant::now();
+        runtime
+            .submit_attempt(
+                user_id,
+                device_id,
+                learning_session.id,
+                first_item.item_id,
+                &SubmitLearningAttemptCommand {
+                    answer: LearningAnswer::TrueFalse { value: true },
+                    self_check: None,
+                    elapsed_ms: 250,
+                    review_rating: Some(LearningReviewRating::Good),
+                },
+                "performance-attempt",
+            )
+            .await?;
+        let attempt_elapsed = attempt_started.elapsed();
+        let projection_started = std::time::Instant::now();
+        let today = runtime.today(user_id, None).await?;
+        let projection_elapsed = projection_started.elapsed();
+
+        assert_eq!(today.counts.ready, 99);
+        if std::env::var_os("LUMI_PERFORMANCE").is_some() {
+            assert!(session_elapsed < std::time::Duration::from_millis(100));
+            assert!(attempt_elapsed < std::time::Duration::from_millis(100));
+            assert!(projection_elapsed < std::time::Duration::from_millis(100));
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn unanswered_items_are_not_graded_on_completion() -> Result<(), LearningStoreError> {
         let _unused_answer = LearningAnswer::TrueFalse { value: true };
         let mut session = LearningSession {

@@ -1,6 +1,7 @@
 //! Owner-scoped generic audio uploads and learning attachment lifecycle.
 
 use std::sync::Arc;
+use std::time::Instant;
 
 use axum::{
     body::Bytes,
@@ -81,6 +82,7 @@ async fn create_upload(
     Extension(session): Extension<AuthenticatedSession>,
     Json(command): Json<CreateAudioUploadCommand>,
 ) -> Result<Json<AudioUpload>, AppError> {
+    let started = Instant::now();
     command
         .validate()
         .map_err(|error| AppError::BadRequest(error.to_string()))?;
@@ -102,14 +104,23 @@ async fn create_upload(
     .fetch_one(&runtime.pool)
     .await
     .map_err(log_db)?;
-    Ok(Json(AudioUpload {
+    let upload = AudioUpload {
         id,
         media_type: command.media_type,
         byte_length: command.byte_length,
         checksum_sha256: command.checksum_sha256,
         status: AudioUploadStatus::Pending,
         created_at: time_to_ms(row.try_get("created_at").map_err(log_db)?),
-    }))
+    };
+    tracing::info!(
+        event = "learning.audio_upload_reserved",
+        owner_id = %session.user_id,
+        upload_id = %upload.id,
+        byte_length = upload.byte_length,
+        latency_ms = started.elapsed().as_millis(),
+        "bounded audio upload reserved"
+    );
+    Ok(Json(upload))
 }
 
 async fn put_upload(
@@ -300,6 +311,22 @@ async fn transcribe(
     Path(attachment_id): Path<Uuid>,
     Json(command): Json<TranscribeCommand>,
 ) -> Result<Json<TranscriptArtifact>, AppError> {
+    let started = Instant::now();
+    let _permit = state
+        .learning_operation_limits()
+        .acquire(
+            session.user_id,
+            crate::learning::limits::LearningOperationKind::Transcription,
+        )
+        .map_err(|error| match error {
+            crate::learning::limits::LearningOperationLimitError::RateLimited
+            | crate::learning::limits::LearningOperationLimitError::Busy => {
+                AppError::TooManyRequests("transcription operation limit reached")
+            }
+            crate::learning::limits::LearningOperationLimitError::Unavailable => {
+                AppError::Unavailable("learning operation limiter")
+            }
+        })?;
     let runtime = state.audio_runtime()?;
     attachment_row(runtime, session.user_id, attachment_id).await?;
     let id = Uuid::now_v7();
@@ -318,7 +345,7 @@ async fn transcribe(
     .fetch_one(&runtime.pool)
     .await
     .map_err(log_db)?;
-    Ok(Json(TranscriptArtifact {
+    let transcript = TranscriptArtifact {
         id,
         attachment_id,
         revision: u32::try_from(row.try_get::<i32, _>("revision").map_err(log_db)?)
@@ -330,7 +357,16 @@ async fn transcribe(
         language: command.language,
         created_at: time_to_ms(row.try_get("created_at").map_err(log_db)?),
         accepted_at: None,
-    }))
+    };
+    tracing::info!(
+        event = "learning.transcription_requested",
+        owner_id = %session.user_id,
+        attachment_id = %attachment_id,
+        transcript_id = %transcript.id,
+        latency_ms = started.elapsed().as_millis(),
+        "transcription request persisted"
+    );
+    Ok(Json(transcript))
 }
 
 async fn get_transcript(
@@ -359,6 +395,7 @@ async fn accept_transcript(
     Path(attachment_id): Path<Uuid>,
     Json(command): Json<AcceptTranscriptCommand>,
 ) -> Result<Json<TranscriptArtifact>, AppError> {
+    let started = Instant::now();
     if command.text.trim().is_empty() || command.idempotency_key.trim().is_empty() {
         return Err(AppError::BadRequest(
             "reviewed transcript and idempotency key are required".to_owned(),
@@ -389,7 +426,16 @@ async fn accept_transcript(
     .execute(&runtime.pool)
     .await
     .map_err(log_db)?;
-    row_to_transcript(&row).map(Json)
+    let transcript = row_to_transcript(&row)?;
+    tracing::info!(
+        event = "learning.transcript_accepted",
+        owner_id = %session.user_id,
+        attachment_id = %attachment_id,
+        transcript_id = %transcript.id,
+        latency_ms = started.elapsed().as_millis(),
+        "reviewed transcript accepted"
+    );
+    Ok(Json(transcript))
 }
 
 async fn attachment_row(

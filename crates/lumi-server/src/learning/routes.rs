@@ -1,5 +1,10 @@
 //! Versioned Axum routes for deterministic learning operations.
 
+use std::time::Instant;
+
+use super::generation::{
+    create_learning_generation_task, LearningGenerationError, LearningGenerationTarget,
+};
 use super::repository::{LearningStoreError, SessionTransition};
 use crate::ai::repository::{AiRepositoryError, PgAiRepository};
 use crate::{account::AuthenticatedSession, required_idempotency_key, AppError, AppState};
@@ -19,9 +24,8 @@ use lumi_core::{
     LearningSource, LearningSourceId, LearningSourceScheduleSettings, LearningToday, MaterialId,
     RecordLearningSourceOpenedCommand, RevealLearningHintCommand, SnoozeLearningSessionCommand,
     SubmitLearningAttemptCommand, TaskMutationRequest, UpdateLearningItemCommand,
-    UpdateLearningOfferCommand, UpdateLearningSettingsCommand, LEARNING_ITEMS_PROMPT_VERSION,
-    LEARNING_OPEN_ANSWER_PROMPT_VERSION, OPEN_ANSWER_EVALUATION_SCHEMA_VERSION,
-    QUESTION_SET_ARTIFACT_SCHEMA_VERSION,
+    UpdateLearningOfferCommand, UpdateLearningSettingsCommand, LEARNING_OPEN_ANSWER_PROMPT_VERSION,
+    OPEN_ANSWER_EVALUATION_SCHEMA_VERSION,
 };
 use serde::Deserialize;
 
@@ -117,47 +121,25 @@ async fn generate_learning_items(
     Path(source_id): Path<LearningSourceId>,
     Json(request): Json<GenerateLearningItemsRequest>,
 ) -> Result<Json<AiTask>, AppError> {
-    if !(1..=32).contains(&request.item_count) || request.idempotency_key.trim().is_empty() {
-        return Err(AppError::BadRequest(
-            "generation requires from 1 to 32 items and an idempotency key".to_owned(),
-        ));
-    }
-    let source = state
-        .learning_runtime()
-        .source(session.user_id, source_id)
-        .await
-        .map_err(map_learning_error)?;
-    let repository = PgAiRepository::new(state.ai_runtime()?.pool().clone());
-    let mut task = repository
-        .create_task(
-            session.user_id,
-            CreateAiTaskCommand {
-                kind: "generate_learning_items".to_owned(),
-                source_scope: ai_scope(&source)?,
-                instruction: format!(
-                    "Создай {} разнообразных учебных заданий. Все задания останутся \
-                     черновиками до явного решения пользователя.",
-                    request.item_count
-                ),
-                parameters: serde_json::json!({
-                    "source_id": source_id,
-                    "item_count": request.item_count,
-                }),
-                prompt_version: LEARNING_ITEMS_PROMPT_VERSION.to_owned(),
-                output_schema_version: QUESTION_SET_ARTIFACT_SCHEMA_VERSION.to_owned(),
-                idempotency_key: request.idempotency_key.clone(),
-            },
-        )
-        .await
-        .map_err(map_ai_repository_error)?;
-    task = maybe_execute_task(
-        &repository,
+    let started = Instant::now();
+    let task = create_learning_generation_task(
+        &state,
         session.user_id,
-        task,
-        request.execution_mode,
-        &request.idempotency_key,
+        source_id,
+        &request,
+        LearningGenerationTarget::MixedItems,
     )
-    .await?;
+    .await
+    .map_err(map_generation_error)?;
+    tracing::info!(
+        event = "learning.ai_task_created",
+        owner_id = %session.user_id,
+        source_id = %source_id,
+        task_id = %task.id,
+        task_kind = "generate_learning_items",
+        latency_ms = started.elapsed().as_millis(),
+        "learning AI task accepted"
+    );
     Ok(Json(task))
 }
 
@@ -166,6 +148,7 @@ async fn evaluate_open_answer(
     Extension(session): Extension<AuthenticatedSession>,
     Json(request): Json<EvaluateOpenAnswerRequest>,
 ) -> Result<Json<AiTask>, AppError> {
+    let started = Instant::now();
     if request.answer.trim().is_empty()
         || request.answer.len() > 64 * 1024
         || request.idempotency_key.trim().is_empty()
@@ -174,6 +157,10 @@ async fn evaluate_open_answer(
             "open answer and idempotency key are required".to_owned(),
         ));
     }
+    let _permit = state
+        .learning_operation_limits()
+        .acquire(session.user_id, super::limits::LearningOperationKind::Ai)
+        .map_err(map_operation_limit)?;
     let learning_session = state
         .learning_runtime()
         .get_session(session.user_id, request.session_id)
@@ -218,6 +205,16 @@ async fn evaluate_open_answer(
         &request.idempotency_key,
     )
     .await?;
+    tracing::info!(
+        event = "learning.ai_task_created",
+        owner_id = %session.user_id,
+        session_id = %request.session_id,
+        item_id = %request.item_id,
+        task_id = %task.id,
+        task_kind = "evaluate_open_answer",
+        latency_ms = started.elapsed().as_millis(),
+        "learning AI task accepted"
+    );
     Ok(Json(task))
 }
 
@@ -265,6 +262,34 @@ async fn maybe_execute_task(
         .map_err(map_ai_repository_error)
 }
 
+fn map_generation_error(error: LearningGenerationError) -> AppError {
+    match error {
+        LearningGenerationError::Invalid(detail) => AppError::BadRequest(detail),
+        LearningGenerationError::NotFound => AppError::NotFound("learning source"),
+        LearningGenerationError::Conflict => {
+            AppError::Conflict("learning generation conflicts with current state".to_owned())
+        }
+        LearningGenerationError::Unavailable => {
+            AppError::Unavailable("learning generation service")
+        }
+        LearningGenerationError::Limited => {
+            AppError::TooManyRequests("learning AI operation limit reached")
+        }
+    }
+}
+
+fn map_operation_limit(error: super::limits::LearningOperationLimitError) -> AppError {
+    match error {
+        super::limits::LearningOperationLimitError::RateLimited
+        | super::limits::LearningOperationLimitError::Busy => {
+            AppError::TooManyRequests("learning operation limit reached")
+        }
+        super::limits::LearningOperationLimitError::Unavailable => {
+            AppError::Unavailable("learning operation limiter")
+        }
+    }
+}
+
 fn map_ai_repository_error(error: AiRepositoryError) -> AppError {
     match error {
         AiRepositoryError::NotFound => AppError::NotFound("AI task"),
@@ -302,6 +327,7 @@ async fn complete_reading(
     headers: HeaderMap,
     Json(command): Json<CompleteReadingScopeCommand>,
 ) -> Result<Json<CompleteReadingResponse>, AppError> {
+    let started = Instant::now();
     if command.material_id != material_id {
         return Err(AppError::BadRequest(
             "material id in path and body must match".to_owned(),
@@ -309,7 +335,7 @@ async fn complete_reading(
     }
     let command_key = required_idempotency_key(&headers)?;
     let context = state.learning_material_context(session.user_id, &command)?;
-    state
+    let response = state
         .learning_runtime()
         .complete_reading(
             session.user_id,
@@ -319,8 +345,17 @@ async fn complete_reading(
             command_key,
         )
         .await
-        .map(Json)
-        .map_err(map_learning_error)
+        .map_err(map_learning_error)?;
+    tracing::info!(
+        event = "learning.completion",
+        owner_id = %session.user_id,
+        material_id = %material_id,
+        source_id = %response.offer.source.id,
+        created = response.created,
+        latency_ms = started.elapsed().as_millis(),
+        "learning completion persisted"
+    );
+    Ok(Json(response))
 }
 
 async fn get_offer(
@@ -490,13 +525,22 @@ async fn create_session(
     headers: HeaderMap,
     Json(command): Json<CreateLearningSessionCommand>,
 ) -> Result<Json<LearningSession>, AppError> {
+    let started = Instant::now();
     let command_key = required_idempotency_key(&headers)?;
-    state
+    let learning_session = state
         .learning_runtime()
         .create_session(session.user_id, session.device_id, command, command_key)
         .await
-        .map(Json)
-        .map_err(map_learning_error)
+        .map_err(map_learning_error)?;
+    tracing::info!(
+        event = "learning.session_created",
+        owner_id = %session.user_id,
+        session_id = %learning_session.id,
+        item_count = learning_session.items.len(),
+        latency_ms = started.elapsed().as_millis(),
+        "learning session created"
+    );
+    Ok(Json(learning_session))
 }
 
 async fn get_session(
@@ -631,8 +675,9 @@ async fn submit_attempt(
     headers: HeaderMap,
     Json(command): Json<SubmitLearningAttemptCommand>,
 ) -> Result<Json<LearningAttempt>, AppError> {
+    let started = Instant::now();
     let command_key = required_idempotency_key(&headers)?;
-    state
+    let attempt = state
         .learning_runtime()
         .submit_attempt(
             session.user_id,
@@ -643,8 +688,19 @@ async fn submit_attempt(
             command_key,
         )
         .await
-        .map(Json)
-        .map_err(map_learning_error)
+        .map_err(map_learning_error)?;
+    tracing::info!(
+        event = "learning.attempt_submitted",
+        owner_id = %session.user_id,
+        session_id = %session_id,
+        item_id = %item_id,
+        attempt_id = %attempt.id,
+        hints_used = attempt.hints_used.len(),
+        source_opened = attempt.source_opened,
+        latency_ms = started.elapsed().as_millis(),
+        "learning attempt persisted"
+    );
+    Ok(Json(attempt))
 }
 
 async fn today_challenges(
@@ -652,12 +708,26 @@ async fn today_challenges(
     Extension(session): Extension<AuthenticatedSession>,
     Query(query): Query<ChallengesQuery>,
 ) -> Result<Json<LearningToday>, AppError> {
-    state
+    let started = Instant::now();
+    let today = state
         .learning_runtime()
         .today(session.user_id, query.material_id)
         .await
-        .map(Json)
-        .map_err(map_learning_error)
+        .map_err(map_learning_error)?;
+    let selected_count = today
+        .groups
+        .iter()
+        .chain(&today.ready_groups)
+        .map(|group| group.item_ids.len())
+        .sum::<usize>();
+    tracing::info!(
+        event = "learning.today_projected",
+        owner_id = %session.user_id,
+        selected_count,
+        latency_ms = started.elapsed().as_millis(),
+        "bounded learning queue projected"
+    );
+    Ok(Json(today))
 }
 
 async fn list_schedules(

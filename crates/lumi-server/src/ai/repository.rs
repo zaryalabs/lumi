@@ -2038,6 +2038,10 @@ fn output_kind(schema_version: &str) -> Result<String, AiRepositoryError> {
         Ok("summary_artifact".to_owned())
     } else if schema_version == ABRIDGEMENT_ARTIFACT_SCHEMA_VERSION {
         Ok("abridgement_artifact".to_owned())
+    } else if schema_version == lumi_core::QUESTION_SET_ARTIFACT_SCHEMA_VERSION {
+        Ok("question_set_artifact".to_owned())
+    } else if schema_version == lumi_core::OPEN_ANSWER_EVALUATION_SCHEMA_VERSION {
+        Ok("open_answer_evaluation".to_owned())
     } else {
         Err(AiRepositoryError::Invalid(
             "unsupported result schema".to_owned(),
@@ -2868,5 +2872,17 @@ mod tests {
             };
             pack
         }
+    }
+
+    #[test]
+    fn learning_output_schemas_use_the_common_artifact_registry() {
+        assert_eq!(
+            output_kind(lumi_core::QUESTION_SET_ARTIFACT_SCHEMA_VERSION).as_deref(),
+            Ok("question_set_artifact")
+        );
+        assert_eq!(
+            output_kind(lumi_core::OPEN_ANSWER_EVALUATION_SCHEMA_VERSION).as_deref(),
+            Ok("open_answer_evaluation")
+        );
     }
 }

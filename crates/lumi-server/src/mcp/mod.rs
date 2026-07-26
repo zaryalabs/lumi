@@ -14,10 +14,13 @@ use axum::{
 };
 use lumi_core::{
     mcp_tool_schema_contracts, AiExecutorKind, AiPage, AiTaskClaim, AiTaskClaimFence,
-    CompleteAiTaskRequest, CreateMcpConnectionRequest, McpAiTaskProgressRequest, McpConnection,
-    McpConnectionId, McpConnectionStatus, McpConnectionTokenResponse, RevokeMcpConnectionRequest,
-    RotateMcpConnectionRequest, UserId, MCP_CONTROL_REQUEST_MAX_BYTES, MCP_INLINE_RESULT_MAX_BYTES,
-    MCP_LIST_PAGE_MAX_ITEMS, MCP_PROTOCOL_VERSION, MCP_TOOL_CONTRACT_VERSION,
+    CompleteAiTaskRequest, CreateFlashcardTaskRequest, CreateMcpConnectionRequest,
+    GenerateLearningItemsRequest, ListLearningItemsRequest, McpAiTaskProgressRequest,
+    McpConnection, McpConnectionId, McpConnectionStatus, McpConnectionTokenResponse,
+    RevokeMcpConnectionRequest, RotateMcpConnectionRequest, SubmitLearningAnswerRequest,
+    SubmitLearningAttemptCommand, UserId, MCP_CONTROL_REQUEST_MAX_BYTES,
+    MCP_INLINE_RESULT_MAX_BYTES, MCP_LIST_PAGE_MAX_ITEMS, MCP_PROTOCOL_VERSION,
+    MCP_TOOL_CONTRACT_VERSION,
 };
 use rand::{rngs::OsRng, RngCore};
 use serde::{Deserialize, Serialize};
@@ -693,6 +696,7 @@ enum ToolError {
     NotFound,
     Conflict,
     StaleClaim,
+    RateLimited,
     Unavailable,
 }
 
@@ -703,6 +707,7 @@ impl ToolError {
             Self::NotFound => -32004,
             Self::Conflict => -32009,
             Self::StaleClaim => -32010,
+            Self::RateLimited => -32029,
             Self::Unavailable => -32000,
         }
     }
@@ -713,6 +718,7 @@ impl ToolError {
             Self::NotFound => "Resource not found",
             Self::Conflict => "Object conflict",
             Self::StaleClaim => "Stale task claim",
+            Self::RateLimited => "Tool rate limit exceeded",
             Self::Unavailable => "Tool unavailable",
         }
     }
@@ -723,6 +729,7 @@ impl ToolError {
             Self::NotFound => "not_found",
             Self::Conflict => "conflict",
             Self::StaleClaim => "stale_claim",
+            Self::RateLimited => "rate_limited",
             Self::Unavailable => "unavailable",
         }
     }
@@ -798,7 +805,9 @@ fn tool_enabled(state: &AppState, name: &str) -> bool {
         | "create_highlight"
         | "create_note"
         | "update_annotation"
-        | "delete_annotation" => true,
+        | "delete_annotation"
+        | "list_learning_items"
+        | "submit_learning_answer" => true,
         "import_url" | "import_text" | "get_import_status" => state.imports.is_some(),
         "get_source_context"
         | "create_summary_task"
@@ -812,6 +821,13 @@ fn tool_enabled(state: &AppState, name: &str) -> bool {
         | "fail_ai_task"
         | "release_ai_task"
         | "get_ai_artifact" => state.ai.is_some(),
+        "create_flashcard_task" => {
+            state.ai.is_some()
+                && crate::service_capabilities(state)
+                    .features
+                    .iter()
+                    .any(|feature| feature == "learning-ai")
+        }
         _ => false,
     }
 }
@@ -837,7 +853,7 @@ async fn call_tool(
             "instance": {
                 "protocol_version": MCP_PROTOCOL_VERSION,
                 "tool_contract_version": MCP_TOOL_CONTRACT_VERSION,
-                "features": state.ai_capabilities.advertised_feature_ids(),
+                "features": crate::service_capabilities(state).features,
                 "limits": {
                     "control_request_bytes": MCP_CONTROL_REQUEST_MAX_BYTES,
                     "inline_result_bytes": MCP_INLINE_RESULT_MAX_BYTES,
@@ -1395,6 +1411,70 @@ async fn call_tool(
                 .map_err(map_ai_tool)?;
             Ok(json!(summary))
         }
+        "list_learning_items" => {
+            let request: ListLearningItemsRequest =
+                serde_json::from_value(arguments).map_err(|_| ToolError::Invalid)?;
+            let limit = request.limit.unwrap_or(DEFAULT_PAGE_SIZE);
+            if limit == 0 || limit > MCP_LIST_PAGE_MAX_ITEMS {
+                return Err(ToolError::Invalid);
+            }
+            let page = state
+                .learning_runtime()
+                .list_items(
+                    principal.user_id,
+                    request.material_id,
+                    request.source_id,
+                    request.status,
+                    request.cursor,
+                    limit,
+                )
+                .await
+                .map_err(map_learning_tool)?;
+            Ok(json!(page))
+        }
+        "create_flashcard_task" => {
+            let request: CreateFlashcardTaskRequest =
+                serde_json::from_value(arguments).map_err(|_| ToolError::Invalid)?;
+            let task = crate::learning::generation::create_learning_generation_task(
+                state,
+                principal.user_id,
+                request.source_id,
+                &GenerateLearningItemsRequest {
+                    item_count: request.item_count,
+                    execution_mode: request.execution_mode,
+                    idempotency_key: request.idempotency_key,
+                },
+                crate::learning::generation::LearningGenerationTarget::Flashcards,
+            )
+            .await
+            .map_err(map_learning_generation_tool)?;
+            Ok(json!(task))
+        }
+        "submit_learning_answer" => {
+            let request: SubmitLearningAnswerRequest =
+                serde_json::from_value(arguments).map_err(|_| ToolError::Invalid)?;
+            if request.idempotency_key.trim().is_empty() || request.idempotency_key.len() > 256 {
+                return Err(ToolError::Invalid);
+            }
+            let attempt = state
+                .learning_runtime()
+                .submit_attempt(
+                    principal.user_id,
+                    principal.device_id,
+                    request.session_id,
+                    request.item_id,
+                    &SubmitLearningAttemptCommand {
+                        answer: request.answer,
+                        self_check: request.self_check,
+                        elapsed_ms: request.elapsed_ms,
+                        review_rating: request.review_rating,
+                    },
+                    &request.idempotency_key,
+                )
+                .await
+                .map_err(map_learning_tool)?;
+            Ok(json!(attempt))
+        }
         _ => Err(ToolError::NotFound),
     }
 }
@@ -1502,6 +1582,28 @@ fn map_ai_tool(error: crate::ai::repository::AiRepositoryError) -> ToolError {
         crate::ai::repository::AiRepositoryError::StaleClaim => ToolError::StaleClaim,
         crate::ai::repository::AiRepositoryError::Invalid(_) => ToolError::Invalid,
         _ => ToolError::Unavailable,
+    }
+}
+
+fn map_learning_tool(error: crate::learning::repository::LearningStoreError) -> ToolError {
+    match error {
+        crate::learning::repository::LearningStoreError::NotFound => ToolError::NotFound,
+        crate::learning::repository::LearningStoreError::Conflict => ToolError::Conflict,
+        crate::learning::repository::LearningStoreError::Invalid(_)
+        | crate::learning::repository::LearningStoreError::InvalidDetail(_) => ToolError::Invalid,
+        crate::learning::repository::LearningStoreError::Unavailable => ToolError::Unavailable,
+    }
+}
+
+fn map_learning_generation_tool(
+    error: crate::learning::generation::LearningGenerationError,
+) -> ToolError {
+    match error {
+        crate::learning::generation::LearningGenerationError::Invalid(_) => ToolError::Invalid,
+        crate::learning::generation::LearningGenerationError::NotFound => ToolError::NotFound,
+        crate::learning::generation::LearningGenerationError::Conflict => ToolError::Conflict,
+        crate::learning::generation::LearningGenerationError::Unavailable => ToolError::Unavailable,
+        crate::learning::generation::LearningGenerationError::Limited => ToolError::RateLimited,
     }
 }
 
@@ -1697,6 +1799,204 @@ mod tests {
         assert!(!names
             .iter()
             .any(|name| name.contains("credential") || name.contains("chat")));
+    }
+
+    #[test]
+    fn learning_tool_catalog_hides_ai_mutation_without_learning_ai_capability() {
+        let state = AppState::seeded();
+        let names = enabled_tools(&state)
+            .into_iter()
+            .filter_map(|tool| tool["name"].as_str().map(ToOwned::to_owned))
+            .collect::<Vec<_>>();
+
+        assert!(names.iter().any(|name| name == "list_learning_items"));
+        assert!(names.iter().any(|name| name == "submit_learning_answer"));
+        assert!(!names.iter().any(|name| name == "create_flashcard_task"));
+    }
+
+    #[tokio::test]
+    async fn learning_tools_reuse_owner_scoped_application_service(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let state = AppState::seeded();
+        let (owner_id, material_id, revision_id, content_unit_id) = {
+            let repository = crate::read_repository(&state)
+                .map_err(|_| std::io::Error::other("seeded repository unavailable"))?;
+            let material = repository
+                .materials
+                .values()
+                .next()
+                .ok_or("seeded material missing")?;
+            let package = repository
+                .packages_by_revision
+                .get(&material.active_revision_id)
+                .ok_or("seeded package missing")?;
+            (
+                material.owner_id,
+                material.id,
+                material.active_revision_id,
+                package
+                    .units
+                    .first()
+                    .ok_or("seeded content unit missing")?
+                    .id
+                    .clone(),
+            )
+        };
+        let device_id = Uuid::now_v7();
+        let completion_command = lumi_core::CompleteReadingScopeCommand {
+            material_id,
+            revision_id,
+            scope_kind: lumi_core::LearningScopeKind::ContentUnit,
+            content_unit_id: Some(content_unit_id),
+            anchor: None,
+            trigger: lumi_core::ReadingCompletionTrigger::ExplicitUserAction,
+        };
+        let context = state
+            .learning_material_context(owner_id, &completion_command)
+            .map_err(|_| std::io::Error::other("learning material context unavailable"))?;
+        let completion = state
+            .learning_runtime()
+            .complete_reading(
+                owner_id,
+                device_id,
+                context,
+                &completion_command,
+                "mcp-learning-completion",
+            )
+            .await?;
+        let item = state
+            .learning_runtime()
+            .create_item(
+                owner_id,
+                device_id,
+                &lumi_core::CreateLearningItemCommand {
+                    source_id: completion.offer.source.id,
+                    kind: lumi_core::LearningItemKind::QuizTrueFalse,
+                    status: lumi_core::LearningItemStatus::Active,
+                    prompt: "Revision хранит immutable content?".to_owned(),
+                    answer_spec: lumi_core::LearningAnswerSpec::TrueFalse { correct: true },
+                    explanation: "Да.".to_owned(),
+                    hints: Vec::new(),
+                    source_anchor: None,
+                },
+                "mcp-learning-item",
+            )
+            .await?;
+        let learning_session = state
+            .learning_runtime()
+            .create_session(
+                owner_id,
+                device_id,
+                lumi_core::CreateLearningSessionCommand {
+                    source_id: completion.offer.source.id,
+                    kind: lumi_core::LearningSessionKind::ManualPractice,
+                },
+                "mcp-learning-session",
+            )
+            .await?;
+        state
+            .learning_runtime()
+            .transition_session(
+                owner_id,
+                device_id,
+                learning_session.id,
+                crate::learning::repository::SessionTransition::Start,
+                "mcp-learning-start",
+            )
+            .await?;
+        let principal = McpPrincipal {
+            connection_id: Uuid::now_v7(),
+            user_id: owner_id,
+            device_id,
+        };
+
+        let page = call_tool(
+            &state,
+            principal,
+            "list_learning_items",
+            json!({"source_id": completion.offer.source.id, "limit": 10}),
+        )
+        .await
+        .map_err(|_| std::io::Error::other("MCP learning list failed"))?;
+        assert_eq!(page["items"].as_array().map(Vec::len), Some(1));
+        let attempt = call_tool(
+            &state,
+            principal,
+            "submit_learning_answer",
+            json!({
+                "session_id": learning_session.id,
+                "item_id": item.id,
+                "answer": {"type": "true_false", "value": true},
+                "self_check": null,
+                "elapsed_ms": 1200,
+                "review_rating": "good",
+                "idempotency_key": "mcp-learning-answer"
+            }),
+        )
+        .await
+        .map_err(|_| std::io::Error::other("MCP learning submit failed"))?;
+        assert_eq!(attempt["feedback"]["outcome"], "correct");
+        let replayed_attempt = call_tool(
+            &state,
+            principal,
+            "submit_learning_answer",
+            json!({
+                "session_id": learning_session.id,
+                "item_id": item.id,
+                "answer": {"type": "true_false", "value": true},
+                "self_check": null,
+                "elapsed_ms": 1200,
+                "review_rating": "good",
+                "idempotency_key": "mcp-learning-answer"
+            }),
+        )
+        .await
+        .map_err(|_| std::io::Error::other("MCP learning replay failed"))?;
+        assert_eq!(replayed_attempt["id"], attempt["id"]);
+
+        assert!(matches!(
+            call_tool(
+                &state,
+                principal,
+                "list_learning_items",
+                json!({"limit": MCP_LIST_PAGE_MAX_ITEMS + 1}),
+            )
+            .await,
+            Err(ToolError::Invalid)
+        ));
+
+        let foreign = McpPrincipal {
+            connection_id: Uuid::now_v7(),
+            user_id: Uuid::now_v7(),
+            device_id: Uuid::now_v7(),
+        };
+        let foreign_page = call_tool(
+            &state,
+            foreign,
+            "list_learning_items",
+            json!({"source_id": completion.offer.source.id}),
+        )
+        .await
+        .map_err(|_| std::io::Error::other("foreign MCP learning list failed"))?;
+        assert_eq!(foreign_page["items"].as_array().map(Vec::len), Some(0));
+        assert!(matches!(
+            call_tool(
+                &state,
+                foreign,
+                "submit_learning_answer",
+                json!({
+                    "session_id": learning_session.id,
+                    "item_id": item.id,
+                    "answer": {"type": "true_false", "value": true},
+                    "self_check": null,
+                    "elapsed_ms": 1,
+                    "idempotency_key": "foreign-learning-answer"
+                }),
+            )
+            .await,
+            Err(ToolError::NotFound)
+        ));
+        Ok(())
     }
 
     #[tokio::test]

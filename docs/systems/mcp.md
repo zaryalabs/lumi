@@ -421,8 +421,21 @@ annotation и AI worker tools вызывают те же owner-scoped applicatio
 что HTTP/Web. Queue mutations используют общий claim/fence/lease и
 transactional artifact publication.
 
-Large generated `.lum` upload reference и abridgement tools остаются частью
-`E4/C3`; до их реализации они отсутствуют в `tools/list`.
+## Расширение `0.3.0/E5`: learning parity
+
+Registry `mcp-tools.v2` добавляет:
+
+- `list_learning_items` — bounded owner-scoped projection с фильтрами;
+- `create_flashcard_task` — source-backed generation через общий
+  `generate_learning_items` task и AI queue;
+- `submit_learning_answer` — тот же immutable attempt/scheduling transaction,
+  что использует Web.
+
+Детерминированные list/submit tools доступны с `learning-core`;
+`create_flashcard_task` публикуется только при `learning-ai`. Adapter сохраняет
+account scope, idempotency и typed errors, не открывает BYOK credentials, raw
+audio/blob storage или conversation runtime. Frozen schema и parity/foreign
+account fixtures находятся в `tests/fixtures/mcp/contracts/v2`.
 
 Операторский smoke и пример клиентской конфигурации:
 [`../runbooks/mcp-external-agents.md`](../runbooks/mcp-external-agents.md).

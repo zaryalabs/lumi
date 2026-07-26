@@ -259,6 +259,7 @@ pub struct AppState {
     telegram: Option<Arc<TelegramRuntime>>,
     ai: Option<Arc<ai::AiRuntime>>,
     learning: Arc<learning::LearningRuntime>,
+    learning_operation_limits: Arc<learning::limits::LearningOperationLimits>,
     audio: Option<Arc<audio::AudioRuntime>>,
     mcp: Arc<mcp::McpRuntime>,
     ai_capabilities: ai::AiCapabilityReadiness,
@@ -298,6 +299,9 @@ impl AppState {
             telegram: None,
             ai: None,
             learning: Arc::new(learning::LearningRuntime::memory()),
+            learning_operation_limits: Arc::new(
+                learning::limits::LearningOperationLimits::default(),
+            ),
             audio: None,
             mcp: Arc::new(mcp::McpRuntime::memory()),
             ai_capabilities: ai::AiCapabilityReadiness::default(),
@@ -371,6 +375,9 @@ impl AppState {
             telegram: Some(telegram),
             ai: Some(Arc::new(ai)),
             learning,
+            learning_operation_limits: Arc::new(
+                learning::limits::LearningOperationLimits::default(),
+            ),
             audio,
             mcp,
             ai_capabilities: ai::AiCapabilityReadiness::e4_release(),
@@ -393,6 +400,9 @@ impl AppState {
             telegram: None,
             ai: None,
             learning: Arc::new(learning::LearningRuntime::memory()),
+            learning_operation_limits: Arc::new(
+                learning::limits::LearningOperationLimits::default(),
+            ),
             audio: None,
             mcp: Arc::new(mcp::McpRuntime::memory()),
             ai_capabilities: ai::AiCapabilityReadiness::default(),
@@ -429,6 +439,10 @@ impl AppState {
 
     fn learning_runtime(&self) -> &learning::LearningRuntime {
         self.learning.as_ref()
+    }
+
+    fn learning_operation_limits(&self) -> &learning::limits::LearningOperationLimits {
+        self.learning_operation_limits.as_ref()
     }
 
     fn audio_runtime(&self) -> Result<&audio::AudioRuntime, AppError> {
@@ -623,6 +637,10 @@ async fn readiness(State(state): State<AppState>) -> Result<Json<HealthResponse>
 }
 
 async fn capabilities(State(state): State<AppState>) -> Json<ServiceCapabilities> {
+    Json(service_capabilities(&state))
+}
+
+pub(crate) fn service_capabilities(state: &AppState) -> ServiceCapabilities {
     let mut capabilities = ServiceCapabilities::s1();
     if state
         .telegram
@@ -649,6 +667,7 @@ async fn capabilities(State(state): State<AppState>) -> Json<ServiceCapabilities
     capabilities.route_groups.push("learning".to_owned());
     capabilities.features.push("learning-core".to_owned());
     capabilities.features.push("learning-scheduling".to_owned());
+    capabilities.features.push("learning-mcp".to_owned());
     if state.audio.is_some() {
         capabilities
             .features
@@ -660,7 +679,7 @@ async fn capabilities(State(state): State<AppState>) -> Json<ServiceCapabilities
             .features
             .push("learning-explain-back".to_owned());
     }
-    Json(capabilities)
+    capabilities
 }
 
 async fn schema_migrations() -> Json<Vec<SchemaMigration>> {
@@ -2092,6 +2111,10 @@ mod tests {
             .features
             .iter()
             .any(|feature| feature == "learning-scheduling"));
+        assert!(capabilities
+            .features
+            .iter()
+            .any(|feature| feature == "learning-mcp"));
         assert!(capabilities
             .route_groups
             .iter()

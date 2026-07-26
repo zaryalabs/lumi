@@ -61,19 +61,27 @@ Knowledge Base, native full-copy replicas, Obsidian, plugin platform, будущ
   без штрафного backlog;
 - `0.3.0 / E3`: typed source-backed generation, AI drafts, rubric-based
   open-answer evaluation, iterative explain-back и self-check fallback;
+- `0.3.0 / E5 / A4`: MCP learning parity поверх общих application services и
+  AI queue, capability-filtered registry `mcp-tools.v2`, account scope,
+  idempotency, bounded typed errors и parity/authorization fixtures;
+- `0.3.0 / E5 / release foundation`: payload-free learning/audio traces,
+  account/process limits AI/transcription и performance fixtures для due,
+  session и attempt;
 - release evidence A1 зафиксирован commit trailer
   `Lumi-Plan-Stage: 0.2.0/A1`.
 
 Ещё не готово:
 
-- voice learning, общий learning release gate, Desk/search/RAG и Community
-  Spaces.
+- полный voice learning browser/provider vertical, общий learning
+  release/operator gate, Desk/search/RAG и Community Spaces.
 
 Persistent server публикует capabilities `ai-provider-openrouter`,
 `ai-provider-byok`, `ai-explicit-context`, `ai-global-chat`, `ai-task-queue`,
 `ai-summary-artifacts`, `mcp-account-agent`, `mcp-ai-worker` и
 `ai-abridged-lum`, а также route group `learning` и capability
-`learning-core`.
+`learning-core`, `learning-scheduling`, `learning-ai`,
+`learning-explain-back`, `learning-audio-attachments` и `learning-mcp` при
+готовых prerequisites.
 
 После перехода на новую шкалу выполнено `7/18` продуктовых эпиков. Stage 0,
 Contract Freeze 1 и A1 остаются закрытыми prerequisites.
@@ -129,8 +137,9 @@ operator gate.
    evaluation, iterative cited feedback и no-provider/self-check fallback.
 4. [ ] **E4 — Голосовой контур.** Generic audio attachment, browser recording,
    transcription, transcript review, grading/explain-back и retention/delete.
-5. [ ] **E5 — Learning platform и выпуск.** MCP learning parity, общая
-   интеграция, security/accessibility/performance, runbook и release acceptance.
+5. [ ] **E5 — Learning platform и выпуск.** Platform slice MCP learning parity,
+   limits/traces/performance fixtures и документация реализован; checkpoint
+   остаётся открытым до V4/E4 и release acceptance.
 
 Результат: deterministic learning, scheduling, AI explain-back и voice flow
 закрыты отдельными пользовательскими вертикалями.

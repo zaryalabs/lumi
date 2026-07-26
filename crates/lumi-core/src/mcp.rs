@@ -6,13 +6,15 @@ use thiserror::Error;
 use uuid::Uuid;
 
 use crate::{
-    validate_ai_output, AiArtifactId, AiClaimId, AiContextPackId, AiRunId, AiTaskId, TimestampMs,
+    validate_ai_output, AiArtifactId, AiClaimId, AiContextPackId, AiExecutionMode, AiRunId,
+    AiTaskId, LearningAnswer, LearningItemId, LearningItemStatus, LearningReviewRating,
+    LearningSessionId, LearningSourceId, MaterialId, SelfCheckRating, TimestampMs,
 };
 
 /// Frozen MCP protocol snapshot.
 pub const MCP_PROTOCOL_VERSION: &str = "2025-06-18";
 /// Version of Lumi MCP tool schemas and DTOs.
-pub const MCP_TOOL_CONTRACT_VERSION: &str = "mcp-tools.v1";
+pub const MCP_TOOL_CONTRACT_VERSION: &str = "mcp-tools.v2";
 /// Maximum MCP control request body.
 pub const MCP_CONTROL_REQUEST_MAX_BYTES: usize = 1024 * 1024;
 /// Maximum ordinary inline MCP tool result.
@@ -22,6 +24,54 @@ pub const MCP_LIST_PAGE_MAX_ITEMS: usize = 100;
 
 /// Stable MCP connection identifier.
 pub type McpConnectionId = Uuid;
+
+/// Account-scoped filters for the learning item list tool.
+#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+pub struct ListLearningItemsRequest {
+    /// Optional material filter.
+    pub material_id: Option<MaterialId>,
+    /// Optional immutable learning source filter.
+    pub source_id: Option<LearningSourceId>,
+    /// Optional lifecycle filter.
+    pub status: Option<LearningItemStatus>,
+    /// Stable item-id cursor returned by the previous page.
+    pub cursor: Option<LearningItemId>,
+    /// Requested page size; the server applies the MCP upper bound.
+    pub limit: Option<usize>,
+}
+
+/// Request for source-backed flashcard drafts through the common AI queue.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct CreateFlashcardTaskRequest {
+    /// Immutable source used by the context resolver.
+    pub source_id: LearningSourceId,
+    /// Requested number of flashcard drafts.
+    pub item_count: u16,
+    /// Queue-only or immediate internal execution mode.
+    pub execution_mode: AiExecutionMode,
+    /// Retry-safe request key shared with the Web application service.
+    pub idempotency_key: String,
+}
+
+/// Account-scoped learning answer mutation exposed through MCP.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct SubmitLearningAnswerRequest {
+    /// Existing session containing an immutable item snapshot.
+    pub session_id: LearningSessionId,
+    /// Item snapshot being answered.
+    pub item_id: LearningItemId,
+    /// Typed answer payload.
+    pub answer: LearningAnswer,
+    /// Explicit self-check rating where required by the item kind.
+    pub self_check: Option<SelfCheckRating>,
+    /// Bounded client-measured elapsed time.
+    pub elapsed_ms: u64,
+    /// Optional explicit scheduler rating.
+    #[serde(default)]
+    pub review_rating: Option<LearningReviewRating>,
+    /// Retry-safe mutation key.
+    pub idempotency_key: String,
+}
 
 /// MCP connection lifecycle visible in account settings.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -292,7 +342,7 @@ pub fn mcp_tool_schema_contracts() -> &'static [McpToolSchemaContract] {
     MCP_TOOL_SCHEMAS
 }
 
-/// Required MCP tool allowlist for the `0.2.0` profile.
+/// Required MCP tool allowlist for the `0.3.0` profile.
 pub const MCP_TOOL_NAMES: &[&str] = &[
     "get_lumi_capabilities",
     "list_materials",
@@ -326,6 +376,9 @@ pub const MCP_TOOL_NAMES: &[&str] = &[
     "fail_ai_task",
     "release_ai_task",
     "get_ai_artifact",
+    "list_learning_items",
+    "create_flashcard_task",
+    "submit_learning_answer",
 ];
 
 const MCP_TOOL_SCHEMAS: &[McpToolSchemaContract] = &[
@@ -489,6 +542,21 @@ const MCP_TOOL_SCHEMAS: &[McpToolSchemaContract] = &[
         input_schema: "artifact-id.input.v1",
         output_schema: "ai-artifact.output.v1",
     },
+    McpToolSchemaContract {
+        name: "list_learning_items",
+        input_schema: "list-learning-items.input.v1",
+        output_schema: "learning-item-page.output.v1",
+    },
+    McpToolSchemaContract {
+        name: "create_flashcard_task",
+        input_schema: "create-flashcard-task.input.v1",
+        output_schema: "ai-task.output.v1",
+    },
+    McpToolSchemaContract {
+        name: "submit_learning_answer",
+        input_schema: "submit-learning-answer.input.v1",
+        output_schema: "learning-attempt.output.v1",
+    },
 ];
 
 const MCP_HTTP_ROUTES: [McpHttpRouteContract; 4] = [
@@ -583,7 +651,7 @@ mod tests {
     #[test]
     fn frozen_mcp_tool_snapshot_matches_allowlist() -> Result<(), Box<dyn std::error::Error>> {
         let registry: Value = serde_json::from_str(include_str!(
-            "../../../tests/fixtures/mcp/contracts/v1/tool-registry.json"
+            "../../../tests/fixtures/mcp/contracts/v2/tool-registry.json"
         ))?;
         let tools = registry["tools"]
             .as_array()

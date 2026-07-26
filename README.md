@@ -86,6 +86,16 @@ items проходят строгую schema/citation validation и появля
 остаётся честная self-check ветка. Решение описано в
 [`ADR 0028`](docs/adr/0028-learning-ai-evaluation-explain-back.md).
 
+Для `0.3.0/E5` реализован независимый platform slice: account-scoped MCP tools
+`list_learning_items`, `create_flashcard_task` и `submit_learning_answer`
+используют те же learning application services, AI queue, authorization и
+idempotency, что HTTP/Web. Добавлены capability filtering, frozen MCP schema
+`mcp-tools.v2`, typed limits/errors, owner/parity fixtures, payload-free
+операционные traces и process/account limits для AI/transcription. Полный
+выпуск `0.3.0` пока не объявлен: обязательный E4 browser recording/provider
+transcription vertical и заключительный release/operator gate ещё не закрыты,
+поэтому версия workspace намеренно остаётся `0.2.0`.
+
 ## Локальный запуск
 
 Для основного пути нужны Docker с Compose и `make`. Он собирает и запускает
