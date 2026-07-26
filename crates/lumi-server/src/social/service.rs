@@ -4,10 +4,11 @@ use std::time::{Duration, Instant};
 
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
 use lumi_core::{
-    CommunityAccessLink, CommunityAccessLinkId, CommunityAction, CommunityLinkPreview,
-    CommunityMembership, CommunityRole, CommunitySpace, CommunitySpaceDetail, CommunitySpaceId,
-    CreateCommunityAccessLinkRequest, CreateCommunitySpaceRequest, CreatedCommunityAccessLink,
-    JoinCommunityLinkRequest, PreviewCommunityLinkRequest, UpdateCommunityMemberRequest,
+    ClaimSharedMaterialRequest, CommunityAccessLink, CommunityAccessLinkId, CommunityAction,
+    CommunityLinkPreview, CommunityMembership, CommunityRole, CommunitySpace, CommunitySpaceDetail,
+    CommunitySpaceId, CreateCommunityAccessLinkRequest, CreateCommunitySpaceRequest,
+    CreatedCommunityAccessLink, JoinCommunityLinkRequest, PreviewCommunityLinkRequest,
+    ShareMaterialRequest, SharedMaterial, SharedMaterialId, UpdateCommunityMemberRequest,
     UpdateCommunitySpaceRequest, UserId,
 };
 use rand::{rngs::OsRng, RngCore};
@@ -86,6 +87,10 @@ impl SocialRuntime {
             backend: SocialBackend::Postgres(PgSocialStore::new(pool, secrets)),
             limits: Arc::new(Mutex::new(RateLimitState::default())),
         })
+    }
+
+    pub(crate) fn supports_material_sharing(&self) -> bool {
+        matches!(self.backend, SocialBackend::Postgres(_))
     }
 
     pub(crate) async fn list(
@@ -528,6 +533,127 @@ impl SocialRuntime {
                         idempotency_key,
                         &token,
                         token_hash,
+                    )
+                    .await
+            }
+        }
+    }
+
+    pub(crate) async fn list_materials(
+        &self,
+        user_id: UserId,
+        space_id: CommunitySpaceId,
+    ) -> Result<Vec<SharedMaterial>, SocialStoreError> {
+        match &self.backend {
+            SocialBackend::Memory(_) => Err(SocialStoreError::Unavailable),
+            SocialBackend::Postgres(store) => store.list_materials(user_id, space_id).await,
+        }
+    }
+
+    pub(crate) async fn material(
+        &self,
+        user_id: UserId,
+        space_id: CommunitySpaceId,
+        shared_material_id: SharedMaterialId,
+    ) -> Result<SharedMaterial, SocialStoreError> {
+        match &self.backend {
+            SocialBackend::Memory(_) => Err(SocialStoreError::Unavailable),
+            SocialBackend::Postgres(store) => {
+                store.material(user_id, space_id, shared_material_id).await
+            }
+        }
+    }
+
+    pub(crate) async fn share_material(
+        &self,
+        user_id: UserId,
+        device_id: Uuid,
+        space_id: CommunitySpaceId,
+        idempotency_key: &str,
+        request: ShareMaterialRequest,
+    ) -> Result<SharedMaterial, SocialStoreError> {
+        validate_key(idempotency_key)?;
+        match &self.backend {
+            SocialBackend::Memory(_) => Err(SocialStoreError::Unavailable),
+            SocialBackend::Postgres(store) => {
+                store
+                    .share_material(user_id, device_id, space_id, idempotency_key, request)
+                    .await
+            }
+        }
+    }
+
+    pub(crate) async fn claim_material(
+        &self,
+        user_id: UserId,
+        device_id: Uuid,
+        space_id: CommunitySpaceId,
+        shared_material_id: SharedMaterialId,
+        idempotency_key: &str,
+        request: ClaimSharedMaterialRequest,
+    ) -> Result<SharedMaterial, SocialStoreError> {
+        validate_key(idempotency_key)?;
+        match &self.backend {
+            SocialBackend::Memory(_) => Err(SocialStoreError::Unavailable),
+            SocialBackend::Postgres(store) => {
+                store
+                    .claim_material(
+                        user_id,
+                        device_id,
+                        space_id,
+                        shared_material_id,
+                        idempotency_key,
+                        request,
+                    )
+                    .await
+            }
+        }
+    }
+
+    pub(crate) async fn recheck_material(
+        &self,
+        user_id: UserId,
+        device_id: Uuid,
+        space_id: CommunitySpaceId,
+        shared_material_id: SharedMaterialId,
+        idempotency_key: &str,
+    ) -> Result<SharedMaterial, SocialStoreError> {
+        validate_key(idempotency_key)?;
+        match &self.backend {
+            SocialBackend::Memory(_) => Err(SocialStoreError::Unavailable),
+            SocialBackend::Postgres(store) => {
+                store
+                    .recheck_material(
+                        user_id,
+                        device_id,
+                        space_id,
+                        shared_material_id,
+                        idempotency_key,
+                    )
+                    .await
+            }
+        }
+    }
+
+    pub(crate) async fn delete_material(
+        &self,
+        user_id: UserId,
+        device_id: Uuid,
+        space_id: CommunitySpaceId,
+        shared_material_id: SharedMaterialId,
+        idempotency_key: &str,
+    ) -> Result<(), SocialStoreError> {
+        validate_key(idempotency_key)?;
+        match &self.backend {
+            SocialBackend::Memory(_) => Err(SocialStoreError::Unavailable),
+            SocialBackend::Postgres(store) => {
+                store
+                    .delete_material(
+                        user_id,
+                        device_id,
+                        space_id,
+                        shared_material_id,
+                        idempotency_key,
                     )
                     .await
             }

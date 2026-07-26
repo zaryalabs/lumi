@@ -8,6 +8,7 @@
 mod ai;
 mod auth;
 mod epub;
+mod fingerprints;
 mod fixtures;
 mod learning;
 #[cfg(feature = "markdown-import")]
@@ -24,6 +25,7 @@ mod sources;
 pub use ai::*;
 pub use auth::*;
 pub use epub::*;
+pub use fingerprints::*;
 pub use fixtures::{
     import_epub_fixture, rich_epub_fixture, sample_fixture_highlight, sample_learning_fixture,
     simple_epub_fixture, EpubFixture, EpubFixtureResource, EpubFixtureSection, ImportError,
@@ -47,7 +49,7 @@ use serde::{Deserialize, Serialize};
 pub const API_VERSION: &str = "v1";
 
 /// Current domain schema marker for the frozen `0.2.0` AI contracts.
-pub const DOMAIN_SCHEMA_VERSION: &str = "s1.2026-07-26.community-spaces-v1";
+pub const DOMAIN_SCHEMA_VERSION: &str = "s1.2026-07-26.material-sharing-v1";
 
 /// Current normalized content package marker for reflowable S1 documents.
 pub const NORMALIZED_PACKAGE_VERSION: &str = "normalized.reflowable.s1";

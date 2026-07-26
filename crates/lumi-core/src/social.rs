@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use uuid::Uuid;
 
-use crate::{TimestampMs, UserId};
+use crate::{DocumentRevisionId, MaterialId, SourceFormat, TimestampMs, UserId};
 
 /// Version of the first Community Space contract.
 pub const COMMUNITY_CONTRACT_VERSION: &str = "community-space.v1";
@@ -25,6 +25,10 @@ pub type CommunityMembershipId = Uuid;
 pub type CommunityAccessLinkId = Uuid;
 /// Stable identifier of a Community activity event.
 pub type CommunityActivityEventId = Uuid;
+/// Stable identifier of one material identity shared into a Community Space.
+pub type SharedMaterialId = Uuid;
+/// Stable identifier of a user's claim connecting their private material copy.
+pub type UserMaterialClaimId = Uuid;
 
 /// Discoverability supported by the first closed Community release.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -74,6 +78,113 @@ pub enum CommunityAccessLinkStatus {
     Active,
     /// Link was revoked and cannot be used again.
     Revoked,
+}
+
+/// Match lifecycle for a user's private copy of a shared material.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum UserMaterialClaimStatus {
+    /// Fingerprint generation or re-evaluation has not completed.
+    Pending,
+    /// Conservative evidence allows the shared layer to use this copy.
+    Matched,
+    /// Available evidence is incompatible.
+    Rejected,
+    /// Evidence is plausible but cannot safely grant automatic access.
+    ManualReview,
+}
+
+/// Safe explanation of a claim decision without protected fingerprint values.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MaterialMatchBasis {
+    /// Identity creator's exact private revision.
+    CreatorCopy,
+    /// Complete canonical normalized text is identical.
+    ExactContent,
+    /// Protected similarity passed the conservative threshold and guards.
+    HighSimilarity,
+    /// Only non-authoritative or ambiguous evidence is available.
+    Ambiguous,
+    /// Evidence is incompatible.
+    Incompatible,
+}
+
+/// Safe metadata identity shared into one Community Space.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct SharedMaterialIdentity {
+    /// Stable shared identity.
+    pub id: SharedMaterialId,
+    /// Community Space containing the identity.
+    pub community_space_id: CommunitySpaceId,
+    /// Canonical title extracted from the creator's immutable revision.
+    pub canonical_title: String,
+    /// Creator names safe to show on the metadata shell.
+    pub creators: Vec<String>,
+    /// Source families represented by current matched claims.
+    pub source_formats: Vec<SourceFormat>,
+    /// Stable account that first shared this identity.
+    pub created_by_user_id: UserId,
+    /// Optimistic concurrency revision.
+    pub object_revision: u64,
+    /// Creation timestamp.
+    pub created_at: TimestampMs,
+    /// Last update timestamp.
+    pub updated_at: TimestampMs,
+}
+
+/// A user's owner-scoped private material linked to a shared identity.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct UserMaterialClaim {
+    /// Stable claim identity.
+    pub id: UserMaterialClaimId,
+    /// Community Space containing the claim.
+    pub community_space_id: CommunitySpaceId,
+    /// Shared material being claimed.
+    pub shared_material_id: SharedMaterialId,
+    /// Stable claiming account.
+    pub user_id: UserId,
+    /// Private material id. It is returned only to its owner.
+    pub material_id: MaterialId,
+    /// Immutable private revision evaluated for this claim.
+    pub revision_id: DocumentRevisionId,
+    /// Current conservative match state.
+    pub status: UserMaterialClaimStatus,
+    /// Safe decision explanation.
+    pub basis: MaterialMatchBasis,
+    /// Similarity in basis points when similarity evidence was evaluated.
+    pub score_bps: Option<u16>,
+    /// Versioned fingerprint contract, without protected values.
+    pub fingerprint_version: String,
+    /// Optimistic concurrency revision.
+    pub object_revision: u64,
+    /// Creation timestamp.
+    pub created_at: TimestampMs,
+    /// Last evaluation timestamp.
+    pub updated_at: TimestampMs,
+}
+
+/// Shared metadata shell together with the current caller's optional claim.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct SharedMaterial {
+    /// Community-safe identity metadata.
+    pub identity: SharedMaterialIdentity,
+    /// Current caller's claim; another member's private material id is never returned.
+    pub claim: Option<UserMaterialClaim>,
+}
+
+/// Owner-scoped request to share one private material into a Space.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct ShareMaterialRequest {
+    /// Private material owned by the authenticated caller.
+    pub material_id: MaterialId,
+}
+
+/// Owner-scoped request to attach a private copy to an existing identity.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct ClaimSharedMaterialRequest {
+    /// Private material owned by the authenticated caller.
+    pub material_id: MaterialId,
 }
 
 /// Community Space read model safe for active members.
@@ -184,6 +295,10 @@ pub struct CommunityPermissions {
     pub can_assign_admin: bool,
     /// Space can be deleted.
     pub can_delete_space: bool,
+    /// Active member can share a private material identity.
+    pub can_add_material: bool,
+    /// Role can remove a shared material identity from the Space.
+    pub can_remove_material: bool,
 }
 
 impl CommunityPermissions {
@@ -196,6 +311,8 @@ impl CommunityPermissions {
             can_remove_members: matches!(role, CommunityRole::Owner | CommunityRole::Admin),
             can_assign_admin: role == CommunityRole::Owner,
             can_delete_space: role == CommunityRole::Owner,
+            can_add_material: true,
+            can_remove_material: matches!(role, CommunityRole::Owner | CommunityRole::Admin),
         }
     }
 }
@@ -278,6 +395,10 @@ pub enum CommunityAction {
     RemoveMember,
     /// Permanently close the Space.
     DeleteSpace,
+    /// Add a private material identity or claim.
+    AddMaterial,
+    /// Remove a shared identity from the Space.
+    RemoveMaterial,
 }
 
 /// Domain validation or authorization failure.
@@ -367,12 +488,12 @@ pub fn authorize_community_action(
         return Err(CommunityContractError::InactiveMembership);
     }
     let allowed = match action {
-        CommunityAction::View => true,
+        CommunityAction::View | CommunityAction::AddMaterial => true,
         CommunityAction::UpdateSpace | CommunityAction::ManageLinks => {
             matches!(role, CommunityRole::Owner | CommunityRole::Admin)
         }
         CommunityAction::ChangeRole | CommunityAction::DeleteSpace => role == CommunityRole::Owner,
-        CommunityAction::RemoveMember => {
+        CommunityAction::RemoveMember | CommunityAction::RemoveMaterial => {
             matches!(role, CommunityRole::Owner | CommunityRole::Admin)
         }
     };

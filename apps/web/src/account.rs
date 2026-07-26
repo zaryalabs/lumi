@@ -164,6 +164,7 @@ pub(crate) fn AccountGate() -> Element {
     let mut csrf = use_signal(String::new);
     let mut bootstrap_generation = use_signal(|| 0_u64);
     let mut community_available = use_signal(|| false);
+    let mut material_sharing_available = use_signal(|| false);
     let mut capability_error = use_signal(String::new);
     use_effect(move || {
         let Some(window) = web_sys::window() else {
@@ -224,10 +225,17 @@ pub(crate) fn AccountGate() -> Element {
                                     .iter()
                                     .any(|feature| feature == "community-spaces"),
                             );
+                            material_sharing_available.set(
+                                capabilities
+                                    .features
+                                    .iter()
+                                    .any(|feature| feature == "material-sharing"),
+                            );
                             capability_error.set(String::new());
                         }
                         Err(api_error) => {
                             community_available.set(false);
+                            material_sharing_available.set(false);
                             capability_error.set(format!(
                                 "Не удалось проверить возможности сервера: {api_error}"
                             ));
@@ -268,10 +276,17 @@ pub(crate) fn AccountGate() -> Element {
                                         .iter()
                                         .any(|feature| feature == "community-spaces"),
                                 );
+                                material_sharing_available.set(
+                                    capabilities
+                                        .features
+                                        .iter()
+                                        .any(|feature| feature == "material-sharing"),
+                                );
                                 capability_error.set(String::new());
                             }
                             Err(api_error) => {
                                 community_available.set(false);
+                                material_sharing_available.set(false);
                                 capability_error.set(format!(
                                     "Не удалось проверить возможности сервера: {api_error}"
                                 ));
@@ -380,6 +395,12 @@ pub(crate) fn AccountGate() -> Element {
                                                     .iter()
                                                     .any(|feature| feature == "community-spaces"),
                                             );
+                                            material_sharing_available.set(
+                                                capabilities
+                                                    .features
+                                                    .iter()
+                                                    .any(|feature| feature == "material-sharing"),
+                                            );
                                         }
                                         Err(api_error) => capability_error.set(format!(
                                             "Не удалось проверить возможности сервера: {api_error}"
@@ -393,6 +414,7 @@ pub(crate) fn AccountGate() -> Element {
                         crate::pdf_reader::ReaderRoute {
                             material_id,
                             csrf_token: csrf.read().clone(),
+                            material_sharing_available: material_sharing_available(),
                             on_close: move |_| {
                                 let next = return_to.map_or(AppRoute::Library, AppRoute::LearningSession);
                                 set_browser_route(next);
@@ -443,6 +465,7 @@ pub(crate) fn AccountGate() -> Element {
                             space_id: if let AppRoute::CommunitySpace(space_id) = route() { Some(space_id) } else { None },
                             join_token: if route() == AppRoute::CommunityJoin { community_join_token() } else { None },
                             available: community_available(),
+                            material_sharing_available: material_sharing_available(),
                             on_open_space: move |space_id| {
                                 let next = AppRoute::CommunitySpace(space_id);
                                 set_browser_route(next);
@@ -1051,6 +1074,12 @@ fn LibraryApp(
             .iter()
             .any(|feature| feature == "ai-abridged-lum")
     });
+    let material_sharing_enabled = capabilities.read().as_ref().is_some_and(|value| {
+        value
+            .features
+            .iter()
+            .any(|feature| feature == "material-sharing")
+    });
     rsx! {
         main { id: "main-content", class: "library-view", aria_label: "Библиотека Lumi",
             header { class: if loaded { "library-hero compact" } else { "library-hero" },
@@ -1137,6 +1166,7 @@ fn LibraryApp(
                                 key: "{entry.id}",
                                 entry,
                                 csrf_token: csrf_token.clone(),
+                                material_sharing_enabled,
                                 on_changed: move |_| {
                                     spawn(async move {
                                         match refresh_library(entries, continue_reading, refresh_generation).await {
@@ -1171,6 +1201,7 @@ fn LibraryApp(
                                 key: "archived-{entry.id}",
                                 entry,
                                 csrf_token: csrf_token.clone(),
+                                material_sharing_enabled,
                                 on_changed: move |_| {
                                     spawn(async move {
                                         let _ = refresh_library(entries, continue_reading, refresh_generation).await;
@@ -1211,7 +1242,7 @@ fn LibraryApp(
         }
 
         if let Some(entry) = details.read().clone() {
-            MaterialDetailsDialog { entry: entry.clone(), csrf_token: csrf_token.clone(), abridgement_enabled, on_close: move |_| {
+            MaterialDetailsDialog { entry: entry.clone(), csrf_token: csrf_token.clone(), abridgement_enabled, material_sharing_enabled, on_close: move |_| {
                 details.set(None);
                 defer_account_focus(&format!("details-{}", entry.id));
             } }
@@ -1256,6 +1287,7 @@ fn LibraryApp(
 fn MaterialCard(
     entry: LibraryEntry,
     csrf_token: String,
+    material_sharing_enabled: bool,
     on_changed: EventHandler<()>,
     on_details: EventHandler<LibraryEntry>,
     on_delete: EventHandler<LibraryEntry>,
@@ -1276,7 +1308,8 @@ fn MaterialCard(
     let delete_entry = entry.clone();
     let state_csrf = csrf_token.clone();
     let cancel_job_csrf = csrf_token.clone();
-    let retry_job_csrf = csrf_token;
+    let retry_job_csrf = csrf_token.clone();
+    let share_csrf = csrf_token;
     let state_changed = on_changed;
     let job_changed = on_changed;
     let state_error = on_error;
@@ -1327,6 +1360,14 @@ fn MaterialCard(
                         div { class: "material-menu-actions",
                             button { id: "details-{material_id}", class: "text-action", r#type: "button", onclick: move |_| on_details.call(details_entry.clone()), "Сведения" }
                             a { class: "text-action", href: "{API_BASE}/materials/{material_id}/source", "{source_download_label}" }
+                            if entry.import_status == MaterialImportStatus::Ready {
+                                crate::community::ShareMaterialAction {
+                                    material_id,
+                                    csrf_token: share_csrf.clone(),
+                                    available: material_sharing_enabled,
+                                    label: "Поделиться в сообществе".to_owned(),
+                                }
+                            }
                             if matches!(entry.latest_job.status, JobStatus::Queued | JobStatus::Running) {
                                 button { class: "text-action", r#type: "button", onclick: move |_| {
                                     let csrf = cancel_job_csrf.clone();
@@ -1618,6 +1659,7 @@ fn MaterialDetailsDialog(
     entry: LibraryEntry,
     csrf_token: String,
     abridgement_enabled: bool,
+    material_sharing_enabled: bool,
     on_close: EventHandler<()>,
 ) -> Element {
     let revision = entry
@@ -1673,6 +1715,14 @@ fn MaterialDetailsDialog(
             }
             div { class: "dialog-actions",
                 a { class: "secondary-action", href: "{API_BASE}/materials/{entry.id}/source", "{download_label}" }
+                if entry.import_status == MaterialImportStatus::Ready {
+                    crate::community::ShareMaterialAction {
+                        material_id: entry.id,
+                        csrf_token: csrf_token.clone(),
+                        available: material_sharing_enabled,
+                        label: "Поделиться".to_owned(),
+                    }
+                }
                 if let Some(revision_id) = entry.active_revision_id {
                     crate::ai::SummaryAction {
                         material_id: entry.id,

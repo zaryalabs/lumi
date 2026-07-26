@@ -368,13 +368,23 @@ SharedAnchor {
 ### Fingerprinting pipeline
 
 1. Importer creates normalized text layer.
-2. Fingerprint job computes metadata fingerprint and text shingles.
+2. Server computes a versioned metadata/content fingerprint. В E2 explicit
+   share/claim/recheck делает это для текущей immutable active revision;
+   durable Job/backfill подключается после стабилизации revision lifecycle
+   `0.4.0`.
 3. Community Space claim compares local fingerprint to shared identity.
-4. Server stores match score/status, not necessarily raw full text.
+4. Server stores match score/status и server-internal evidence, но не raw full
+   text.
 5. Client maps shared anchors to local document revision.
 
-Open privacy choice: exact fingerprint payload must be designed so it is useful
-for matching but does not become a practical substitute for the text.
+Принятый `material-fingerprint.v1` описан в
+[`ADR 0031`](../adr/0031-material-fingerprints-and-community-claims.md):
+canonical exact hash дополняется 32-lane MinHash по нормализованным shingles,
+защищённым версионированным server-side HMAC key. Raw/protected signatures,
+metadata key и section hash никогда не возвращаются клиенту. Exact non-empty
+content совпадает автоматически; similarity требует не менее 100 tokens,
+90% MinHash similarity, совместимый размер и metadata/section evidence.
+Metadata-only и неоднозначные случаи дают `manual_review`, а не `matched`.
 
 ### Community Space sync
 
@@ -481,11 +491,5 @@ material comments и общий chat.
 
 ## Открытые вопросы
 
-- What exact fingerprint format balances matching quality and text privacy?
-- Which similarity threshold is safe enough across EPUB/FB2/PDF editions?
-- Should metadata-only shared material pages show discussion to users without a
-  matching local copy, or only invite them to import?
 - How should quoted snippets in comments be limited to avoid reconstructing a
   book through many comments?
-- Does opening an unlisted link create membership immediately, show a guest
-  preview or require an explicit join confirmation?

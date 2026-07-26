@@ -51,6 +51,7 @@ struct PdfSelection {
 pub(crate) fn ReaderRoute(
     material_id: Uuid,
     csrf_token: String,
+    material_sharing_available: bool,
     on_close: EventHandler<()>,
     on_open_learning_session: EventHandler<Uuid>,
     on_manage_learning: EventHandler<(Uuid, Uuid)>,
@@ -74,6 +75,7 @@ pub(crate) fn ReaderRoute(
             crate::reader::ReaderApp {
                 material_id,
                 csrf_token,
+                material_sharing_available,
                 on_close,
                 on_open_learning_session,
                 on_manage_learning,
@@ -83,6 +85,7 @@ pub(crate) fn ReaderRoute(
             PdfReaderApp {
                 material_id,
                 csrf_token,
+                material_sharing_available,
                 on_close,
                 on_open_learning_session,
                 on_manage_learning,
@@ -102,6 +105,7 @@ pub(crate) fn ReaderRoute(
 fn PdfReaderApp(
     material_id: Uuid,
     csrf_token: String,
+    material_sharing_available: bool,
     on_close: EventHandler<()>,
     on_open_learning_session: EventHandler<Uuid>,
     on_manage_learning: EventHandler<(Uuid, Uuid)>,
@@ -282,6 +286,12 @@ fn PdfReaderApp(
                                 scope_ref: "material".to_owned(),
                                 label: "Саммари".to_owned(),
                                 csrf_token: csrf.read().clone(),
+                            }
+                            crate::community::ShareMaterialAction {
+                                material_id,
+                                csrf_token: csrf.read().clone(),
+                                available: material_sharing_available,
+                                label: "Поделиться".to_owned(),
                             }
                             a { class: "secondary-action", href: "{API_BASE}/materials/{material_id}/source", download: "{data.entry.source_identity.source_name}", "Скачать PDF" }
                         }

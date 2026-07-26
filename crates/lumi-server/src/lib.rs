@@ -714,6 +714,9 @@ pub(crate) fn service_capabilities(state: &AppState) -> ServiceCapabilities {
     capabilities
         .features
         .push("community-link-access".to_owned());
+    if state.social_runtime().supports_material_sharing() {
+        capabilities.features.push("material-sharing".to_owned());
+    }
     capabilities
 }
 
@@ -2213,7 +2216,7 @@ mod tests {
         let migrations: Vec<SchemaMigration> =
             json_get(build_router(), "/api/v1/schema/migrations").await?;
 
-        assert_eq!(migrations.len(), 24);
+        assert_eq!(migrations.len(), 25);
         assert!(migrations
             .iter()
             .any(|migration| migration.id == "s1-0017-learning-core"));
@@ -2229,6 +2232,9 @@ mod tests {
         assert!(migrations
             .iter()
             .any(|migration| migration.id == "s1-0021-community-spaces-access"));
+        assert!(migrations
+            .iter()
+            .any(|migration| migration.id == "s1-0022-material-sharing-matching"));
         Ok(())
     }
 
@@ -2915,6 +2921,202 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn postgres_material_sharing_matches_copies_without_exposing_source(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let Ok(database_url) = std::env::var("LUMI_TEST_DATABASE_URL") else {
+            return Ok(());
+        };
+        let _recovery_guard = crate::imports::POSTGRES_RECOVERY_TEST_LOCK.lock().await;
+        run_migrations(&database_url).await?;
+        let blob_root =
+            std::env::temp_dir().join(format!("lumi-social-material-{}", uuid::Uuid::now_v7()));
+        let secret_root = std::env::temp_dir().join(format!(
+            "lumi-social-material-secrets-{}",
+            uuid::Uuid::now_v7()
+        ));
+        let mut config = AppConfig::from_env();
+        config.database_url = database_url.clone();
+        config.blob_root = blob_root;
+        config.secret_root = secret_root;
+        config.bind_address = DEFAULT_BIND_ADDRESS.to_owned();
+        config.deployment_mode = "local".to_owned();
+        let app = build_router_with_state(AppState::persistent(&config).await?);
+        let owner = register_test_session(app.clone(), 0xa1).await?;
+        let member = register_test_session(app.clone(), 0xb1).await?;
+        let reviewer = register_test_session(app.clone(), 0xc1).await?;
+        let owner_material = persist_social_fixture(&database_url, owner.user_id, None).await?;
+        let member_material = persist_social_fixture(&database_url, member.user_id, None).await?;
+        let reviewer_material = persist_social_fixture(
+            &database_url,
+            reviewer.user_id,
+            Some("Совершенно другое короткое содержание с тем же заголовком."),
+        )
+        .await?;
+
+        let created: lumi_core::CommunitySpaceDetail = request_json_with_session_status(
+            app.clone(),
+            Request::builder()
+                .method("POST")
+                .uri("/api/v1/spaces")
+                .header(header::CONTENT_TYPE, "application/json")
+                .header("idempotency-key", "material-space")
+                .body(json_body(&lumi_core::CreateCommunitySpaceRequest {
+                    name: "Сопоставление копий".to_owned(),
+                    description: None,
+                })?)?,
+            &owner,
+            StatusCode::CREATED,
+        )
+        .await?;
+        let link: lumi_core::CreatedCommunityAccessLink = request_json_with_session_status(
+            app.clone(),
+            Request::builder()
+                .method("POST")
+                .uri(format!("/api/v1/spaces/{}/access-links", created.space.id))
+                .header(header::CONTENT_TYPE, "application/json")
+                .header("idempotency-key", "material-space-link")
+                .body(json_body(&lumi_core::CreateCommunityAccessLinkRequest {
+                    expires_at: None,
+                    max_uses: None,
+                })?)?,
+            &owner,
+            StatusCode::CREATED,
+        )
+        .await?;
+        for (session, idempotency_key) in [
+            (&member, "member-material-join"),
+            (&reviewer, "reviewer-material-join"),
+        ] {
+            let _: lumi_core::CommunitySpaceDetail = request_json_with_session(
+                app.clone(),
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/shares/community-link/join")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .header("idempotency-key", idempotency_key)
+                    .body(json_body(&lumi_core::JoinCommunityLinkRequest {
+                        token: link.token.clone(),
+                    })?)?,
+                session,
+            )
+            .await?;
+        }
+
+        let owner_shared: lumi_core::SharedMaterial = request_json_with_session(
+            app.clone(),
+            Request::builder()
+                .method("POST")
+                .uri(format!(
+                    "/api/v1/spaces/{}/materials/share",
+                    created.space.id
+                ))
+                .header(header::CONTENT_TYPE, "application/json")
+                .header("idempotency-key", "owner-material-share")
+                .body(json_body(&lumi_core::ShareMaterialRequest {
+                    material_id: owner_material,
+                })?)?,
+            &owner,
+        )
+        .await?;
+        assert_eq!(
+            owner_shared.claim.as_ref().map(|claim| claim.status),
+            Some(lumi_core::UserMaterialClaimStatus::Matched)
+        );
+
+        let member_shared: lumi_core::SharedMaterial = request_json_with_session(
+            app.clone(),
+            Request::builder()
+                .method("POST")
+                .uri(format!(
+                    "/api/v1/spaces/{}/materials/share",
+                    created.space.id
+                ))
+                .header(header::CONTENT_TYPE, "application/json")
+                .header("idempotency-key", "member-material-share")
+                .body(json_body(&lumi_core::ShareMaterialRequest {
+                    material_id: member_material,
+                })?)?,
+            &member,
+        )
+        .await?;
+        assert_eq!(member_shared.identity.id, owner_shared.identity.id);
+        assert_eq!(
+            member_shared.claim.as_ref().map(|claim| claim.basis),
+            Some(lumi_core::MaterialMatchBasis::ExactContent)
+        );
+        let social_store = PgAccountStore::connect(&database_url, HashSet::new()).await?;
+        let sync_payloads = sqlx_core::query::query(
+            "SELECT change.payload::text AS payload
+             FROM sync_changes change
+             JOIN community_spaces space ON space.sync_space_id = change.space_id
+             WHERE space.community_space_id = $1",
+        )
+        .bind(created.space.id)
+        .fetch_all(social_store.pool())
+        .await?;
+        for row in sync_payloads {
+            let payload: String = row.try_get("payload")?;
+            assert!(!payload.contains(&owner_material.to_string()));
+            assert!(!payload.contains(&member_material.to_string()));
+        }
+
+        let ambiguous: lumi_core::SharedMaterial = request_json_with_session(
+            app.clone(),
+            Request::builder()
+                .method("POST")
+                .uri(format!(
+                    "/api/v1/spaces/{}/materials/share",
+                    created.space.id
+                ))
+                .header(header::CONTENT_TYPE, "application/json")
+                .header("idempotency-key", "reviewer-material-share")
+                .body(json_body(&lumi_core::ShareMaterialRequest {
+                    material_id: reviewer_material,
+                })?)?,
+            &reviewer,
+        )
+        .await?;
+        assert_eq!(
+            ambiguous.claim.as_ref().map(|claim| claim.status),
+            Some(lumi_core::UserMaterialClaimStatus::ManualReview)
+        );
+        let serialized = serde_json::to_string(&member_shared)?;
+        assert!(!serialized.contains("protected_similarity_signature"));
+        assert!(!serialized.contains("exact_normalized_hash"));
+
+        let forged = app
+            .clone()
+            .oneshot(
+                owner.apply(
+                    Request::builder()
+                        .method("POST")
+                        .uri(format!(
+                            "/api/v1/spaces/{}/materials/share",
+                            created.space.id
+                        ))
+                        .header(header::CONTENT_TYPE, "application/json")
+                        .header("idempotency-key", "foreign-material-share")
+                        .body(json_body(&lumi_core::ShareMaterialRequest {
+                            material_id: member_material,
+                        })?)?,
+                ),
+            )
+            .await?;
+        assert_eq!(forged.status(), StatusCode::NOT_FOUND);
+        let source = app
+            .oneshot(
+                member.apply(
+                    Request::builder()
+                        .uri(format!("/api/v1/materials/{owner_material}/source"))
+                        .body(Body::empty())?,
+                ),
+            )
+            .await?;
+        assert_eq!(source.status(), StatusCode::NOT_FOUND);
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn postgres_account_session_csrf_route_matrix() -> Result<(), Box<dyn std::error::Error>>
     {
         let Ok(database_url) = std::env::var("LUMI_TEST_DATABASE_URL") else {
@@ -3405,6 +3607,7 @@ mod tests {
     struct TestSession {
         cookie: String,
         csrf: String,
+        user_id: UserId,
     }
 
     impl TestSession {
@@ -3429,6 +3632,83 @@ mod tests {
             }
             request
         }
+    }
+
+    async fn persist_social_fixture(
+        database_url: &str,
+        user_id: UserId,
+        replacement_text: Option<&str>,
+    ) -> Result<MaterialId, Box<dyn std::error::Error>> {
+        let store = PgAccountStore::connect(database_url, HashSet::new()).await?;
+        let space_id: uuid::Uuid = sqlx_core::query::query(
+            "SELECT space_id FROM sync_spaces
+             WHERE owner_user_id = $1 AND kind = 'personal' AND deleted_at IS NULL",
+        )
+        .bind(user_id)
+        .fetch_one(store.pool())
+        .await?
+        .try_get("space_id")?;
+        let mut imported = import_epub_fixture(user_id, &simple_epub_fixture())?;
+        if let Some(text) = replacement_text {
+            if let Some(block) = imported.package.blocks.first_mut() {
+                block.text = Some(text.to_owned());
+                block.content_hash = lumi_core::content_hash(text.as_bytes());
+            }
+        }
+        let material_id = imported.material.id;
+        let revision_id = imported.revision.id;
+        let mut transaction = store.pool().begin().await?;
+        sqlx_core::query::query(
+            "INSERT INTO materials
+             (material_id, space_id, owner_user_id, kind, canonical_title,
+              active_revision_id, library_state, source_identity, import_status,
+              object_revision, created_at, updated_at)
+             VALUES ($1, $2, $3, 'epub', $4, NULL, 'active', $5, 'ready', 1, now(), now())",
+        )
+        .bind(material_id)
+        .bind(space_id)
+        .bind(user_id)
+        .bind(&imported.material.canonical_title)
+        .bind(serde_json::to_value(&imported.material.source_identity)?)
+        .execute(&mut *transaction)
+        .await?;
+        sqlx_core::query::query(
+            "INSERT INTO document_revisions
+             (revision_id, material_id, space_id, source_format, source_hash,
+              importer_id, importer_version, normalized_hash,
+              package_format_version, created_at)
+             VALUES ($1, $2, $3, 'epub', $4, $5, $6, $7, $8, now())",
+        )
+        .bind(revision_id)
+        .bind(material_id)
+        .bind(space_id)
+        .bind(&imported.revision.source_hash)
+        .bind(&imported.revision.importer_id)
+        .bind(&imported.revision.importer_version)
+        .bind(&imported.revision.normalized_hash)
+        .bind(&imported.revision.package_format_version)
+        .execute(&mut *transaction)
+        .await?;
+        sqlx_core::query::query(
+            "INSERT INTO normalized_packages
+             (package_id, revision_id, schema_version, payload, source_map, created_at)
+             VALUES ($1, $2, $3, $4, '{}'::jsonb, now())",
+        )
+        .bind(imported.package.id)
+        .bind(revision_id)
+        .bind(&imported.revision.package_format_version)
+        .bind(serde_json::to_value(&imported.package)?)
+        .execute(&mut *transaction)
+        .await?;
+        sqlx_core::query::query(
+            "UPDATE materials SET active_revision_id = $2 WHERE material_id = $1",
+        )
+        .bind(material_id)
+        .bind(revision_id)
+        .execute(&mut *transaction)
+        .await?;
+        transaction.commit().await?;
+        Ok(material_id)
     }
 
     async fn register_test_session(
@@ -3491,6 +3771,7 @@ mod tests {
         Ok(TestSession {
             cookie,
             csrf: bootstrap.csrf_token,
+            user_id: bootstrap.account.user_id,
         })
     }
 
@@ -3501,6 +3782,18 @@ mod tests {
     ) -> Result<T, Box<dyn std::error::Error>> {
         let response = app.oneshot(session.apply(request)).await?;
         assert_eq!(response.status(), StatusCode::OK);
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX).await?;
+        Ok(serde_json::from_slice(&bytes)?)
+    }
+
+    async fn request_json_with_session_status<T: for<'de> Deserialize<'de>>(
+        app: Router,
+        request: Request<Body>,
+        session: &TestSession,
+        expected_status: StatusCode,
+    ) -> Result<T, Box<dyn std::error::Error>> {
+        let response = app.oneshot(session.apply(request)).await?;
+        assert_eq!(response.status(), expected_status);
         let bytes = axum::body::to_bytes(response.into_body(), usize::MAX).await?;
         Ok(serde_json::from_slice(&bytes)?)
     }

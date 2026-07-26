@@ -256,6 +256,13 @@ pub fn s1_schema_migrations() -> Vec<SchemaMigration> {
                 "Community Space identity, memberships, revocable link access and sync projection."
                     .to_owned(),
         },
+        SchemaMigration {
+            id: "s1-0022-material-sharing-matching".to_owned(),
+            schema_version: DOMAIN_SCHEMA_VERSION.to_owned(),
+            description:
+                "Server-internal material fingerprints, shared identities and conservative user copy claims."
+                    .to_owned(),
+        },
     ]);
     migrations
 }
@@ -1821,7 +1828,7 @@ mod tests {
     fn migrations_cover_s1_contract_groups() {
         let migrations = s1_schema_migrations();
 
-        assert_eq!(migrations.len(), 24);
+        assert_eq!(migrations.len(), 25);
         assert!(migrations
             .iter()
             .any(|migration| migration.id == "s1-0011-ai-contract-freeze-v1"));
@@ -1852,5 +1859,8 @@ mod tests {
         assert!(migrations
             .iter()
             .any(|migration| migration.id == "s1-0021-community-spaces-access"));
+        assert!(migrations
+            .iter()
+            .any(|migration| migration.id == "s1-0022-material-sharing-matching"));
     }
 }

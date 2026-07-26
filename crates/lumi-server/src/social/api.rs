@@ -7,10 +7,12 @@ use axum::{
     Extension, Json, Router,
 };
 use lumi_core::{
-    CommunityAccessLink, CommunityAccessLinkId, CommunityLinkPreview, CommunityMembership,
-    CommunitySpace, CommunitySpaceDetail, CommunitySpaceId, CreateCommunityAccessLinkRequest,
-    CreateCommunitySpaceRequest, CreatedCommunityAccessLink, JoinCommunityLinkRequest,
-    PreviewCommunityLinkRequest, UpdateCommunityMemberRequest, UpdateCommunitySpaceRequest, UserId,
+    ClaimSharedMaterialRequest, CommunityAccessLink, CommunityAccessLinkId, CommunityLinkPreview,
+    CommunityMembership, CommunitySpace, CommunitySpaceDetail, CommunitySpaceId,
+    CreateCommunityAccessLinkRequest, CreateCommunitySpaceRequest, CreatedCommunityAccessLink,
+    JoinCommunityLinkRequest, PreviewCommunityLinkRequest, ShareMaterialRequest, SharedMaterial,
+    SharedMaterialId, UpdateCommunityMemberRequest, UpdateCommunitySpaceRequest, UserId,
+    UserMaterialClaim,
 };
 
 use crate::{account::AuthenticatedSession, required_idempotency_key, AppError, AppState};
@@ -47,6 +49,20 @@ pub(crate) fn protected_routes() -> Router<AppState> {
         .route(
             "/spaces/{space_id}/access-links/{link_id}/rotate",
             post(rotate_link),
+        )
+        .route("/spaces/{space_id}/materials", get(list_materials))
+        .route("/spaces/{space_id}/materials/share", post(share_material))
+        .route(
+            "/spaces/{space_id}/materials/{shared_material_id}",
+            get(get_material).delete(delete_material),
+        )
+        .route(
+            "/spaces/{space_id}/materials/{shared_material_id}/claim",
+            get(get_claim).post(claim_material),
+        )
+        .route(
+            "/spaces/{space_id}/materials/{shared_material_id}/claim/recheck",
+            post(recheck_material),
         )
         .route("/shares/community-link/join", post(join_link))
         .layer(DefaultBodyLimit::max(64 * 1024))
@@ -310,6 +326,134 @@ async fn join_link(
     state
         .social_runtime()
         .join(session.user_id, session.device_id, idempotency_key, request)
+        .await
+        .map(Json)
+        .map_err(map_social_error)
+}
+
+async fn list_materials(
+    State(state): State<AppState>,
+    Extension(session): Extension<AuthenticatedSession>,
+    Path(space_id): Path<CommunitySpaceId>,
+) -> Result<Json<Vec<SharedMaterial>>, AppError> {
+    state
+        .social_runtime()
+        .list_materials(session.user_id, space_id)
+        .await
+        .map(Json)
+        .map_err(map_social_error)
+}
+
+async fn share_material(
+    State(state): State<AppState>,
+    Extension(session): Extension<AuthenticatedSession>,
+    Path(space_id): Path<CommunitySpaceId>,
+    headers: HeaderMap,
+    Json(request): Json<ShareMaterialRequest>,
+) -> Result<Json<SharedMaterial>, AppError> {
+    let idempotency_key = required_idempotency_key(&headers)?;
+    state
+        .social_runtime()
+        .share_material(
+            session.user_id,
+            session.device_id,
+            space_id,
+            idempotency_key,
+            request,
+        )
+        .await
+        .map(Json)
+        .map_err(map_social_error)
+}
+
+async fn get_material(
+    State(state): State<AppState>,
+    Extension(session): Extension<AuthenticatedSession>,
+    Path((space_id, shared_material_id)): Path<(CommunitySpaceId, SharedMaterialId)>,
+) -> Result<Json<SharedMaterial>, AppError> {
+    state
+        .social_runtime()
+        .material(session.user_id, space_id, shared_material_id)
+        .await
+        .map(Json)
+        .map_err(map_social_error)
+}
+
+async fn delete_material(
+    State(state): State<AppState>,
+    Extension(session): Extension<AuthenticatedSession>,
+    Path((space_id, shared_material_id)): Path<(CommunitySpaceId, SharedMaterialId)>,
+    headers: HeaderMap,
+) -> Result<StatusCode, AppError> {
+    let idempotency_key = required_idempotency_key(&headers)?;
+    state
+        .social_runtime()
+        .delete_material(
+            session.user_id,
+            session.device_id,
+            space_id,
+            shared_material_id,
+            idempotency_key,
+        )
+        .await
+        .map_err(map_social_error)?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn get_claim(
+    State(state): State<AppState>,
+    Extension(session): Extension<AuthenticatedSession>,
+    Path((space_id, shared_material_id)): Path<(CommunitySpaceId, SharedMaterialId)>,
+) -> Result<Json<UserMaterialClaim>, AppError> {
+    state
+        .social_runtime()
+        .material(session.user_id, space_id, shared_material_id)
+        .await
+        .map_err(map_social_error)?
+        .claim
+        .map(Json)
+        .ok_or(AppError::NotFound("material claim"))
+}
+
+async fn claim_material(
+    State(state): State<AppState>,
+    Extension(session): Extension<AuthenticatedSession>,
+    Path((space_id, shared_material_id)): Path<(CommunitySpaceId, SharedMaterialId)>,
+    headers: HeaderMap,
+    Json(request): Json<ClaimSharedMaterialRequest>,
+) -> Result<Json<SharedMaterial>, AppError> {
+    let idempotency_key = required_idempotency_key(&headers)?;
+    state
+        .social_runtime()
+        .claim_material(
+            session.user_id,
+            session.device_id,
+            space_id,
+            shared_material_id,
+            idempotency_key,
+            request,
+        )
+        .await
+        .map(Json)
+        .map_err(map_social_error)
+}
+
+async fn recheck_material(
+    State(state): State<AppState>,
+    Extension(session): Extension<AuthenticatedSession>,
+    Path((space_id, shared_material_id)): Path<(CommunitySpaceId, SharedMaterialId)>,
+    headers: HeaderMap,
+) -> Result<Json<SharedMaterial>, AppError> {
+    let idempotency_key = required_idempotency_key(&headers)?;
+    state
+        .social_runtime()
+        .recheck_material(
+            session.user_id,
+            session.device_id,
+            space_id,
+            shared_material_id,
+            idempotency_key,
+        )
         .await
         .map(Json)
         .map_err(map_social_error)

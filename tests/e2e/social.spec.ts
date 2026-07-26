@@ -1,5 +1,12 @@
 import { expect, test, type BrowserContext, type Page } from "@playwright/test";
 
+const sharedMarkdown = Buffer.from(
+  "# Клубная книга\n\n## Глава\n\nОдин и тот же текст в независимых пользовательских копиях.\n",
+);
+const ambiguousMarkdown = Buffer.from(
+  "# Клубная книга\n\n## Другая глава\n\nСовершенно другое короткое содержание с тем же названием.\n",
+);
+
 async function register(context: BrowserContext): Promise<Page> {
   const page = await context.newPage();
   await page.goto("/");
@@ -13,6 +20,33 @@ async function register(context: BrowserContext): Promise<Page> {
   ).toBeVisible();
   await expect(page.getByRole("link", { name: "Сообщества" })).toBeVisible();
   return page;
+}
+
+async function importMarkdown(page: Page, buffer: Buffer) {
+  await page.getByRole("link", { name: "Библиотека", exact: true }).click();
+  await page
+    .getByRole("button", { name: "＋ Добавить материал", exact: true })
+    .click();
+  const dialog = page.getByRole("dialog", { name: "Добавить материал" });
+  await dialog.getByRole("tab", { name: "Markdown" }).click();
+  await dialog.getByLabel("Файл Markdown").setInputFiles({
+    name: "club-book.md",
+    mimeType: "text/markdown",
+    buffer,
+  });
+  await dialog.getByRole("button", { name: "Добавить в библиотеку" }).click();
+  const card = page.getByRole("article", { name: "Материал Клубная книга" });
+  await expect(card.getByText("Готово", { exact: true })).toBeVisible();
+  return card;
+}
+
+async function joinByLink(page: Page, inviteUrl: string) {
+  await page.goto(inviteUrl);
+  await page
+    .getByRole("main", { name: "Вступление в сообщество" })
+    .getByRole("button", { name: "Вступить" })
+    .click();
+  await expect(page).not.toHaveURL(/#join\//);
 }
 
 test("two accounts create, preview, join, revoke and remove Community access", async ({
@@ -98,4 +132,95 @@ test("two accounts create, preview, join, revoke and remove Community access", a
   await ownerContext.close();
   await memberContext.close();
   await rejectedContext.close();
+});
+
+test("shares metadata and matches only each participant's own copy", async ({
+  browser,
+}) => {
+  test.setTimeout(120_000);
+  const ownerContext = await browser.newContext();
+  const memberContext = await browser.newContext();
+  const reviewerContext = await browser.newContext();
+  const owner = await register(ownerContext);
+  const ownerCard = await importMarkdown(owner, sharedMarkdown);
+
+  await owner.getByRole("link", { name: "Сообщества" }).click();
+  const communityList = owner.getByRole("main", { name: "Сообщества Lumi" });
+  await communityList.getByLabel("Название").fill("Клубная полка");
+  await communityList
+    .getByRole("button", { name: "Создать пространство" })
+    .click();
+  const ownerSpace = owner.getByRole("main", {
+    name: "Пространство сообщества",
+  });
+  await ownerSpace
+    .getByRole("button", { name: "Создать новую ссылку" })
+    .click();
+  const inviteInput = ownerSpace.getByLabel(
+    "Скопируйте ссылку — после закрытия она больше не показывается",
+  );
+  const inviteUrl = await inviteInput.inputValue();
+
+  await owner.getByRole("link", { name: "Библиотека", exact: true }).click();
+  await ownerCard
+    .getByRole("button", { name: "Дополнительные действия с материалом" })
+    .click();
+  await ownerCard
+    .getByRole("button", { name: "Поделиться в сообществе" })
+    .click();
+  const shareDialog = owner.getByRole("dialog", {
+    name: "Поделиться материалом",
+  });
+  await shareDialog.getByRole("button", { name: "Клубная полка" }).click();
+  await expect(
+    shareDialog.getByText("Исходный файл, личные заметки", { exact: false }),
+  ).toBeVisible();
+  await shareDialog.getByRole("button", { name: "Поделиться" }).click();
+
+  const member = await register(memberContext);
+  await importMarkdown(member, sharedMarkdown);
+  await joinByLink(member, inviteUrl);
+  const memberSpace = member.getByRole("main", {
+    name: "Пространство сообщества",
+  });
+  const memberMaterial = memberSpace.getByRole("article", {
+    name: "Материал сообщества Клубная книга",
+  });
+  await expect(
+    memberMaterial.getByText("Импортируйте свою копию", { exact: true }),
+  ).toBeVisible();
+  await memberMaterial
+    .getByRole("button", { name: "Подключить свою копию" })
+    .click();
+  await member
+    .getByRole("dialog", { name: "Подключить свою копию" })
+    .getByRole("button", { name: "Клубная книга" })
+    .click();
+  await expect(
+    memberMaterial.getByText("Есть ваша копия", { exact: true }),
+  ).toBeVisible();
+
+  const reviewer = await register(reviewerContext);
+  await importMarkdown(reviewer, ambiguousMarkdown);
+  await joinByLink(reviewer, inviteUrl);
+  const reviewerSpace = reviewer.getByRole("main", {
+    name: "Пространство сообщества",
+  });
+  const reviewerMaterial = reviewerSpace.getByRole("article", {
+    name: "Материал сообщества Клубная книга",
+  });
+  await reviewerMaterial
+    .getByRole("button", { name: "Подключить свою копию" })
+    .click();
+  await reviewer
+    .getByRole("dialog", { name: "Подключить свою копию" })
+    .getByRole("button", { name: "Клубная книга" })
+    .click();
+  await expect(
+    reviewerMaterial.getByText("Нужно подтвердить", { exact: true }),
+  ).toBeVisible();
+
+  await ownerContext.close();
+  await memberContext.close();
+  await reviewerContext.close();
 });

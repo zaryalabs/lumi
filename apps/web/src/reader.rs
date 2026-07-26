@@ -116,6 +116,7 @@ enum ReaderPanel {
 pub(crate) fn ReaderApp(
     material_id: Uuid,
     csrf_token: String,
+    material_sharing_available: bool,
     on_close: EventHandler<()>,
     on_open_learning_session: EventHandler<Uuid>,
     on_manage_learning: EventHandler<(Uuid, Uuid)>,
@@ -323,6 +324,12 @@ pub(crate) fn ReaderApp(
                                         scope_ref: "material".to_owned(),
                                         label: "Саммари материала".to_owned(),
                                         csrf_token: csrf.read().clone(),
+                                    }
+                                    crate::community::ShareMaterialAction {
+                                        material_id: view.entry.id,
+                                        csrf_token: csrf.read().clone(),
+                                        available: material_sharing_available,
+                                        label: "Поделиться в сообществе".to_owned(),
                                     }
                                 }
                             }

@@ -1,10 +1,13 @@
 use lumi_core::{
-    CommunityAccessLink, CommunityAccessLinkId, CommunityAccessLinkStatus, CommunityAction,
-    CommunityDiscoverability, CommunityEntryPolicy, CommunityLinkPreview, CommunityMembership,
-    CommunityMembershipStatus, CommunityPermissions, CommunityRole, CommunitySpace,
-    CommunitySpaceDetail, CommunitySpaceId, CreateCommunityAccessLinkRequest,
-    CreateCommunitySpaceRequest, CreatedCommunityAccessLink, UpdateCommunityMemberRequest,
-    UpdateCommunitySpaceRequest, UserId, COMMUNITY_CONTRACT_VERSION,
+    compare_material_fingerprints, ClaimSharedMaterialRequest, CommunityAccessLink,
+    CommunityAccessLinkId, CommunityAccessLinkStatus, CommunityAction, CommunityDiscoverability,
+    CommunityEntryPolicy, CommunityLinkPreview, CommunityMembership, CommunityMembershipStatus,
+    CommunityPermissions, CommunityRole, CommunitySpace, CommunitySpaceDetail, CommunitySpaceId,
+    CreateCommunityAccessLinkRequest, CreateCommunitySpaceRequest, CreatedCommunityAccessLink,
+    MaterialFingerprintEvidence, MaterialMatchBasis, MaterialMatchDecision, ShareMaterialRequest,
+    SharedMaterial, SharedMaterialId, SharedMaterialIdentity, SourceFormat,
+    UpdateCommunityMemberRequest, UpdateCommunitySpaceRequest, UserId, UserMaterialClaim,
+    UserMaterialClaimStatus, COMMUNITY_CONTRACT_VERSION, MATERIAL_FINGERPRINT_ALGORITHM,
 };
 use serde::{de::DeserializeOwned, Serialize};
 use serde_json::{json, Value};
@@ -16,8 +19,8 @@ use uuid::Uuid;
 
 use crate::secrets::{SecretContext, SecretStore, SecretValue};
 
-use super::permissions;
 use super::SocialStoreError;
+use super::{matching, permissions};
 
 mod sqlx {
     pub(crate) use sqlx_core::query::query;
@@ -1163,6 +1166,911 @@ impl PgSocialStore {
         transaction.commit().await.map_err(storage)?;
         Ok(detail)
     }
+
+    pub(super) async fn list_materials(
+        &self,
+        user_id: UserId,
+        space_id: CommunitySpaceId,
+    ) -> Result<Vec<SharedMaterial>, SocialStoreError> {
+        let mut transaction = self.pool.begin().await.map_err(storage)?;
+        let actor = membership_in_transaction(&mut transaction, user_id, space_id).await?;
+        permissions::active(&actor, CommunityAction::View)?;
+        let rows = sqlx::query(
+            "SELECT identity.shared_material_id, identity.community_space_id,
+                    identity.canonical_title, identity.creators, identity.source_formats,
+                    identity.created_by_user_id, identity.object_revision,
+                    identity.created_at, identity.updated_at,
+                    claim.claim_id, claim.user_id, claim.material_id, claim.revision_id,
+                    claim.match_status, claim.match_basis, claim.match_score_bps,
+                    claim.fingerprint_version, claim.object_revision AS claim_revision,
+                    claim.created_at AS claim_created_at, claim.updated_at AS claim_updated_at
+             FROM shared_material_identities identity
+             LEFT JOIN user_material_claims claim
+               ON claim.shared_material_id = identity.shared_material_id
+              AND claim.user_id = $2 AND claim.deleted_at IS NULL
+             WHERE identity.community_space_id = $1 AND identity.deleted_at IS NULL
+             ORDER BY identity.created_at DESC, identity.shared_material_id DESC",
+        )
+        .bind(space_id)
+        .bind(user_id)
+        .fetch_all(&mut *transaction)
+        .await
+        .map_err(storage)?;
+        let materials = rows.iter().map(shared_material_from_row).collect();
+        transaction.commit().await.map_err(storage)?;
+        materials
+    }
+
+    pub(super) async fn material(
+        &self,
+        user_id: UserId,
+        space_id: CommunitySpaceId,
+        shared_material_id: SharedMaterialId,
+    ) -> Result<SharedMaterial, SocialStoreError> {
+        let mut transaction = self.pool.begin().await.map_err(storage)?;
+        let actor = membership_in_transaction(&mut transaction, user_id, space_id).await?;
+        permissions::active(&actor, CommunityAction::View)?;
+        let material =
+            shared_material_in_transaction(&mut transaction, user_id, space_id, shared_material_id)
+                .await?;
+        transaction.commit().await.map_err(storage)?;
+        Ok(material)
+    }
+
+    pub(super) async fn share_material(
+        &self,
+        user_id: UserId,
+        device_id: Uuid,
+        space_id: CommunitySpaceId,
+        idempotency_key: &str,
+        request: ShareMaterialRequest,
+    ) -> Result<SharedMaterial, SocialStoreError> {
+        let operation = "community.material.share";
+        let request_hash = request_hash(&request)?;
+        let mut transaction = self.pool.begin().await.map_err(storage)?;
+        if let Some(retry) = load_retry(
+            &mut transaction,
+            space_id,
+            idempotency_key,
+            operation,
+            &request_hash,
+        )
+        .await?
+        {
+            transaction.commit().await.map_err(storage)?;
+            return Ok(retry);
+        }
+        let actor = membership_in_transaction(&mut transaction, user_id, space_id).await?;
+        permissions::active(&actor, CommunityAction::AddMaterial)?;
+        lock_space(&mut transaction, space_id).await?;
+        if let Some(existing) =
+            material_for_private_copy(&mut transaction, user_id, space_id, request.material_id)
+                .await?
+        {
+            save_retry(
+                &mut transaction,
+                space_id,
+                idempotency_key,
+                operation,
+                &request_hash,
+                200,
+                &existing,
+            )
+            .await?;
+            transaction.commit().await.map_err(storage)?;
+            return Ok(existing);
+        }
+
+        let fingerprint = self
+            .ensure_fingerprint(&mut transaction, user_id, request.material_id)
+            .await?;
+        let candidates = candidate_fingerprints(&mut transaction, space_id, &fingerprint).await?;
+        let selected = candidates
+            .into_iter()
+            .map(|candidate| {
+                let decision = compare_stored_fingerprint(&fingerprint, &candidate);
+                (candidate, decision)
+            })
+            .filter(|(_, decision)| !matches!(decision, MaterialMatchDecision::Rejected))
+            .max_by_key(|(_, decision)| match decision {
+                MaterialMatchDecision::ExactContent => 20_000,
+                MaterialMatchDecision::HighSimilarity { score_bps } => 10_000 + *score_bps,
+                MaterialMatchDecision::ManualReview { score_bps } => *score_bps,
+                MaterialMatchDecision::Rejected => 0,
+            });
+
+        let now = OffsetDateTime::now_utc();
+        let (shared_material_id, decision, created_identity) = if let Some((candidate, decision)) =
+            selected
+        {
+            (candidate.shared_material_id, decision, false)
+        } else {
+            let shared_material_id = Uuid::now_v7();
+            sqlx::query(
+                "INSERT INTO shared_material_identities
+                     (shared_material_id, community_space_id, canonical_title, creators,
+                      source_formats, canonical_fingerprint_id, created_by_user_id,
+                      object_revision, created_at, updated_at)
+                     VALUES ($1, $2, $3, $4, $5, $6, $7, 1, $8, $8)",
+            )
+            .bind(shared_material_id)
+            .bind(space_id)
+            .bind(&fingerprint.title)
+            .bind(serde_json::to_value(&fingerprint.creators).map_err(storage)?)
+            .bind(serde_json::to_value(vec![fingerprint.source_format.clone()]).map_err(storage)?)
+            .bind(fingerprint.fingerprint_id)
+            .bind(user_id)
+            .bind(now)
+            .execute(&mut *transaction)
+            .await
+            .map_err(storage)?;
+            (
+                shared_material_id,
+                MaterialMatchDecision::ExactContent,
+                true,
+            )
+        };
+
+        let response = insert_or_update_claim(
+            &mut transaction,
+            user_id,
+            space_id,
+            shared_material_id,
+            request.material_id,
+            &fingerprint,
+            if created_identity {
+                ClaimDecision::creator()
+            } else {
+                ClaimDecision::from_match(decision)
+            },
+            now,
+        )
+        .await?;
+        let sync_space_id = sync_space_id(&mut transaction, space_id).await?;
+        let sync_payload = if created_identity {
+            serde_json::to_value(&response.identity).map_err(storage)?
+        } else {
+            json!({
+                "shared_material_id": shared_material_id,
+                "claim_changed": true,
+            })
+        };
+        append_change(
+            &mut transaction,
+            sync_space_id,
+            shared_material_id,
+            response.identity.object_revision,
+            None,
+            if created_identity { "create" } else { "update" },
+            &sync_payload,
+            device_id,
+            idempotency_key,
+            now,
+        )
+        .await?;
+        if created_identity {
+            append_activity(
+                &mut transaction,
+                space_id,
+                Some(user_id),
+                "material_added",
+                "shared_material",
+                shared_material_id,
+                now,
+            )
+            .await?;
+        }
+        save_retry(
+            &mut transaction,
+            space_id,
+            idempotency_key,
+            operation,
+            &request_hash,
+            if created_identity { 201 } else { 200 },
+            &response,
+        )
+        .await?;
+        transaction.commit().await.map_err(storage)?;
+        Ok(response)
+    }
+
+    pub(super) async fn claim_material(
+        &self,
+        user_id: UserId,
+        device_id: Uuid,
+        space_id: CommunitySpaceId,
+        shared_material_id: SharedMaterialId,
+        idempotency_key: &str,
+        request: ClaimSharedMaterialRequest,
+    ) -> Result<SharedMaterial, SocialStoreError> {
+        self.claim_material_with_operation(
+            user_id,
+            device_id,
+            space_id,
+            shared_material_id,
+            idempotency_key,
+            request,
+            "community.material.claim",
+        )
+        .await
+    }
+
+    pub(super) async fn recheck_material(
+        &self,
+        user_id: UserId,
+        device_id: Uuid,
+        space_id: CommunitySpaceId,
+        shared_material_id: SharedMaterialId,
+        idempotency_key: &str,
+    ) -> Result<SharedMaterial, SocialStoreError> {
+        let material_id = sqlx::query(
+            "SELECT claim.material_id
+             FROM user_material_claims claim
+             JOIN community_memberships membership
+               ON membership.community_space_id = claim.community_space_id
+              AND membership.user_id = $1 AND membership.status = 'active'
+             WHERE claim.community_space_id = $2 AND claim.shared_material_id = $3
+               AND claim.user_id = $1 AND claim.deleted_at IS NULL",
+        )
+        .bind(user_id)
+        .bind(space_id)
+        .bind(shared_material_id)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(storage)?
+        .ok_or(SocialStoreError::NotFound)?
+        .try_get("material_id")
+        .map_err(storage)?;
+        self.claim_material_with_operation(
+            user_id,
+            device_id,
+            space_id,
+            shared_material_id,
+            idempotency_key,
+            ClaimSharedMaterialRequest { material_id },
+            "community.material.recheck",
+        )
+        .await
+    }
+
+    pub(super) async fn delete_material(
+        &self,
+        user_id: UserId,
+        device_id: Uuid,
+        space_id: CommunitySpaceId,
+        shared_material_id: SharedMaterialId,
+        idempotency_key: &str,
+    ) -> Result<(), SocialStoreError> {
+        let operation = "community.material.delete";
+        let request_hash = request_hash(&json!({"shared_material_id": shared_material_id}))?;
+        let mut transaction = self.pool.begin().await.map_err(storage)?;
+        if load_retry::<Value>(
+            &mut transaction,
+            space_id,
+            idempotency_key,
+            operation,
+            &request_hash,
+        )
+        .await?
+        .is_some()
+        {
+            transaction.commit().await.map_err(storage)?;
+            return Ok(());
+        }
+        let actor = membership_in_transaction(&mut transaction, user_id, space_id).await?;
+        permissions::active(&actor, CommunityAction::RemoveMaterial)?;
+        let row = sqlx::query(
+            "UPDATE shared_material_identities
+             SET deleted_at = now(), updated_at = now(), object_revision = object_revision + 1
+             WHERE shared_material_id = $1 AND community_space_id = $2 AND deleted_at IS NULL
+             RETURNING object_revision, updated_at",
+        )
+        .bind(shared_material_id)
+        .bind(space_id)
+        .fetch_optional(&mut *transaction)
+        .await
+        .map_err(storage)?
+        .ok_or(SocialStoreError::NotFound)?;
+        let revision = u64_from_i64(row.try_get("object_revision").map_err(storage)?)?;
+        let now: OffsetDateTime = row.try_get("updated_at").map_err(storage)?;
+        sqlx::query(
+            "UPDATE user_material_claims
+             SET deleted_at = $3, updated_at = $3, object_revision = object_revision + 1
+             WHERE shared_material_id = $1 AND community_space_id = $2 AND deleted_at IS NULL",
+        )
+        .bind(shared_material_id)
+        .bind(space_id)
+        .bind(now)
+        .execute(&mut *transaction)
+        .await
+        .map_err(storage)?;
+        let sync_space_id = sync_space_id(&mut transaction, space_id).await?;
+        append_change(
+            &mut transaction,
+            sync_space_id,
+            shared_material_id,
+            revision,
+            revision.checked_sub(1),
+            "delete",
+            &json!({"shared_material_id": shared_material_id}),
+            device_id,
+            idempotency_key,
+            now,
+        )
+        .await?;
+        save_retry(
+            &mut transaction,
+            space_id,
+            idempotency_key,
+            operation,
+            &request_hash,
+            204,
+            &Value::Null,
+        )
+        .await?;
+        transaction.commit().await.map_err(storage)?;
+        Ok(())
+    }
+
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "claim command keeps authorization and idempotency scope explicit"
+    )]
+    async fn claim_material_with_operation(
+        &self,
+        user_id: UserId,
+        device_id: Uuid,
+        space_id: CommunitySpaceId,
+        shared_material_id: SharedMaterialId,
+        idempotency_key: &str,
+        request: ClaimSharedMaterialRequest,
+        operation: &'static str,
+    ) -> Result<SharedMaterial, SocialStoreError> {
+        let request_hash = request_hash(&(shared_material_id, request))?;
+        let mut transaction = self.pool.begin().await.map_err(storage)?;
+        if let Some(retry) = load_retry(
+            &mut transaction,
+            space_id,
+            idempotency_key,
+            operation,
+            &request_hash,
+        )
+        .await?
+        {
+            transaction.commit().await.map_err(storage)?;
+            return Ok(retry);
+        }
+        let actor = membership_in_transaction(&mut transaction, user_id, space_id).await?;
+        permissions::active(&actor, CommunityAction::AddMaterial)?;
+        let fingerprint = self
+            .ensure_fingerprint(&mut transaction, user_id, request.material_id)
+            .await?;
+        let canonical =
+            canonical_fingerprint(&mut transaction, space_id, shared_material_id).await?;
+        let decision = compare_stored_fingerprint(&fingerprint, &canonical);
+        let now = OffsetDateTime::now_utc();
+        let response = insert_or_update_claim(
+            &mut transaction,
+            user_id,
+            space_id,
+            shared_material_id,
+            request.material_id,
+            &fingerprint,
+            ClaimDecision::from_match(decision),
+            now,
+        )
+        .await?;
+        let claim = response
+            .claim
+            .as_ref()
+            .ok_or(SocialStoreError::Unavailable)?;
+        let sync_space_id = sync_space_id(&mut transaction, space_id).await?;
+        append_change(
+            &mut transaction,
+            sync_space_id,
+            claim.id,
+            claim.object_revision,
+            None,
+            "update",
+            &json!({
+                "shared_material_id": shared_material_id,
+                "claim_changed": true,
+            }),
+            device_id,
+            idempotency_key,
+            now,
+        )
+        .await?;
+        save_retry(
+            &mut transaction,
+            space_id,
+            idempotency_key,
+            operation,
+            &request_hash,
+            200,
+            &response,
+        )
+        .await?;
+        transaction.commit().await.map_err(storage)?;
+        Ok(response)
+    }
+
+    async fn ensure_fingerprint(
+        &self,
+        transaction: &mut Transaction<'_, Postgres>,
+        user_id: UserId,
+        material_id: Uuid,
+    ) -> Result<StoredFingerprint, SocialStoreError> {
+        let (key_version, key) = self
+            .secrets
+            .derive_feature_key(matching::feature_key_purpose())
+            .map_err(storage)?;
+        let row = sqlx::query(
+            "SELECT material.active_revision_id AS revision_id, revision.source_format,
+                    package.payload
+             FROM materials material
+             JOIN document_revisions revision
+               ON revision.revision_id = material.active_revision_id
+              AND revision.material_id = material.material_id
+              AND revision.space_id = material.space_id
+             JOIN normalized_packages package ON package.revision_id = revision.revision_id
+             WHERE material.material_id = $1 AND material.owner_user_id = $2
+               AND material.deleted_at IS NULL AND material.import_status = 'ready'",
+        )
+        .bind(material_id)
+        .bind(user_id)
+        .fetch_optional(&mut **transaction)
+        .await
+        .map_err(storage)?
+        .ok_or(SocialStoreError::NotFound)?;
+        let revision_id = row.try_get("revision_id").map_err(storage)?;
+        let source_format: String = row.try_get("source_format").map_err(storage)?;
+        let payload: Value = row.try_get("payload").map_err(storage)?;
+        let computed = matching::compute(&source_format, payload, key)?;
+        let encoded_signature =
+            matching::encode_signature(&computed.evidence.protected_similarity_signature)?;
+        let fingerprint_id = Uuid::now_v7();
+        let stored_id = sqlx::query(
+            "INSERT INTO material_fingerprints
+             (fingerprint_id, material_id, revision_id, owner_user_id,
+              algorithm_version, key_version, metadata_key, exact_normalized_hash,
+              protected_similarity_signature, section_sequence_hash,
+              text_token_count, text_length_bucket, status)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, 'ready')
+             ON CONFLICT (revision_id, algorithm_version, key_version)
+             DO UPDATE SET material_id = EXCLUDED.material_id
+             RETURNING fingerprint_id",
+        )
+        .bind(fingerprint_id)
+        .bind(material_id)
+        .bind(revision_id)
+        .bind(user_id)
+        .bind(MATERIAL_FINGERPRINT_ALGORITHM)
+        .bind(i32::try_from(key_version).map_err(storage)?)
+        .bind(computed.evidence.metadata_key.to_vec())
+        .bind(computed.evidence.exact_content_hash.to_vec())
+        .bind(encoded_signature)
+        .bind(computed.evidence.section_sequence_hash.to_vec())
+        .bind(i32::try_from(computed.evidence.token_count).map_err(storage)?)
+        .bind(i32::from(computed.evidence.text_length_bucket))
+        .fetch_one(&mut **transaction)
+        .await
+        .map_err(storage)?
+        .try_get("fingerprint_id")
+        .map_err(storage)?;
+        Ok(StoredFingerprint {
+            fingerprint_id: stored_id,
+            material_id,
+            revision_id,
+            key_version,
+            evidence: computed.evidence,
+            title: computed.title,
+            creators: computed.creators,
+            source_format: computed.source_format,
+        })
+    }
+}
+
+struct StoredFingerprint {
+    fingerprint_id: Uuid,
+    material_id: Uuid,
+    revision_id: Uuid,
+    key_version: u32,
+    evidence: MaterialFingerprintEvidence,
+    title: String,
+    creators: Vec<String>,
+    source_format: SourceFormat,
+}
+
+struct CandidateFingerprint {
+    shared_material_id: SharedMaterialId,
+    key_version: u32,
+    evidence: MaterialFingerprintEvidence,
+}
+
+fn compare_stored_fingerprint(
+    fingerprint: &StoredFingerprint,
+    candidate: &CandidateFingerprint,
+) -> MaterialMatchDecision {
+    if fingerprint.key_version != candidate.key_version {
+        return MaterialMatchDecision::ManualReview { score_bps: 0 };
+    }
+    compare_material_fingerprints(&fingerprint.evidence, &candidate.evidence)
+}
+
+struct ClaimDecision {
+    status: UserMaterialClaimStatus,
+    basis: MaterialMatchBasis,
+    score_bps: Option<u16>,
+}
+
+impl ClaimDecision {
+    fn creator() -> Self {
+        Self {
+            status: UserMaterialClaimStatus::Matched,
+            basis: MaterialMatchBasis::CreatorCopy,
+            score_bps: Some(10_000),
+        }
+    }
+
+    fn from_match(decision: MaterialMatchDecision) -> Self {
+        match decision {
+            MaterialMatchDecision::ExactContent => Self {
+                status: UserMaterialClaimStatus::Matched,
+                basis: MaterialMatchBasis::ExactContent,
+                score_bps: Some(10_000),
+            },
+            MaterialMatchDecision::HighSimilarity { score_bps } => Self {
+                status: UserMaterialClaimStatus::Matched,
+                basis: MaterialMatchBasis::HighSimilarity,
+                score_bps: Some(score_bps),
+            },
+            MaterialMatchDecision::ManualReview { score_bps } => Self {
+                status: UserMaterialClaimStatus::ManualReview,
+                basis: MaterialMatchBasis::Ambiguous,
+                score_bps: Some(score_bps),
+            },
+            MaterialMatchDecision::Rejected => Self {
+                status: UserMaterialClaimStatus::Rejected,
+                basis: MaterialMatchBasis::Incompatible,
+                score_bps: None,
+            },
+        }
+    }
+}
+
+async fn lock_space(
+    transaction: &mut Transaction<'_, Postgres>,
+    space_id: CommunitySpaceId,
+) -> Result<(), SocialStoreError> {
+    sqlx::query(
+        "SELECT community_space_id FROM community_spaces
+         WHERE community_space_id = $1 AND deleted_at IS NULL FOR UPDATE",
+    )
+    .bind(space_id)
+    .fetch_optional(&mut **transaction)
+    .await
+    .map_err(storage)?
+    .ok_or(SocialStoreError::NotFound)?;
+    Ok(())
+}
+
+async fn candidate_fingerprints(
+    transaction: &mut Transaction<'_, Postgres>,
+    space_id: CommunitySpaceId,
+    fingerprint: &StoredFingerprint,
+) -> Result<Vec<CandidateFingerprint>, SocialStoreError> {
+    let rows = sqlx::query(
+        "SELECT identity.shared_material_id, stored.algorithm_version, stored.key_version,
+                stored.metadata_key, stored.exact_normalized_hash,
+                stored.protected_similarity_signature, stored.section_sequence_hash,
+                stored.text_token_count, stored.text_length_bucket
+         FROM shared_material_identities identity
+         JOIN material_fingerprints stored
+           ON stored.fingerprint_id = identity.canonical_fingerprint_id
+          AND stored.status = 'ready'
+         WHERE identity.community_space_id = $1 AND identity.deleted_at IS NULL
+           AND stored.algorithm_version = $2 AND stored.key_version = $3",
+    )
+    .bind(space_id)
+    .bind(&fingerprint.evidence.algorithm_version)
+    .bind(i32::try_from(fingerprint.key_version).map_err(storage)?)
+    .fetch_all(&mut **transaction)
+    .await
+    .map_err(storage)?;
+    rows.iter()
+        .map(|row| {
+            Ok(CandidateFingerprint {
+                shared_material_id: row.try_get("shared_material_id").map_err(storage)?,
+                key_version: u32::try_from(row.try_get::<i32, _>("key_version").map_err(storage)?)
+                    .map_err(storage)?,
+                evidence: evidence_from_row(row)?,
+            })
+        })
+        .collect()
+}
+
+async fn canonical_fingerprint(
+    transaction: &mut Transaction<'_, Postgres>,
+    space_id: CommunitySpaceId,
+    shared_material_id: SharedMaterialId,
+) -> Result<CandidateFingerprint, SocialStoreError> {
+    let row = sqlx::query(
+        "SELECT identity.shared_material_id, stored.algorithm_version, stored.key_version,
+                stored.metadata_key, stored.exact_normalized_hash,
+                stored.protected_similarity_signature, stored.section_sequence_hash,
+                stored.text_token_count, stored.text_length_bucket
+         FROM shared_material_identities identity
+         JOIN material_fingerprints stored
+           ON stored.fingerprint_id = identity.canonical_fingerprint_id
+          AND stored.status = 'ready'
+         WHERE identity.community_space_id = $1 AND identity.shared_material_id = $2
+           AND identity.deleted_at IS NULL",
+    )
+    .bind(space_id)
+    .bind(shared_material_id)
+    .fetch_optional(&mut **transaction)
+    .await
+    .map_err(storage)?
+    .ok_or(SocialStoreError::NotFound)?;
+    Ok(CandidateFingerprint {
+        shared_material_id,
+        key_version: u32::try_from(row.try_get::<i32, _>("key_version").map_err(storage)?)
+            .map_err(storage)?,
+        evidence: evidence_from_row(&row)?,
+    })
+}
+
+fn evidence_from_row(
+    row: &sqlx_postgres::PgRow,
+) -> Result<MaterialFingerprintEvidence, SocialStoreError> {
+    Ok(MaterialFingerprintEvidence {
+        algorithm_version: row.try_get("algorithm_version").map_err(storage)?,
+        metadata_key: bytes_32(row.try_get("metadata_key").map_err(storage)?)?,
+        exact_content_hash: bytes_32(row.try_get("exact_normalized_hash").map_err(storage)?)?,
+        protected_similarity_signature: matching::decode_signature(
+            &row.try_get::<Vec<u8>, _>("protected_similarity_signature")
+                .map_err(storage)?,
+        )?,
+        section_sequence_hash: bytes_32(row.try_get("section_sequence_hash").map_err(storage)?)?,
+        token_count: u32::try_from(row.try_get::<i32, _>("text_token_count").map_err(storage)?)
+            .map_err(storage)?,
+        text_length_bucket: u16::try_from(
+            row.try_get::<i32, _>("text_length_bucket")
+                .map_err(storage)?,
+        )
+        .map_err(storage)?,
+    })
+}
+
+async fn material_for_private_copy(
+    transaction: &mut Transaction<'_, Postgres>,
+    user_id: UserId,
+    space_id: CommunitySpaceId,
+    material_id: Uuid,
+) -> Result<Option<SharedMaterial>, SocialStoreError> {
+    let shared_material_id = sqlx::query(
+        "SELECT shared_material_id FROM user_material_claims
+         WHERE community_space_id = $1 AND user_id = $2 AND material_id = $3
+           AND deleted_at IS NULL",
+    )
+    .bind(space_id)
+    .bind(user_id)
+    .bind(material_id)
+    .fetch_optional(&mut **transaction)
+    .await
+    .map_err(storage)?
+    .map(|row| row.try_get("shared_material_id").map_err(storage))
+    .transpose()?;
+    match shared_material_id {
+        Some(shared_material_id) => {
+            shared_material_in_transaction(transaction, user_id, space_id, shared_material_id)
+                .await
+                .map(Some)
+        }
+        None => Ok(None),
+    }
+}
+
+#[expect(
+    clippy::too_many_arguments,
+    reason = "claim persistence keeps all owner and revision constraints visible"
+)]
+async fn insert_or_update_claim(
+    transaction: &mut Transaction<'_, Postgres>,
+    user_id: UserId,
+    space_id: CommunitySpaceId,
+    shared_material_id: SharedMaterialId,
+    material_id: Uuid,
+    fingerprint: &StoredFingerprint,
+    decision: ClaimDecision,
+    now: OffsetDateTime,
+) -> Result<SharedMaterial, SocialStoreError> {
+    if fingerprint.material_id != material_id {
+        return Err(SocialStoreError::Unavailable);
+    }
+    let claim_id = Uuid::now_v7();
+    let status = claim_status_db(decision.status);
+    let basis = match_basis_db(decision.basis);
+    sqlx::query(
+        "INSERT INTO user_material_claims
+         (claim_id, community_space_id, shared_material_id, user_id, material_id,
+          revision_id, fingerprint_id, match_status, match_basis, match_score_bps,
+          fingerprint_version, match_evidence, object_revision, created_at, updated_at)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11,
+                 jsonb_build_object('basis', $9::text, 'score_bps', $10::integer),
+                 1, $12, $12)
+         ON CONFLICT (shared_material_id, user_id, material_id)
+             WHERE deleted_at IS NULL
+         DO UPDATE SET revision_id = EXCLUDED.revision_id,
+                       fingerprint_id = EXCLUDED.fingerprint_id,
+                       match_status = EXCLUDED.match_status,
+                       match_basis = EXCLUDED.match_basis,
+                       match_score_bps = EXCLUDED.match_score_bps,
+                       fingerprint_version = EXCLUDED.fingerprint_version,
+                       match_evidence = EXCLUDED.match_evidence,
+                       object_revision = user_material_claims.object_revision + 1,
+                       updated_at = EXCLUDED.updated_at
+         RETURNING claim_id",
+    )
+    .bind(claim_id)
+    .bind(space_id)
+    .bind(shared_material_id)
+    .bind(user_id)
+    .bind(material_id)
+    .bind(fingerprint.revision_id)
+    .bind(fingerprint.fingerprint_id)
+    .bind(status)
+    .bind(basis)
+    .bind(decision.score_bps.map(i32::from))
+    .bind(matching::fingerprint_version(fingerprint.key_version))
+    .bind(now)
+    .fetch_one(&mut **transaction)
+    .await
+    .map_err(storage)?;
+    if decision.status == UserMaterialClaimStatus::Matched {
+        let source_format = serde_json::to_value(&fingerprint.source_format).map_err(storage)?;
+        sqlx::query(
+            "UPDATE shared_material_identities
+             SET source_formats = CASE
+                   WHEN source_formats @> jsonb_build_array($2::jsonb) THEN source_formats
+                   ELSE source_formats || jsonb_build_array($2::jsonb)
+                 END,
+                 object_revision = CASE
+                   WHEN source_formats @> jsonb_build_array($2::jsonb) THEN object_revision
+                   ELSE object_revision + 1
+                 END,
+                 updated_at = $3
+             WHERE shared_material_id = $1 AND deleted_at IS NULL",
+        )
+        .bind(shared_material_id)
+        .bind(source_format)
+        .bind(now)
+        .execute(&mut **transaction)
+        .await
+        .map_err(storage)?;
+    }
+    shared_material_in_transaction(transaction, user_id, space_id, shared_material_id).await
+}
+
+async fn shared_material_in_transaction(
+    transaction: &mut Transaction<'_, Postgres>,
+    user_id: UserId,
+    space_id: CommunitySpaceId,
+    shared_material_id: SharedMaterialId,
+) -> Result<SharedMaterial, SocialStoreError> {
+    let row = sqlx::query(
+        "SELECT identity.shared_material_id, identity.community_space_id,
+                identity.canonical_title, identity.creators, identity.source_formats,
+                identity.created_by_user_id, identity.object_revision,
+                identity.created_at, identity.updated_at,
+                claim.claim_id, claim.user_id, claim.material_id, claim.revision_id,
+                claim.match_status, claim.match_basis, claim.match_score_bps,
+                claim.fingerprint_version, claim.object_revision AS claim_revision,
+                claim.created_at AS claim_created_at, claim.updated_at AS claim_updated_at
+         FROM shared_material_identities identity
+         LEFT JOIN user_material_claims claim
+           ON claim.shared_material_id = identity.shared_material_id
+          AND claim.user_id = $3 AND claim.deleted_at IS NULL
+         WHERE identity.community_space_id = $1 AND identity.shared_material_id = $2
+           AND identity.deleted_at IS NULL",
+    )
+    .bind(space_id)
+    .bind(shared_material_id)
+    .bind(user_id)
+    .fetch_optional(&mut **transaction)
+    .await
+    .map_err(storage)?
+    .ok_or(SocialStoreError::NotFound)?;
+    shared_material_from_row(&row)
+}
+
+fn shared_material_from_row(
+    row: &sqlx_postgres::PgRow,
+) -> Result<SharedMaterial, SocialStoreError> {
+    let identity = SharedMaterialIdentity {
+        id: row.try_get("shared_material_id").map_err(storage)?,
+        community_space_id: row.try_get("community_space_id").map_err(storage)?,
+        canonical_title: row.try_get("canonical_title").map_err(storage)?,
+        creators: serde_json::from_value(row.try_get("creators").map_err(storage)?)
+            .map_err(storage)?,
+        source_formats: serde_json::from_value(row.try_get("source_formats").map_err(storage)?)
+            .map_err(storage)?,
+        created_by_user_id: row.try_get("created_by_user_id").map_err(storage)?,
+        object_revision: u64_from_i64(row.try_get("object_revision").map_err(storage)?)?,
+        created_at: timestamp_ms(row.try_get("created_at").map_err(storage)?),
+        updated_at: timestamp_ms(row.try_get("updated_at").map_err(storage)?),
+    };
+    let claim_id: Option<Uuid> = row.try_get("claim_id").map_err(storage)?;
+    let claim = claim_id
+        .map(|claim_id| {
+            let score_bps: Option<i32> = row.try_get("match_score_bps").map_err(storage)?;
+            Ok(UserMaterialClaim {
+                id: claim_id,
+                community_space_id: identity.community_space_id,
+                shared_material_id: identity.id,
+                user_id: row.try_get("user_id").map_err(storage)?,
+                material_id: row.try_get("material_id").map_err(storage)?,
+                revision_id: row.try_get("revision_id").map_err(storage)?,
+                status: claim_status_from_db(
+                    &row.try_get::<String, _>("match_status").map_err(storage)?,
+                )?,
+                basis: match_basis_from_db(
+                    &row.try_get::<String, _>("match_basis").map_err(storage)?,
+                )?,
+                score_bps: score_bps.map(u16::try_from).transpose().map_err(storage)?,
+                fingerprint_version: row.try_get("fingerprint_version").map_err(storage)?,
+                object_revision: u64_from_i64(row.try_get("claim_revision").map_err(storage)?)?,
+                created_at: timestamp_ms(row.try_get("claim_created_at").map_err(storage)?),
+                updated_at: timestamp_ms(row.try_get("claim_updated_at").map_err(storage)?),
+            })
+        })
+        .transpose()?;
+    Ok(SharedMaterial { identity, claim })
+}
+
+fn claim_status_db(value: UserMaterialClaimStatus) -> &'static str {
+    match value {
+        UserMaterialClaimStatus::Pending => "pending",
+        UserMaterialClaimStatus::Matched => "matched",
+        UserMaterialClaimStatus::Rejected => "rejected",
+        UserMaterialClaimStatus::ManualReview => "manual_review",
+    }
+}
+
+fn claim_status_from_db(value: &str) -> Result<UserMaterialClaimStatus, SocialStoreError> {
+    match value {
+        "pending" => Ok(UserMaterialClaimStatus::Pending),
+        "matched" => Ok(UserMaterialClaimStatus::Matched),
+        "rejected" => Ok(UserMaterialClaimStatus::Rejected),
+        "manual_review" => Ok(UserMaterialClaimStatus::ManualReview),
+        _ => Err(SocialStoreError::Unavailable),
+    }
+}
+
+fn match_basis_db(value: MaterialMatchBasis) -> &'static str {
+    match value {
+        MaterialMatchBasis::CreatorCopy => "creator_copy",
+        MaterialMatchBasis::ExactContent => "exact_content",
+        MaterialMatchBasis::HighSimilarity => "high_similarity",
+        MaterialMatchBasis::Ambiguous => "ambiguous",
+        MaterialMatchBasis::Incompatible => "incompatible",
+    }
+}
+
+fn match_basis_from_db(value: &str) -> Result<MaterialMatchBasis, SocialStoreError> {
+    match value {
+        "creator_copy" => Ok(MaterialMatchBasis::CreatorCopy),
+        "exact_content" => Ok(MaterialMatchBasis::ExactContent),
+        "high_similarity" => Ok(MaterialMatchBasis::HighSimilarity),
+        "ambiguous" => Ok(MaterialMatchBasis::Ambiguous),
+        "incompatible" => Ok(MaterialMatchBasis::Incompatible),
+        _ => Err(SocialStoreError::Unavailable),
+    }
+}
+
+fn bytes_32(value: Vec<u8>) -> Result<[u8; 32], SocialStoreError> {
+    value.try_into().map_err(|_| SocialStoreError::Unavailable)
 }
 
 async fn detail_in_transaction(

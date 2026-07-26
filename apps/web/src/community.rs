@@ -3,11 +3,13 @@
 use dioxus::prelude::*;
 use gloo_net::http::Request;
 use lumi_core::{
-    CommunityAccessLink, CommunityAccessLinkStatus, CommunityLinkPreview, CommunityMembership,
-    CommunityMembershipStatus, CommunityRole, CommunitySpace, CommunitySpaceDetail,
-    CreateCommunityAccessLinkRequest, CreateCommunitySpaceRequest, CreatedCommunityAccessLink,
-    JoinCommunityLinkRequest, PreviewCommunityLinkRequest, UpdateCommunityMemberRequest,
-    UpdateCommunitySpaceRequest,
+    ClaimSharedMaterialRequest, CommunityAccessLink, CommunityAccessLinkStatus,
+    CommunityLinkPreview, CommunityMembership, CommunityMembershipStatus, CommunityRole,
+    CommunitySpace, CommunitySpaceDetail, CreateCommunityAccessLinkRequest,
+    CreateCommunitySpaceRequest, CreatedCommunityAccessLink, JoinCommunityLinkRequest,
+    LibraryEntry, MaterialImportStatus, PreviewCommunityLinkRequest, ShareMaterialRequest,
+    SharedMaterial, UpdateCommunityMemberRequest, UpdateCommunitySpaceRequest,
+    UserMaterialClaimStatus,
 };
 use uuid::Uuid;
 use web_sys::RequestCredentials;
@@ -21,6 +23,7 @@ pub(crate) fn CommunityPage(
     space_id: Option<Uuid>,
     join_token: Option<String>,
     available: bool,
+    material_sharing_available: bool,
     on_open_space: EventHandler<Uuid>,
     on_open_list: EventHandler<()>,
 ) -> Element {
@@ -51,6 +54,7 @@ pub(crate) fn CommunityPage(
                 current_user_id,
                 csrf_token,
                 space_id,
+                material_sharing_available,
                 on_close: move |_| on_open_list.call(()),
             }
         };
@@ -245,12 +249,14 @@ fn CommunityDetail(
     current_user_id: Uuid,
     csrf_token: String,
     space_id: Uuid,
+    material_sharing_available: bool,
     on_close: EventHandler<()>,
 ) -> Element {
     let csrf_token = use_signal(|| csrf_token);
     let mut detail = use_signal(|| Option::<CommunitySpaceDetail>::None);
     let mut members = use_signal(Vec::<CommunityMembership>::new);
     let mut links = use_signal(Vec::<CommunityAccessLink>::new);
+    let mut materials = use_signal(|| Option::<Vec<SharedMaterial>>::None);
     let mut generated_link = use_signal(String::new);
     let mut error = use_signal(String::new);
     let mut busy = use_signal(|| false);
@@ -264,6 +270,12 @@ fn CommunityDetail(
                     members.set(loaded_members);
                     links.set(loaded_links);
                     error.set(String::new());
+                    if material_sharing_available {
+                        match load_shared_materials(space_id).await {
+                            Ok(loaded_materials) => materials.set(Some(loaded_materials)),
+                            Err(load_error) => error.set(load_error.to_string()),
+                        }
+                    }
                 }
                 Err(load_error) => error.set(load_error.to_string()),
             }
@@ -434,9 +446,30 @@ fn CommunityDetail(
                     }
                 }
                 section { class: "community-shell-grid", aria_label: "Разделы сообщества",
-                    article { class: "library-section",
+                    article { class: "library-section community-materials", aria_label: "Материалы сообщества",
                         h2 { "Материалы" }
-                        p { "Публикация identity материалов появится в следующем социальном эпике." }
+                        if !material_sharing_available {
+                            p { "Этот сервер не публикует capability material-sharing." }
+                        } else {
+                            match materials.read().clone() {
+                                None => rsx! { p { role: "status", "Загружаем материалы…" } },
+                                Some(values) if values.is_empty() => rsx! {
+                                    p { "Пока никто не добавил материал. Используйте «Поделиться» в библиотеке или Reader." }
+                                },
+                                Some(values) => rsx! {
+                                    div { class: "community-material-list",
+                                        for material in values {
+                                            CommunityMaterialCard {
+                                                material,
+                                                space_id,
+                                                csrf_token: csrf_token(),
+                                                on_changed: move |_| generation += 1,
+                                            }
+                                        }
+                                    }
+                                },
+                            }
+                        }
                     }
                     article { class: "library-section",
                         h2 { "Обсуждение и чат" }
@@ -511,6 +544,227 @@ fn SpaceIdentityEditor(
     }
 }
 
+#[component]
+pub(crate) fn ShareMaterialAction(
+    material_id: Uuid,
+    csrf_token: String,
+    available: bool,
+    label: String,
+) -> Element {
+    let mut open = use_signal(|| false);
+    let mut spaces = use_signal(|| Option::<Vec<CommunitySpace>>::None);
+    let mut selected = use_signal(|| Option::<CommunitySpace>::None);
+    let mut error = use_signal(String::new);
+    let mut message = use_signal(String::new);
+    let mut busy = use_signal(|| false);
+    let mut idempotency_key = use_signal(String::new);
+    if !available {
+        return rsx! {};
+    }
+    rsx! {
+        button {
+            class: "text-action",
+            r#type: "button",
+            onclick: move |_| {
+                open.set(true);
+                selected.set(None);
+                error.set(String::new());
+                message.set(String::new());
+                idempotency_key.set(Uuid::now_v7().to_string());
+                spawn(async move {
+                    match load_spaces().await {
+                        Ok(value) => spaces.set(Some(value)),
+                        Err(load_error) => error.set(load_error.to_string()),
+                    }
+                });
+            },
+            "{label}"
+        }
+        if !message().is_empty() {
+            span { class: "community-share-status", role: "status", "{message}" }
+        }
+        if open() {
+            dialog { class: "library-dialog community-share-dialog", open: true, aria_modal: "true", aria_label: "Поделиться материалом",
+                div { class: "dialog-heading",
+                    div {
+                        p { class: "eyebrow", "Community" }
+                        h2 { "Поделиться материалом" }
+                    }
+                    button { class: "icon-action", r#type: "button", aria_label: "Закрыть", onclick: move |_| open.set(false), "×" }
+                }
+                if let Some(space) = selected.read().clone() {
+                    p { "Пространство: " strong { "{space.name}" } }
+                    p { class: "privacy-note", "Будут опубликованы только название, авторы и защищённый fingerprint. Исходный файл, личные заметки, прогресс и обучение останутся приватными." }
+                    div { class: "dialog-actions",
+                        button {
+                            class: "primary-action",
+                            r#type: "button",
+                            disabled: busy(),
+                            onclick: move |_| {
+                                let csrf = csrf_token.clone();
+                                let key = idempotency_key();
+                                let space_id = space.id;
+                                let space_name = space.name.clone();
+                                busy.set(true);
+                                error.set(String::new());
+                                spawn(async move {
+                                    match share_private_material(&csrf, space_id, material_id, &key).await {
+                                        Ok(shared) => {
+                                            message.set(format!("Добавлено в «{}»: {}", space_name, claim_status_label(shared.claim.as_ref().map(|claim| claim.status))));
+                                            open.set(false);
+                                        }
+                                        Err(share_error) => error.set(share_error.to_string()),
+                                    }
+                                    busy.set(false);
+                                });
+                            },
+                            if busy() { "Публикуем…" } else { "Поделиться" }
+                        }
+                        button { class: "secondary-action", r#type: "button", onclick: move |_| selected.set(None), "Назад" }
+                    }
+                } else {
+                    p { "Выберите одно пространство." }
+                    match spaces.read().clone() {
+                        None => rsx! { p { role: "status", "Загружаем пространства…" } },
+                        Some(values) if values.is_empty() => rsx! { p { "Сначала создайте сообщество или вступите по ссылке." } },
+                        Some(values) => rsx! {
+                            ul { class: "community-space-picker",
+                                for space in values {
+                                    li {
+                                        button { r#type: "button", onclick: move |_| selected.set(Some(space.clone())), "{space.name}" }
+                                    }
+                                }
+                            }
+                        },
+                    }
+                }
+                if !error().is_empty() {
+                    p { class: "account-error", role: "alert", "{error}" }
+                }
+            }
+        }
+    }
+}
+
+#[component]
+fn CommunityMaterialCard(
+    material: SharedMaterial,
+    space_id: Uuid,
+    csrf_token: String,
+    on_changed: EventHandler<()>,
+) -> Element {
+    let creators = if material.identity.creators.is_empty() {
+        "Автор не указан".to_owned()
+    } else {
+        material.identity.creators.join(", ")
+    };
+    let claim = material.claim.clone();
+    rsx! {
+        article { class: "community-material-card", aria_label: "Материал сообщества {material.identity.canonical_title}",
+            p { class: "eyebrow", "{claim_status_label(claim.as_ref().map(|value| value.status))}" }
+            h3 { "{material.identity.canonical_title}" }
+            p { "{creators}" }
+            p { class: "material-meta", "Форматы копий: {source_formats_label(&material.identity.source_formats)}" }
+            if claim.as_ref().is_some_and(|value| matches!(value.status, UserMaterialClaimStatus::ManualReview | UserMaterialClaimStatus::Rejected)) {
+                button {
+                    class: "secondary-action",
+                    r#type: "button",
+                    onclick: {
+                        let csrf = csrf_token.clone();
+                        let shared_material_id = material.identity.id;
+                        move |_| {
+                            let csrf = csrf.clone();
+                            spawn(async move {
+                                if recheck_claim(&csrf, space_id, shared_material_id).await.is_ok() {
+                                    on_changed.call(());
+                                }
+                            });
+                        }
+                    },
+                    "Проверить снова"
+                }
+            }
+            if claim.as_ref().is_none_or(|value| value.status != UserMaterialClaimStatus::Matched) {
+                ClaimMaterialAction {
+                    space_id,
+                    shared_material_id: material.identity.id,
+                    csrf_token,
+                    on_changed,
+                }
+            }
+        }
+    }
+}
+
+#[component]
+fn ClaimMaterialAction(
+    space_id: Uuid,
+    shared_material_id: Uuid,
+    csrf_token: String,
+    on_changed: EventHandler<()>,
+) -> Element {
+    let mut open = use_signal(|| false);
+    let mut library = use_signal(|| Option::<Vec<LibraryEntry>>::None);
+    let mut error = use_signal(String::new);
+    rsx! {
+        button {
+            class: "text-action",
+            r#type: "button",
+            onclick: move |_| {
+                open.set(true);
+                error.set(String::new());
+                spawn(async move {
+                    match load_library_materials().await {
+                        Ok(entries) => library.set(Some(entries)),
+                        Err(load_error) => error.set(load_error.to_string()),
+                    }
+                });
+            },
+            "Подключить свою копию"
+        }
+        if open() {
+            dialog { class: "library-dialog community-claim-dialog", open: true, aria_modal: "true", aria_label: "Подключить свою копию",
+                div { class: "dialog-heading",
+                    h2 { "Выберите материал из своей библиотеки" }
+                    button { class: "icon-action", r#type: "button", aria_label: "Закрыть", onclick: move |_| open.set(false), "×" }
+                }
+                p { class: "privacy-note", "Lumi сравнит копии на сервере. Файл и полный текст не публикуются в сообщество." }
+                match library.read().clone() {
+                    None => rsx! { p { role: "status", "Загружаем библиотеку…" } },
+                    Some(entries) => rsx! {
+                        ul { class: "community-space-picker",
+                            for entry in entries.into_iter().filter(|entry| entry.import_status == MaterialImportStatus::Ready) {
+                                li {
+                                    button {
+                                        r#type: "button",
+                                        onclick: {
+                                            let csrf = csrf_token.clone();
+                                            move |_| {
+                                                let csrf = csrf.clone();
+                                                spawn(async move {
+                                                    match claim_private_material(&csrf, space_id, shared_material_id, entry.id).await {
+                                                        Ok(_) => {
+                                                            open.set(false);
+                                                            on_changed.call(());
+                                                        }
+                                                        Err(claim_error) => error.set(claim_error.to_string()),
+                                                    }
+                                                });
+                                            }
+                                        },
+                                        "{entry.display_title()}"
+                                    }
+                                }
+                            }
+                        }
+                    },
+                }
+                if !error().is_empty() { p { class: "account-error", role: "alert", "{error}" } }
+            }
+        }
+    }
+}
+
 async fn load_spaces() -> Result<Vec<CommunitySpace>, ApiError> {
     let response = Request::get(&format!("{API_BASE}/spaces"))
         .credentials(RequestCredentials::Include)
@@ -518,6 +772,58 @@ async fn load_spaces() -> Result<Vec<CommunitySpace>, ApiError> {
         .await
         .map_err(network_error)?;
     parse_json(response).await
+}
+
+async fn load_shared_materials(space_id: Uuid) -> Result<Vec<SharedMaterial>, ApiError> {
+    api_get(&format!("/spaces/{space_id}/materials")).await
+}
+
+async fn load_library_materials() -> Result<Vec<LibraryEntry>, ApiError> {
+    api_get("/materials").await
+}
+
+async fn share_private_material(
+    csrf: &str,
+    space_id: Uuid,
+    material_id: Uuid,
+    idempotency_key: &str,
+) -> Result<SharedMaterial, ApiError> {
+    api_json_mutation_with_key(
+        "POST",
+        &format!("/spaces/{space_id}/materials/share"),
+        csrf,
+        idempotency_key,
+        &ShareMaterialRequest { material_id },
+    )
+    .await
+}
+
+async fn claim_private_material(
+    csrf: &str,
+    space_id: Uuid,
+    shared_material_id: Uuid,
+    material_id: Uuid,
+) -> Result<SharedMaterial, ApiError> {
+    api_json_mutation(
+        "POST",
+        &format!("/spaces/{space_id}/materials/{shared_material_id}/claim"),
+        csrf,
+        &ClaimSharedMaterialRequest { material_id },
+    )
+    .await
+}
+
+async fn recheck_claim(
+    csrf: &str,
+    space_id: Uuid,
+    shared_material_id: Uuid,
+) -> Result<SharedMaterial, ApiError> {
+    api_empty_mutation_json(
+        "POST",
+        &format!("/spaces/{space_id}/materials/{shared_material_id}/claim/recheck"),
+        csrf,
+    )
+    .await
 }
 
 async fn load_space_bundle(
@@ -668,6 +974,20 @@ where
     T: serde::Serialize + ?Sized,
     R: for<'de> serde::Deserialize<'de>,
 {
+    api_json_mutation_with_key(method, path, csrf, &Uuid::now_v7().to_string(), body).await
+}
+
+async fn api_json_mutation_with_key<T, R>(
+    method: &str,
+    path: &str,
+    csrf: &str,
+    idempotency_key: &str,
+    body: &T,
+) -> Result<R, ApiError>
+where
+    T: serde::Serialize + ?Sized,
+    R: for<'de> serde::Deserialize<'de>,
+{
     let builder = match method {
         "POST" => Request::post(&format!("{API_BASE}{path}")),
         "PATCH" => Request::patch(&format!("{API_BASE}{path}")),
@@ -676,7 +996,7 @@ where
     let request = builder
         .credentials(RequestCredentials::Include)
         .header("X-Lumi-CSRF", csrf)
-        .header("Idempotency-Key", &Uuid::now_v7().to_string())
+        .header("Idempotency-Key", idempotency_key)
         .json(body)
         .map_err(network_error)?;
     parse_json(request.send().await.map_err(network_error)?).await
@@ -741,6 +1061,31 @@ fn role_label(role: CommunityRole) -> &'static str {
         CommunityRole::Admin => "Администратор",
         CommunityRole::Member => "Участник",
     }
+}
+
+fn claim_status_label(status: Option<UserMaterialClaimStatus>) -> &'static str {
+    match status {
+        Some(UserMaterialClaimStatus::Matched) => "Есть ваша копия",
+        Some(UserMaterialClaimStatus::Pending) => "Ищем совпадение",
+        Some(UserMaterialClaimStatus::ManualReview) => "Нужно подтвердить",
+        Some(UserMaterialClaimStatus::Rejected) => "Копия не совпала",
+        None => "Импортируйте свою копию",
+    }
+}
+
+fn source_formats_label(formats: &[lumi_core::SourceFormat]) -> String {
+    formats
+        .iter()
+        .map(|format| match format {
+            lumi_core::SourceFormat::Epub => "EPUB",
+            lumi_core::SourceFormat::Pdf => "PDF",
+            lumi_core::SourceFormat::WebPage => "Web",
+            lumi_core::SourceFormat::Telegram => "Telegram",
+            lumi_core::SourceFormat::Markdown => "Markdown",
+            lumi_core::SourceFormat::Lum => "LUM",
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 fn link_status_label(status: CommunityAccessLinkStatus) -> &'static str {

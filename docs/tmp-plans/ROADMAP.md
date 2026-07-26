@@ -70,14 +70,19 @@ Knowledge Base, native full-copy replicas, Obsidian, plugin platform, будущ
 - `0.3.0 / E5 / release foundation`: payload-free learning/audio traces,
   account/process limits AI/transcription и performance fixtures для due,
   session и attempt;
+- `0.5.0 / E1`: Community Spaces, scoped membership/roles, revocable link
+  access, safe preview/join и permission-checked Web shell;
+- `0.5.0 / E2`: публикация metadata identity без source blob, versioned
+  privacy-protected fingerprints, personal claims, conservative
+  exact/similarity matching, manual review и import-own-copy UX;
 - release evidence A1 зафиксирован commit trailer
   `Lumi-Plan-Stage: 0.2.0/A1`.
 
 Ещё не готово:
 
 - Desk/search/RAG;
-- следующие social verticals: публикация и сопоставление материалов,
-  совместное чтение, коммуникации и выпуск. Зависимости E1 от ещё не
+- следующие social verticals: совместное чтение, коммуникации и выпуск.
+  Lifecycle-интеграции E2 и зависимости social от ещё не
   завершённого `0.4.0` перечислены в
   [`0.5.0-deferred-until-0.4.0.md`](0.5.0-deferred-until-0.4.0.md).
   Внешний staging operator acceptance остаётся gate конкретного окружения.
@@ -88,9 +93,10 @@ Persistent server публикует capabilities `ai-provider-openrouter`,
 `ai-abridged-lum`, а также route group `learning` и capability
 `learning-core`, `learning-scheduling`, `learning-ai`,
 `learning-explain-back`, `learning-audio-attachments`, `learning-voice` и
-`learning-mcp` при готовых prerequisites.
+`learning-mcp`, а также `community-spaces`, `community-link-access` и
+`material-sharing` при готовых prerequisites.
 
-После перехода на новую шкалу выполнено `10/18` продуктовых эпиков. Stage 0,
+После перехода на новую шкалу выполнено `11/18` продуктовых эпиков. Stage 0,
 Contract Freeze 1 и A1 остаются закрытыми prerequisites.
 
 Repository-side gates `make c`, PostgreSQL/compatibility/security/performance,
@@ -184,7 +190,7 @@ record-scoped RAG без второго контура данных.
 1. [x] **E1 — Community Spaces и доступ.** Social foundation, Community/
    SyncSpace boundary, create/preview/join, roles, links, membership UX и
    permission/security gate.
-2. [ ] **E2 — Публикация и сопоставление материалов.** Share flow,
+2. [x] **E2 — Публикация и сопоставление материалов.** Share flow,
    fingerprints, shared identity, claims, conservative matching и
    import-own-copy.
 3. [ ] **E3 — Совместное чтение.** Shared anchors, discussions, explicit

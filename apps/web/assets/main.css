@@ -558,6 +558,44 @@ p {
   border-radius: 0.75rem;
   background: color-mix(in srgb, var(--sage) 18%, transparent);
 }
+
+.community-material-list,
+.community-space-picker {
+  display: grid;
+  gap: 0.7rem;
+  padding: 0;
+  list-style: none;
+}
+
+.community-material-card {
+  display: grid;
+  gap: 0.55rem;
+  padding: 1rem;
+  border: 1px solid var(--border);
+  border-radius: 0.9rem;
+  background: var(--paper);
+}
+
+.community-material-card h3,
+.community-material-card p {
+  margin: 0;
+}
+
+.community-space-picker button {
+  width: 100%;
+  min-height: 2.8rem;
+  text-align: left;
+}
+
+.community-share-dialog,
+.community-claim-dialog {
+  width: min(38rem, calc(100vw - 2rem));
+}
+
+.community-share-status {
+  color: var(--sage-strong);
+  font-size: 0.88rem;
+}
 .continue-section {
   margin: 0 0 54px;
 }

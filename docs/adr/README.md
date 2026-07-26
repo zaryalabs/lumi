@@ -44,6 +44,14 @@ plugin, AI, search and account/auth boundaries.
   snapshots.
 - [`0027`](0027-fsrs-scheduling-challenges.md) — versioned FSRS schedules,
   ordered hint evidence и bounded Challenges projection.
+- [`0028`](0028-learning-ai-evaluation-explain-back.md) — source-backed AI
+  drafts, open-answer evaluation и explain-back.
+- [`0029`](0029-learning-voice-attachments-transcripts.md) — owner-scoped audio
+  attachments, transcript revisions и voice learning lifecycle.
+- [`0030`](0030-community-space-sync-membership-links.md) — граница
+  CommunitySpace/SyncSpace, membership, roles и безопасные link invitations.
+- [`0031`](0031-material-fingerprints-and-community-claims.md) —
+  privacy-protected fingerprints и conservative claims личных копий.
 
 ## Template
 

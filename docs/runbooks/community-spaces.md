@@ -2,15 +2,18 @@
 
 ## Назначение
 
-Runbook описывает локальную проверку `0.5.0/E1`: закрытые Community Spaces,
-membership/roles и доступ по отзывной ссылке. Материалы, social Reader,
-сообщения и social search пока не входят в опубликованные capabilities.
+Runbook описывает локальную проверку `0.5.0/E1–E2`: закрытые Community Spaces,
+membership/roles, доступ по отзывной ссылке, публикацию безопасной material
+identity и привязку собственной копии. Social Reader, сообщения и social
+search пока не входят в опубликованные capabilities.
 
 ## Capabilities
 
 Persistent и memory server публикуют route groups `spaces`, `shares` и
-capabilities `community-spaces`, `community-link-access`. Web показывает
-Community navigation только после получения этих capabilities.
+capabilities `community-spaces`, `community-link-access`. Только persistent
+server дополнительно публикует `material-sharing`, потому что matching требует
+PostgreSQL projection, normalized packages и versioned feature key. Web
+показывает действия публикации только после получения этой capability.
 
 ## Ручной сценарий
 
@@ -23,6 +26,14 @@ Community navigation только после получения этих capabil
    вернуть not found, а повторный join той же общей ссылкой — forbidden.
 6. Создать новую ссылку, проверить rotate и revoke: старый token перестаёт
    открывать preview немедленно.
+7. Аккаунтом A импортировать Markdown и через меню карточки опубликовать его в
+   Space. Confirmation должен явно перечислять только metadata/fingerprint и
+   не обещать передачу файла.
+8. Аккаунтом B открыть Space: до привязки видна только metadata shell и
+   `Импортируйте свою копию`. Импортировать тот же Markdown, подключить его и
+   получить `Есть ваша копия`.
+9. Третьим аккаунтом импортировать короткий другой текст с тем же названием:
+   после подключения состояние должно быть `Нужно подтвердить`, а не matched.
 
 Invitation передаётся как `#join/{token}`. Fragment не отправляется серверу
 браузером; Web передаёт token только в preview/join API и очищает route после
@@ -39,8 +50,9 @@ make web-e2e
 ```
 
 PostgreSQL integration tests ожидают чистую мигрированную test database через
-`DATABASE_URL`. E2E использует три изолированных browser contexts и проверяет
-create → preview → join → role update → rotate/revoke → remove.
+`LUMI_TEST_DATABASE_URL`. E2E использует изолированные browser contexts и
+проверяет create → preview → join → revoke/remove, а также
+share → no-copy → exact match/manual-review.
 
 ## Security и observability
 
@@ -52,6 +64,10 @@ create → preview → join → role update → rotate/revoke → remove.
   и application logs.
 - Remove/revoke проверяются на каждом server read; browser cache не является
   authorization source.
+- Social API принимает только owner-scoped `material_id`; fingerprint, score и
+  status нельзя подложить с клиента.
+- Raw/protected signatures не входят в HTTP DTO, sync payload или activity;
+  source/package routes сохраняют personal-owner scope.
 - Rate limit возвращает `429`, invalid mutation — `422`.
 
 ## Отложенные зависимости

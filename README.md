@@ -108,8 +108,15 @@ identities, owner/admin/member permission matrix, scoped memberships,
 отзывные и ротируемые link invitations, safe preview и explicit join.
 Community Web shell поддерживает создание и настройку Space, управление
 ролями, ссылками и выходом; capability flags публикуются только для готового
-контура. Зависимые от ещё выполняемого `0.4.0` shared anchors, social search,
-generic images и fingerprint/matching перечислены в
+контура. В `0.5.0/E2` добавлена публикация material identity без source blob:
+сервер сам строит versioned privacy-protected fingerprint текущей личной
+копии, дедуплицирует identity внутри Space и создаёт personal claim с
+консервативными состояниями `matched`, `manual_review` или `rejected`.
+Карточка, сведения и оба Reader предоставляют явный Share flow, а участник
+может подключить только материал из собственной библиотеки. Persistent server
+публикует capability `material-sharing`. Зависимые от ещё выполняемого `0.4.0`
+shared anchors, social search, generic images и автоматический fingerprint
+lifecycle перечислены в
 [`docs/tmp-plans/0.5.0-deferred-until-0.4.0.md`](docs/tmp-plans/0.5.0-deferred-until-0.4.0.md).
 
 ## Локальный запуск
