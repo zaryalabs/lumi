@@ -38,12 +38,7 @@ async function selectReaderText(page: import("@playwright/test").Page) {
   });
 }
 
-test("persists OpenRouter chat and returns a Reader citation", async ({
-  page,
-}) => {
-  test.setTimeout(120_000);
-  await register(page);
-
+async function configureOpenRouter(page: import("@playwright/test").Page) {
   await page.getByRole("button", { name: "ИИ-чат" }).click();
   const chat = page.getByRole("complementary", {
     name: "Персональный AI-ассистент",
@@ -54,7 +49,9 @@ test("persists OpenRouter chat and returns a Reader citation", async ({
   await expect(chat.getByText("готов", { exact: true })).toBeVisible();
   await chat.getByRole("button", { name: "Настройки OpenRouter" }).click();
   await chat.getByRole("button", { name: "Свернуть AI-чат" }).click();
+}
 
+async function importMarkdown(page: import("@playwright/test").Page) {
   await page
     .getByRole("button", { name: "＋ Добавить материал", exact: true })
     .click();
@@ -74,6 +71,19 @@ test("persists OpenRouter chat and returns a Reader citation", async ({
     name: "Материал Руководство Lumi",
   });
   await expect(card.getByText("Готово", { exact: true })).toBeVisible();
+  return card;
+}
+
+test("persists OpenRouter chat and returns a Reader citation", async ({
+  page,
+}) => {
+  test.setTimeout(120_000);
+  await register(page);
+  await configureOpenRouter(page);
+  const chat = page.getByRole("complementary", {
+    name: "Персональный AI-ассистент",
+  });
+  const card = await importMarkdown(page);
   await card.getByRole("button", { name: "Читать" }).click();
 
   await selectReaderText(page);
@@ -95,4 +105,57 @@ test("persists OpenRouter chat and returns a Reader citation", async ({
     page.getByRole("main", { name: "Чтение Руководство Lumi" }),
   ).toBeVisible();
   await expect(page.getByText("Открыт источник ответа AI.")).toBeVisible();
+});
+
+test("keeps a manual summary edit and offers regeneration as a candidate", async ({
+  page,
+}) => {
+  test.setTimeout(120_000);
+  await register(page);
+  await configureOpenRouter(page);
+  await importMarkdown(page);
+
+  const card = page.getByRole("article", {
+    name: "Материал Руководство Lumi",
+  });
+  await card
+    .getByRole("button", { name: "Дополнительные действия с материалом" })
+    .click();
+  await card.getByRole("button", { name: "Сведения" }).click();
+  const details = page.getByRole("dialog", { name: "Сведения о материале" });
+  await details.getByRole("button", { name: "Саммари материала" }).click();
+  const summary = page.getByRole("dialog", { name: "Саммари" });
+  await summary.getByRole("button", { name: "Создать саммари" }).click();
+  await expect(
+    summary.getByText("Краткое саммари фикстуры с проверяемым источником."),
+  ).toBeVisible();
+  await expect(
+    summary.getByRole("button", { name: /^Источник ctx:/ }),
+  ).toBeVisible();
+
+  await summary.getByRole("button", { name: "Редактировать" }).click();
+  await summary.getByLabel("Текст саммари").fill("Моя сохранённая версия.");
+  await summary.getByRole("button", { name: "Сохранить правку" }).click();
+  await expect(summary.getByText("Моя сохранённая версия.")).toBeVisible();
+  await expect(summary.getByText("Отредактировано вручную")).toBeVisible();
+
+  await summary.getByRole("button", { name: "Перегенерировать" }).click();
+  const candidate = summary.getByRole("region", {
+    name: "Новая версия саммари",
+  });
+  await expect(
+    candidate.getByText("Новая версия не заменила ручную правку"),
+  ).toBeVisible();
+  await expect(summary.getByText("Моя сохранённая версия.")).toBeVisible();
+
+  await summary.getByRole("button", { name: "Закрыть саммари" }).click();
+  await details.getByRole("button", { name: "Готово" }).click();
+  await page.getByRole("link", { name: "AI-задачи" }).click();
+  await page.getByLabel("Показывать завершённые").check();
+  const queue = page.getByRole("main", { name: "Очередь AI-задач" });
+  const completedSummaries = queue
+    .getByRole("row")
+    .filter({ hasText: "Саммари" })
+    .filter({ hasText: "Готово" });
+  await expect(completedSummaries).toHaveCount(2);
 });

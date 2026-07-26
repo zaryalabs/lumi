@@ -25,6 +25,7 @@ pub(crate) const API_BASE: &str = match option_env!("LUMI_API_BASE") {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum AppRoute {
     Library,
+    AiQueue,
     Connections,
     Settings,
     Reader(Uuid),
@@ -40,6 +41,9 @@ fn initial_route() -> AppRoute {
     if hash == "#connections" {
         return AppRoute::Connections;
     }
+    if hash == "#ai-queue" {
+        return AppRoute::AiQueue;
+    }
     hash.strip_prefix("#reader/")
         .and_then(|id| Uuid::parse_str(id).ok())
         .map_or(AppRoute::Library, AppRoute::Reader)
@@ -48,6 +52,7 @@ fn initial_route() -> AppRoute {
 fn set_browser_route(route: AppRoute) {
     let hash = match route {
         AppRoute::Library => "library".to_owned(),
+        AppRoute::AiQueue => "ai-queue".to_owned(),
         AppRoute::Connections => "connections".to_owned(),
         AppRoute::Settings => "settings".to_owned(),
         AppRoute::Reader(material_id) => format!("reader/{material_id}"),
@@ -120,6 +125,7 @@ pub(crate) fn AccountGate() -> Element {
     use_effect(move || {
         let title = match route() {
             AppRoute::Library => "Библиотека — Lumi",
+            AppRoute::AiQueue => "AI-задачи — Lumi",
             AppRoute::Connections => "Подключения — Lumi",
             AppRoute::Settings => "Администрирование — Lumi",
             AppRoute::Reader(_) => "Чтение — Lumi",
@@ -205,6 +211,10 @@ pub(crate) fn AccountGate() -> Element {
                                 set_browser_route(AppRoute::Library);
                                 route.set(AppRoute::Library);
                             }, "Библиотека" }
+                            a { href: "#ai-queue", aria_current: if route() == AppRoute::AiQueue { "page" } else { "false" }, onclick: move |_| {
+                                set_browser_route(AppRoute::AiQueue);
+                                route.set(AppRoute::AiQueue);
+                            }, "AI-задачи" }
                             a { href: "#connections", aria_current: if route() == AppRoute::Connections { "page" } else { "false" }, onclick: move |_| {
                                 set_browser_route(AppRoute::Connections);
                                 route.set(AppRoute::Connections);
@@ -245,6 +255,8 @@ pub(crate) fn AccountGate() -> Element {
                         }
                     } else if route() == AppRoute::Connections {
                         ConnectionsApp {}
+                    } else if route() == AppRoute::AiQueue {
+                        crate::ai::AiQueuePage { csrf_token: csrf.read().clone() }
                     } else if route() == AppRoute::Settings && is_admin {
                         SettingsApp { csrf_token: csrf.read().clone() }
                     } else {
@@ -798,7 +810,7 @@ fn LibraryApp(csrf_token: String, on_open_reader: EventHandler<Uuid>) -> Element
         }
 
         if let Some(entry) = details.read().clone() {
-            MaterialDetailsDialog { entry: entry.clone(), on_close: move |_| {
+            MaterialDetailsDialog { entry: entry.clone(), csrf_token: csrf_token.clone(), on_close: move |_| {
                 details.set(None);
                 defer_account_focus(&format!("details-{}", entry.id));
             } }
@@ -1196,7 +1208,11 @@ fn AddMaterialDialog(
 }
 
 #[component]
-fn MaterialDetailsDialog(entry: LibraryEntry, on_close: EventHandler<()>) -> Element {
+fn MaterialDetailsDialog(
+    entry: LibraryEntry,
+    csrf_token: String,
+    on_close: EventHandler<()>,
+) -> Element {
     let revision = entry
         .active_revision_id
         .map(|id| id.to_string())
@@ -1229,6 +1245,16 @@ fn MaterialDetailsDialog(entry: LibraryEntry, on_close: EventHandler<()>) -> Ele
             }
             div { class: "dialog-actions",
                 a { class: "secondary-action", href: "{API_BASE}/materials/{entry.id}/source", "{download_label}" }
+                if let Some(revision_id) = entry.active_revision_id {
+                    crate::ai::SummaryAction {
+                        material_id: entry.id,
+                        revision_id,
+                        scope_kind: lumi_core::SummaryScopeKind::Material,
+                        scope_ref: "material".to_owned(),
+                        label: "Саммари материала".to_owned(),
+                        csrf_token,
+                    }
+                }
                 button { class: "primary-action", r#type: "button", onclick: move |_| on_close.call(()), "Готово" }
             }
         }

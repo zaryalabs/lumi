@@ -523,32 +523,6 @@ async fn provider_descriptor(
     })
 }
 
-pub(crate) async fn provider_preferences(
-    state: &AppState,
-    owner_id: Uuid,
-) -> Result<ProviderPreferences, AppError> {
-    let runtime = state.ai_runtime()?;
-    let row = sqlx_core::query::query(
-        "SELECT default_model, object_revision
-           FROM ai_provider_preferences
-          WHERE user_id = $1 AND provider_kind = $2",
-    )
-    .bind(owner_id)
-    .bind(PROVIDER_KIND)
-    .fetch_optional(runtime.pool())
-    .await
-    .map_err(|_| AppError::Unavailable("AI provider settings"))?;
-    row.as_ref().map_or_else(
-        || {
-            Ok(ProviderPreferences {
-                default_model: DEFAULT_MODEL.to_owned(),
-                object_revision: 1,
-            })
-        },
-        preferences_from_row,
-    )
-}
-
 pub(crate) async fn load_provider(
     state: &AppState,
     owner_id: Uuid,
@@ -556,6 +530,13 @@ pub(crate) async fn load_provider(
     let runtime = state
         .ai_runtime()
         .map_err(|_| AiProviderError::Unavailable)?;
+    load_provider_for_runtime(runtime, owner_id).await
+}
+
+pub(crate) async fn load_provider_for_runtime(
+    runtime: &super::AiRuntime,
+    owner_id: Uuid,
+) -> Result<(OpenRouterClient, ProviderPreferences), AiProviderError> {
     let (_, secret_id) = active_credential_ids(runtime.pool(), owner_id)
         .await
         .map_err(|_| AiProviderError::MissingCredential)?;
@@ -570,9 +551,25 @@ pub(crate) async fn load_provider(
                 SecretStoreError::NotFound => AiProviderError::MissingCredential,
                 _ => AiProviderError::Unavailable,
             })?;
-    let preferences = provider_preferences(state, owner_id)
-        .await
-        .map_err(|_| AiProviderError::Unavailable)?;
+    let preferences = sqlx_core::query::query(
+        "SELECT default_model, object_revision FROM ai_provider_preferences WHERE user_id = $1 AND provider_kind = $2",
+    )
+    .bind(owner_id)
+    .bind(PROVIDER_KIND)
+    .fetch_optional(runtime.pool())
+    .await
+    .map_err(|_| AiProviderError::Unavailable)?
+    .as_ref()
+    .map_or_else(
+        || {
+            Ok(ProviderPreferences {
+                default_model: DEFAULT_MODEL.to_owned(),
+                object_revision: 1,
+            })
+        },
+        preferences_from_row,
+    )
+    .map_err(|_| AiProviderError::Unavailable)?;
     let provider = OpenRouterClient::new(runtime.provider_endpoint(), secret)?;
     Ok((provider, preferences))
 }

@@ -231,6 +231,19 @@ pub(crate) fn ReaderApp(
             let page_count = view.page_map.pages.len();
             let current_page = view.navigation.current().min(page_count.saturating_sub(1));
             let page = view.page_map.pages.get(current_page).cloned();
+            let current_unit = page
+                .as_ref()
+                .and_then(|page| page.fragments.first())
+                .and_then(|fragment| fragment.node_path.first())
+                .cloned();
+            let next_unit = view
+                .page_map
+                .pages
+                .get(current_page.saturating_add(1))
+                .and_then(|page| page.fragments.first())
+                .and_then(|fragment| fragment.node_path.first())
+                .cloned();
+            let chapter_end = current_unit.is_some() && current_unit != next_unit;
             let title = view.document.title.clone();
             let creators = if view.document.creators.is_empty() {
                 "Автор не указан".to_owned()
@@ -305,6 +318,14 @@ pub(crate) fn ReaderApp(
                                 }
                                 div { class: "reader-more-menu",
                                     button { r#type: "button", onclick: move |_| export_annotations(state, export_material_id), "Экспорт заметок" }
+                                    crate::ai::SummaryAction {
+                                        material_id: view.entry.id,
+                                        revision_id: view.document.revision_id,
+                                        scope_kind: lumi_core::SummaryScopeKind::Material,
+                                        scope_ref: "material".to_owned(),
+                                        label: "Саммари материала".to_owned(),
+                                        csrf_token: csrf.read().clone(),
+                                    }
                                 }
                             }
                         }
@@ -390,6 +411,20 @@ pub(crate) fn ReaderApp(
                                     progress { max: "{page_count}", value: "{current_page + 1}", aria_label: "Прогресс чтения" }
                                 }
                                 button { r#type: "button", disabled: current_page + 1 >= page_count, onclick: move |_| move_page(state, current_page + 1, csrf, progress_generation, progress_in_flight, save_state), "Дальше →" }
+                            }
+                            if chapter_end {
+                                if let Some(scope_ref) = current_unit.clone() {
+                                    div { class: "reader-summary-action", role: "region", aria_label: "Саммари главы",
+                                        crate::ai::SummaryAction {
+                                            material_id: view.entry.id,
+                                            revision_id: view.document.revision_id,
+                                            scope_kind: lumi_core::SummaryScopeKind::Chapter,
+                                            scope_ref,
+                                            label: "Создать или открыть саммари главы".to_owned(),
+                                            csrf_token: csrf.read().clone(),
+                                        }
+                                    }
+                                }
                             }
                         }
 
@@ -774,8 +809,8 @@ fn apply_ai_reader_target(view: &mut ReaderView) {
             Some("Источник ответа относится к другой версии материала.".to_owned());
         return;
     }
-    if let AiSourceScope::Selection { anchor, .. } = target.scope {
-        match view.plan.resolve_anchor(&anchor) {
+    match target.scope {
+        AiSourceScope::Selection { anchor, .. } => match view.plan.resolve_anchor(&anchor) {
             AnchorResolution::Resolved { anchor, .. } => {
                 let offset = anchor.text_range.map_or(0, |range| range.start);
                 if let Some(page) = view.page_map.page_for_boundary(&anchor.node_path, offset) {
@@ -788,6 +823,24 @@ fn apply_ai_reader_target(view: &mut ReaderView) {
                 view.annotation_message =
                     Some("Не удалось восстановить источник ответа в этой версии.".to_owned());
             }
+        },
+        AiSourceScope::Chapter { scope_ref, .. } => {
+            if let Some(page) = view.page_map.pages.iter().position(|page| {
+                page.fragments
+                    .first()
+                    .and_then(|fragment| fragment.node_path.first())
+                    == Some(&scope_ref)
+            }) {
+                view.navigation.jump_to(page, view.page_map.pages.len());
+                view.annotation_message = Some("Открыт источник саммари.".to_owned());
+            } else {
+                view.annotation_message =
+                    Some("Не удалось найти главу источника саммари.".to_owned());
+            }
+        }
+        AiSourceScope::Material { .. } => {
+            view.navigation.jump_to(0, view.page_map.pages.len());
+            view.annotation_message = Some("Открыт материал источника саммари.".to_owned());
         }
     }
 }

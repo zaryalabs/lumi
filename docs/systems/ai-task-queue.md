@@ -241,6 +241,23 @@ Mobile client не входит в текущий scope queue UI. При буд�
 - **No browser secrets.** Web queue execution использует server-side BYOK
   credential.
 
+## Реализованный срез `0.2.0/E2`
+
+Production surface включает account-scoped create/list/get/execute/cancel/
+retry и bulk execute до 50 задач, отдельную Dioxus Queue page и внутренний
+server worker. Запуск worker является частью server lifecycle; при старте он
+выполняет recovery общего fenced Job Runtime. Lease, heartbeat, cancellation,
+retry и transactional artifact publication не реализуются в browser.
+
+Иерархический summary workflow включается для explicit context больше
+8 fragments или 64 KiB: bounded section summaries строятся порциями около
+32 KiB, затем единый результат синтезируется и проверяется по исходному
+immutable context pack. Технические стадии доступны как durable progress, но
+не создают отдельные пользовательские `AiTask`.
+
+Операционная процедура и redacted diagnostics описаны в
+[`../runbooks/ai-task-queue.md`](../runbooks/ai-task-queue.md).
+
 ## Интеграции
 
 - **AI core.** Определяет task, run, provider и result contracts.

@@ -47,19 +47,22 @@ Knowledge Base, native full-copy replicas, Obsidian, plugin platform, будущ
   transactional artifact publication;
 - `0.2.0 / E1`: bounded explicit source context, OpenRouter BYOK, глобальный
   durable streaming chat, Reader selection handoff и source-backed citations;
+- `0.2.0 / E2`: durable AI queue/internal worker, chapter/material summaries,
+  Queue/Reader UX, retry/cancel/bulk и manual-edit candidate policy;
 - release evidence A1 зафиксирован commit trailer
   `Lumi-Plan-Stage: 0.2.0/A1`.
 
 Ещё не готово:
 
-- AI queue, summaries, MCP transport/tools и abridged `.lum`;
+- MCP transport/tools и abridged `.lum`;
 - production learning, Desk/search/RAG и Community Spaces.
 
 Persistent server публикует capabilities `ai-provider-openrouter`,
-`ai-provider-byok`, `ai-explicit-context` и `ai-global-chat`. Незавершённые
-task queue, summary, MCP и abridgement capabilities остаются выключенными.
+`ai-provider-byok`, `ai-explicit-context`, `ai-global-chat`, `ai-task-queue`
+и `ai-summary`. Незавершённые MCP и abridgement capabilities остаются
+выключенными.
 
-После перехода на новую шкалу выполнено `1/18` продуктовых эпиков. Stage 0,
+После перехода на новую шкалу выполнено `2/18` продуктовых эпиков. Stage 0,
 Contract Freeze 1 и A1 остаются закрытыми prerequisites.
 
 В прежней шкале это соответствовало `3/57` закрытым checkpoint roadmap, но
@@ -67,7 +70,7 @@ Contract Freeze 1 и A1 остаются закрытыми prerequisites.
 готовность. Поэтому новая шкала начинается с нуля завершённых end-to-end
 эпиков и отдельно сохраняет перечень уже готового foundation выше.
 
-Текущий следующий эпик — `0.2.0/E2: AI-задачи и саммари`.
+Текущий следующий эпик — `0.2.0/E3: Внешние агенты через MCP`.
 
 ## Последовательность
 
@@ -79,7 +82,7 @@ Contract Freeze 1 и A1 остаются закрытыми prerequisites.
 1. [x] **E1 — Персональный AI-ассистент.** Explicit source context,
    BYOK/OpenRouter, settings, global chat, durable streaming conversations,
    citations и Reader selection handoff.
-2. [ ] **E2 — AI-задачи и саммари.** Durable queue/internal worker,
+2. [x] **E2 — AI-задачи и саммари.** Durable queue/internal worker,
    chapter/material summaries, Reader actions, Queue UX, retry/cancel/bulk и
    manual-edit policy.
 3. [ ] **E3 — Внешние агенты через MCP.** Revocable connections, transport,

@@ -2248,6 +2248,97 @@ h6.reading-heading {
   flex-wrap: wrap;
 }
 
+.ai-queue-controls,
+.queue-row-actions,
+.summary-meta,
+.summary-citations {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 12px;
+}
+
+.ai-queue-controls label {
+  display: grid;
+  gap: 6px;
+  color: var(--muted);
+  font-size: 0.84rem;
+  font-weight: 720;
+}
+
+.queue-toggle {
+  grid-template-columns: auto 1fr;
+}
+
+.ai-queue-table-wrap {
+  overflow-x: auto;
+}
+
+.ai-queue-table {
+  width: 100%;
+  border-collapse: collapse;
+}
+
+.ai-queue-table th,
+.ai-queue-table td {
+  padding: 12px;
+  border-bottom: 1px solid var(--line);
+  text-align: left;
+  vertical-align: top;
+}
+
+.queue-scope {
+  display: block;
+  margin-top: 4px;
+  color: var(--muted);
+  font-size: 0.78rem;
+}
+
+.status-pill.queued,
+.status-pill.running,
+.status-pill.needs_input {
+  background: var(--accent-soft);
+  color: var(--accent-strong);
+}
+
+.status-pill.failed,
+.status-pill.cancelled {
+  background: color-mix(in srgb, var(--danger) 12%, var(--surface));
+  color: var(--danger);
+}
+
+.summary-dialog {
+  width: min(720px, calc(100vw - 24px));
+}
+
+.summary-content,
+.summary-candidate,
+.summary-empty,
+.summary-task-state {
+  margin-top: 16px;
+  padding: 16px;
+  border: 1px solid var(--line);
+  border-radius: 16px;
+  background: var(--surface-muted);
+}
+
+.summary-body {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  line-height: 1.65;
+}
+
+.summary-dialog textarea {
+  width: 100%;
+  resize: vertical;
+}
+
+.reader-summary-action {
+  display: flex;
+  justify-content: center;
+  padding: 14px;
+}
+
 @media (max-width: 720px) {
   .ai-chat-panel {
     inset: 0;
@@ -2274,5 +2365,13 @@ h6.reading-heading {
 
   .ai-message {
     max-width: 96%;
+  }
+
+  .ai-queue-controls {
+    align-items: stretch;
+  }
+
+  .ai-queue-controls > * {
+    width: 100%;
   }
 }

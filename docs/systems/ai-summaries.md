@@ -221,6 +221,22 @@ Generated package проходит тот же import/validation pipeline, чт�
 - перегенерировать summary;
 - собрать новую revision сокращенного `.lum`-материала.
 
+## Реализованный срез `0.2.0/E2`
+
+Сохранённые `brief`/`outline` саммари главы и материала реализованы поверх
+общей durable queue и frozen `summary-artifact.v1`. Первый AI-authored
+результат становится active автоматически. Ручная правка создаёт новую
+immutable user-authored artifact revision и supersedes прежнюю. Последующая
+генерация остаётся candidate до явного принятия или отклонения, поэтому
+пользовательский текст не перезаписывается молча.
+
+Reader показывает chapter action в конце структурной единицы; Library и
+Reader дают material action, PDF — material и page-as-chapter scope. Summary
+dialog показывает active/candidate/manual-edit/source-changed состояния,
+cancel/retry и source navigation. История задач доступна на отдельной Queue
+page. Производный сокращённый `.lum` по-прежнему относится к следующему
+эпику E4.
+
 ## Данные
 
 Рамочная модель:

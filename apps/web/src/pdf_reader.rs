@@ -263,6 +263,14 @@ fn PdfReaderApp(material_id: Uuid, csrf_token: String, on_close: EventHandler<()
                                 zoom.set(next);
                                 call_pdf_two("setZoom", JsValue::from_str(PDF_CONTAINER_ID), JsValue::from_f64(next));
                             }, "+" }
+                            crate::ai::SummaryAction {
+                                material_id,
+                                revision_id: data.document.revision_id,
+                                scope_kind: lumi_core::SummaryScopeKind::Material,
+                                scope_ref: "material".to_owned(),
+                                label: "Саммари".to_owned(),
+                                csrf_token: csrf.read().clone(),
+                            }
                             a { class: "secondary-action", href: "{API_BASE}/materials/{material_id}/source", download: "{data.entry.source_identity.source_name}", "Скачать PDF" }
                         }
                         div { class: "reader-chapter-progress", aria_hidden: "true", span {} }
@@ -281,6 +289,14 @@ fn PdfReaderApp(material_id: Uuid, csrf_token: String, on_close: EventHandler<()
                         }
                         aside { class: "pdf-annotation-panel", aria_label: "Аннотации PDF",
                             h2 { "Аннотации" }
+                            crate::ai::SummaryAction {
+                                material_id,
+                                revision_id: data.document.revision_id,
+                                scope_kind: lumi_core::SummaryScopeKind::Chapter,
+                                scope_ref: format!("page:{}", current_page()),
+                                label: "Саммари страницы".to_owned(),
+                                csrf_token: csrf.read().clone(),
+                            }
                             if let Some(anchor) = selected {
                                 div { class: "pdf-selection-card",
                                     p { class: "eyebrow", "Выбранный фрагмент" }
@@ -484,18 +500,29 @@ fn apply_pdf_ai_reader_target(
         reader_message.set("Источник ответа относится к другой версии материала.".to_owned());
         return;
     }
-    let AiSourceScope::Selection { anchor, .. } = target.scope else {
-        return;
-    };
-    let page = match anchor.source_locator.as_ref() {
-        Some(SourceLocator::Pdf(locator)) => locator.page_index,
-        _ => {
-            reader_message.set("Citation не содержит PDF page anchor.".to_owned());
-            return;
+    let (page, anchor) = match target.scope {
+        AiSourceScope::Selection { anchor, .. } => {
+            let page = match anchor.source_locator.as_ref() {
+                Some(SourceLocator::Pdf(locator)) => locator.page_index,
+                _ => {
+                    reader_message.set("Citation не содержит PDF page anchor.".to_owned());
+                    return;
+                }
+            };
+            (page, Some(*anchor))
         }
+        AiSourceScope::Chapter { scope_ref, .. } => (
+            scope_ref
+                .strip_prefix("page:")
+                .unwrap_or(&scope_ref)
+                .parse()
+                .unwrap_or_default(),
+            None,
+        ),
+        AiSourceScope::Material { .. } => (0, None),
     };
     current_page.set(page);
-    selected_anchor.set(Some(*anchor));
+    selected_anchor.set(anchor);
     call_pdf_two(
         "goToPage",
         JsValue::from_str(PDF_CONTAINER_ID),

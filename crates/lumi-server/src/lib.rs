@@ -351,7 +351,7 @@ impl AppState {
             imports: Some(imports),
             telegram: Some(telegram),
             ai: Some(Arc::new(ai)),
-            ai_capabilities: ai::AiCapabilityReadiness::e1_personal_assistant(),
+            ai_capabilities: ai::AiCapabilityReadiness::e2_tasks_and_summaries(),
         })
     }
 
@@ -402,6 +402,15 @@ impl AppState {
     pub async fn run_telegram(self, cancellation: tokio_util::sync::CancellationToken) {
         if let Some(runtime) = self.telegram {
             runtime.run(cancellation).await;
+        } else {
+            cancellation.cancelled().await;
+        }
+    }
+
+    /// Run the durable internal AI task worker until shutdown.
+    pub async fn run_ai_tasks(self, cancellation: tokio_util::sync::CancellationToken) {
+        if let Some(runtime) = self.ai {
+            ai::tasks::run_worker(runtime, cancellation).await;
         } else {
             cancellation.cancelled().await;
         }
@@ -2039,7 +2048,7 @@ mod tests {
         let migrations: Vec<SchemaMigration> =
             json_get(build_router(), "/api/v1/schema/migrations").await?;
 
-        assert_eq!(migrations.len(), 17);
+        assert_eq!(migrations.len(), 18);
         Ok(())
     }
 

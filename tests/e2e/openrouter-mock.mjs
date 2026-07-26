@@ -24,6 +24,34 @@ const server = createServer((request, response) => {
     }
     const body = JSON.parse(Buffer.concat(chunks).toString("utf8"));
     if (!body.stream) {
+      if (body.response_format?.type === "json_object") {
+        const sourceMessage =
+          body.messages.find((message) =>
+            message.content?.includes("<source citation_id="),
+          )?.content ?? "";
+        const citationId =
+          sourceMessage.match(/<source citation_id="([^"]+)">/)?.[1] ??
+          "ctx:missing:1";
+        response.writeHead(200, { "content-type": "application/json" });
+        response.end(
+          JSON.stringify({
+            id: "structured-summary",
+            choices: [
+              {
+                message: {
+                  content: JSON.stringify({
+                    schema_version: "summary-artifact.v1",
+                    content:
+                      "Краткое саммари фикстуры с проверяемым источником.",
+                    citation_ids: [citationId],
+                  }),
+                },
+              },
+            ],
+          }),
+        );
+        return;
+      }
       response.writeHead(200, { "content-type": "application/json" });
       response.end(
         JSON.stringify({

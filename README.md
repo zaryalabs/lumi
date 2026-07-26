@@ -39,13 +39,16 @@ Repository-side production contract и main-only self-hosted CI/CD описан�
 наличие не означает, что server bootstrap, DNS или первый production deploy уже
 выполнены.
 
-Для `0.2.0` реализованы foundation A1 и первый продуктовый эпик E1:
+Для `0.2.0` реализованы foundation A1 и продуктовые эпики E1–E2:
 owner-scoped explicit source context, зашифрованный OpenRouter BYOK,
 глобальный durable streaming AI-чат, Reader selection handoff и рабочие
-source citations. Операционные контракты описаны в
+source citations, а также durable AI queue, внутренний worker, сохранённые
+chapter/material summaries и manual-edit candidate policy. Операционные
+контракты описаны в
 [docs/runbooks/ai-persistence.md](docs/runbooks/ai-persistence.md) и
-[docs/runbooks/personal-ai-assistant.md](docs/runbooks/personal-ai-assistant.md).
-AI queue, summaries и MCP остаются следующими эпиками и не рекламируются
+[docs/runbooks/personal-ai-assistant.md](docs/runbooks/personal-ai-assistant.md),
+[docs/runbooks/ai-task-queue.md](docs/runbooks/ai-task-queue.md).
+MCP и производные `.lum` остаются следующими эпиками и не рекламируются
 capabilities преждевременно.
 
 ## Локальный запуск

@@ -3,10 +3,11 @@
 use std::time::Duration;
 
 use lumi_core::{
-    content_hash, AiArtifact, AiArtifactStatus, AiContextPack, AiExecutorKind, AiRun, AiRunStatus,
-    AiSourceScope, AiTask, AiTaskClaim, AiTaskId, AiTaskStatus, AiTokenUsage,
-    CompleteAiTaskRequest, CompleteAiTaskResult, CreateAiTaskCommand, SummaryForm, UserId,
-    AI_CONTRACT_VERSION,
+    content_hash, AiArtifact, AiArtifactAuthor, AiArtifactStatus, AiContextPack, AiExecutorKind,
+    AiRun, AiRunStatus, AiSourceScope, AiTask, AiTaskClaim, AiTaskId, AiTaskStatus, AiTokenUsage,
+    CompleteAiTaskRequest, CompleteAiTaskResult, CreateAiTaskCommand, SummaryArtifact, SummaryForm,
+    SummaryScopeKind, TaskMutationRequest, UpdateSummaryRequest, UserId, AI_CONTRACT_VERSION,
+    SUMMARY_ARTIFACT_SCHEMA_VERSION,
 };
 use serde_json::Value;
 use sqlx_core::{row::Row, transaction::Transaction};
@@ -14,7 +15,9 @@ use sqlx_postgres::{PgPool, Postgres};
 use time::OffsetDateTime;
 use uuid::Uuid;
 
-use crate::jobs::{JobFence, JobRuntime, JobRuntimeError, PgJobRepository};
+use crate::jobs::{
+    JobFailure, JobFence, JobRuntime, JobRuntimeError, JobRuntimeStatus, PgJobRepository,
+};
 
 mod sqlx {
     pub(crate) use sqlx_core::query::query;
@@ -59,6 +62,12 @@ impl From<JobRuntimeError> for AiRepositoryError {
 pub struct PgAiRepository {
     pool: PgPool,
     jobs: JobRuntime<PgJobRepository>,
+}
+
+/// Provider-neutral input required by the internal E2 worker.
+pub(crate) struct AiTaskExecutionInput {
+    pub task: AiTask,
+    pub instruction: String,
 }
 
 impl PgAiRepository {
@@ -242,6 +251,254 @@ impl PgAiRepository {
         .await
         .map_err(storage_error)?;
         rows.iter().map(task_from_row).collect()
+    }
+
+    /// Mark one queued task for the internal provider worker.
+    pub async fn request_execute(
+        &self,
+        owner_id: UserId,
+        task_id: AiTaskId,
+        request: &TaskMutationRequest,
+    ) -> Result<AiTask, AiRepositoryError> {
+        self.mutate_task(owner_id, task_id, request, "execute")
+            .await
+    }
+
+    /// Request cooperative cancellation for queued or running work.
+    pub async fn request_cancel(
+        &self,
+        owner_id: UserId,
+        task_id: AiTaskId,
+        request: &TaskMutationRequest,
+    ) -> Result<AiTask, AiRepositoryError> {
+        self.mutate_task(owner_id, task_id, request, "cancel").await
+    }
+
+    /// Requeue one failed task without changing its durable identity.
+    pub async fn retry_task(
+        &self,
+        owner_id: UserId,
+        task_id: AiTaskId,
+        request: &TaskMutationRequest,
+    ) -> Result<AiTask, AiRepositoryError> {
+        self.mutate_task(owner_id, task_id, request, "retry").await
+    }
+
+    async fn mutate_task(
+        &self,
+        owner_id: UserId,
+        task_id: AiTaskId,
+        request: &TaskMutationRequest,
+        action: &'static str,
+    ) -> Result<AiTask, AiRepositoryError> {
+        if request.expected_revision == 0
+            || request.idempotency_key.trim().is_empty()
+            || request.idempotency_key.len() > 256
+        {
+            return Err(AiRepositoryError::Invalid(
+                "task mutation is outside bounds".to_owned(),
+            ));
+        }
+        let request_hash = hash_json(&serde_json::json!({
+            "task_id": task_id,
+            "action": action,
+            "expected_revision": request.expected_revision,
+        }))?;
+        if let Some(row) = sqlx::query(
+            "SELECT task_id, action, request_hash FROM ai_task_mutations WHERE user_id = $1 AND idempotency_key = $2",
+        )
+        .bind(owner_id)
+        .bind(&request.idempotency_key)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(storage_error)?
+        {
+            let prior_task: Uuid = row.try_get("task_id").map_err(storage_error)?;
+            let prior_action: String = row.try_get("action").map_err(storage_error)?;
+            let prior_hash: String = row.try_get("request_hash").map_err(storage_error)?;
+            return if prior_task == task_id
+                && prior_action == action
+                && prior_hash == request_hash
+            {
+                self.task(owner_id, task_id).await
+            } else {
+                Err(AiRepositoryError::Conflict)
+            };
+        }
+
+        let mut transaction = self.pool.begin().await.map_err(storage_error)?;
+        let row = sqlx::query(
+            "SELECT job_id, status, object_revision FROM ai_tasks WHERE task_id = $1 AND user_id = $2 FOR UPDATE",
+        )
+        .bind(task_id)
+        .bind(owner_id)
+        .fetch_optional(&mut *transaction)
+        .await
+        .map_err(storage_error)?
+        .ok_or(AiRepositoryError::NotFound)?;
+        let current_revision: i64 = row.try_get("object_revision").map_err(storage_error)?;
+        if u64::try_from(current_revision).ok() != Some(request.expected_revision) {
+            return Err(AiRepositoryError::Conflict);
+        }
+        let status: String = row.try_get("status").map_err(storage_error)?;
+        let job_id: Uuid = row.try_get("job_id").map_err(storage_error)?;
+        match (action, status.as_str()) {
+            ("execute", "queued") => {
+                sqlx::query(
+                    "UPDATE ai_tasks SET internal_execution_requested = true, object_revision = object_revision + 1, updated_at = now() WHERE task_id = $1 AND user_id = $2",
+                )
+                .bind(task_id)
+                .bind(owner_id)
+                .execute(&mut *transaction)
+                .await
+                .map_err(storage_error)?;
+            }
+            ("cancel", "queued" | "running") => {
+                let job = sqlx::query(
+                    "UPDATE jobs SET cancellation_requested = true, status = CASE WHEN status = 'queued' THEN 'cancelled' ELSE status END, claim_id = CASE WHEN status = 'queued' THEN NULL ELSE claim_id END, lease_expires_at = CASE WHEN status = 'queued' THEN NULL ELSE lease_expires_at END, finished_at = CASE WHEN status = 'queued' THEN now() ELSE finished_at END, updated_at = now(), object_revision = object_revision + 1 WHERE job_id = $1 AND user_id = $2 AND status IN ('queued', 'running') RETURNING status",
+                )
+                .bind(job_id)
+                .bind(owner_id)
+                .fetch_optional(&mut *transaction)
+                .await
+                .map_err(storage_error)?
+                .ok_or(AiRepositoryError::Conflict)?;
+                let job_status: String = job.try_get("status").map_err(storage_error)?;
+                sqlx::query(
+                    "UPDATE ai_tasks SET status = CASE WHEN $3 = 'cancelled' THEN 'cancelled' ELSE status END, active_run_id = CASE WHEN $3 = 'cancelled' THEN NULL ELSE active_run_id END, internal_execution_requested = false, object_revision = object_revision + 1, updated_at = now() WHERE task_id = $1 AND user_id = $2",
+                )
+                .bind(task_id)
+                .bind(owner_id)
+                .bind(job_status)
+                .execute(&mut *transaction)
+                .await
+                .map_err(storage_error)?;
+            }
+            ("retry", "failed" | "needs_input") => {
+                sqlx::query(
+                    "UPDATE jobs SET status = 'queued', stage = 'queued', progress = 0, cancellation_requested = false, error_code = NULL, error_message = NULL, finished_at = NULL, updated_at = now(), object_revision = object_revision + 1 WHERE job_id = $1 AND user_id = $2 AND status = 'failed'",
+                )
+                .bind(job_id)
+                .bind(owner_id)
+                .execute(&mut *transaction)
+                .await
+                .map_err(storage_error)?;
+                sqlx::query(
+                    "UPDATE ai_tasks SET status = 'queued', active_run_id = NULL, result_artifact_id = NULL, internal_execution_requested = false, object_revision = object_revision + 1, updated_at = now() WHERE task_id = $1 AND user_id = $2",
+                )
+                .bind(task_id)
+                .bind(owner_id)
+                .execute(&mut *transaction)
+                .await
+                .map_err(storage_error)?;
+            }
+            _ => return Err(AiRepositoryError::Conflict),
+        }
+        let resulting_revision = current_revision.saturating_add(1);
+        sqlx::query(
+            "INSERT INTO ai_task_mutations (user_id, idempotency_key, task_id, action, request_hash, resulting_revision) VALUES ($1, $2, $3, $4, $5, $6)",
+        )
+        .bind(owner_id)
+        .bind(&request.idempotency_key)
+        .bind(task_id)
+        .bind(action)
+        .bind(request_hash)
+        .bind(resulting_revision)
+        .execute(&mut *transaction)
+        .await
+        .map_err(|error| {
+            if unique_violation(&error) {
+                AiRepositoryError::Conflict
+            } else {
+                storage_error(error)
+            }
+        })?;
+        transaction.commit().await.map_err(storage_error)?;
+        self.task(owner_id, task_id).await
+    }
+
+    /// Return the oldest queued task explicitly admitted to the internal worker.
+    pub(crate) async fn next_internal_task(
+        &self,
+    ) -> Result<Option<(UserId, AiTaskId)>, AiRepositoryError> {
+        sqlx::query(
+            "SELECT user_id, task_id FROM ai_tasks WHERE status = 'queued' AND internal_execution_requested ORDER BY priority DESC, created_at, task_id LIMIT 1",
+        )
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(storage_error)?
+        .map(|row| {
+            Ok((
+                row.try_get("user_id").map_err(storage_error)?,
+                row.try_get("task_id").map_err(storage_error)?,
+            ))
+        })
+        .transpose()
+    }
+
+    /// Load instruction and frozen projection for an internal execution.
+    pub(crate) async fn execution_input(
+        &self,
+        owner_id: UserId,
+        task_id: AiTaskId,
+    ) -> Result<AiTaskExecutionInput, AiRepositoryError> {
+        let row = sqlx::query(
+            "SELECT task_id, user_id, contract_version, kind, result_kind, source_scope, parameters, prompt_version, output_schema_version, status, dedupe_key, object_revision, instruction FROM ai_tasks WHERE task_id = $1 AND user_id = $2",
+        )
+        .bind(task_id)
+        .bind(owner_id)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(storage_error)?
+        .ok_or(AiRepositoryError::NotFound)?;
+        Ok(AiTaskExecutionInput {
+            task: task_from_row(&row)?,
+            instruction: row.try_get("instruction").map_err(storage_error)?,
+        })
+    }
+
+    /// Fail queued work that cannot produce a valid immutable context pack.
+    pub(crate) async fn fail_unclaimed_task(
+        &self,
+        owner_id: UserId,
+        task_id: AiTaskId,
+        code: &str,
+    ) -> Result<AiTask, AiRepositoryError> {
+        if code.is_empty() || code.len() > 128 {
+            return Err(AiRepositoryError::Invalid(
+                "failure code is outside bounds".to_owned(),
+            ));
+        }
+        let mut transaction = self.pool.begin().await.map_err(storage_error)?;
+        let row = sqlx::query(
+            "SELECT job_id FROM ai_tasks WHERE task_id = $1 AND user_id = $2 AND status = 'queued' FOR UPDATE",
+        )
+        .bind(task_id)
+        .bind(owner_id)
+        .fetch_optional(&mut *transaction)
+        .await
+        .map_err(storage_error)?
+        .ok_or(AiRepositoryError::Conflict)?;
+        let job_id: Uuid = row.try_get("job_id").map_err(storage_error)?;
+        sqlx::query(
+            "UPDATE jobs SET status = 'failed', error_code = $3, error_message = 'AI source context is unavailable', finished_at = now(), updated_at = now(), object_revision = object_revision + 1 WHERE job_id = $1 AND user_id = $2 AND status = 'queued'",
+        )
+        .bind(job_id)
+        .bind(owner_id)
+        .bind(code)
+        .execute(&mut *transaction)
+        .await
+        .map_err(storage_error)?;
+        sqlx::query(
+            "UPDATE ai_tasks SET status = 'failed', internal_execution_requested = false, object_revision = object_revision + 1, updated_at = now() WHERE task_id = $1 AND user_id = $2 AND status = 'queued'",
+        )
+        .bind(task_id)
+        .bind(owner_id)
+        .execute(&mut *transaction)
+        .await
+        .map_err(storage_error)?;
+        transaction.commit().await.map_err(storage_error)?;
+        self.task(owner_id, task_id).await
     }
 
     /// Persist one immutable, validated context pack for an account-owned task.
@@ -787,6 +1044,424 @@ impl PgAiRepository {
         artifact_from_row(&row)
     }
 
+    /// Reconcile a failed or cancelled internal execution through the common
+    /// job runtime and its task/run projections.
+    pub(crate) async fn fail_task(
+        &self,
+        owner_id: UserId,
+        claim: &AiTaskClaim,
+        code: &str,
+        retryable: bool,
+    ) -> Result<AiTask, AiRepositoryError> {
+        let job_id: Uuid =
+            sqlx::query("SELECT job_id FROM ai_tasks WHERE task_id = $1 AND user_id = $2")
+                .bind(claim.task_id)
+                .bind(owner_id)
+                .fetch_optional(&self.pool)
+                .await
+                .map_err(storage_error)?
+                .map(|row| row.try_get("job_id").map_err(storage_error))
+                .transpose()?
+                .ok_or(AiRepositoryError::NotFound)?;
+        let job = self
+            .jobs
+            .fail(
+                Some(owner_id),
+                &JobFence {
+                    job_id,
+                    claim_id: claim.claim_id,
+                    fence: claim.fence,
+                },
+                &JobFailure {
+                    code: code.to_owned(),
+                    message: "AI provider execution did not complete".to_owned(),
+                    retryable,
+                },
+            )
+            .await?;
+        let (task_status, run_status) = match job.status {
+            JobRuntimeStatus::Queued => ("queued", "released"),
+            JobRuntimeStatus::Cancelled => ("cancelled", "cancelled"),
+            JobRuntimeStatus::Failed => ("failed", "failed"),
+            _ => return Err(AiRepositoryError::Storage),
+        };
+        let mut transaction = self.pool.begin().await.map_err(storage_error)?;
+        sqlx::query(
+            "UPDATE ai_runs SET status = $4, claim_id = NULL, lease_expires_at = NULL, error_code = $5, finished_at = now() WHERE run_id = $1 AND task_id = $2 AND user_id = $3 AND status = 'running'",
+        )
+        .bind(claim.run_id)
+        .bind(claim.task_id)
+        .bind(owner_id)
+        .bind(run_status)
+        .bind(code)
+        .execute(&mut *transaction)
+        .await
+        .map_err(storage_error)?;
+        sqlx::query(
+            "UPDATE ai_tasks SET status = $3, active_run_id = NULL, internal_execution_requested = ($3 = 'queued'), object_revision = object_revision + 1, updated_at = now() WHERE task_id = $1 AND user_id = $2 AND status = 'running'",
+        )
+        .bind(claim.task_id)
+        .bind(owner_id)
+        .bind(task_status)
+        .execute(&mut *transaction)
+        .await
+        .map_err(storage_error)?;
+        transaction.commit().await.map_err(storage_error)?;
+        self.task(owner_id, claim.task_id).await
+    }
+
+    /// Promote a generated candidate unless it would overwrite a user edit.
+    pub(crate) async fn activate_generated_summary(
+        &self,
+        owner_id: UserId,
+        artifact_id: Uuid,
+    ) -> Result<SummaryArtifact, AiRepositoryError> {
+        let mut transaction = self.pool.begin().await.map_err(storage_error)?;
+        let candidate = sqlx::query(
+            "SELECT source_revision_id, scope_kind, scope_ref, summary_form FROM ai_artifacts WHERE artifact_id = $1 AND user_id = $2 AND kind = 'summary_artifact' AND status = 'candidate' FOR UPDATE",
+        )
+        .bind(artifact_id)
+        .bind(owner_id)
+        .fetch_optional(&mut *transaction)
+        .await
+        .map_err(storage_error)?
+        .ok_or(AiRepositoryError::NotFound)?;
+        let active = sqlx::query(
+            "SELECT artifact_id, authored_by FROM ai_artifacts WHERE user_id = $1 AND source_revision_id = $2 AND scope_kind = $3 AND scope_ref = $4 AND summary_form = $5 AND kind = 'summary_artifact' AND status = 'active' FOR UPDATE",
+        )
+        .bind(owner_id)
+        .bind(candidate.try_get::<Uuid, _>("source_revision_id").map_err(storage_error)?)
+        .bind(candidate.try_get::<String, _>("scope_kind").map_err(storage_error)?)
+        .bind(candidate.try_get::<String, _>("scope_ref").map_err(storage_error)?)
+        .bind(candidate.try_get::<String, _>("summary_form").map_err(storage_error)?)
+        .fetch_optional(&mut *transaction)
+        .await
+        .map_err(storage_error)?;
+        if active.as_ref().is_some_and(|row| {
+            row.try_get::<String, _>("authored_by").ok().as_deref() == Some("user")
+        }) {
+            transaction.commit().await.map_err(storage_error)?;
+            return self.summary(owner_id, artifact_id).await;
+        }
+        if let Some(active) = active {
+            let active_id: Uuid = active.try_get("artifact_id").map_err(storage_error)?;
+            sqlx::query(
+                "UPDATE ai_artifacts SET status = 'superseded', object_revision = object_revision + 1, updated_at = now() WHERE artifact_id = $1 AND user_id = $2",
+            )
+            .bind(active_id)
+            .bind(owner_id)
+            .execute(&mut *transaction)
+            .await
+            .map_err(storage_error)?;
+            sqlx::query(
+                "UPDATE ai_artifacts SET supersedes_artifact_id = $3 WHERE artifact_id = $1 AND user_id = $2",
+            )
+            .bind(artifact_id)
+            .bind(owner_id)
+            .bind(active_id)
+            .execute(&mut *transaction)
+            .await
+            .map_err(storage_error)?;
+        }
+        sqlx::query(
+            "UPDATE ai_artifacts SET status = 'active', object_revision = object_revision + 1, updated_at = now() WHERE artifact_id = $1 AND user_id = $2 AND status = 'candidate'",
+        )
+        .bind(artifact_id)
+        .bind(owner_id)
+        .execute(&mut *transaction)
+        .await
+        .map_err(storage_error)?;
+        transaction.commit().await.map_err(storage_error)?;
+        self.summary(owner_id, artifact_id).await
+    }
+
+    /// List active and pending summary revisions for one owned material.
+    pub async fn list_summaries(
+        &self,
+        owner_id: UserId,
+        material_id: Uuid,
+    ) -> Result<Vec<SummaryArtifact>, AiRepositoryError> {
+        let rows = sqlx::query(
+            "SELECT artifact_id, task_id, run_id, kind, schema_version, status, source_revision_id, scope_kind, scope_ref, summary_form, payload, authored_by, artifact_revision FROM ai_artifacts WHERE user_id = $1 AND source_material_id = $2 AND kind = 'summary_artifact' AND status IN ('active', 'candidate') ORDER BY created_at, artifact_id",
+        )
+        .bind(owner_id)
+        .bind(material_id)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(storage_error)?;
+        rows.iter().map(summary_from_row).collect()
+    }
+
+    /// Read one account-owned summary projection.
+    pub async fn summary(
+        &self,
+        owner_id: UserId,
+        artifact_id: Uuid,
+    ) -> Result<SummaryArtifact, AiRepositoryError> {
+        let row = sqlx::query(
+            "SELECT artifact_id, task_id, run_id, kind, schema_version, status, source_revision_id, scope_kind, scope_ref, summary_form, payload, authored_by, artifact_revision FROM ai_artifacts WHERE artifact_id = $1 AND user_id = $2 AND kind = 'summary_artifact'",
+        )
+        .bind(artifact_id)
+        .bind(owner_id)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(storage_error)?
+        .ok_or(AiRepositoryError::NotFound)?;
+        summary_from_row(&row)
+    }
+
+    /// Accept or reject one generated candidate with optimistic concurrency.
+    pub async fn mutate_artifact(
+        &self,
+        owner_id: UserId,
+        artifact_id: Uuid,
+        expected_revision: u64,
+        idempotency_key: &str,
+        accept: bool,
+    ) -> Result<AiArtifact, AiRepositoryError> {
+        if expected_revision == 0
+            || idempotency_key.trim().is_empty()
+            || idempotency_key.len() > 256
+        {
+            return Err(AiRepositoryError::Invalid(
+                "artifact mutation is outside bounds".to_owned(),
+            ));
+        }
+        let action = if accept { "accept" } else { "reject" };
+        let request_hash = hash_json(&serde_json::json!({
+            "artifact_id": artifact_id,
+            "expected_revision": expected_revision,
+            "action": action,
+        }))?;
+        let mut transaction = self.pool.begin().await.map_err(storage_error)?;
+        sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 6))")
+            .bind(format!("{owner_id}:{idempotency_key}"))
+            .execute(&mut *transaction)
+            .await
+            .map_err(storage_error)?;
+        if let Some(replay) = sqlx::query(
+            "SELECT artifact_id, action, request_hash, resulting_artifact_id FROM ai_artifact_mutations WHERE user_id = $1 AND idempotency_key = $2",
+        )
+        .bind(owner_id)
+        .bind(idempotency_key)
+        .fetch_optional(&mut *transaction)
+        .await
+        .map_err(storage_error)?
+        {
+            let matches = replay
+                .try_get::<Uuid, _>("artifact_id")
+                .map_err(storage_error)?
+                == artifact_id
+                && replay
+                    .try_get::<String, _>("action")
+                    .map_err(storage_error)?
+                    == action
+                && replay
+                    .try_get::<String, _>("request_hash")
+                    .map_err(storage_error)?
+                    == request_hash;
+            let resulting_artifact_id = replay
+                .try_get::<Uuid, _>("resulting_artifact_id")
+                .map_err(storage_error)?;
+            transaction.rollback().await.map_err(storage_error)?;
+            if !matches {
+                return Err(AiRepositoryError::Conflict);
+            }
+            return self.artifact(owner_id, resulting_artifact_id).await;
+        }
+        let row = sqlx::query(
+            "SELECT source_revision_id, scope_kind, scope_ref, summary_form, status, object_revision FROM ai_artifacts WHERE artifact_id = $1 AND user_id = $2 FOR UPDATE",
+        )
+        .bind(artifact_id)
+        .bind(owner_id)
+        .fetch_optional(&mut *transaction)
+        .await
+        .map_err(storage_error)?
+        .ok_or(AiRepositoryError::NotFound)?;
+        let object_revision: i64 = row.try_get("object_revision").map_err(storage_error)?;
+        if row.try_get::<String, _>("status").map_err(storage_error)? != "candidate"
+            || u64::try_from(object_revision).ok() != Some(expected_revision)
+        {
+            return Err(AiRepositoryError::Conflict);
+        }
+        if accept {
+            sqlx::query(
+                "UPDATE ai_artifacts SET status = 'superseded', object_revision = object_revision + 1, updated_at = now() WHERE user_id = $1 AND source_revision_id = $2 AND scope_kind = $3 AND scope_ref = $4 AND summary_form = $5 AND kind = 'summary_artifact' AND status = 'active'",
+            )
+            .bind(owner_id)
+            .bind(row.try_get::<Uuid, _>("source_revision_id").map_err(storage_error)?)
+            .bind(row.try_get::<String, _>("scope_kind").map_err(storage_error)?)
+            .bind(row.try_get::<String, _>("scope_ref").map_err(storage_error)?)
+            .bind(row.try_get::<String, _>("summary_form").map_err(storage_error)?)
+            .execute(&mut *transaction)
+            .await
+            .map_err(storage_error)?;
+        }
+        sqlx::query(
+            "UPDATE ai_artifacts SET status = $3, object_revision = object_revision + 1, updated_at = now() WHERE artifact_id = $1 AND user_id = $2",
+        )
+        .bind(artifact_id)
+        .bind(owner_id)
+        .bind(if accept { "active" } else { "rejected" })
+        .execute(&mut *transaction)
+        .await
+        .map_err(storage_error)?;
+        sqlx::query(
+            "INSERT INTO ai_artifact_mutations (user_id, idempotency_key, artifact_id, action, request_hash, resulting_artifact_id) VALUES ($1, $2, $3, $4, $5, $3)",
+        )
+        .bind(owner_id)
+        .bind(idempotency_key)
+        .bind(artifact_id)
+        .bind(action)
+        .bind(request_hash)
+        .execute(&mut *transaction)
+        .await
+        .map_err(storage_error)?;
+        transaction.commit().await.map_err(storage_error)?;
+        self.artifact(owner_id, artifact_id).await
+    }
+
+    /// Create an immutable user-authored revision and replace the active slot.
+    pub async fn update_summary(
+        &self,
+        owner_id: UserId,
+        summary_id: Uuid,
+        request: &UpdateSummaryRequest,
+    ) -> Result<SummaryArtifact, AiRepositoryError> {
+        if request.content.trim().is_empty()
+            || request.content.len() > 256 * 1024
+            || request.expected_revision == 0
+            || request.idempotency_key.trim().is_empty()
+            || request.idempotency_key.len() > 256
+        {
+            return Err(AiRepositoryError::Invalid(
+                "summary edit is outside bounds".to_owned(),
+            ));
+        }
+        let content = request.content.trim();
+        let request_hash = hash_json(&serde_json::json!({
+            "artifact_id": summary_id,
+            "expected_revision": request.expected_revision,
+            "action": "edit",
+            "content": content,
+        }))?;
+        let mut transaction = self.pool.begin().await.map_err(storage_error)?;
+        sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 6))")
+            .bind(format!("{owner_id}:{}", request.idempotency_key))
+            .execute(&mut *transaction)
+            .await
+            .map_err(storage_error)?;
+        if let Some(replay) = sqlx::query(
+            "SELECT artifact_id, action, request_hash, resulting_artifact_id FROM ai_artifact_mutations WHERE user_id = $1 AND idempotency_key = $2",
+        )
+        .bind(owner_id)
+        .bind(&request.idempotency_key)
+        .fetch_optional(&mut *transaction)
+        .await
+        .map_err(storage_error)?
+        {
+            let matches = replay
+                .try_get::<Uuid, _>("artifact_id")
+                .map_err(storage_error)?
+                == summary_id
+                && replay
+                    .try_get::<String, _>("action")
+                    .map_err(storage_error)?
+                    == "edit"
+                && replay
+                    .try_get::<String, _>("request_hash")
+                    .map_err(storage_error)?
+                    == request_hash;
+            let resulting_artifact_id = replay
+                .try_get::<Uuid, _>("resulting_artifact_id")
+                .map_err(storage_error)?;
+            transaction.rollback().await.map_err(storage_error)?;
+            if !matches {
+                return Err(AiRepositoryError::Conflict);
+            }
+            return self.summary(owner_id, resulting_artifact_id).await;
+        }
+        let row = sqlx::query(
+            "SELECT * FROM ai_artifacts WHERE artifact_id = $1 AND user_id = $2 AND kind = 'summary_artifact' AND status = 'active' FOR UPDATE",
+        )
+        .bind(summary_id)
+        .bind(owner_id)
+        .fetch_optional(&mut *transaction)
+        .await
+        .map_err(storage_error)?
+        .ok_or(AiRepositoryError::NotFound)?;
+        let artifact_revision: i64 = row.try_get("artifact_revision").map_err(storage_error)?;
+        if u64::try_from(artifact_revision).ok() != Some(request.expected_revision) {
+            return Err(AiRepositoryError::Conflict);
+        }
+        let mut payload: Value = row.try_get("payload").map_err(storage_error)?;
+        payload["content"] = Value::String(content.to_owned());
+        let new_id = Uuid::now_v7();
+        sqlx::query(
+            "UPDATE ai_artifacts SET status = 'superseded', object_revision = object_revision + 1, updated_at = now() WHERE artifact_id = $1",
+        )
+        .bind(summary_id)
+        .execute(&mut *transaction)
+        .await
+        .map_err(storage_error)?;
+        sqlx::query(
+            "INSERT INTO ai_artifacts (artifact_id, task_id, run_id, user_id, space_id, kind, schema_version, payload, payload_hash, source_material_id, source_revision_id, scope_kind, scope_ref, summary_form, source_refs, status, authored_by, artifact_revision, supersedes_artifact_id) VALUES ($1, $2, $3, $4, $5, 'summary_artifact', $6, $7, $8, $9, $10, $11, $12, $13, $14, 'active', 'user', $15, $16)",
+        )
+        .bind(new_id)
+        .bind(row.try_get::<Uuid, _>("task_id").map_err(storage_error)?)
+        .bind(row.try_get::<Uuid, _>("run_id").map_err(storage_error)?)
+        .bind(owner_id)
+        .bind(row.try_get::<Uuid, _>("space_id").map_err(storage_error)?)
+        .bind(SUMMARY_ARTIFACT_SCHEMA_VERSION)
+        .bind(&payload)
+        .bind(hash_json(&payload)?)
+        .bind(row.try_get::<Uuid, _>("source_material_id").map_err(storage_error)?)
+        .bind(row.try_get::<Uuid, _>("source_revision_id").map_err(storage_error)?)
+        .bind(row.try_get::<String, _>("scope_kind").map_err(storage_error)?)
+        .bind(row.try_get::<String, _>("scope_ref").map_err(storage_error)?)
+        .bind(row.try_get::<String, _>("summary_form").map_err(storage_error)?)
+        .bind(row.try_get::<Value, _>("source_refs").map_err(storage_error)?)
+        .bind(artifact_revision.saturating_add(1))
+        .bind(summary_id)
+        .execute(&mut *transaction)
+        .await
+        .map_err(storage_error)?;
+        sqlx::query(
+            "INSERT INTO ai_artifact_mutations (user_id, idempotency_key, artifact_id, action, request_hash, resulting_artifact_id) VALUES ($1, $2, $3, 'edit', $4, $5)",
+        )
+        .bind(owner_id)
+        .bind(&request.idempotency_key)
+        .bind(summary_id)
+        .bind(request_hash)
+        .bind(new_id)
+        .execute(&mut *transaction)
+        .await
+        .map_err(storage_error)?;
+        transaction.commit().await.map_err(storage_error)?;
+        self.summary(owner_id, new_id).await
+    }
+
+    /// Remove an active or pending summary from the product projection.
+    pub async fn delete_summary(
+        &self,
+        owner_id: UserId,
+        summary_id: Uuid,
+    ) -> Result<(), AiRepositoryError> {
+        let updated = sqlx::query(
+            "UPDATE ai_artifacts SET status = 'rejected', object_revision = object_revision + 1, updated_at = now() WHERE artifact_id = $1 AND user_id = $2 AND kind = 'summary_artifact' AND status IN ('active', 'candidate')",
+        )
+        .bind(summary_id)
+        .bind(owner_id)
+        .execute(&self.pool)
+        .await
+        .map_err(storage_error)?;
+        if updated.rows_affected() == 1 {
+            Ok(())
+        } else {
+            Err(AiRepositoryError::NotFound)
+        }
+    }
+
     /// Recover expired generic AI jobs and reconcile their task/run aggregates.
     ///
     /// # Errors
@@ -1140,6 +1815,59 @@ fn artifact_from_row(row: &sqlx_postgres::PgRow) -> Result<AiArtifact, AiReposit
         created_at: timestamp_ms(row.try_get("created_at").map_err(storage_error)?),
         updated_at: timestamp_ms(row.try_get("updated_at").map_err(storage_error)?),
     })
+}
+
+fn summary_from_row(row: &sqlx_postgres::PgRow) -> Result<SummaryArtifact, AiRepositoryError> {
+    let status: String = row.try_get("status").map_err(storage_error)?;
+    let scope_kind: String = row.try_get("scope_kind").map_err(storage_error)?;
+    let form: String = row.try_get("summary_form").map_err(storage_error)?;
+    let authored_by: String = row.try_get("authored_by").map_err(storage_error)?;
+    let payload: Value = row.try_get("payload").map_err(storage_error)?;
+    let summary = SummaryArtifact {
+        schema_version: row.try_get("schema_version").map_err(storage_error)?,
+        artifact_id: row.try_get("artifact_id").map_err(storage_error)?,
+        task_id: row.try_get("task_id").map_err(storage_error)?,
+        run_id: row.try_get("run_id").map_err(storage_error)?,
+        kind: row.try_get("kind").map_err(storage_error)?,
+        status: artifact_status(&status)?,
+        source_revision_id: row.try_get("source_revision_id").map_err(storage_error)?,
+        scope_kind: match scope_kind.as_str() {
+            "chapter" => SummaryScopeKind::Chapter,
+            "material" => SummaryScopeKind::Material,
+            _ => return Err(AiRepositoryError::Storage),
+        },
+        scope_ref: row.try_get("scope_ref").map_err(storage_error)?,
+        form: match form.as_str() {
+            "brief" => SummaryForm::Brief,
+            "outline" => SummaryForm::Outline,
+            _ => return Err(AiRepositoryError::Storage),
+        },
+        content: payload
+            .get("content")
+            .and_then(Value::as_str)
+            .ok_or(AiRepositoryError::Storage)?
+            .to_owned(),
+        citation_ids: payload
+            .get("citation_ids")
+            .and_then(Value::as_array)
+            .ok_or(AiRepositoryError::Storage)?
+            .iter()
+            .map(|value| {
+                value
+                    .as_str()
+                    .map(ToOwned::to_owned)
+                    .ok_or(AiRepositoryError::Storage)
+            })
+            .collect::<Result<Vec<_>, _>>()?,
+        authored_by: match authored_by.as_str() {
+            "ai" => AiArtifactAuthor::Ai,
+            "user" => AiArtifactAuthor::User,
+            _ => return Err(AiRepositoryError::Storage),
+        },
+        artifact_revision: positive_u64(row.try_get("artifact_revision").map_err(storage_error)?)?,
+    };
+    summary.validate().map_err(|_| AiRepositoryError::Storage)?;
+    Ok(summary)
 }
 
 fn task_status(value: &str) -> Result<AiTaskStatus, AiRepositoryError> {
@@ -1598,6 +2326,164 @@ mod tests {
             .await?;
         assert!(next.fence > claim.fence);
         assert_ne!(next.run_id, claim.run_id);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn postgres_e2_summary_queue_preserves_manual_edit_until_candidate_accept(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let Some(fixture) = AiPgFixture::create().await? else {
+            return Ok(());
+        };
+        let repository = PgAiRepository::new(fixture.pool.clone());
+        let task = repository
+            .create_task(fixture.owner_id, fixture.command("e2-summary-create"))
+            .await?;
+        let execute = TaskMutationRequest {
+            expected_revision: task.object_revision,
+            idempotency_key: "e2-summary-execute".to_owned(),
+        };
+        let scheduled = repository
+            .request_execute(fixture.owner_id, task.id, &execute)
+            .await?;
+        assert_eq!(scheduled.object_revision, task.object_revision + 1);
+        assert_eq!(
+            repository
+                .request_execute(fixture.owner_id, task.id, &execute)
+                .await?
+                .object_revision,
+            scheduled.object_revision
+        );
+        assert_eq!(
+            repository.next_internal_task().await?,
+            Some((fixture.owner_id, task.id))
+        );
+
+        repository
+            .store_context_pack(fixture.owner_id, &fixture.context_pack(task.id))
+            .await?;
+        let claim = repository
+            .claim_task(
+                fixture.owner_id,
+                task.id,
+                AiExecutorKind::InternalProvider,
+                Some("worker:e2"),
+            )
+            .await?;
+        let completion = repository
+            .complete_task(
+                fixture.owner_id,
+                CompleteAiTaskRequest {
+                    task_id: task.id,
+                    run_id: claim.run_id,
+                    claim_id: claim.claim_id,
+                    fence: claim.fence,
+                    task_revision: claim.task_revision,
+                    idempotency_key: "e2-summary-complete".to_owned(),
+                    result: serde_json::json!({
+                        "schema_version": SUMMARY_ARTIFACT_SCHEMA_VERSION,
+                        "content": "Сгенерированное саммари",
+                        "citation_ids": ["ctx:test:1"],
+                    }),
+                },
+            )
+            .await?;
+        let active = repository
+            .activate_generated_summary(fixture.owner_id, completion.artifact_id)
+            .await?;
+        assert_eq!(active.status, AiArtifactStatus::Active);
+
+        let edit_request = UpdateSummaryRequest {
+            content: "Моя ручная версия".to_owned(),
+            expected_revision: active.artifact_revision,
+            idempotency_key: "e2-summary-edit".to_owned(),
+        };
+        let edited = repository
+            .update_summary(fixture.owner_id, active.artifact_id, &edit_request)
+            .await?;
+        assert_eq!(edited.authored_by, AiArtifactAuthor::User);
+        assert_eq!(
+            repository
+                .update_summary(fixture.owner_id, active.artifact_id, &edit_request)
+                .await?
+                .artifact_id,
+            edited.artifact_id
+        );
+
+        let mut regenerate = fixture.command("e2-summary-regenerate");
+        regenerate.instruction = "Создай новую версию саммари.".to_owned();
+        let regenerated_task = repository.create_task(fixture.owner_id, regenerate).await?;
+        repository
+            .store_context_pack(fixture.owner_id, &fixture.context_pack(regenerated_task.id))
+            .await?;
+        let regenerated_claim = repository
+            .claim_task(
+                fixture.owner_id,
+                regenerated_task.id,
+                AiExecutorKind::InternalProvider,
+                Some("worker:e2-regenerate"),
+            )
+            .await?;
+        let regenerated = repository
+            .complete_task(
+                fixture.owner_id,
+                CompleteAiTaskRequest {
+                    task_id: regenerated_task.id,
+                    run_id: regenerated_claim.run_id,
+                    claim_id: regenerated_claim.claim_id,
+                    fence: regenerated_claim.fence,
+                    task_revision: regenerated_claim.task_revision,
+                    idempotency_key: "e2-summary-regenerated-complete".to_owned(),
+                    result: serde_json::json!({
+                        "schema_version": SUMMARY_ARTIFACT_SCHEMA_VERSION,
+                        "content": "Новая AI-версия",
+                        "citation_ids": ["ctx:test:1"],
+                    }),
+                },
+            )
+            .await?;
+        let candidate = repository
+            .activate_generated_summary(fixture.owner_id, regenerated.artifact_id)
+            .await?;
+        assert_eq!(candidate.status, AiArtifactStatus::Candidate);
+        let summaries = repository
+            .list_summaries(fixture.owner_id, fixture.material_id)
+            .await?;
+        assert!(summaries.iter().any(|summary| {
+            summary.artifact_id == edited.artifact_id
+                && summary.status == AiArtifactStatus::Active
+                && summary.content == "Моя ручная версия"
+        }));
+        assert!(summaries.iter().any(|summary| {
+            summary.artifact_id == candidate.artifact_id
+                && summary.status == AiArtifactStatus::Candidate
+        }));
+        let candidate_artifact = repository
+            .artifact(fixture.owner_id, candidate.artifact_id)
+            .await?;
+        let accepted = repository
+            .mutate_artifact(
+                fixture.owner_id,
+                candidate.artifact_id,
+                candidate_artifact.object_revision,
+                "e2-summary-accept",
+                true,
+            )
+            .await?;
+        assert_eq!(accepted.status, AiArtifactStatus::Active);
+        assert_eq!(
+            repository
+                .mutate_artifact(
+                    fixture.owner_id,
+                    candidate.artifact_id,
+                    candidate_artifact.object_revision,
+                    "e2-summary-accept",
+                    true,
+                )
+                .await?
+                .id,
+            accepted.id
+        );
         Ok(())
     }
 

@@ -1,14 +1,19 @@
 //! Global Dioxus AI chat surface and Reader handoff adapter.
 
+use std::collections::HashSet;
+
 use dioxus::dioxus_core::spawn_forever;
 use dioxus::prelude::*;
 use gloo_net::http::Request;
 use lumi_core::{
-    AiContextAttachment, AiConversation, AiCredentialState, AiGeneration, AiGenerationStatus,
-    AiMessageRole, AiMessageStatus, AiPage, AiProviderDescriptor, ConversationDetail,
-    CreateConversationRequest, CreateMessageRequest, CreateMessageResponse,
+    AiArtifact, AiArtifactStatus, AiContextAttachment, AiConversation, AiCredentialState,
+    AiExecutionMode, AiGeneration, AiGenerationStatus, AiMessageRole, AiMessageStatus, AiPage,
+    AiProviderDescriptor, AiSourceScope, AiTask, AiTaskStatus, ArtifactMutationRequest,
+    BulkExecuteTasksRequest, BulkTaskResult, ConversationDetail, CreateConversationRequest,
+    CreateMessageRequest, CreateMessageResponse, CreateSummaryTaskRequest,
     GenerationMutationRequest, ProviderCredentialState, PutProviderCredentialRequest,
-    UpdateConversationRequest, ValidateProviderRequest,
+    SummaryArtifact, SummaryForm, SummaryScopeKind, TaskMutationRequest, UpdateConversationRequest,
+    UpdateSummaryRequest, ValidateProviderRequest,
 };
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
@@ -48,6 +53,488 @@ pub(crate) fn dispatch_reader_handoff(handoff: &ReaderAiHandoff) -> Result<(), S
         .dispatch_event(&event)
         .map_err(|_| "Не удалось открыть AI-чат.".to_owned())?;
     Ok(())
+}
+
+#[component]
+pub(crate) fn AiQueuePage(csrf_token: String) -> Element {
+    let mut tasks = use_signal(Vec::<AiTask>::new);
+    let mut selected = use_signal(HashSet::<Uuid>::new);
+    let mut status_filter = use_signal(String::new);
+    let mut show_completed = use_signal(|| false);
+    let mut busy = use_signal(|| false);
+    let mut error = use_signal(String::new);
+    let mut refresh = use_signal(|| 0_u64);
+    let csrf = use_signal(|| csrf_token);
+
+    use_effect(move || {
+        let _ = refresh();
+        spawn(async move {
+            match load_tasks().await {
+                Ok(items) => tasks.set(items),
+                Err(message) => error.set(message),
+            }
+        });
+    });
+
+    let visible = tasks
+        .read()
+        .iter()
+        .filter(|task| {
+            (status_filter().is_empty() || task_status_key(task.status) == status_filter())
+                && (show_completed() || !task_status_terminal(task.status))
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    let selected_count = selected.read().len();
+
+    rsx! {
+        main { id: "main-content", class: "library-view ai-queue-view", aria_label: "Очередь AI-задач",
+            header { class: "library-hero compact",
+                div {
+                    p { class: "eyebrow", "Durable execution" }
+                    h1 { "AI-задачи" }
+                    p { class: "library-lead", "Фоновые саммари переживают reload и перезапуск сервера. Здесь их можно запустить, отменить или повторить." }
+                }
+                button { class: "secondary-action", r#type: "button", onclick: move |_| refresh += 1, "Обновить" }
+            }
+            if !error().is_empty() {
+                p { class: "library-alert", role: "alert", "{error}" }
+            }
+            section { class: "library-section ai-queue-controls", aria_label: "Фильтры очереди",
+                label { "Статус",
+                    select {
+                        value: "{status_filter}",
+                        onchange: move |event| status_filter.set(event.value()),
+                        option { value: "", "Все" }
+                        option { value: "queued", "В очереди" }
+                        option { value: "running", "Выполняется" }
+                        option { value: "failed", "Ошибка" }
+                        option { value: "cancelled", "Отменено" }
+                        option { value: "succeeded", "Готово" }
+                    }
+                }
+                label { class: "queue-toggle",
+                    input {
+                        r#type: "checkbox",
+                        checked: show_completed(),
+                        onchange: move |event| show_completed.set(event.checked()),
+                    }
+                    "Показывать завершённые"
+                }
+                button {
+                    class: "primary-action",
+                    r#type: "button",
+                    disabled: busy() || selected_count == 0,
+                    onclick: move |_| {
+                        let task_ids = selected.read().iter().copied().collect::<Vec<_>>();
+                        let csrf_token = csrf.read().clone();
+                        busy.set(true);
+                        error.set(String::new());
+                        spawn(async move {
+                            match bulk_execute_tasks(task_ids, &csrf_token).await {
+                                Ok(result) => {
+                                    let scheduled = result.results.iter().filter(|item| item.outcome == "scheduled").count();
+                                    error.set(format!("Запланировано задач: {scheduled}."));
+                                    selected.set(HashSet::new());
+                                    refresh += 1;
+                                }
+                                Err(message) => error.set(message),
+                            }
+                            busy.set(false);
+                        });
+                    },
+                    "Выполнить выбранные ({selected_count})"
+                }
+            }
+            section { class: "library-section ai-queue-table-wrap", aria_label: "Задачи",
+                if visible.is_empty() {
+                    p { class: "capability-note", role: "status", "Под выбранные фильтры задач нет." }
+                } else {
+                    table { class: "ai-queue-table",
+                        thead { tr {
+                            th { scope: "col", "Выбор" }
+                            th { scope: "col", "Тип" }
+                            th { scope: "col", "Цель" }
+                            th { scope: "col", "Статус" }
+                            th { scope: "col", "Действия" }
+                        } }
+                        tbody {
+                            for task in visible {
+                                {
+                                    let task_id = task.id;
+                                    let checked = selected.read().contains(&task_id);
+                                    let status = task.status;
+                                    let execute_value = task.clone();
+                                    let cancel_value = task.clone();
+                                    let retry_value = task.clone();
+                                    rsx! {
+                                        tr {
+                                            td { input {
+                                                r#type: "checkbox",
+                                                aria_label: "Выбрать задачу {task_id}",
+                                                checked,
+                                                onchange: move |event| {
+                                                    if event.checked() {
+                                                        selected.write().insert(task_id);
+                                                    } else {
+                                                        selected.write().remove(&task_id);
+                                                    }
+                                                }
+                                            } }
+                                            td { strong { "{task_kind_label(&task.kind)}" } }
+                                            td {
+                                                a { href: "#reader/{task.source_scope.material_id()}", "Материал" }
+                                                span { class: "queue-scope", "{task_scope_label(&task.source_scope)}" }
+                                            }
+                                            td { span { class: "status-pill {task_status_key(task.status)}", "{task_status_label(task.status)}" } }
+                                            td { div { class: "queue-row-actions",
+                                                if status == AiTaskStatus::Queued {
+                                                    button { class: "text-action", r#type: "button", onclick: move |_| mutate_task_ui(execute_value.clone(), "execute", csrf, tasks, error), "Выполнить сейчас" }
+                                                }
+                                                if matches!(status, AiTaskStatus::Queued | AiTaskStatus::Running) {
+                                                    button { class: "text-action danger-text", r#type: "button", onclick: move |_| mutate_task_ui(cancel_value.clone(), "cancel", csrf, tasks, error), "Отменить" }
+                                                }
+                                                if matches!(status, AiTaskStatus::Failed | AiTaskStatus::NeedsInput) {
+                                                    button { class: "text-action", r#type: "button", onclick: move |_| mutate_task_ui(retry_value.clone(), "retry", csrf, tasks, error), "Повторить" }
+                                                }
+                                            } }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+fn mutate_task_ui(
+    task: AiTask,
+    action: &'static str,
+    csrf: Signal<String>,
+    mut tasks: Signal<Vec<AiTask>>,
+    mut error: Signal<String>,
+) {
+    spawn_forever(async move {
+        match mutate_task(&task, action, &csrf()).await {
+            Ok(updated) => {
+                if let Some(item) = tasks.write().iter_mut().find(|item| item.id == updated.id) {
+                    *item = updated;
+                }
+            }
+            Err(message) => error.set(message),
+        }
+    });
+}
+
+#[component]
+pub(crate) fn SummaryAction(
+    material_id: Uuid,
+    revision_id: Uuid,
+    scope_kind: SummaryScopeKind,
+    scope_ref: String,
+    label: String,
+    csrf_token: String,
+) -> Element {
+    let mut open = use_signal(|| false);
+    let mut summaries = use_signal(Vec::<SummaryArtifact>::new);
+    let task = use_signal(|| None::<AiTask>);
+    let mut form = use_signal(move || {
+        if scope_kind == SummaryScopeKind::Chapter {
+            SummaryForm::Brief
+        } else {
+            SummaryForm::Outline
+        }
+    });
+    let mut edit = use_signal(String::new);
+    let mut editing = use_signal(|| false);
+    let mut busy = use_signal(|| false);
+    let mut error = use_signal(String::new);
+    let mut refresh = use_signal(|| 0_u64);
+    let csrf = use_signal(|| csrf_token);
+
+    use_effect(move || {
+        let _ = refresh();
+        if !open() {
+            return;
+        }
+        spawn(async move {
+            match load_summaries(material_id).await {
+                Ok(items) => summaries.set(items),
+                Err(message) => error.set(message),
+            }
+        });
+    });
+
+    let relevant = summaries
+        .read()
+        .iter()
+        .filter(|summary| summary.scope_kind == scope_kind && summary.scope_ref == scope_ref)
+        .cloned()
+        .collect::<Vec<_>>();
+    let active = relevant
+        .iter()
+        .find(|summary| {
+            summary.status == AiArtifactStatus::Active && summary.source_revision_id == revision_id
+        })
+        .cloned();
+    let candidate = relevant
+        .iter()
+        .find(|summary| {
+            summary.status == AiArtifactStatus::Candidate
+                && summary.source_revision_id == revision_id
+        })
+        .cloned();
+    let source_changed = relevant
+        .iter()
+        .any(|summary| summary.source_revision_id != revision_id);
+    let task_snapshot = task.read().clone();
+
+    rsx! {
+        button {
+            class: "text-action summary-action-trigger",
+            r#type: "button",
+            onclick: move |_| {
+                open.set(true);
+                refresh += 1;
+            },
+            "{label}"
+        }
+        if open() {
+            dialog {
+                class: "library-dialog summary-dialog",
+                open: true,
+                aria_modal: "true",
+                aria_label: "Саммари",
+                oncancel: move |event| {
+                    event.prevent_default();
+                    open.set(false);
+                },
+                div { class: "dialog-heading",
+                    div {
+                        p { class: "eyebrow", if scope_kind == SummaryScopeKind::Chapter { "Глава" } else { "Материал" } }
+                        h2 { "Сохранённое саммари" }
+                    }
+                    button { class: "icon-action", r#type: "button", aria_label: "Закрыть саммари", onclick: move |_| open.set(false), "×" }
+                }
+                if !error().is_empty() {
+                    p { class: "library-alert", role: "alert", "{error}" }
+                }
+                if source_changed {
+                    p { class: "settings-notice", role: "status", "Источник изменился. Старое саммари сохранено; для текущей ревизии можно создать новое." }
+                }
+                if let Some(current_task) = task_snapshot.clone() {
+                    {
+                        let status = current_task.status;
+                        let cancel_value = current_task.clone();
+                        let retry_value = current_task;
+                        rsx! {
+                            div { class: "summary-task-state", role: "status",
+                                strong { "{task_status_label(status)}" }
+                                p { "{task_progress_label(status)}" }
+                                if matches!(status, AiTaskStatus::Queued | AiTaskStatus::Running) {
+                                    button { class: "danger-action", r#type: "button", onclick: move |_| mutate_summary_task_ui(cancel_value.clone(), "cancel", csrf, task, error), "Отменить" }
+                                }
+                                if matches!(status, AiTaskStatus::Failed | AiTaskStatus::NeedsInput) {
+                                    button { class: "secondary-action", r#type: "button", onclick: move |_| mutate_summary_task_ui(retry_value.clone(), "retry", csrf, task, error), "Повторить" }
+                                }
+                            }
+                        }
+                    }
+                }
+                if let Some(summary) = active.as_ref() {
+                    article { class: "summary-content", aria_label: "Активное саммари",
+                        div { class: "summary-meta",
+                            span { class: "status-pill succeeded", "Активно" }
+                            span { "{summary_form_label(summary.form)}" }
+                            if summary.authored_by == lumi_core::AiArtifactAuthor::User {
+                                span { "Отредактировано вручную" }
+                            }
+                        }
+                        if editing() {
+                            label { "Текст саммари",
+                                textarea {
+                                    rows: "12",
+                                    value: "{edit}",
+                                    oninput: move |event| edit.set(event.value()),
+                                }
+                            }
+                            div { class: "dialog-actions",
+                                button { class: "secondary-action", r#type: "button", onclick: move |_| editing.set(false), "Отмена" }
+                                button { class: "primary-action", r#type: "button", disabled: busy() || edit().trim().is_empty(), onclick: {
+                                    let summary = summary.clone();
+                                    move |_| {
+                                        let content = edit.read().clone();
+                                        let csrf_token = csrf.read().clone();
+                                        let summary = summary.clone();
+                                        busy.set(true);
+                                        spawn(async move {
+                                            match update_summary_request(&summary, content, &csrf_token).await {
+                                                Ok(_) => {
+                                                    editing.set(false);
+                                                    refresh += 1;
+                                                }
+                                                Err(message) => error.set(message),
+                                            }
+                                            busy.set(false);
+                                        });
+                                    }
+                                }, "Сохранить правку" }
+                            }
+                        } else {
+                            p { class: "summary-body", "{summary.content}" }
+                            div { class: "summary-citations", aria_label: "Источники саммари",
+                                for citation in &summary.citation_ids {
+                                    button { class: "text-action", r#type: "button", onclick: {
+                                        let summary = summary.clone();
+                                        let citation = citation.clone();
+                                        move |_| open_summary_source(material_id, revision_id, &summary, &citation)
+                                    }, "Источник {citation}" }
+                                }
+                            }
+                            div { class: "dialog-actions",
+                                button { class: "secondary-action", r#type: "button", onclick: {
+                                    let content = summary.content.clone();
+                                    move |_| {
+                                        edit.set(content.clone());
+                                        editing.set(true);
+                                    }
+                                }, "Редактировать" }
+                                button { class: "secondary-action", r#type: "button", onclick: move |_| create_summary_ui(material_id, revision_id, scope_kind, scope_ref.clone(), form(), csrf, task, error, busy, refresh), "Перегенерировать" }
+                                button { class: "danger-action", r#type: "button", onclick: {
+                                    let summary_id = summary.artifact_id;
+                                    move |_| {
+                                        let csrf_token = csrf.read().clone();
+                                        spawn(async move {
+                                            match delete_summary_request(summary_id, &csrf_token).await {
+                                                Ok(()) => refresh += 1,
+                                                Err(message) => error.set(message),
+                                            }
+                                        });
+                                    }
+                                }, "Удалить" }
+                            }
+                        }
+                    }
+                } else {
+                    section { class: "summary-empty", aria_label: "Создание саммари",
+                        p { "Сохранённого саммари для этой версии пока нет." }
+                        label { "Форма",
+                            select {
+                                value: "{summary_form_key(form())}",
+                                onchange: move |event| form.set(if event.value() == "outline" { SummaryForm::Outline } else { SummaryForm::Brief }),
+                                option { value: "brief", "Краткое" }
+                                option { value: "outline", "Структурный конспект" }
+                            }
+                        }
+                        button { class: "primary-action", r#type: "button", disabled: busy(), onclick: move |_| create_summary_ui(material_id, revision_id, scope_kind, scope_ref.clone(), form(), csrf, task, error, busy, refresh), "Создать саммари" }
+                    }
+                }
+                if let Some(pending) = candidate.as_ref() {
+                    section { class: "summary-candidate", aria_label: "Новая версия саммари",
+                        p { class: "eyebrow", "Новая версия не заменила ручную правку" }
+                        p { class: "summary-body", "{pending.content}" }
+                        div { class: "dialog-actions",
+                            button { class: "primary-action", r#type: "button", onclick: {
+                                let pending = pending.clone();
+                                move |_| mutate_artifact_ui(pending.clone(), true, csrf, refresh, error)
+                            }, "Принять" }
+                            button { class: "secondary-action", r#type: "button", onclick: {
+                                let pending = pending.clone();
+                                move |_| mutate_artifact_ui(pending.clone(), false, csrf, refresh, error)
+                            }, "Отклонить" }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn create_summary_ui(
+    material_id: Uuid,
+    revision_id: Uuid,
+    scope_kind: SummaryScopeKind,
+    scope_ref: String,
+    form: SummaryForm,
+    csrf: Signal<String>,
+    mut task: Signal<Option<AiTask>>,
+    mut error: Signal<String>,
+    mut busy: Signal<bool>,
+    mut refresh: Signal<u64>,
+) {
+    let csrf_token = csrf.read().clone();
+    busy.set(true);
+    error.set(String::new());
+    spawn_forever(async move {
+        match create_summary_request(
+            material_id,
+            revision_id,
+            scope_kind,
+            scope_ref,
+            form,
+            &csrf_token,
+        )
+        .await
+        {
+            Ok(created) => {
+                task.set(Some(created.clone()));
+                let mut current = created;
+                for _ in 0..240 {
+                    if task_status_terminal(current.status) {
+                        break;
+                    }
+                    browser_delay(250).await;
+                    match load_task(current.id).await {
+                        Ok(updated) => {
+                            current = updated.clone();
+                            task.set(Some(updated));
+                        }
+                        Err(message) => {
+                            error.set(message);
+                            break;
+                        }
+                    }
+                }
+                refresh += 1;
+            }
+            Err(message) => error.set(message),
+        }
+        busy.set(false);
+    });
+}
+
+fn mutate_summary_task_ui(
+    current: AiTask,
+    action: &'static str,
+    csrf: Signal<String>,
+    mut task: Signal<Option<AiTask>>,
+    mut error: Signal<String>,
+) {
+    spawn_forever(async move {
+        match mutate_task(&current, action, &csrf()).await {
+            Ok(updated) => task.set(Some(updated)),
+            Err(message) => error.set(message),
+        }
+    });
+}
+
+fn mutate_artifact_ui(
+    summary: SummaryArtifact,
+    accept: bool,
+    csrf: Signal<String>,
+    mut refresh: Signal<u64>,
+    mut error: Signal<String>,
+) {
+    spawn_forever(async move {
+        match mutate_artifact_request(&summary, accept, &csrf()).await {
+            Ok(_) => refresh += 1,
+            Err(message) => error.set(message),
+        }
+    });
 }
 
 #[component]
@@ -724,6 +1211,116 @@ async fn load_provider() -> Result<AiProviderDescriptor, String> {
     get_json("/providers/openrouter").await
 }
 
+async fn load_tasks() -> Result<Vec<AiTask>, String> {
+    get_json::<AiPage<AiTask>>("/ai/tasks")
+        .await
+        .map(|page| page.items)
+}
+
+async fn load_task(task_id: Uuid) -> Result<AiTask, String> {
+    get_json(&format!("/ai/tasks/{task_id}")).await
+}
+
+async fn mutate_task(task: &AiTask, action: &str, csrf: &str) -> Result<AiTask, String> {
+    post_json(
+        &format!("/ai/tasks/{}/{action}", task.id),
+        &TaskMutationRequest {
+            expected_revision: task.object_revision,
+            idempotency_key: Uuid::now_v7().to_string(),
+        },
+        csrf,
+    )
+    .await
+}
+
+async fn bulk_execute_tasks(task_ids: Vec<Uuid>, csrf: &str) -> Result<BulkTaskResult, String> {
+    post_json(
+        "/ai/tasks/bulk-execute",
+        &BulkExecuteTasksRequest {
+            task_ids,
+            idempotency_key: Uuid::now_v7().to_string(),
+        },
+        csrf,
+    )
+    .await
+}
+
+async fn load_summaries(material_id: Uuid) -> Result<Vec<SummaryArtifact>, String> {
+    get_json::<AiPage<SummaryArtifact>>(&format!("/materials/{material_id}/summaries"))
+        .await
+        .map(|page| page.items)
+}
+
+async fn create_summary_request(
+    material_id: Uuid,
+    revision_id: Uuid,
+    scope_kind: SummaryScopeKind,
+    scope_ref: String,
+    form: SummaryForm,
+    csrf: &str,
+) -> Result<AiTask, String> {
+    post_json(
+        &format!("/materials/{material_id}/summary-tasks"),
+        &CreateSummaryTaskRequest {
+            source_revision_id: revision_id,
+            scope_kind,
+            scope_ref,
+            form,
+            execution_mode: AiExecutionMode::ExecuteNow,
+            idempotency_key: Uuid::now_v7().to_string(),
+        },
+        csrf,
+    )
+    .await
+}
+
+async fn mutate_artifact_request(
+    summary: &SummaryArtifact,
+    accept: bool,
+    csrf: &str,
+) -> Result<AiArtifact, String> {
+    post_json(
+        &format!(
+            "/ai/artifacts/{}/{}",
+            summary.artifact_id,
+            if accept { "accept" } else { "reject" }
+        ),
+        &ArtifactMutationRequest {
+            expected_revision: summary.artifact_revision,
+            idempotency_key: Uuid::now_v7().to_string(),
+        },
+        csrf,
+    )
+    .await
+}
+
+async fn update_summary_request(
+    summary: &SummaryArtifact,
+    content: String,
+    csrf: &str,
+) -> Result<SummaryArtifact, String> {
+    patch_json(
+        &format!("/ai/summaries/{}", summary.artifact_id),
+        &UpdateSummaryRequest {
+            content,
+            expected_revision: summary.artifact_revision,
+            idempotency_key: Uuid::now_v7().to_string(),
+        },
+        csrf,
+    )
+    .await
+}
+
+async fn delete_summary_request(summary_id: Uuid, csrf: &str) -> Result<(), String> {
+    let response = Request::delete(&format!("{API_BASE}/ai/summaries/{summary_id}"))
+        .credentials(RequestCredentials::Include)
+        .header("X-Lumi-CSRF", csrf)
+        .send()
+        .await
+        .map_err(network_error)?;
+    response_ok(response).await
+}
+
 async fn load_conversations() -> Result<Vec<AiConversation>, String> {
     get_json::<AiPage<AiConversation>>("/ai/conversations")
         .await
@@ -948,6 +1545,114 @@ fn message_status_label(status: AiMessageStatus) -> &'static str {
         AiMessageStatus::Failed => "Ответ завершился ошибкой",
         AiMessageStatus::Cancelled => "Ответ остановлен",
         AiMessageStatus::Committed | AiMessageStatus::Streaming | AiMessageStatus::Completed => "",
+    }
+}
+
+fn task_status_key(status: AiTaskStatus) -> &'static str {
+    match status {
+        AiTaskStatus::Queued => "queued",
+        AiTaskStatus::Running => "running",
+        AiTaskStatus::NeedsInput => "needs_input",
+        AiTaskStatus::Succeeded => "succeeded",
+        AiTaskStatus::Failed => "failed",
+        AiTaskStatus::Cancelled => "cancelled",
+    }
+}
+
+fn task_status_label(status: AiTaskStatus) -> &'static str {
+    match status {
+        AiTaskStatus::Queued => "В очереди",
+        AiTaskStatus::Running => "Выполняется",
+        AiTaskStatus::NeedsInput => "Нужны данные",
+        AiTaskStatus::Succeeded => "Готово",
+        AiTaskStatus::Failed => "Ошибка",
+        AiTaskStatus::Cancelled => "Отменено",
+    }
+}
+
+fn task_status_terminal(status: AiTaskStatus) -> bool {
+    matches!(
+        status,
+        AiTaskStatus::Succeeded | AiTaskStatus::Failed | AiTaskStatus::Cancelled
+    )
+}
+
+fn task_kind_label(kind: &str) -> &str {
+    if kind == "summary" {
+        "Саммари"
+    } else {
+        kind
+    }
+}
+
+fn task_scope_label(scope: &AiSourceScope) -> String {
+    match scope {
+        AiSourceScope::Selection { .. } => "выделение".to_owned(),
+        AiSourceScope::Chapter { scope_ref, .. } => format!("глава · {scope_ref}"),
+        AiSourceScope::Material { .. } => "весь материал".to_owned(),
+    }
+}
+
+fn task_progress_label(status: AiTaskStatus) -> &'static str {
+    match status {
+        AiTaskStatus::Queued => "Задача ожидает внутреннего worker.",
+        AiTaskStatus::Running => "Контекст, синтез и проверка результата выполняются на сервере.",
+        AiTaskStatus::NeedsInput => "Проверьте настройки AI provider.",
+        AiTaskStatus::Succeeded => "Результат опубликован.",
+        AiTaskStatus::Failed => "Задачу можно повторить из этой панели или общей очереди.",
+        AiTaskStatus::Cancelled => "Задача отменена.",
+    }
+}
+
+fn summary_form_key(form: SummaryForm) -> &'static str {
+    match form {
+        SummaryForm::Brief => "brief",
+        SummaryForm::Outline => "outline",
+    }
+}
+
+fn summary_form_label(form: SummaryForm) -> &'static str {
+    match form {
+        SummaryForm::Brief => "Краткое",
+        SummaryForm::Outline => "Структурный конспект",
+    }
+}
+
+fn open_summary_source(
+    material_id: Uuid,
+    revision_id: Uuid,
+    summary: &SummaryArtifact,
+    citation_id: &str,
+) {
+    let scope = match summary.scope_kind {
+        SummaryScopeKind::Chapter => AiSourceScope::Chapter {
+            material_id,
+            revision_id,
+            scope_ref: summary.scope_ref.clone(),
+        },
+        SummaryScopeKind::Material => AiSourceScope::Material {
+            material_id,
+            revision_id,
+        },
+    };
+    let attachment = AiContextAttachment {
+        kind: "summary_citation".to_owned(),
+        material_id,
+        revision_id,
+        scope,
+        display_label: format!("Источник саммари {citation_id}"),
+    };
+    let Some(window) = web_sys::window() else {
+        return;
+    };
+    if let Ok(Some(storage)) = window.local_storage() {
+        if let Ok(payload) = serde_json::to_string(&attachment) {
+            let _ = storage.set_item(READER_TARGET_STORAGE_KEY, &payload);
+        }
+    }
+    let _ = window.location().set_hash(&format!("reader/{material_id}"));
+    if let Ok(event) = web_sys::CustomEvent::new(READER_TARGET_EVENT) {
+        let _ = window.dispatch_event(&event);
     }
 }
 

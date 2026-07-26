@@ -74,6 +74,31 @@ impl SourceContextResolver {
         message_id: AiMessageId,
         scope: AiSourceScope,
     ) -> Result<AiContextPack, SourceContextError> {
+        self.resolve(owner_id, ContextOwner::Message(message_id), scope)
+            .await
+    }
+
+    /// Resolve one immutable pack for a durable AI task.
+    ///
+    /// The task id is also used as the stable citation namespace. The caller
+    /// persists the pack through `PgAiRepository`, which rechecks exact task
+    /// ownership and source binding.
+    pub async fn resolve_for_task(
+        &self,
+        owner_id: UserId,
+        task_id: Uuid,
+        scope: AiSourceScope,
+    ) -> Result<AiContextPack, SourceContextError> {
+        self.resolve(owner_id, ContextOwner::Task(task_id), scope)
+            .await
+    }
+
+    async fn resolve(
+        &self,
+        owner_id: UserId,
+        context_owner: ContextOwner,
+        scope: AiSourceScope,
+    ) -> Result<AiContextPack, SourceContextError> {
         scope
             .validate()
             .map_err(|_| SourceContextError::StaleSelection)?;
@@ -114,7 +139,7 @@ impl SourceContextResolver {
                 serde_json::from_value(payload).map_err(|_| SourceContextError::Storage)?;
             resolve_reflowable(&package, &scope)?
         };
-        build_pack(owner_id, message_id, scope, resolved)
+        build_pack(owner_id, context_owner, scope, resolved)
     }
 
     /// Persist a chat-owned context pack after the message itself is durable.
@@ -199,6 +224,34 @@ impl SourceContextResolver {
         .await
         .map_err(|_| SourceContextError::Storage)?;
         Ok(())
+    }
+}
+
+#[derive(Clone, Copy)]
+enum ContextOwner {
+    Message(Uuid),
+    Task(Uuid),
+}
+
+impl ContextOwner {
+    const fn id(self) -> Uuid {
+        match self {
+            Self::Message(id) | Self::Task(id) => id,
+        }
+    }
+
+    const fn task_id(self) -> Option<Uuid> {
+        match self {
+            Self::Task(id) => Some(id),
+            Self::Message(_) => None,
+        }
+    }
+
+    const fn message_id(self) -> Option<Uuid> {
+        match self {
+            Self::Message(id) => Some(id),
+            Self::Task(_) => None,
+        }
     }
 }
 
@@ -439,10 +492,11 @@ fn resolve_pdf(
 
 fn build_pack(
     owner_id: UserId,
-    message_id: AiMessageId,
+    context_owner: ContextOwner,
     scope: AiSourceScope,
     resolved: Vec<ResolvedFragment>,
 ) -> Result<AiContextPack, SourceContextError> {
+    let context_id = context_owner.id();
     let mut remaining = AiContextPack::MAX_TEXT_BYTES;
     let mut fragments = Vec::new();
     let mut citations = Vec::new();
@@ -462,7 +516,7 @@ fn build_pack(
             continue;
         }
         remaining = remaining.saturating_sub(text.len());
-        let citation_id = format!("ctx:{}:{}", message_id, fragments.len().saturating_add(1));
+        let citation_id = format!("ctx:{}:{}", context_id, fragments.len().saturating_add(1));
         let quote_end = source.quote_end.min(text.len());
         let quote_start = source.quote_start.min(quote_end);
         let text_hash = content_hash(text.as_bytes());
@@ -499,7 +553,7 @@ fn build_pack(
     }
     let hash_payload = serde_json::to_vec(&serde_json::json!({
         "owner_id": owner_id,
-        "message_id": message_id,
+        "context_id": context_id,
         "scope": &scope,
         "fragments": &fragments,
         "citations": &citations,
@@ -511,8 +565,8 @@ fn build_pack(
         schema_version: AI_CONTEXT_PACK_SCHEMA_VERSION.to_owned(),
         context_pack_id: Uuid::now_v7(),
         owner_id,
-        task_id: None,
-        message_id: Some(message_id),
+        task_id: context_owner.task_id(),
+        message_id: context_owner.message_id(),
         scope,
         permission_snapshot: AiPermissionSnapshot {
             actor_id: owner_id,

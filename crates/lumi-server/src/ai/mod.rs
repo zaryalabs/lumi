@@ -16,6 +16,7 @@ pub mod mock;
 pub mod providers;
 pub mod repository;
 pub(crate) mod routes;
+pub(crate) mod tasks;
 
 /// Production services and in-flight cancellation registry for E1.
 pub struct AiRuntime {
@@ -174,6 +175,24 @@ impl AiCapabilityReadiness {
         }
     }
 
+    /// Readiness after the complete `0.2.0/E2` queue and summary vertical.
+    #[must_use]
+    pub const fn e2_tasks_and_summaries() -> Self {
+        Self {
+            persistence: true,
+            common_jobs: true,
+            secret_store: true,
+            provider_delivery: true,
+            explicit_context_delivery: true,
+            task_queue_delivery: true,
+            summary_delivery: true,
+            chat_delivery: true,
+            abridgement_delivery: false,
+            mcp_delivery: false,
+            mcp_worker_delivery: false,
+        }
+    }
+
     /// Return only product feature ids whose complete vertical prerequisites
     /// are present.
     #[must_use]
@@ -249,6 +268,21 @@ mod capability_tests {
                 "ai-provider-byok",
                 "ai-explicit-context",
                 "ai-global-chat",
+            ]
+        );
+    }
+
+    #[test]
+    fn e2_advertises_queue_and_summary_without_future_epics() {
+        assert_eq!(
+            AiCapabilityReadiness::e2_tasks_and_summaries().advertised_feature_ids(),
+            vec![
+                "ai-provider-openrouter",
+                "ai-provider-byok",
+                "ai-explicit-context",
+                "ai-global-chat",
+                "ai-task-queue",
+                "ai-summary-artifacts",
             ]
         );
     }
