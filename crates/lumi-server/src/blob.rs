@@ -32,6 +32,7 @@ pub(crate) enum BlobStoreError {
 pub(crate) trait BlobStore: Send + Sync {
     async fn put(&self, expected_hash: &str, bytes: &[u8]) -> Result<StoredBlob, BlobStoreError>;
     async fn get(&self, content_hash: &str) -> Result<Vec<u8>, BlobStoreError>;
+    async fn delete(&self, content_hash: &str) -> Result<(), BlobStoreError>;
     async fn ready(&self) -> Result<(), BlobStoreError>;
 }
 
@@ -113,6 +114,15 @@ impl BlobStore for LocalBlobStore {
             return Err(BlobStoreError::HashMismatch);
         }
         Ok(bytes)
+    }
+
+    async fn delete(&self, content_hash: &str) -> Result<(), BlobStoreError> {
+        let path = self.path_for_hash(content_hash)?;
+        match tokio::fs::remove_file(path).await {
+            Ok(()) => Ok(()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(_) => Err(BlobStoreError::Unavailable),
+        }
     }
 
     async fn ready(&self) -> Result<(), BlobStoreError> {

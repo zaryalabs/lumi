@@ -49,13 +49,19 @@ Required fixture families:
 - X: single post, thread, long post, article, partial/deleted/protected cases.
 - Markdown/`lum`: wikilinks, callouts, rich blocks, resources, broken links.
 - Records: Cyrillic/English legacy v1 и Annotation v2 payloads, target/status/
-  tags backfill и portable export marker.
+  tags backfill, Voice Note audio manifest, repeated/unresolved/ambiguous
+  wikilinks, backlinks и portable export marker.
 
 Для `0.4.0/E1` committed fixture
 `tests/fixtures/records/v1-v2-annotations.json` проверяет совместимое
 декодирование. Browser E2E отдельно покрывает yellow/bold overlays, изменение
 стиля, selection/margin notes, keyboard-only создание записи на полях и оба
 reflowable/PDF path.
+
+Для `0.4.0/E2` domain tests фиксируют безопасный wikilink parser, alias/heading
+и repeated tokens; audio tests проверяют signature spoofing и byte ranges.
+Browser E2E использует deterministic MediaRecorder без реального микрофона и
+проходит record/preview/upload/playback, wikilink suggestion и backlink.
 
 ## Performance budgets
 

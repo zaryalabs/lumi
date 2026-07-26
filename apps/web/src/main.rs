@@ -10,6 +10,8 @@ mod learning;
 mod pdf_reader;
 #[cfg(target_arch = "wasm32")]
 mod reader;
+#[cfg(target_arch = "wasm32")]
+mod voice;
 
 fn main() {
     #[cfg(target_arch = "wasm32")]

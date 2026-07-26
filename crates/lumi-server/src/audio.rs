@@ -6,16 +6,17 @@ use std::time::Instant;
 use axum::{
     body::Bytes,
     extract::{DefaultBodyLimit, Extension, Path, State},
-    http::{header, StatusCode},
+    http::{header, HeaderMap, HeaderValue, StatusCode},
     response::IntoResponse,
     routing::{get, post, put},
     Json, Router,
 };
 use lumi_core::{
     AcceptTranscriptCommand, AiCredentialState, AiProviderDescriptor, AudioAttachment,
-    AudioRetentionPolicy, AudioUpload, AudioUploadStatus, CreateAudioUploadCommand,
-    CreateLearningAttachmentCommand, ProviderCredentialState, PutProviderCredentialRequest,
-    TranscribeAudioCommand, TranscriptArtifact, TranscriptStatus, UserId, MAX_LEARNING_AUDIO_BYTES,
+    AudioRetentionPolicy, AudioUpload, AudioUploadStatus, CreateAudioAttachmentCommand,
+    CreateAudioUploadCommand, CreateLearningAttachmentCommand, ProviderCredentialState,
+    PutProviderCredentialRequest, TranscribeAudioCommand, TranscriptArtifact, TranscriptStatus,
+    UserId, MAX_LEARNING_AUDIO_BYTES,
 };
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -35,6 +36,7 @@ use crate::{
 const TRANSCRIPTION_PROVIDER: &str = "openai";
 const TRANSCRIPTION_MODEL: &str = "whisper-1";
 const MAX_TRANSCRIPT_RESPONSE_BYTES: usize = 2 * 1024 * 1024;
+const MAX_VOICE_NOTE_DURATION_MS: u64 = 10 * 60 * 1_000;
 
 #[derive(Deserialize)]
 struct OpenAiTranscriptionResponse {
@@ -91,6 +93,16 @@ pub(crate) fn protected_routes() -> Router<AppState> {
             put(put_upload).layer(DefaultBodyLimit::max(MAX_LEARNING_AUDIO_BYTES as usize)),
         )
         .route("/blobs/uploads/{upload_id}/complete", post(complete_upload))
+        .route("/audio/attachments", post(create_generic_attachment))
+        .route("/audio/attachments/{attachment_id}", get(get_attachment))
+        .route(
+            "/audio/attachments/{attachment_id}/audio",
+            get(download_audio).delete(delete_audio),
+        )
+        .route(
+            "/audio/attachments/{attachment_id}/transcript",
+            get(get_transcript),
+        )
         .route("/learning/attachments", post(create_attachment))
         .route("/learning/attachments/{attachment_id}", get(get_attachment))
         .route(
@@ -292,6 +304,12 @@ async fn create_upload(
         .validate()
         .map_err(|error| AppError::BadRequest(error.to_string()))?;
     let runtime = state.audio_runtime()?;
+    if let Err(error) = cleanup_expired_audio(runtime).await {
+        tracing::warn!(
+            error = ?error,
+            "bounded audio orphan cleanup was deferred"
+        );
+    }
     let id = Uuid::now_v7();
     let row = query(
         "INSERT INTO audio_uploads (id, owner_id, media_type, byte_length, checksum_sha256, status)
@@ -328,6 +346,71 @@ async fn create_upload(
     Ok(Json(upload))
 }
 
+async fn cleanup_expired_audio(runtime: &AudioRuntime) -> Result<(), AppError> {
+    let rows = query(
+        "WITH expired AS (
+             SELECT upload.id
+               FROM audio_uploads upload
+              WHERE upload.created_at < now() - interval '24 hours'
+                AND NOT EXISTS (
+                    SELECT 1 FROM audio_attachments attachment
+                     WHERE attachment.upload_id = upload.id
+                )
+              ORDER BY upload.created_at
+              LIMIT 32
+         )
+         DELETE FROM audio_uploads upload
+          USING expired
+          WHERE upload.id = expired.id
+         RETURNING upload.checksum_sha256",
+    )
+    .fetch_all(&runtime.pool)
+    .await
+    .map_err(log_db)?;
+    let mut checksums = rows
+        .into_iter()
+        .map(|row| row.try_get::<String, _>("checksum_sha256").map_err(log_db))
+        .collect::<Result<Vec<_>, _>>()?;
+    let released = query(
+        "SELECT DISTINCT attachment.checksum_sha256
+           FROM audio_attachments attachment
+          WHERE attachment.audio_deleted_at < now() - interval '24 hours'
+          ORDER BY attachment.checksum_sha256
+          LIMIT 32",
+    )
+    .fetch_all(&runtime.pool)
+    .await
+    .map_err(log_db)?;
+    for row in released {
+        checksums.push(row.try_get("checksum_sha256").map_err(log_db)?);
+    }
+    checksums.sort();
+    checksums.dedup();
+    for checksum in checksums {
+        let still_needed: bool = sqlx_core::query_scalar::query_scalar(
+            "SELECT EXISTS(
+                SELECT 1 FROM audio_uploads
+                 WHERE checksum_sha256 = $1
+                   AND storage_key IS NOT NULL
+                   AND created_at >= now() - interval '24 hours'
+                UNION ALL
+                SELECT 1 FROM audio_attachments
+                 WHERE checksum_sha256 = $1 AND audio_deleted_at IS NULL
+                UNION ALL
+                SELECT 1 FROM blobs WHERE content_hash = $1
+            )",
+        )
+        .bind(&checksum)
+        .fetch_one(&runtime.pool)
+        .await
+        .map_err(log_db)?;
+        if !still_needed {
+            runtime.blobs.delete(&checksum).await.map_err(map_blob)?;
+        }
+    }
+    Ok(())
+}
+
 async fn put_upload(
     State(state): State<AppState>,
     Extension(session): Extension<AuthenticatedSession>,
@@ -336,7 +419,7 @@ async fn put_upload(
 ) -> Result<StatusCode, AppError> {
     let runtime = state.audio_runtime()?;
     let row = query(
-        "SELECT byte_length, checksum_sha256, status FROM audio_uploads
+        "SELECT media_type, byte_length, checksum_sha256, status FROM audio_uploads
          WHERE id = $1 AND owner_id = $2",
     )
     .bind(upload_id)
@@ -347,12 +430,14 @@ async fn put_upload(
     .ok_or(AppError::NotFound("audio_upload"))?;
     let expected_length: i64 = row.try_get("byte_length").map_err(log_db)?;
     let checksum: String = row.try_get("checksum_sha256").map_err(log_db)?;
+    let media_type: String = row.try_get("media_type").map_err(log_db)?;
     let status: String = row.try_get("status").map_err(log_db)?;
     if status != "pending" || usize::try_from(expected_length).ok() != Some(body.len()) {
         return Err(AppError::BadRequest(
             "audio upload length or state is invalid".to_owned(),
         ));
     }
+    validate_audio_signature(&media_type, &body)?;
     let stored = runtime
         .blobs
         .put(&checksum, &body)
@@ -397,6 +482,79 @@ async fn complete_upload(
         status: AudioUploadStatus::Completed,
         created_at: time_to_ms(row.try_get("created_at").map_err(log_db)?),
     }))
+}
+
+async fn create_generic_attachment(
+    State(state): State<AppState>,
+    Extension(session): Extension<AuthenticatedSession>,
+    Json(command): Json<CreateAudioAttachmentCommand>,
+) -> Result<Json<AudioAttachment>, AppError> {
+    if command.idempotency_key.trim().is_empty()
+        || command.idempotency_key.len() > 256
+        || command
+            .duration_ms
+            .is_some_and(|duration| duration == 0 || duration > MAX_VOICE_NOTE_DURATION_MS)
+    {
+        return Err(AppError::BadRequest(
+            "valid idempotency key and duration up to 10 minutes are required".to_owned(),
+        ));
+    }
+    let runtime = state.audio_runtime()?;
+    let mut tx = runtime.pool.begin().await.map_err(log_db)?;
+    let mutation_key = format!(
+        "audio:generic-attachment:{}",
+        command.idempotency_key.trim()
+    );
+    let hash = request_hash(&command)?;
+    if let Some(previous) =
+        replay_mutation::<AudioAttachment>(&mut tx, session.user_id, &mutation_key, hash).await?
+    {
+        return Ok(Json(previous));
+    }
+    let id = Uuid::now_v7();
+    let row = query(
+        "INSERT INTO audio_attachments
+         (id, owner_id, upload_id, media_type, byte_length, checksum_sha256, retention, duration_ms)
+         SELECT $1, owner_id, id, media_type, byte_length, checksum_sha256, $4, $5
+           FROM audio_uploads
+          WHERE id = $2 AND owner_id = $3 AND status = 'completed'
+         RETURNING id, media_type, byte_length, duration_ms, checksum_sha256,
+                   retention, audio_deleted_at, created_at",
+    )
+    .bind(id)
+    .bind(command.upload_id)
+    .bind(session.user_id)
+    .bind(retention_name(command.retention))
+    .bind(
+        command
+            .duration_ms
+            .map(i64::try_from)
+            .transpose()
+            .map_err(|_| AppError::BadRequest("audio duration is invalid".to_owned()))?,
+    )
+    .fetch_optional(&mut *tx)
+    .await
+    .map_err(log_db)?
+    .ok_or(AppError::NotFound("audio_upload"))?;
+    let attachment = row_to_attachment(&row)?;
+    store_mutation(
+        &mut tx,
+        session.user_id,
+        &mutation_key,
+        "create_generic_audio_attachment",
+        hash,
+        &attachment,
+    )
+    .await?;
+    tx.commit().await.map_err(log_db)?;
+    tracing::info!(
+        event = "records.voice_attachment_created",
+        owner_id = %session.user_id,
+        attachment_id = %attachment.id,
+        byte_length = attachment.byte_length,
+        "generic audio attachment created"
+    );
+    Ok(Json(attachment))
 }
 
 async fn create_attachment(
@@ -445,7 +603,8 @@ async fn create_attachment(
          (id, owner_id, upload_id, media_type, byte_length, checksum_sha256, retention)
          SELECT $1, owner_id, id, media_type, byte_length, checksum_sha256, $4
          FROM audio_uploads WHERE id = $2 AND owner_id = $3 AND status = 'completed'
-         RETURNING id, media_type, byte_length, checksum_sha256, retention, audio_deleted_at, created_at",
+         RETURNING id, media_type, byte_length, duration_ms, checksum_sha256,
+                   retention, audio_deleted_at, created_at",
     )
     .bind(id)
     .bind(command.upload_id)
@@ -496,7 +655,8 @@ async fn download_audio(
     State(state): State<AppState>,
     Extension(session): Extension<AuthenticatedSession>,
     Path(attachment_id): Path<Uuid>,
-) -> Result<impl IntoResponse, AppError> {
+    headers: HeaderMap,
+) -> Result<axum::response::Response, AppError> {
     let runtime = state.audio_runtime()?;
     let row = query(
         "SELECT a.media_type, a.checksum_sha256 FROM audio_attachments a
@@ -511,7 +671,49 @@ async fn download_audio(
     let media_type: String = row.try_get("media_type").map_err(log_db)?;
     let checksum: String = row.try_get("checksum_sha256").map_err(log_db)?;
     let bytes = runtime.blobs.get(&checksum).await.map_err(map_blob)?;
-    Ok(([(header::CONTENT_TYPE, media_type)], bytes))
+    let full_length = bytes.len();
+    let range = headers
+        .get(header::RANGE)
+        .and_then(|value| value.to_str().ok())
+        .map(|value| parse_byte_range(value, full_length))
+        .transpose()?;
+    let (status, payload, content_range) = if let Some((start, end)) = range {
+        (
+            StatusCode::PARTIAL_CONTENT,
+            bytes[start..=end].to_vec(),
+            Some(format!("bytes {start}-{end}/{full_length}")),
+        )
+    } else {
+        (StatusCode::OK, bytes, None)
+    };
+    let mut response_headers = HeaderMap::new();
+    response_headers.insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_str(&media_type)
+            .map_err(|_| AppError::Unavailable("audio media type"))?,
+    );
+    response_headers.insert(header::ACCEPT_RANGES, HeaderValue::from_static("bytes"));
+    response_headers.insert(
+        header::X_CONTENT_TYPE_OPTIONS,
+        HeaderValue::from_static("nosniff"),
+    );
+    response_headers.insert(
+        header::CONTENT_DISPOSITION,
+        HeaderValue::from_static("inline"),
+    );
+    response_headers.insert(
+        header::CONTENT_LENGTH,
+        HeaderValue::from_str(&payload.len().to_string())
+            .map_err(|_| AppError::Unavailable("audio length"))?,
+    );
+    if let Some(content_range) = content_range {
+        response_headers.insert(
+            header::CONTENT_RANGE,
+            HeaderValue::from_str(&content_range)
+                .map_err(|_| AppError::Unavailable("audio range"))?,
+        );
+    }
+    Ok((status, response_headers, payload).into_response())
 }
 
 async fn delete_audio(
@@ -519,6 +721,23 @@ async fn delete_audio(
     Extension(session): Extension<AuthenticatedSession>,
     Path(attachment_id): Path<Uuid>,
 ) -> Result<StatusCode, AppError> {
+    let referenced: bool = sqlx_core::query_scalar::query_scalar(
+        "SELECT EXISTS(
+            SELECT 1 FROM learning_attachment_refs WHERE attachment_id = $1
+            UNION ALL
+            SELECT 1 FROM annotations
+             WHERE audio_attachment_id = $1 AND deleted_at IS NULL
+        )",
+    )
+    .bind(attachment_id)
+    .fetch_one(&state.audio_runtime()?.pool)
+    .await
+    .map_err(log_db)?;
+    if referenced {
+        return Err(AppError::Conflict(
+            "audio attachment is still referenced".to_owned(),
+        ));
+    }
     let result = query(
         "UPDATE audio_attachments SET audio_deleted_at = COALESCE(audio_deleted_at, now())
          WHERE id = $1 AND owner_id = $2",
@@ -944,8 +1163,14 @@ async fn accept_transcript(
     .map_err(log_db)?
     .ok_or_else(|| AppError::Conflict("latest transcript is not ready for review".to_owned()))?;
     query(
-        "UPDATE audio_attachments SET audio_deleted_at = now()
-         WHERE id = $1 AND owner_id = $2 AND retention = 'delete_after_transcript'",
+        "UPDATE audio_attachments attachment SET audio_deleted_at = now()
+         WHERE attachment.id = $1 AND attachment.owner_id = $2
+           AND attachment.retention = 'delete_after_transcript'
+           AND NOT EXISTS (
+               SELECT 1 FROM annotations annotation
+                WHERE annotation.audio_attachment_id = attachment.id
+                  AND annotation.deleted_at IS NULL
+           )",
     )
     .bind(attachment_id)
     .bind(session.user_id)
@@ -980,7 +1205,8 @@ async fn attachment_row(
     attachment_id: Uuid,
 ) -> Result<sqlx_postgres::PgRow, AppError> {
     query(
-        "SELECT id, media_type, byte_length, checksum_sha256, retention, audio_deleted_at, created_at
+        "SELECT id, media_type, byte_length, duration_ms, checksum_sha256, retention,
+                audio_deleted_at, created_at
          FROM audio_attachments WHERE id = $1 AND owner_id = $2",
     )
     .bind(attachment_id)
@@ -997,6 +1223,12 @@ fn row_to_attachment(row: &sqlx_postgres::PgRow) -> Result<AudioAttachment, AppE
         media_type: row.try_get("media_type").map_err(log_db)?,
         byte_length: u64::try_from(row.try_get::<i64, _>("byte_length").map_err(log_db)?)
             .map_err(|_| AppError::Unavailable("audio metadata"))?,
+        duration_ms: row
+            .try_get::<Option<i64>, _>("duration_ms")
+            .map_err(log_db)?
+            .map(u64::try_from)
+            .transpose()
+            .map_err(|_| AppError::Unavailable("audio duration"))?,
         checksum_sha256: row.try_get("checksum_sha256").map_err(log_db)?,
         retention: match row
             .try_get::<String, _>("retention")
@@ -1012,6 +1244,68 @@ fn row_to_attachment(row: &sqlx_postgres::PgRow) -> Result<AudioAttachment, AppE
             .map(time_to_ms),
         created_at: time_to_ms(row.try_get("created_at").map_err(log_db)?),
     })
+}
+
+fn validate_audio_signature(media_type: &str, bytes: &[u8]) -> Result<(), AppError> {
+    let valid = match media_type {
+        "audio/webm" => bytes.starts_with(&[0x1a, 0x45, 0xdf, 0xa3]),
+        "audio/ogg" => bytes.starts_with(b"OggS"),
+        "audio/mp4" => bytes.get(4..8) == Some(b"ftyp"),
+        "audio/mpeg" => {
+            bytes.starts_with(b"ID3")
+                || bytes
+                    .get(..2)
+                    .is_some_and(|prefix| prefix[0] == 0xff && prefix[1] & 0xe0 == 0xe0)
+        }
+        "audio/wav" | "audio/x-wav" => {
+            bytes.starts_with(b"RIFF") && bytes.get(8..12) == Some(b"WAVE")
+        }
+        _ => false,
+    };
+    if valid {
+        Ok(())
+    } else {
+        Err(AppError::BadRequest(
+            "audio bytes do not match the declared media type".to_owned(),
+        ))
+    }
+}
+
+fn parse_byte_range(value: &str, length: usize) -> Result<(usize, usize), AppError> {
+    let value = value
+        .strip_prefix("bytes=")
+        .ok_or_else(|| AppError::BadRequest("invalid audio range".to_owned()))?;
+    if value.contains(',') || length == 0 {
+        return Err(AppError::BadRequest("invalid audio range".to_owned()));
+    }
+    let (start, end) = value
+        .split_once('-')
+        .ok_or_else(|| AppError::BadRequest("invalid audio range".to_owned()))?;
+    let (start, end) = if start.is_empty() {
+        let suffix = end
+            .parse::<usize>()
+            .map_err(|_| AppError::BadRequest("invalid audio range".to_owned()))?;
+        if suffix == 0 {
+            return Err(AppError::BadRequest("invalid audio range".to_owned()));
+        }
+        (length.saturating_sub(suffix), length - 1)
+    } else {
+        let start = start
+            .parse::<usize>()
+            .map_err(|_| AppError::BadRequest("invalid audio range".to_owned()))?;
+        let end = if end.is_empty() {
+            length - 1
+        } else {
+            end.parse::<usize>()
+                .map_err(|_| AppError::BadRequest("invalid audio range".to_owned()))?
+                .min(length - 1)
+        };
+        (start, end)
+    };
+    if start >= length || start > end {
+        return Err(AppError::BadRequest("invalid audio range".to_owned()));
+    }
+    Ok((start, end))
 }
 
 fn row_to_transcript(row: &sqlx_postgres::PgRow) -> Result<TranscriptArtifact, AppError> {
@@ -1227,6 +1521,24 @@ mod tests {
         };
 
         assert_ne!(request_hash(&first)?, request_hash(&changed)?);
+        Ok(())
+    }
+
+    #[test]
+    fn audio_signature_validation_rejects_mime_spoofing() {
+        assert!(
+            validate_audio_signature("audio/webm", &[0x1a, 0x45, 0xdf, 0xa3, 0x42, 0x86]).is_ok()
+        );
+        assert!(validate_audio_signature("audio/webm", b"not webm").is_err());
+        assert!(validate_audio_signature("audio/wav", b"RIFF0000WAVEdata").is_ok());
+    }
+
+    #[test]
+    fn audio_range_parser_supports_open_and_suffix_ranges() -> Result<(), AppError> {
+        assert_eq!(parse_byte_range("bytes=2-4", 10)?, (2, 4));
+        assert_eq!(parse_byte_range("bytes=7-", 10)?, (7, 9));
+        assert_eq!(parse_byte_range("bytes=-3", 10)?, (7, 9));
+        assert!(parse_byte_range("bytes=11-12", 10).is_err());
         Ok(())
     }
 }

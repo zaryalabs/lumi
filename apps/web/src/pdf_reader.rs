@@ -119,6 +119,11 @@ fn PdfReaderApp(
     let mut note_title = use_signal(String::new);
     let mut note_draft = use_signal(String::new);
     let mut note_tags = use_signal(String::new);
+    let voice_recording = use_signal(|| false);
+    let voice_recorded = use_signal(|| None::<crate::voice::RecordedAudio>);
+    let voice_preview_url = use_signal(String::new);
+    let voice_uploading = use_signal(|| false);
+    let mut voice_error = use_signal(|| None::<String>);
     let mut reader_message = use_signal(String::new);
     let save_message = use_signal(|| "Сохранено".to_owned());
     let mut mount_config = use_signal(|| None::<String>);
@@ -369,6 +374,77 @@ fn PdfReaderApp(
                                                 csrf,
                                             );
                                         }, "Жирным" }
+                                    }
+                                    div { class: "pdf-voice-note-composer", aria_label: "Голосовая запись PDF",
+                                        if voice_recording() {
+                                            p { role: "status", "Идёт запись…" }
+                                            button { class: "primary-action", r#type: "button", onclick: move |_| {
+                                                finish_pdf_voice_recording(
+                                                    voice_recording,
+                                                    voice_recorded,
+                                                    voice_preview_url,
+                                                    voice_error,
+                                                );
+                                            }, "Остановить запись" }
+                                        } else if !voice_preview_url().is_empty() {
+                                            audio { controls: true, src: "{voice_preview_url}", aria_label: "Предпрослушивание голосовой заметки PDF" }
+                                            div { class: "dialog-actions",
+                                                button { class: "secondary-action", r#type: "button", disabled: voice_uploading(), onclick: move |_| {
+                                                    discard_pdf_voice_recording(
+                                                        voice_recording,
+                                                        voice_recorded,
+                                                        voice_preview_url,
+                                                        voice_error,
+                                                    );
+                                                }, "Удалить запись" }
+                                                button { class: "primary-action", r#type: "button", disabled: voice_uploading(), onclick: move |_| {
+                                                    save_pdf_voice_annotation(
+                                                        state,
+                                                        selected_anchor,
+                                                        selected_target,
+                                                        annotations,
+                                                        voice_recorded,
+                                                        voice_preview_url,
+                                                        voice_uploading,
+                                                        voice_error,
+                                                        save_message,
+                                                        reader_message,
+                                                        csrf,
+                                                    );
+                                                }, if voice_uploading() { "Загружаем…" } else { "Сохранить голосовую заметку" } }
+                                            }
+                                        } else {
+                                            button { class: "secondary-action", r#type: "button", onclick: move |_| {
+                                                begin_pdf_voice_recording(voice_recording, voice_error);
+                                            }, "Записать голос" }
+                                            label { class: "voice-file-fallback",
+                                                "Или выберите аудиофайл"
+                                                input {
+                                                    r#type: "file",
+                                                    accept: ".webm,.ogg,.oga,.m4a,.mp4,.mp3,.wav,audio/webm,audio/ogg,audio/mp4,audio/mpeg,audio/wav",
+                                                    aria_label: "Аудиофайл голосовой заметки PDF",
+                                                    onchange: move |event| {
+                                                        let Some(file) = event.files().into_iter().next() else { return; };
+                                                        spawn(async move {
+                                                            let name = file.name();
+                                                            match file.read_bytes().await {
+                                                                Ok(bytes) => set_pdf_voice_recording(
+                                                                    voice_recording,
+                                                                    voice_recorded,
+                                                                    voice_preview_url,
+                                                                    voice_error,
+                                                                    crate::voice::RecordedAudio::from_file(&name, bytes.to_vec()),
+                                                                ),
+                                                                Err(_) => voice_error.set(Some("Не удалось прочитать аудиофайл.".to_owned())),
+                                                            }
+                                                        });
+                                                    }
+                                                }
+                                            }
+                                        }
+                                        if let Some(error) = voice_error() {
+                                            p { class: "annotation-conflict", role: "alert", "{error}" }
+                                        }
                                     }
                                     label { "Заголовок",
                                         input {
@@ -951,6 +1027,128 @@ fn create_pdf_annotation(
     });
 }
 
+fn begin_pdf_voice_recording(
+    mut voice_recording: Signal<bool>,
+    mut voice_error: Signal<Option<String>>,
+) {
+    voice_error.set(None);
+    spawn(async move {
+        match crate::voice::begin_recording().await {
+            Ok(()) => voice_recording.set(true),
+            Err(error) => voice_error.set(Some(error)),
+        }
+    });
+}
+
+fn finish_pdf_voice_recording(
+    voice_recording: Signal<bool>,
+    voice_recorded: Signal<Option<crate::voice::RecordedAudio>>,
+    voice_preview_url: Signal<String>,
+    voice_error: Signal<Option<String>>,
+) {
+    spawn(async move {
+        let recording = crate::voice::finish_recording().await;
+        set_pdf_voice_recording(
+            voice_recording,
+            voice_recorded,
+            voice_preview_url,
+            voice_error,
+            recording,
+        );
+    });
+}
+
+fn set_pdf_voice_recording(
+    mut voice_recording: Signal<bool>,
+    mut voice_recorded: Signal<Option<crate::voice::RecordedAudio>>,
+    mut voice_preview_url: Signal<String>,
+    mut voice_error: Signal<Option<String>>,
+    recording: Result<crate::voice::RecordedAudio, String>,
+) {
+    voice_recording.set(false);
+    match recording {
+        Ok(recording) => {
+            if !voice_preview_url().is_empty() {
+                crate::voice::revoke_preview(&voice_preview_url());
+            }
+            let preview = crate::voice::preview_url(&recording);
+            voice_recorded.set(Some(recording));
+            voice_preview_url.set(preview);
+            voice_error.set(None);
+        }
+        Err(error) => voice_error.set(Some(error)),
+    }
+}
+
+fn discard_pdf_voice_recording(
+    mut voice_recording: Signal<bool>,
+    mut voice_recorded: Signal<Option<crate::voice::RecordedAudio>>,
+    mut voice_preview_url: Signal<String>,
+    mut voice_error: Signal<Option<String>>,
+) {
+    crate::voice::cancel_recording();
+    crate::voice::revoke_preview(&voice_preview_url());
+    voice_recording.set(false);
+    voice_recorded.set(None);
+    voice_preview_url.set(String::new());
+    voice_error.set(None);
+}
+
+#[expect(
+    clippy::too_many_arguments,
+    reason = "PDF Voice Note upload bridges independent Dioxus signals"
+)]
+fn save_pdf_voice_annotation(
+    state: Signal<PdfReaderState>,
+    selected_anchor: Signal<Option<Anchor>>,
+    selected_target: Signal<AnnotationTarget>,
+    annotations: Signal<Vec<Annotation>>,
+    mut voice_recorded: Signal<Option<crate::voice::RecordedAudio>>,
+    mut voice_preview_url: Signal<String>,
+    mut voice_uploading: Signal<bool>,
+    mut voice_error: Signal<Option<String>>,
+    save_message: Signal<String>,
+    reader_message: Signal<String>,
+    csrf: Signal<String>,
+) {
+    let Some(recording) = voice_recorded.read().clone() else {
+        return;
+    };
+    let csrf_token = csrf.read().clone();
+    voice_uploading.set(true);
+    voice_error.set(None);
+    spawn(async move {
+        match crate::reader::upload_voice_attachment(recording, &csrf_token).await {
+            Ok(attachment) => {
+                crate::voice::revoke_preview(&voice_preview_url());
+                voice_recorded.set(None);
+                voice_preview_url.set(String::new());
+                voice_uploading.set(false);
+                create_pdf_annotation(
+                    AnnotationKind::VoiceNote {
+                        audio_attachment_id: attachment.id,
+                        transcript_artifact_id: None,
+                        waveform_summary: None,
+                    },
+                    None,
+                    Vec::new(),
+                    state,
+                    selected_anchor,
+                    selected_target,
+                    annotations,
+                    save_message,
+                    reader_message,
+                    csrf,
+                );
+            }
+            Err(error) => {
+                voice_uploading.set(false);
+                voice_error.set(Some(error));
+            }
+        }
+    });
+}
+
 #[component]
 fn PdfAnnotationItem(
     annotation: Annotation,
@@ -964,6 +1162,13 @@ fn PdfAnnotationItem(
     let yellow_value = annotation.clone();
     let bold_value = annotation.clone();
     let delete_value = annotation.clone();
+    let voice_attachment_id = match &annotation.kind {
+        AnnotationKind::VoiceNote {
+            audio_attachment_id,
+            ..
+        } => Some(*audio_attachment_id),
+        AnnotationKind::Highlight { .. } | AnnotationKind::Note { .. } => None,
+    };
     let style = match annotation.kind {
         AnnotationKind::Highlight { style } => Some(style),
         AnnotationKind::Note { .. } | AnnotationKind::VoiceNote { .. } => None,
@@ -981,6 +1186,14 @@ fn PdfAnnotationItem(
             }
             if let Some(title) = annotation.title.clone() { strong { "{title}" } }
             if !annotation.tags.is_empty() { span { "{annotation.tags.join(\", \")}" } }
+            if let Some(attachment_id) = voice_attachment_id {
+                audio {
+                    controls: true,
+                    preload: "metadata",
+                    src: "{API_BASE}/audio/attachments/{attachment_id}/audio",
+                    aria_label: "Голосовая запись PDF",
+                }
+            }
             if let Some(style) = style {
                 div { class: "annotation-style-actions",
                     button { r#type: "button", disabled: style == HighlightStyle::Yellow, onclick: move |_| update_pdf_highlight(yellow_value.clone(), HighlightStyle::Yellow, annotations, save_message, reader_message, csrf), "Жёлтый" }

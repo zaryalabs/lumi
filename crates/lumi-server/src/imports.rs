@@ -8,20 +8,21 @@ use std::sync::{Arc, Mutex};
 use lumi_core::{
     build_generated_lum_package, content_hash, import_epub, import_lum, import_markdown,
     import_telegram_composite, import_telegram_text, import_web_snapshot, normalize_pdf,
-    AcceptedImport, Annotation, AnnotationExport, AnnotationKind, AnnotationStatus,
-    AnnotationTarget, AnnotationType, BlobManifest, BlobRef, BlobRole, ContinueReadingEntry,
+    AcceptedImport, Annotation, AnnotationAudioExportEntry, AnnotationBacklink, AnnotationExport,
+    AnnotationKind, AnnotationLink, AnnotationLinkState, AnnotationStatus, AnnotationTarget,
+    AnnotationType, AudioRetentionPolicy, BlobManifest, BlobRef, BlobRole, ContinueReadingEntry,
     CreateAnnotationCommand, DeleteAnnotationCommand, DerivedMaterialRelation, DiagnosticSeverity,
     DocumentRevision, DocumentRevisionId, EpubImportError, EpubImportRequest, EpubLimits,
     FixedLayoutContentPackage, GeneratedLumPackageRequest, ImportDiagnostic, ImportStatusEntry,
     ImportedEpub, ImportedPdf, ImportedPublication, ImportedPublicationResource, Job, JobId,
-    JobKind, JobStage, JobStatus, LibraryEntry, LibraryState, LumImportError, LumImportRequest,
-    LumLimits, MarkdownImportError, MarkdownImportRequest, MarkdownLimits, Material, MaterialId,
-    MaterialImportStatus, MaterialKind, MoveReadingPositionCommand, NormalizedContentPackage,
-    PageFidelityDocument, PdfImportRequest, PdfLimits, ReaderSettings, ReadingDocument,
-    ReadingNode, ReadingNodeKind, ReadingProgress, RenderPlan, SourceIdentity,
-    TelegramCapturedImage, TelegramMessageSnapshot, TelegramPhotoDescriptor, TelegramUpdate,
-    TelegramWebSection, UpdateAnnotationCommand, GENERATED_LUM_PROVENANCE_VERSION,
-    LUM_SOURCE_MEDIA_TYPE,
+    JobKind, JobStage, JobStatus, LibraryEntry, LibraryState, LinkTarget, LinkTargetType,
+    LumImportError, LumImportRequest, LumLimits, MarkdownImportError, MarkdownImportRequest,
+    MarkdownLimits, Material, MaterialId, MaterialImportStatus, MaterialKind,
+    MoveReadingPositionCommand, NormalizedContentPackage, PageFidelityDocument, PdfImportRequest,
+    PdfLimits, ReaderSettings, ReadingDocument, ReadingNode, ReadingNodeKind, ReadingProgress,
+    RenderPlan, SourceIdentity, TelegramCapturedImage, TelegramMessageSnapshot,
+    TelegramPhotoDescriptor, TelegramUpdate, TelegramWebSection, UpdateAnnotationCommand,
+    GENERATED_LUM_PROVENANCE_VERSION, LUM_SOURCE_MEDIA_TYPE,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -191,6 +192,10 @@ impl ImportService {
             upload_slots: Arc::new(Semaphore::new(MAX_CONCURRENT_DOCUMENT_UPLOADS)),
             account_upload_slots: Arc::new(Mutex::new(HashMap::new())),
         }
+    }
+
+    pub(crate) fn pool(&self) -> &PgPool {
+        &self.pool
     }
 
     pub(crate) async fn ready(&self) -> Result<(), ImportServiceError> {
@@ -2141,6 +2146,14 @@ impl ImportService {
         .await
         .map_err(log_storage_error)?;
         replace_annotation_tags(&mut tx, annotation.id, &annotation.tags, now).await?;
+        crate::links::replace_annotation_links(
+            &mut tx,
+            session.user_id,
+            annotation.id,
+            annotation.material_id,
+            annotation.note_body(),
+        )
+        .await?;
         append_annotation_change(
             &mut tx,
             AnnotationChange {
@@ -2199,7 +2212,7 @@ impl ImportService {
             return Err(ImportServiceError::NotFound);
         }
         let current = sqlx::query(
-            "SELECT anchor
+            "SELECT anchor, audio_attachment_id
                FROM annotations
               WHERE annotation_id = $1
                 AND material_id = $2
@@ -2216,6 +2229,9 @@ impl ImportService {
         .ok_or(ImportServiceError::NotFound)?;
         let current_anchor: serde_json::Value =
             current.try_get("anchor").map_err(log_storage_error)?;
+        let previous_audio_attachment_id: Option<Uuid> = current
+            .try_get("audio_attachment_id")
+            .map_err(log_storage_error)?;
         let current_anchor: lumi_core::Anchor =
             serde_json::from_value(current_anchor).map_err(|_| ImportServiceError::Unavailable)?;
         command
@@ -2288,6 +2304,19 @@ impl ImportService {
         };
         replace_annotation_tags(&mut tx, annotation.id, &command.tags, now).await?;
         annotation.tags = command.tags.clone();
+        crate::links::replace_annotation_links(
+            &mut tx,
+            session.user_id,
+            annotation.id,
+            annotation.material_id,
+            annotation.note_body(),
+        )
+        .await?;
+        if previous_audio_attachment_id != annotation.kind.audio_attachment_id() {
+            if let Some(attachment_id) = previous_audio_attachment_id {
+                release_unreferenced_audio(&mut tx, session.user_id, attachment_id).await?;
+            }
+        }
         append_annotation_change(
             &mut tx,
             AnnotationChange {
@@ -2387,6 +2416,10 @@ impl ImportService {
             }
         };
         annotation.tags = annotation_tags(&mut tx, annotation.id).await?;
+        crate::links::delete_annotation_links(&mut tx, session.user_id, annotation.id).await?;
+        if let Some(attachment_id) = annotation.kind.audio_attachment_id() {
+            release_unreferenced_audio(&mut tx, session.user_id, attachment_id).await?;
+        }
         append_annotation_change(
             &mut tx,
             AnnotationChange {
@@ -2484,7 +2517,10 @@ impl ImportService {
             .iter()
             .map(annotation_from_row)
             .collect::<Result<Vec<_>, _>>()?;
-        let export = AnnotationExport::for_material(&material, &annotations);
+        let mut export = AnnotationExport::for_material(&material, &annotations);
+        export.links = export_annotation_links(&mut tx, user_id, material_id).await?;
+        export.backlinks = export_annotation_backlinks(&mut tx, user_id, material_id).await?;
+        export.audio_manifest = export_annotation_audio(&mut tx, user_id, material_id).await?;
         tx.commit().await.map_err(log_storage_error)?;
         Ok(export)
     }
@@ -4897,6 +4933,223 @@ async fn validate_voice_attachment(
             "voice transcript must belong to the referenced attachment",
         ))
     }
+}
+
+async fn release_unreferenced_audio(
+    tx: &mut Transaction<'_, Postgres>,
+    user_id: Uuid,
+    attachment_id: Uuid,
+) -> Result<(), ImportServiceError> {
+    sqlx::query(
+        "UPDATE audio_attachments attachment
+            SET audio_deleted_at = COALESCE(audio_deleted_at, now())
+          WHERE attachment.id = $1
+            AND attachment.owner_id = $2
+            AND NOT EXISTS (
+                SELECT 1 FROM annotations annotation
+                 WHERE annotation.audio_attachment_id = attachment.id
+                   AND annotation.deleted_at IS NULL
+            )
+            AND NOT EXISTS (
+                SELECT 1 FROM learning_attachment_refs learning_ref
+                 WHERE learning_ref.attachment_id = attachment.id
+            )",
+    )
+    .bind(attachment_id)
+    .bind(user_id)
+    .execute(&mut **tx)
+    .await
+    .map_err(log_storage_error)?;
+    Ok(())
+}
+
+async fn export_annotation_links(
+    tx: &mut Transaction<'_, Postgres>,
+    user_id: Uuid,
+    material_id: Uuid,
+) -> Result<Vec<AnnotationLink>, ImportServiceError> {
+    let rows = sqlx::query(
+        "SELECT l.link_id, l.source_annotation_id, l.raw_text, l.display_path, l.state,
+                l.target_type, l.target_id, l.material_id, l.anchor
+           FROM annotation_links l
+           JOIN annotations a ON a.annotation_id = l.source_annotation_id
+           JOIN materials m ON m.material_id = a.material_id
+          WHERE l.owner_id = $1 AND a.material_id = $2
+            AND m.owner_user_id = $1 AND a.deleted_at IS NULL
+          ORDER BY a.created_at, l.ordinal",
+    )
+    .bind(user_id)
+    .bind(material_id)
+    .fetch_all(&mut **tx)
+    .await
+    .map_err(log_storage_error)?;
+    rows.into_iter()
+        .map(|row| {
+            let state = match row
+                .try_get::<String, _>("state")
+                .map_err(log_storage_error)?
+                .as_str()
+            {
+                "resolved" => AnnotationLinkState::Resolved,
+                "ambiguous" => AnnotationLinkState::Ambiguous,
+                "unresolved" => AnnotationLinkState::Unresolved,
+                _ => return Err(ImportServiceError::Unavailable),
+            };
+            let target = if state == AnnotationLinkState::Resolved {
+                let object_type = match row
+                    .try_get::<String, _>("target_type")
+                    .map_err(log_storage_error)?
+                    .as_str()
+                {
+                    "material" => LinkTargetType::Material,
+                    "annotation" => LinkTargetType::Annotation,
+                    "anchor" => LinkTargetType::Anchor,
+                    _ => return Err(ImportServiceError::Unavailable),
+                };
+                let anchor = row
+                    .try_get::<Option<serde_json::Value>, _>("anchor")
+                    .map_err(log_storage_error)?
+                    .map(serde_json::from_value)
+                    .transpose()
+                    .map_err(|_| ImportServiceError::Unavailable)?;
+                Some(LinkTarget {
+                    object_type,
+                    object_id: row.try_get("target_id").map_err(log_storage_error)?,
+                    material_id: row.try_get("material_id").map_err(log_storage_error)?,
+                    anchor,
+                    display_path: row.try_get("display_path").map_err(log_storage_error)?,
+                })
+            } else {
+                None
+            };
+            Ok(AnnotationLink {
+                id: row.try_get("link_id").map_err(log_storage_error)?,
+                source_annotation_id: row
+                    .try_get("source_annotation_id")
+                    .map_err(log_storage_error)?,
+                raw_text: row.try_get("raw_text").map_err(log_storage_error)?,
+                display_path: row.try_get("display_path").map_err(log_storage_error)?,
+                state,
+                target,
+                candidates: Vec::new(),
+            })
+        })
+        .collect()
+}
+
+async fn export_annotation_audio(
+    tx: &mut Transaction<'_, Postgres>,
+    user_id: Uuid,
+    material_id: Uuid,
+) -> Result<Vec<AnnotationAudioExportEntry>, ImportServiceError> {
+    let rows = sqlx::query(
+        "SELECT a.annotation_id, attachment.id AS audio_attachment_id,
+                attachment.media_type, attachment.byte_length, attachment.duration_ms,
+                attachment.checksum_sha256, attachment.retention,
+                NULLIF(a.kind ->> 'transcript_artifact_id', '')::uuid
+                    AS transcript_artifact_id
+           FROM annotations a
+           JOIN materials m ON m.material_id = a.material_id
+           JOIN audio_attachments attachment ON attachment.id = a.audio_attachment_id
+          WHERE m.owner_user_id = $1 AND a.material_id = $2
+            AND a.deleted_at IS NULL AND attachment.owner_id = $1
+          ORDER BY a.created_at, a.annotation_id",
+    )
+    .bind(user_id)
+    .bind(material_id)
+    .fetch_all(&mut **tx)
+    .await
+    .map_err(log_storage_error)?;
+    rows.into_iter()
+        .map(|row| {
+            let duration_ms = row
+                .try_get::<Option<i64>, _>("duration_ms")
+                .map_err(log_storage_error)?
+                .map(u64::try_from)
+                .transpose()
+                .map_err(|_| ImportServiceError::Unavailable)?;
+            Ok(AnnotationAudioExportEntry {
+                annotation_id: row.try_get("annotation_id").map_err(log_storage_error)?,
+                audio_attachment_id: row
+                    .try_get("audio_attachment_id")
+                    .map_err(log_storage_error)?,
+                media_type: row.try_get("media_type").map_err(log_storage_error)?,
+                byte_length: u64::try_from(
+                    row.try_get::<i64, _>("byte_length")
+                        .map_err(log_storage_error)?,
+                )
+                .map_err(|_| ImportServiceError::Unavailable)?,
+                duration_ms,
+                checksum_sha256: row.try_get("checksum_sha256").map_err(log_storage_error)?,
+                retention: match row
+                    .try_get::<String, _>("retention")
+                    .map_err(log_storage_error)?
+                    .as_str()
+                {
+                    "delete_after_transcript" => AudioRetentionPolicy::DeleteAfterTranscript,
+                    _ => AudioRetentionPolicy::KeepUntilDeleted,
+                },
+                transcript_artifact_id: row
+                    .try_get("transcript_artifact_id")
+                    .map_err(log_storage_error)?,
+                audio_bytes_included: false,
+            })
+        })
+        .collect()
+}
+
+async fn export_annotation_backlinks(
+    tx: &mut Transaction<'_, Postgres>,
+    user_id: Uuid,
+    material_id: Uuid,
+) -> Result<Vec<AnnotationBacklink>, ImportServiceError> {
+    let rows = sqlx::query(
+        "SELECT l.link_id, l.source_annotation_id, source.material_id AS source_material_id,
+                l.raw_text,
+                concat(coalesce(source_material.title_override, source_material.canonical_title),
+                       ' / Записи / ',
+                       coalesce(source.title, 'Запись ' || left(source.annotation_id::text, 8)))
+                    AS source_display_path
+           FROM annotation_links l
+           JOIN annotations source ON source.annotation_id = l.source_annotation_id
+           JOIN materials source_material ON source_material.material_id = source.material_id
+          WHERE l.owner_id = $1 AND l.state = 'resolved'
+            AND source.deleted_at IS NULL AND source_material.deleted_at IS NULL
+            AND (
+                (l.target_type = 'material' AND l.target_id = $2)
+                OR (
+                    l.target_type = 'annotation'
+                    AND l.target_id IN (
+                        SELECT annotation_id FROM annotations
+                         WHERE material_id = $2 AND deleted_at IS NULL
+                    )
+                )
+                OR (l.target_type = 'anchor' AND l.material_id = $2)
+            )
+          ORDER BY source.updated_at DESC, l.link_id",
+    )
+    .bind(user_id)
+    .bind(material_id)
+    .fetch_all(&mut **tx)
+    .await
+    .map_err(log_storage_error)?;
+    rows.into_iter()
+        .map(|row| {
+            Ok(AnnotationBacklink {
+                link_id: row.try_get("link_id").map_err(log_storage_error)?,
+                source_annotation_id: row
+                    .try_get("source_annotation_id")
+                    .map_err(log_storage_error)?,
+                source_material_id: row
+                    .try_get("source_material_id")
+                    .map_err(log_storage_error)?,
+                source_display_path: row
+                    .try_get("source_display_path")
+                    .map_err(log_storage_error)?,
+                raw_text: row.try_get("raw_text").map_err(log_storage_error)?,
+            })
+        })
+        .collect()
 }
 
 fn validate_anchor_shape(

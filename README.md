@@ -112,6 +112,15 @@ yellow/bold highlights, изменение стиля, selection notes и keyboa
 [`ADR 0030`](docs/adr/0030-annotation-v2-rich-reader.md) и
 [`durable annotations runbook`](docs/runbooks/durable-annotations.md).
 
+Для `0.4.0/E2` реализованы Voice Notes и внутренние связи: Reader переиспользует
+общий browser recorder и owner-scoped audio attachment lifecycle, поддерживает
+preview/file fallback, durable playback, safe delete/refcount и manifest-only
+export. Markdown-заметки получают stable `LinkTarget`, wikilink suggestions,
+unresolved/ambiguous resolution и backlinks без зависимости от Obsidian.
+Решения описаны в [`ADR 0031`](docs/adr/0031-voice-note-audio-lifecycle.md),
+[`ADR 0032`](docs/adr/0032-stable-record-links-backlinks.md) и
+[`runbook`](docs/runbooks/voice-notes-and-links.md).
+
 ## Локальный запуск
 
 Для основного пути нужны Docker с Compose и `make`. Он собирает и запускает

@@ -256,6 +256,13 @@ pub fn s1_schema_migrations() -> Vec<SchemaMigration> {
                 "Queryable Annotation v2 targets, rich highlight styles, metadata and normalized tags."
                     .to_owned(),
         },
+        SchemaMigration {
+            id: "s1-0022-voice-notes-links".to_owned(),
+            schema_version: DOMAIN_SCHEMA_VERSION.to_owned(),
+            description:
+                "Generic Voice Note attachments, stable internal LinkTarget bindings and backlinks."
+                    .to_owned(),
+        },
     ]);
     migrations
 }

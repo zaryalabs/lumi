@@ -8,13 +8,17 @@ use dioxus::dioxus_core::spawn_forever;
 use dioxus::prelude::*;
 use gloo_net::http::Request;
 use lumi_core::{
-    AiContextAttachment, AiSourceScope, Anchor, AnchorResolution, Annotation, AnnotationId,
-    AnnotationKind, AnnotationStatus, AnnotationTarget, AnnotationType, CreateAnnotationCommand,
-    DeleteAnnotationCommand, HighlightStyle, LibraryEntry, MoveReadingPositionCommand,
-    PageBoundary, PageFragment, PageMap, ReaderNavigation, ReaderPage, ReaderSettings, ReaderTheme,
-    ReaderWidth, ReadingDocument, ReadingLink, ReadingLinkKind, ReadingProgress, RenderBlock,
-    RenderPlan, TextRange, UpdateAnnotationCommand, UpdateReaderSettingsCommand,
+    AiContextAttachment, AiSourceScope, Anchor, AnchorResolution, Annotation, AnnotationBacklink,
+    AnnotationId, AnnotationKind, AnnotationLink, AnnotationLinkState, AnnotationStatus,
+    AnnotationTarget, AnnotationType, AudioAttachment, AudioRetentionPolicy, AudioUpload,
+    CreateAnnotationCommand, CreateAudioAttachmentCommand, CreateAudioUploadCommand,
+    DeleteAnnotationCommand, HighlightStyle, LibraryEntry, LinkTarget, LinkTargetType,
+    MoveReadingPositionCommand, PageBoundary, PageFragment, PageMap, ReaderNavigation, ReaderPage,
+    ReaderSettings, ReaderTheme, ReaderWidth, ReadingDocument, ReadingLink, ReadingLinkKind,
+    ReadingProgress, RenderBlock, RenderPlan, ResolveAnnotationLinkCommand, TextRange,
+    TranscriptArtifact, UpdateAnnotationCommand, UpdateReaderSettingsCommand,
 };
+use sha2::{Digest, Sha256};
 use uuid::Uuid;
 use wasm_bindgen::{closure::Closure, JsCast};
 use wasm_bindgen_futures::JsFuture;
@@ -43,6 +47,12 @@ struct ReaderView {
     selected_anchor: Option<Anchor>,
     draft_target: AnnotationTarget,
     note_composer_open: bool,
+    voice_composer_open: bool,
+    voice_recording: bool,
+    voice_recorded: Option<crate::voice::RecordedAudio>,
+    voice_preview_url: String,
+    voice_uploading: bool,
+    voice_error: Option<String>,
     note_title_draft: String,
     note_draft: String,
     note_tags_draft: String,
@@ -51,6 +61,10 @@ struct ReaderView {
     edit_note_tags: String,
     editing_note: Option<AnnotationId>,
     notes_filter: NotesFilter,
+    annotation_links: HashMap<AnnotationId, Vec<AnnotationLink>>,
+    annotation_backlinks: HashMap<AnnotationId, Vec<AnnotationBacklink>>,
+    transcripts: HashMap<Uuid, TranscriptArtifact>,
+    link_suggestions: Vec<LinkTarget>,
     conflict_draft: Option<String>,
     annotation_message: Option<String>,
 }
@@ -123,6 +137,7 @@ enum NotesFilter {
     All,
     Notes,
     Highlights,
+    Voice,
 }
 
 /// API-backed reader route for one ready material.
@@ -162,7 +177,16 @@ pub(crate) fn ReaderApp(
         state.set(ReaderState::Loading);
         spawn(async move {
             match load_reader(material_id).await {
-                Ok((entry, document, settings, progress, annotations)) => {
+                Ok((
+                    entry,
+                    document,
+                    settings,
+                    progress,
+                    annotations,
+                    links,
+                    backlinks,
+                    transcripts,
+                )) => {
                     set_document_title(&format!("{} — Lumi", entry.display_title()));
                     let plan = Rc::new(RenderPlan::from_document(&document));
                     match browser_page_map(&plan, settings) {
@@ -200,6 +224,12 @@ pub(crate) fn ReaderApp(
                                 selected_anchor: None,
                                 draft_target: AnnotationTarget::TextRange,
                                 note_composer_open: false,
+                                voice_composer_open: false,
+                                voice_recording: false,
+                                voice_recorded: None,
+                                voice_preview_url: String::new(),
+                                voice_uploading: false,
+                                voice_error: None,
                                 note_title_draft: String::new(),
                                 note_draft: String::new(),
                                 note_tags_draft: String::new(),
@@ -208,6 +238,19 @@ pub(crate) fn ReaderApp(
                                 edit_note_tags: String::new(),
                                 editing_note: None,
                                 notes_filter: NotesFilter::All,
+                                annotation_links: links.into_iter().fold(
+                                    HashMap::new(),
+                                    |mut grouped, link| {
+                                        grouped
+                                            .entry(link.source_annotation_id)
+                                            .or_default()
+                                            .push(link);
+                                        grouped
+                                    },
+                                ),
+                                annotation_backlinks: backlinks,
+                                transcripts,
+                                link_suggestions: Vec::new(),
                                 conflict_draft: None,
                                 annotation_message: None,
                             };
@@ -326,6 +369,7 @@ pub(crate) fn ReaderApp(
                             button { id: "reader-toc-button", r#type: "button", aria_expanded: view.toc_open, aria_controls: "reader-toc-panel", onclick: move |_| toggle_reader_panel(state, ReaderPanel::Toc), "Оглавление" }
                             button { id: "reader-settings-button", r#type: "button", aria_expanded: view.settings_open, aria_controls: "reader-settings-panel", onclick: move |_| toggle_reader_panel(state, ReaderPanel::Settings), "Настройки" }
                             button { id: "reader-margin-note-button", r#type: "button", onclick: move |_| start_margin_note(state, current_page), "Запись на полях" }
+                            button { id: "reader-voice-note-button", r#type: "button", onclick: move |_| start_margin_voice_note(state, current_page), "Голосовая заметка" }
                             button { id: "reader-notes-button", r#type: "button", aria_expanded: view.notes_open, aria_controls: "reader-notes-panel", onclick: move |_| {
                                 toggle_reader_panel(state, ReaderPanel::Notes);
                             }, "Заметки ({view.annotations.len()})" }
@@ -510,7 +554,12 @@ pub(crate) fn ReaderApp(
                             title: view.note_title_draft.clone(),
                             draft: view.note_draft.clone(),
                             tags: view.note_tags_draft.clone(),
-                            note_composer_open: view.note_composer_open
+                            note_composer_open: view.note_composer_open,
+                            voice_composer_open: view.voice_composer_open,
+                            voice_recording: view.voice_recording,
+                            voice_preview_url: view.voice_preview_url.clone(),
+                            voice_uploading: view.voice_uploading,
+                            voice_error: view.voice_error.clone(),
                         }
                     }
 
@@ -757,6 +806,7 @@ fn NotesPanel(
                 AnnotationType::Note | AnnotationType::MarginNote
             ),
             NotesFilter::Highlights => item.annotation.annotation_type == AnnotationType::Highlight,
+            NotesFilter::Voice => item.annotation.annotation_type == AnnotationType::VoiceNote,
         })
         .cloned()
         .collect::<Vec<_>>();
@@ -773,6 +823,7 @@ fn NotesPanel(
                 button { r#type: "button", role: "tab", aria_selected: view.notes_filter == NotesFilter::All, onclick: move |_| set_notes_filter(state, NotesFilter::All), "Все" }
                 button { r#type: "button", role: "tab", aria_selected: view.notes_filter == NotesFilter::Notes, onclick: move |_| set_notes_filter(state, NotesFilter::Notes), "Заметки" }
                 button { r#type: "button", role: "tab", aria_selected: view.notes_filter == NotesFilter::Highlights, onclick: move |_| set_notes_filter(state, NotesFilter::Highlights), "Выделения" }
+                button { r#type: "button", role: "tab", aria_selected: view.notes_filter == NotesFilter::Voice, onclick: move |_| set_notes_filter(state, NotesFilter::Voice), "Голос" }
             }
             if view.annotations.is_empty() {
                 p { class: "notes-empty", "Выделите фрагмент на странице, чтобы сохранить выделение или заметку." }
@@ -813,6 +864,11 @@ fn SelectionComposer(
     draft: String,
     tags: String,
     note_composer_open: bool,
+    voice_composer_open: bool,
+    voice_recording: bool,
+    voice_preview_url: String,
+    voice_uploading: bool,
+    voice_error: Option<String>,
 ) -> Element {
     let yellow_anchor = anchor.clone();
     let bold_anchor = anchor.clone();
@@ -820,7 +876,7 @@ fn SelectionComposer(
     let explain_anchor = anchor.clone();
     let summary_anchor = anchor.clone();
     rsx! {
-        if !note_composer_open {
+        if !note_composer_open && !voice_composer_open {
             div { class: "selection-actions", role: "toolbar", aria_label: if target.is_text_range() { "Действия с выделением" } else { "Действия с записью на полях" },
                 button { class: "primary-action", r#type: "button", onclick: move |_| ask_ai_about_selection(state, ask_anchor.clone(), "", false), "Спросить ИИ" }
                 button { r#type: "button", onclick: move |_| ask_ai_about_selection(
@@ -849,21 +905,337 @@ fn SelectionComposer(
                     }
                     defer_reader_focus("reader-note-draft");
                 }, "Заметка" }
+                button { r#type: "button", onclick: move |_| open_voice_composer(state), "Голос" }
                 button { r#type: "button", onclick: move |_| dismiss_selection(state), "Отмена" }
             }
-        } else {
+        } else if note_composer_open {
             form { class: "note-composer", onsubmit: move |event| { event.prevent_default(); create_note(state, anchor.clone(), csrf, save_state); },
                 p { class: "annotation-kind", if target.is_text_range() { "Заметка к выделению" } else { "Запись на полях" } }
                 label { "Заголовок (необязательно)", input { name: "note_title", autocomplete: "off", maxlength: "240", placeholder: "Короткое название", value: "{title}", oninput: move |event| if let ReaderState::Ready(current) = &mut *state.write() { current.note_title_draft = event.value(); } } }
-                label { "Текст заметки", textarea { id: "reader-note-draft", name: "note_body", autocomplete: "off", placeholder: "Добавьте мысль…", value: "{draft}", oninput: move |event| if let ReaderState::Ready(current) = &mut *state.write() { current.note_draft = event.value(); } } }
+                label { "Текст заметки", textarea { id: "reader-note-draft", name: "note_body", autocomplete: "off", placeholder: "Добавьте мысль…", value: "{draft}", oninput: move |event| update_note_draft(state, event.value(), false) } }
+                WikilinkSuggestions { state, draft: draft.clone() }
                 label { "Теги", input { name: "note_tags", autocomplete: "off", placeholder: "чтение, идея", value: "{tags}", oninput: move |event| if let ReaderState::Ready(current) = &mut *state.write() { current.note_tags_draft = event.value(); } } }
                 div { class: "dialog-actions",
                     button { class: "secondary-action", r#type: "button", onclick: move |_| dismiss_selection(state), "Отмена" }
                     button { class: "primary-action", r#type: "submit", disabled: draft.trim().is_empty(), "Сохранить заметку" }
                 }
             }
+        } else {
+            div { class: "voice-note-composer", role: "dialog", aria_label: "Новая голосовая заметка",
+                p { class: "annotation-kind", if target.is_text_range() { "Голосовая заметка к выделению" } else { "Голосовая заметка на полях" } }
+                if voice_recording {
+                    p { role: "status", "Идёт запись…" }
+                    button { class: "primary-action", r#type: "button", onclick: move |_| finish_voice_note_recording(state), "Остановить запись" }
+                } else if !voice_preview_url.is_empty() {
+                    audio { controls: true, src: "{voice_preview_url}", aria_label: "Предпрослушивание голосовой заметки" }
+                    div { class: "dialog-actions",
+                        button { class: "secondary-action", r#type: "button", disabled: voice_uploading, onclick: move |_| discard_voice_note_recording(state), "Удалить запись" }
+                        button { class: "primary-action", r#type: "button", disabled: voice_uploading, onclick: move |_| upload_voice_note(state, csrf, save_state), if voice_uploading { "Загружаем…" } else { "Сохранить голосовую заметку" } }
+                    }
+                } else {
+                    button { class: "primary-action", r#type: "button", onclick: move |_| begin_voice_note_recording(state), "Начать запись" }
+                    label { class: "voice-file-fallback",
+                        "Или выберите аудиофайл"
+                        input {
+                            r#type: "file",
+                            accept: ".webm,.ogg,.oga,.m4a,.mp4,.mp3,.wav,audio/webm,audio/ogg,audio/mp4,audio/mpeg,audio/wav",
+                            aria_label: "Аудиофайл голосовой заметки",
+                            onchange: move |event| {
+                                let Some(file) = event.files().into_iter().next() else { return; };
+                                spawn(async move {
+                                    let name = file.name();
+                                    match file.read_bytes().await {
+                                        Ok(bytes) => set_voice_note_file(state, &name, bytes.to_vec()),
+                                        Err(_) => set_voice_note_error(state, "Не удалось прочитать аудиофайл.".to_owned()),
+                                    }
+                                });
+                            }
+                        }
+                    }
+                }
+                if let Some(error) = voice_error {
+                    p { class: "annotation-conflict", role: "alert", "{error}" }
+                }
+                button { class: "secondary-action", r#type: "button", disabled: voice_uploading, onclick: move |_| dismiss_selection(state), "Отмена" }
+            }
         }
     }
+}
+
+#[component]
+fn WikilinkSuggestions(state: Signal<ReaderState>, draft: String) -> Element {
+    let suggestions = match &*state.read() {
+        ReaderState::Ready(view) => view.link_suggestions.clone(),
+        _ => Vec::new(),
+    };
+    if suggestions.is_empty() || unfinished_wikilink_query(&draft).is_none() {
+        return rsx! {};
+    }
+    rsx! {
+        div { class: "wikilink-suggestions", role: "listbox", aria_label: "Подсказки для внутренней ссылки",
+            for suggestion in suggestions {
+                button {
+                    r#type: "button",
+                    role: "option",
+                    onclick: move |_| insert_wikilink_suggestion(state, suggestion.display_path.clone()),
+                    "{suggestion.display_path}"
+                }
+            }
+        }
+    }
+}
+
+fn update_note_draft(mut state: Signal<ReaderState>, value: String, editing: bool) {
+    let (query, material_id) = {
+        let ReaderState::Ready(view) = &mut *state.write() else {
+            return;
+        };
+        if editing {
+            view.edit_note_draft = value.clone();
+        } else {
+            view.note_draft = value.clone();
+        }
+        (unfinished_wikilink_query(&value), view.entry.id)
+    };
+    let Some(query) = query else {
+        if let ReaderState::Ready(view) = &mut *state.write() {
+            view.link_suggestions.clear();
+        }
+        return;
+    };
+    spawn(async move {
+        let path = format!(
+            "/links/suggest?q={}&material_id={material_id}",
+            js_sys::encode_uri_component(&query)
+        );
+        match get_json::<Vec<LinkTarget>>(&path).await {
+            Ok(suggestions) => {
+                if let ReaderState::Ready(view) = &mut *state.write() {
+                    let active = if editing {
+                        &view.edit_note_draft
+                    } else {
+                        &view.note_draft
+                    };
+                    if unfinished_wikilink_query(active).as_deref() == Some(query.as_str()) {
+                        view.link_suggestions = suggestions;
+                    }
+                }
+            }
+            Err(_) => {
+                if let ReaderState::Ready(view) = &mut *state.write() {
+                    view.link_suggestions.clear();
+                }
+            }
+        }
+    });
+}
+
+fn unfinished_wikilink_query(value: &str) -> Option<String> {
+    let start = value.rfind("[[")?;
+    let tail = &value[start + 2..];
+    if tail.contains("]]") || tail.contains('\n') || tail.len() > 1_000 {
+        return None;
+    }
+    let query = tail.trim();
+    (!query.is_empty()).then(|| query.to_owned())
+}
+
+fn insert_wikilink_suggestion(mut state: Signal<ReaderState>, display_path: String) {
+    let ReaderState::Ready(view) = &mut *state.write() else {
+        return;
+    };
+    let draft = if view.editing_note.is_some() {
+        &mut view.edit_note_draft
+    } else {
+        &mut view.note_draft
+    };
+    if let Some(start) = draft.rfind("[[") {
+        draft.replace_range(start.., &format!("[[{display_path}]]"));
+    }
+    view.link_suggestions.clear();
+}
+
+fn open_voice_composer(mut state: Signal<ReaderState>) {
+    if let ReaderState::Ready(view) = &mut *state.write() {
+        view.note_composer_open = false;
+        view.voice_composer_open = true;
+        view.voice_error = None;
+    }
+}
+
+fn begin_voice_note_recording(mut state: Signal<ReaderState>) {
+    if let ReaderState::Ready(view) = &mut *state.write() {
+        view.voice_error = None;
+    }
+    spawn(async move {
+        match crate::voice::begin_recording().await {
+            Ok(()) => {
+                if let ReaderState::Ready(view) = &mut *state.write() {
+                    view.voice_recording = true;
+                }
+            }
+            Err(error) => set_voice_note_error(state, error),
+        }
+    });
+}
+
+fn finish_voice_note_recording(mut state: Signal<ReaderState>) {
+    spawn(async move {
+        match crate::voice::finish_recording().await {
+            Ok(recording) => set_voice_note_recording(state, recording),
+            Err(error) => {
+                if let ReaderState::Ready(view) = &mut *state.write() {
+                    view.voice_recording = false;
+                    view.voice_error = Some(error);
+                }
+            }
+        }
+    });
+}
+
+fn set_voice_note_file(state: Signal<ReaderState>, name: &str, bytes: Vec<u8>) {
+    match crate::voice::RecordedAudio::from_file(name, bytes) {
+        Ok(recording) => set_voice_note_recording(state, recording),
+        Err(error) => set_voice_note_error(state, error),
+    }
+}
+
+fn set_voice_note_recording(
+    mut state: Signal<ReaderState>,
+    recording: crate::voice::RecordedAudio,
+) {
+    let preview = crate::voice::preview_url(&recording);
+    if let ReaderState::Ready(view) = &mut *state.write() {
+        if !view.voice_preview_url.is_empty() {
+            crate::voice::revoke_preview(&view.voice_preview_url);
+        }
+        view.voice_recording = false;
+        view.voice_recorded = Some(recording);
+        view.voice_preview_url = preview;
+        view.voice_error = None;
+    }
+}
+
+fn discard_voice_note_recording(mut state: Signal<ReaderState>) {
+    crate::voice::cancel_recording();
+    if let ReaderState::Ready(view) = &mut *state.write() {
+        if !view.voice_preview_url.is_empty() {
+            crate::voice::revoke_preview(&view.voice_preview_url);
+        }
+        view.voice_recording = false;
+        view.voice_recorded = None;
+        view.voice_preview_url.clear();
+        view.voice_error = None;
+    }
+}
+
+fn set_voice_note_error(mut state: Signal<ReaderState>, error: String) {
+    if let ReaderState::Ready(view) = &mut *state.write() {
+        view.voice_error = Some(error);
+        view.voice_recording = false;
+        view.voice_uploading = false;
+    }
+}
+
+fn upload_voice_note(
+    mut state: Signal<ReaderState>,
+    csrf: Signal<String>,
+    save_state: Signal<SaveState>,
+) {
+    let (recording, anchor, target, preview_url) = match &*state.read() {
+        ReaderState::Ready(view) => {
+            let Some(recording) = view.voice_recorded.clone() else {
+                return;
+            };
+            let Some(anchor) = view.selected_anchor.clone() else {
+                return;
+            };
+            (
+                recording,
+                anchor,
+                view.draft_target.clone(),
+                view.voice_preview_url.clone(),
+            )
+        }
+        _ => return,
+    };
+    if let ReaderState::Ready(view) = &mut *state.write() {
+        view.voice_uploading = true;
+        view.voice_error = None;
+    }
+    let csrf_token = csrf.read().clone();
+    spawn(async move {
+        match upload_voice_attachment(recording, &csrf_token).await {
+            Ok(attachment) => {
+                crate::voice::revoke_preview(&preview_url);
+                if let ReaderState::Ready(view) = &mut *state.write() {
+                    view.voice_recorded = None;
+                    view.voice_preview_url.clear();
+                    view.voice_uploading = false;
+                    view.voice_composer_open = false;
+                }
+                create_annotation_optimistic(
+                    state,
+                    anchor,
+                    target,
+                    AnnotationKind::VoiceNote {
+                        audio_attachment_id: attachment.id,
+                        transcript_artifact_id: None,
+                        waveform_summary: None,
+                    },
+                    None,
+                    Vec::new(),
+                    csrf,
+                    save_state,
+                );
+            }
+            Err(error) => set_voice_note_error(state, error),
+        }
+    });
+}
+
+pub(crate) async fn upload_voice_attachment(
+    recording: crate::voice::RecordedAudio,
+    csrf: &str,
+) -> Result<AudioAttachment, String> {
+    let checksum = hex_sha256(&recording.bytes);
+    let upload: AudioUpload = post_reader_json(
+        "/blobs/uploads",
+        &CreateAudioUploadCommand {
+            media_type: recording.media_type.clone(),
+            byte_length: recording.bytes.len() as u64,
+            checksum_sha256: checksum,
+        },
+        csrf,
+    )
+    .await?;
+    put_audio_bytes(
+        &format!("/blobs/uploads/{}", upload.id),
+        &recording.media_type,
+        recording.bytes,
+        csrf,
+    )
+    .await?;
+    let _: AudioUpload =
+        post_reader_empty(&format!("/blobs/uploads/{}/complete", upload.id), csrf).await?;
+    post_reader_json(
+        "/audio/attachments",
+        &CreateAudioAttachmentCommand {
+            upload_id: upload.id,
+            retention: AudioRetentionPolicy::KeepUntilDeleted,
+            duration_ms: recording.duration_ms,
+            idempotency_key: Uuid::now_v7().to_string(),
+        },
+        csrf,
+    )
+    .await
+}
+
+fn hex_sha256(bytes: &[u8]) -> String {
+    Sha256::digest(bytes)
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
 }
 
 fn ask_ai_about_selection(
@@ -996,6 +1368,27 @@ fn AnnotationPanelItem(
     let status_value = item.annotation.clone();
     let annotation_id = item.annotation.id;
     let quote = item.annotation.anchor.quote.clone();
+    let (links, backlinks, transcript) = match &*state.read() {
+        ReaderState::Ready(view) => {
+            let transcript = item
+                .annotation
+                .kind
+                .audio_attachment_id()
+                .and_then(|attachment_id| view.transcripts.get(&attachment_id).cloned());
+            (
+                view.annotation_links
+                    .get(&annotation_id)
+                    .cloned()
+                    .unwrap_or_default(),
+                view.annotation_backlinks
+                    .get(&annotation_id)
+                    .cloned()
+                    .unwrap_or_default(),
+                transcript,
+            )
+        }
+        _ => (Vec::new(), Vec::new(), None),
+    };
     rsx! {
         li { class: "annotation-item",
             button { class: "annotation-target", r#type: "button", onclick: move |_| navigate_to_annotation(state, &target_anchor, csrf, progress_generation, progress_in_flight, save_state), blockquote { "{quote}" } }
@@ -1024,7 +1417,76 @@ fn AnnotationPanelItem(
                         current.conflict_draft = None;
                     }, "Изменить" }
                 },
-                AnnotationKind::VoiceNote { .. } => rsx! { p { class: "annotation-kind", "Голосовая заметка" } },
+                AnnotationKind::VoiceNote { audio_attachment_id, transcript_artifact_id, .. } => rsx! {
+                    p { class: "annotation-kind", "Голосовая заметка" }
+                    audio {
+                        controls: true,
+                        preload: "metadata",
+                        src: "{API_BASE}/audio/attachments/{audio_attachment_id}/audio",
+                        aria_label: "Голосовая заметка",
+                    }
+                    if let Some(transcript) = transcript {
+                        details { class: "voice-transcript",
+                            summary { "Транскрипт" }
+                            p { "{transcript.text}" }
+                        }
+                    } else if transcript_artifact_id.is_some() {
+                        p { class: "annotation-kind", "Связанный транскрипт временно недоступен." }
+                    }
+                },
+            }
+            if !links.is_empty() {
+                ul { class: "annotation-links", aria_label: "Ссылки из заметки",
+                    for link in links {
+                        li {
+                            match link.state {
+                                AnnotationLinkState::Resolved => rsx! {
+                                    button { r#type: "button", onclick: {
+                                        let target = link.target.clone();
+                                        move |_| if let Some(target) = target.clone() { navigate_to_link_target(state, target, csrf, progress_generation, progress_in_flight, save_state); }
+                                    }, "↗ {link.display_path}" }
+                                },
+                                AnnotationLinkState::Unresolved => rsx! {
+                                    span { class: "link-unresolved", "Не найдена: {link.display_path}" }
+                                },
+                                AnnotationLinkState::Ambiguous => rsx! {
+                                    details {
+                                        summary { "Уточнить: {link.display_path}" }
+                                        for candidate in link.candidates.clone() {
+                                            button { r#type: "button", onclick: {
+                                                let candidate = candidate.clone();
+                                                move |_| resolve_annotation_link(state, link.id, candidate.clone(), csrf)
+                                            }, "{candidate.display_path}" }
+                                        }
+                                    }
+                                },
+                            }
+                        }
+                    }
+                }
+            }
+            if !backlinks.is_empty() {
+                details { class: "annotation-backlinks",
+                    summary { "Обратные ссылки ({backlinks.len()})" }
+                    ul {
+                        for backlink in backlinks {
+                            li {
+                                button {
+                                    r#type: "button",
+                                    onclick: move |_| navigate_to_backlink(
+                                        state,
+                                        backlink.clone(),
+                                        csrf,
+                                        progress_generation,
+                                        progress_in_flight,
+                                        save_state,
+                                    ),
+                                    "{backlink.source_display_path}"
+                                }
+                            }
+                        }
+                    }
+                }
             }
             button {
                 r#type: "button",
@@ -1038,7 +1500,8 @@ fn AnnotationPanelItem(
             if editing == Some(annotation_id) {
                 form { class: "note-editor", onsubmit: move |event| { event.prevent_default(); update_note_optimistic(state, edit_value.clone(), csrf, save_state); },
                     label { "Заголовок", input { name: "edited_note_title", maxlength: "240", value: "{edit_title}", oninput: move |event| if let ReaderState::Ready(current) = &mut *state.write() { current.edit_note_title = event.value(); } } }
-                    label { "Редактировать заметку", textarea { name: "edited_note_body", autocomplete: "off", value: "{draft}", oninput: move |event| if let ReaderState::Ready(current) = &mut *state.write() { current.edit_note_draft = event.value(); } } }
+                    label { "Редактировать заметку", textarea { name: "edited_note_body", autocomplete: "off", value: "{draft}", oninput: move |event| update_note_draft(state, event.value(), true) } }
+                    WikilinkSuggestions { state, draft: draft.clone() }
                     label { "Теги", input { name: "edited_note_tags", value: "{edit_tags}", oninput: move |event| if let ReaderState::Ready(current) = &mut *state.write() { current.edit_note_tags = event.value(); } } }
                     button { r#type: "submit", disabled: draft.trim().is_empty(), "Сохранить изменения" }
                 }
@@ -1150,6 +1613,17 @@ fn start_margin_note(mut state: Signal<ReaderState>, page_index: usize) {
         view.annotation_message = None;
     }
     defer_reader_focus("reader-note-draft");
+}
+
+fn start_margin_voice_note(mut state: Signal<ReaderState>, page_index: usize) {
+    start_margin_note(state, page_index);
+    if let ReaderState::Ready(view) = &mut *state.write() {
+        if view.selected_anchor.is_some() {
+            view.note_composer_open = false;
+            view.voice_composer_open = true;
+            view.voice_error = None;
+        }
+    }
 }
 
 fn set_notes_filter(mut state: Signal<ReaderState>, filter: NotesFilter) {
@@ -1372,6 +1846,16 @@ fn create_annotation_optimistic(
         });
         view.selected_anchor = None;
         view.note_composer_open = false;
+        view.voice_composer_open = false;
+        view.voice_recording = false;
+        view.voice_recorded = None;
+        if !view.voice_preview_url.is_empty() {
+            crate::voice::revoke_preview(&view.voice_preview_url);
+        }
+        view.voice_preview_url.clear();
+        view.voice_uploading = false;
+        view.voice_error = None;
+        view.link_suggestions.clear();
         view.note_title_draft.clear();
         view.note_draft.clear();
         view.note_tags_draft.clear();
@@ -1601,6 +2085,11 @@ fn dispatch_pending(
 ) {
     let csrf_token = csrf.read().clone();
     let save_key = pending_key(&pending).to_owned();
+    let material_id = match &pending {
+        PendingMutation::Create { command, .. } => command.material_id,
+        PendingMutation::Update { command, .. } => command.material_id,
+        PendingMutation::Delete { command, .. } => command.material_id,
+    };
     spawn_forever(async move {
         let result = match &pending {
             PendingMutation::Create {
@@ -1622,9 +2111,48 @@ fn dispatch_pending(
                     if let ReaderState::Ready(view) = &mut *state.write() {
                         view.annotations
                             .retain(|item| item.annotation.id != local_id);
+                        view.annotation_links.remove(&local_id);
                     }
                 } else {
                     replace_annotation(&mut state, local_id, annotation);
+                }
+                if let Ok(links) = get_json::<Vec<AnnotationLink>>(&format!(
+                    "/materials/{material_id}/annotation-links"
+                ))
+                .await
+                {
+                    if let ReaderState::Ready(view) = &mut *state.write() {
+                        view.annotation_links.clear();
+                        for link in links {
+                            view.annotation_links
+                                .entry(link.source_annotation_id)
+                                .or_default()
+                                .push(link);
+                        }
+                    }
+                }
+                let annotation_ids = match &*state.read() {
+                    ReaderState::Ready(view) => view
+                        .annotations
+                        .iter()
+                        .map(|item| item.annotation.id)
+                        .collect::<Vec<_>>(),
+                    _ => Vec::new(),
+                };
+                let mut backlinks = HashMap::new();
+                for annotation_id in annotation_ids {
+                    if let Ok(items) = get_json::<Vec<AnnotationBacklink>>(&format!(
+                        "/links/backlinks/annotation/{annotation_id}"
+                    ))
+                    .await
+                    {
+                        if !items.is_empty() {
+                            backlinks.insert(annotation_id, items);
+                        }
+                    }
+                }
+                if let ReaderState::Ready(view) = &mut *state.write() {
+                    view.annotation_backlinks = backlinks;
                 }
                 finish_save(save_state, &save_key, Ok(()));
             }
@@ -1901,8 +2429,18 @@ fn close_reader_overlay(mut state: Signal<ReaderState>) {
             view.notes_open = false;
             Some("reader-notes-button")
         } else if view.selected_anchor.is_some() {
+            crate::voice::cancel_recording();
+            if !view.voice_preview_url.is_empty() {
+                crate::voice::revoke_preview(&view.voice_preview_url);
+            }
             view.selected_anchor = None;
             view.note_composer_open = false;
+            view.voice_composer_open = false;
+            view.voice_recording = false;
+            view.voice_recorded = None;
+            view.voice_preview_url.clear();
+            view.voice_uploading = false;
+            view.voice_error = None;
             Some("reader-page-surface")
         } else {
             None
@@ -1916,9 +2454,20 @@ fn close_reader_overlay(mut state: Signal<ReaderState>) {
 }
 
 fn dismiss_selection(mut state: Signal<ReaderState>) {
+    crate::voice::cancel_recording();
     if let ReaderState::Ready(view) = &mut *state.write() {
+        if !view.voice_preview_url.is_empty() {
+            crate::voice::revoke_preview(&view.voice_preview_url);
+        }
         view.selected_anchor = None;
         view.note_composer_open = false;
+        view.voice_composer_open = false;
+        view.voice_recording = false;
+        view.voice_recorded = None;
+        view.voice_preview_url.clear();
+        view.voice_uploading = false;
+        view.voice_error = None;
+        view.link_suggestions.clear();
         view.note_title_draft.clear();
         view.note_draft.clear();
         view.note_tags_draft.clear();
@@ -2174,6 +2723,182 @@ async fn annotation_request<T: serde::Serialize>(
     }
 }
 
+async fn post_reader_json<T, R>(path: &str, body: &T, csrf: &str) -> Result<R, String>
+where
+    T: serde::Serialize,
+    R: for<'de> serde::Deserialize<'de>,
+{
+    let request = Request::post(&format!("{API_BASE}{path}"))
+        .credentials(RequestCredentials::Include)
+        .header("X-Lumi-CSRF", csrf)
+        .json(body)
+        .map_err(|error| error.to_string())?;
+    let response = request.send().await.map_err(|error| error.to_string())?;
+    if response.status() == 401 {
+        super::account::notify_session_expired();
+    }
+    if !response.ok() {
+        return Err(format!(
+            "Lumi API отклонил запрос (HTTP {}). Проверьте формат, размер и подключение.",
+            response.status()
+        ));
+    }
+    response.json().await.map_err(|error| error.to_string())
+}
+
+async fn post_reader_empty<R>(path: &str, csrf: &str) -> Result<R, String>
+where
+    R: for<'de> serde::Deserialize<'de>,
+{
+    let response = Request::post(&format!("{API_BASE}{path}"))
+        .credentials(RequestCredentials::Include)
+        .header("X-Lumi-CSRF", csrf)
+        .send()
+        .await
+        .map_err(|error| error.to_string())?;
+    if response.status() == 401 {
+        super::account::notify_session_expired();
+    }
+    if !response.ok() {
+        return Err(format!("Lumi API вернул HTTP {}.", response.status()));
+    }
+    response.json().await.map_err(|error| error.to_string())
+}
+
+async fn put_audio_bytes(
+    path: &str,
+    media_type: &str,
+    bytes: Vec<u8>,
+    csrf: &str,
+) -> Result<(), String> {
+    let response = Request::put(&format!("{API_BASE}{path}"))
+        .credentials(RequestCredentials::Include)
+        .header("X-Lumi-CSRF", csrf)
+        .header("Content-Type", media_type)
+        .body(bytes)
+        .map_err(|error| error.to_string())?
+        .send()
+        .await
+        .map_err(|error| error.to_string())?;
+    if response.status() == 401 {
+        super::account::notify_session_expired();
+    }
+    if response.ok() {
+        Ok(())
+    } else {
+        Err(format!(
+            "Аудио не загружено: Lumi API вернул HTTP {}.",
+            response.status()
+        ))
+    }
+}
+
+fn resolve_annotation_link(
+    mut state: Signal<ReaderState>,
+    link_id: Uuid,
+    target: LinkTarget,
+    csrf: Signal<String>,
+) {
+    let csrf_token = csrf.read().clone();
+    spawn(async move {
+        match post_reader_json::<_, AnnotationLink>(
+            "/links/resolve",
+            &ResolveAnnotationLinkCommand { link_id, target },
+            &csrf_token,
+        )
+        .await
+        {
+            Ok(resolved) => {
+                if let ReaderState::Ready(view) = &mut *state.write() {
+                    let links = view
+                        .annotation_links
+                        .entry(resolved.source_annotation_id)
+                        .or_default();
+                    if let Some(current) = links.iter_mut().find(|link| link.id == resolved.id) {
+                        *current = resolved;
+                    }
+                    view.annotation_message = Some("Ссылка уточнена.".to_owned());
+                }
+            }
+            Err(error) => set_annotation_message(&mut state, error),
+        }
+    });
+}
+
+fn navigate_to_link_target(
+    mut state: Signal<ReaderState>,
+    target: LinkTarget,
+    csrf: Signal<String>,
+    generation: Signal<u64>,
+    in_flight: Signal<bool>,
+    save_state: Signal<SaveState>,
+) {
+    let current_material = match &*state.read() {
+        ReaderState::Ready(view) => view.entry.id,
+        _ => return,
+    };
+    if target.material_id == Some(current_material) {
+        if let Some(anchor) = target.anchor {
+            navigate_to_annotation(state, &anchor, csrf, generation, in_flight, save_state);
+            return;
+        }
+        if target.object_type == LinkTargetType::Annotation {
+            let anchor = match &*state.read() {
+                ReaderState::Ready(view) => view
+                    .annotations
+                    .iter()
+                    .find(|item| item.annotation.id == target.object_id)
+                    .map(|item| item.annotation.anchor.clone()),
+                _ => None,
+            };
+            if let Some(anchor) = anchor {
+                navigate_to_annotation(state, &anchor, csrf, generation, in_flight, save_state);
+                return;
+            }
+        }
+        if let ReaderState::Ready(view) = &mut *state.write() {
+            view.navigation.jump_to(0, view.page_map.pages.len());
+            view.notes_open = false;
+            persist_current(view, csrf, generation, in_flight, save_state);
+        }
+        return;
+    }
+    if let Some(material_id) = target.material_id {
+        if let Some(window) = web_sys::window() {
+            let _ = window.location().set_hash(&format!("reader/{material_id}"));
+        }
+    }
+}
+
+fn navigate_to_backlink(
+    state: Signal<ReaderState>,
+    backlink: AnnotationBacklink,
+    csrf: Signal<String>,
+    generation: Signal<u64>,
+    in_flight: Signal<bool>,
+    save_state: Signal<SaveState>,
+) {
+    let (current_material, anchor) = match &*state.read() {
+        ReaderState::Ready(view) => (
+            view.entry.id,
+            view.annotations
+                .iter()
+                .find(|item| item.annotation.id == backlink.source_annotation_id)
+                .map(|item| item.annotation.anchor.clone()),
+        ),
+        _ => return,
+    };
+    if backlink.source_material_id == current_material {
+        if let Some(anchor) = anchor {
+            navigate_to_annotation(state, &anchor, csrf, generation, in_flight, save_state);
+        }
+    } else if let Some(window) = web_sys::window() {
+        let _ = window
+            .location()
+            .set_hash(&format!("reader/{}", backlink.source_material_id));
+    }
+}
+
 fn move_page(
     mut state: Signal<ReaderState>,
     page: usize,
@@ -2413,6 +3138,9 @@ async fn load_reader(
         ReaderSettings,
         Option<ReadingProgress>,
         Vec<Annotation>,
+        Vec<AnnotationLink>,
+        HashMap<Uuid, Vec<AnnotationBacklink>>,
+        HashMap<Uuid, TranscriptArtifact>,
     ),
     String,
 > {
@@ -2423,8 +3151,55 @@ async fn load_reader(
     let document = get_json(&format!("/revisions/{revision_id}/reading-document")).await?;
     let settings = get_json("/reader/settings").await?;
     let progress = get_json(&format!("/materials/{material_id}/progress")).await?;
-    let annotations = get_json(&format!("/materials/{material_id}/annotations")).await?;
-    Ok((entry, document, settings, progress, annotations))
+    let annotations: Vec<Annotation> =
+        get_json(&format!("/materials/{material_id}/annotations")).await?;
+    let links = get_json(&format!("/materials/{material_id}/annotation-links"))
+        .await
+        .unwrap_or_default();
+    let mut backlinks = HashMap::new();
+    for annotation in &annotations {
+        if let Ok(items) = get_json::<Vec<AnnotationBacklink>>(&format!(
+            "/links/backlinks/annotation/{}",
+            annotation.id
+        ))
+        .await
+        {
+            if !items.is_empty() {
+                backlinks.insert(annotation.id, items);
+            }
+        }
+    }
+    let mut transcripts = HashMap::new();
+    for attachment_id in annotations.iter().filter_map(|annotation| {
+        if let AnnotationKind::VoiceNote {
+            audio_attachment_id,
+            transcript_artifact_id: Some(_),
+            ..
+        } = &annotation.kind
+        {
+            Some(*audio_attachment_id)
+        } else {
+            None
+        }
+    }) {
+        if let Ok(transcript) = get_json::<TranscriptArtifact>(&format!(
+            "/audio/attachments/{attachment_id}/transcript"
+        ))
+        .await
+        {
+            transcripts.insert(attachment_id, transcript);
+        }
+    }
+    Ok((
+        entry,
+        document,
+        settings,
+        progress,
+        annotations,
+        links,
+        backlinks,
+        transcripts,
+    ))
 }
 
 async fn get_json<T: for<'de> serde::Deserialize<'de>>(path: &str) -> Result<T, String> {

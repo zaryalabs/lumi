@@ -1504,6 +1504,95 @@ h6.reading-heading {
   background: var(--surface);
   box-shadow: var(--shadow);
 }
+
+.voice-note-composer {
+  position: fixed;
+  z-index: 45;
+  right: clamp(1rem, 4vw, 3rem);
+  bottom: clamp(5rem, 10vh, 7rem);
+  width: min(28rem, calc(100vw - 2rem));
+  padding: 1rem;
+  border: 1px solid var(--line);
+  border-radius: 1rem;
+  background: var(--surface);
+  box-shadow: 0 1.25rem 3rem rgb(37 43 36 / 18%);
+}
+
+.voice-note-composer audio,
+.annotation-item audio {
+  width: 100%;
+  margin: 0.65rem 0;
+}
+
+.voice-file-fallback {
+  display: grid;
+  gap: 0.35rem;
+  margin-top: 0.75rem;
+  color: var(--muted);
+}
+
+.pdf-voice-note-composer {
+  display: grid;
+  gap: 0.65rem;
+  padding: 0.75rem;
+  border: 1px solid var(--line);
+  border-radius: 0.8rem;
+  background: var(--surface-muted);
+}
+
+.pdf-voice-note-composer audio {
+  width: 100%;
+}
+
+.wikilink-suggestions {
+  display: grid;
+  gap: 0.25rem;
+  max-height: 12rem;
+  overflow: auto;
+  padding: 0.4rem;
+  border: 1px solid var(--line);
+  border-radius: 0.7rem;
+  background: var(--surface-muted);
+}
+
+.wikilink-suggestions button {
+  justify-content: flex-start;
+  text-align: left;
+}
+
+.annotation-links {
+  display: grid;
+  gap: 0.35rem;
+  margin: 0.65rem 0;
+  padding: 0;
+  list-style: none;
+}
+
+.annotation-links button {
+  max-width: 100%;
+  overflow-wrap: anywhere;
+  text-align: left;
+}
+
+.link-unresolved {
+  color: var(--danger);
+}
+
+.voice-transcript {
+  margin: 0.5rem 0;
+}
+
+.annotation-backlinks {
+  margin: 0.65rem 0;
+}
+
+.annotation-backlinks ul {
+  display: grid;
+  gap: 0.35rem;
+  margin: 0.45rem 0 0;
+  padding: 0;
+  list-style: none;
+}
 .selection-actions {
   display: flex;
   gap: 6px;

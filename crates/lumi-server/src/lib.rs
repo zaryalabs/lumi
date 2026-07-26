@@ -13,6 +13,7 @@ mod blob;
 mod imports;
 pub mod jobs;
 mod learning;
+mod links;
 mod mcp;
 mod pdf_engine;
 mod scheduler;
@@ -687,6 +688,20 @@ pub(crate) fn service_capabilities(state: &AppState) -> ServiceCapabilities {
             .features
             .push("learning-audio-attachments".to_owned());
         capabilities.features.push("learning-voice".to_owned());
+        if state.imports.is_some() {
+            capabilities.route_groups.push("audio".to_owned());
+            capabilities.features.push("voice-notes".to_owned());
+        }
+    }
+    if state.imports.is_some() {
+        capabilities.route_groups.push("links".to_owned());
+        capabilities.features.push("stable-link-targets".to_owned());
+        capabilities
+            .features
+            .push("annotation-wikilinks".to_owned());
+        capabilities
+            .features
+            .push("annotation-backlinks".to_owned());
     }
     if learning_ai_ready {
         capabilities.features.push("learning-ai".to_owned());
@@ -2256,7 +2271,7 @@ mod tests {
         let migrations: Vec<SchemaMigration> =
             json_get(build_router(), "/api/v1/schema/migrations").await?;
 
-        assert_eq!(migrations.len(), 24);
+        assert_eq!(migrations.len(), 25);
         assert!(migrations
             .iter()
             .any(|migration| migration.id == "s1-0017-learning-core"));
@@ -2272,6 +2287,9 @@ mod tests {
         assert!(migrations
             .iter()
             .any(|migration| migration.id == "s1-0021-records-v2"));
+        assert!(migrations
+            .iter()
+            .any(|migration| migration.id == "s1-0022-voice-notes-links"));
         Ok(())
     }
 

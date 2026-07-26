@@ -25,97 +25,7 @@ use sha2::{Digest, Sha256};
 use uuid::Uuid;
 use web_sys::RequestCredentials;
 
-#[cfg(target_arch = "wasm32")]
-use wasm_bindgen::prelude::*;
-
 use super::account::{notify_session_expired, API_BASE};
-
-#[cfg(target_arch = "wasm32")]
-#[wasm_bindgen(inline_js = r#"
-let lumiRecorder = null;
-let lumiRecorderStream = null;
-let lumiRecorderChunks = [];
-
-export async function startLumiRecording() {
-  if (!navigator.mediaDevices?.getUserMedia || typeof MediaRecorder === "undefined") {
-    throw new Error("media_recorder_unavailable");
-  }
-  const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-  const candidates = ["audio/webm;codecs=opus", "audio/ogg;codecs=opus", "audio/webm"];
-  const mimeType = candidates.find((value) => MediaRecorder.isTypeSupported(value)) || "";
-  lumiRecorderChunks = [];
-  lumiRecorderStream = stream;
-  lumiRecorder = mimeType ? new MediaRecorder(stream, { mimeType }) : new MediaRecorder(stream);
-  lumiRecorder.ondataavailable = (event) => {
-    if (event.data?.size) lumiRecorderChunks.push(event.data);
-  };
-  lumiRecorder.start(250);
-}
-
-export async function stopLumiRecording() {
-  if (!lumiRecorder || lumiRecorder.state === "inactive") {
-    throw new Error("recorder_not_started");
-  }
-  const recorder = lumiRecorder;
-  const stream = lumiRecorderStream;
-  const result = await new Promise((resolve, reject) => {
-    recorder.onerror = () => reject(new Error("recording_failed"));
-    recorder.onstop = async () => {
-      try {
-        const blob = new Blob(lumiRecorderChunks, { type: recorder.mimeType || "audio/webm" });
-        const bytes = new Uint8Array(await blob.arrayBuffer());
-        resolve({ bytes, mediaType: (blob.type || "audio/webm").split(";")[0] });
-      } catch (error) {
-        reject(error);
-      }
-    };
-    recorder.stop();
-  });
-  stream?.getTracks().forEach((track) => track.stop());
-  lumiRecorder = null;
-  lumiRecorderStream = null;
-  lumiRecorderChunks = [];
-  return result;
-}
-
-export function cancelLumiRecording() {
-  if (lumiRecorder && lumiRecorder.state !== "inactive") {
-    lumiRecorder.ondataavailable = null;
-    lumiRecorder.onstop = null;
-    lumiRecorder.stop();
-  }
-  lumiRecorderStream?.getTracks().forEach((track) => track.stop());
-  lumiRecorder = null;
-  lumiRecorderStream = null;
-  lumiRecorderChunks = [];
-}
-
-export function createLumiAudioUrl(bytes, mediaType) {
-  return URL.createObjectURL(new Blob([bytes], { type: mediaType }));
-}
-
-export function revokeLumiAudioUrl(url) {
-  if (url) URL.revokeObjectURL(url);
-}
-
-export async function sleepLumi(milliseconds) {
-  await new Promise((resolve) => setTimeout(resolve, milliseconds));
-}
-"#)]
-extern "C" {
-    #[wasm_bindgen(catch, js_name = startLumiRecording)]
-    async fn start_lumi_recording() -> Result<JsValue, JsValue>;
-    #[wasm_bindgen(catch, js_name = stopLumiRecording)]
-    async fn stop_lumi_recording() -> Result<JsValue, JsValue>;
-    #[wasm_bindgen(js_name = cancelLumiRecording)]
-    fn cancel_lumi_recording();
-    #[wasm_bindgen(js_name = createLumiAudioUrl)]
-    fn create_lumi_audio_url(bytes: &js_sys::Uint8Array, media_type: &str) -> String;
-    #[wasm_bindgen(js_name = revokeLumiAudioUrl)]
-    fn revoke_lumi_audio_url(url: &str);
-    #[wasm_bindgen(js_name = sleepLumi)]
-    async fn sleep_lumi(milliseconds: u32);
-}
 
 #[derive(Clone, PartialEq)]
 enum CompletionOfferState {
@@ -1708,18 +1618,11 @@ fn transcript_status_label(status: TranscriptStatus) -> &'static str {
     }
 }
 
-#[derive(Clone, PartialEq)]
-struct RecordedAudio {
-    bytes: Vec<u8>,
-    media_type: String,
-}
+use crate::voice::RecordedAudio;
 
 #[cfg(target_arch = "wasm32")]
 async fn begin_voice_recording() -> Result<(), String> {
-    start_lumi_recording()
-        .await
-        .map(|_| ())
-        .map_err(|_| "Браузер не дал доступ к микрофону или не поддерживает запись.".to_owned())
+    crate::voice::begin_recording().await
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -1729,20 +1632,7 @@ async fn begin_voice_recording() -> Result<(), String> {
 
 #[cfg(target_arch = "wasm32")]
 async fn recorded_audio() -> Result<RecordedAudio, String> {
-    let value = stop_lumi_recording()
-        .await
-        .map_err(|_| "Не удалось завершить запись.".to_owned())?;
-    let bytes = js_sys::Reflect::get(&value, &JsValue::from_str("bytes"))
-        .map_err(|_| "Браузер вернул некорректную запись.".to_owned())?;
-    let media_type = js_sys::Reflect::get(&value, &JsValue::from_str("mediaType"))
-        .ok()
-        .and_then(|value| value.as_string())
-        .unwrap_or_else(|| "audio/webm".to_owned());
-    let bytes = js_sys::Uint8Array::new(&bytes).to_vec();
-    if bytes.is_empty() || bytes.len() > lumi_core::MAX_LEARNING_AUDIO_BYTES as usize {
-        return Err("Запись пуста или превышает 25 МиБ.".to_owned());
-    }
-    Ok(RecordedAudio { bytes, media_type })
+    crate::voice::finish_recording().await
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -1752,8 +1642,7 @@ async fn recorded_audio() -> Result<RecordedAudio, String> {
 
 #[cfg(target_arch = "wasm32")]
 fn voice_preview(recording: &RecordedAudio) -> String {
-    let bytes = js_sys::Uint8Array::from(recording.bytes.as_slice());
-    create_lumi_audio_url(&bytes, &recording.media_type)
+    crate::voice::preview_url(recording)
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -1763,7 +1652,7 @@ fn voice_preview(_recording: &RecordedAudio) -> String {
 
 #[cfg(target_arch = "wasm32")]
 fn revoke_voice_preview(url: &str) {
-    revoke_lumi_audio_url(url);
+    crate::voice::revoke_preview(url);
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -1771,7 +1660,7 @@ fn revoke_voice_preview(_url: &str) {}
 
 #[cfg(target_arch = "wasm32")]
 fn cancel_voice_recording() {
-    cancel_lumi_recording();
+    crate::voice::cancel_recording();
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -1779,7 +1668,7 @@ fn cancel_voice_recording() {}
 
 #[cfg(target_arch = "wasm32")]
 async fn sleep_one_second() {
-    sleep_lumi(1_000).await;
+    crate::voice::sleep_one_second().await;
 }
 
 #[cfg(not(target_arch = "wasm32"))]

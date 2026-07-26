@@ -1,4 +1,4 @@
-import { devices, expect, test } from "@playwright/test";
+import { devices, expect, test, type Page } from "@playwright/test";
 import { readFileSync } from "node:fs";
 
 const textLayerPdf = readFileSync(
@@ -7,6 +7,45 @@ const textLayerPdf = readFileSync(
 const supportedMarkdown = readFileSync(
   new URL("../fixtures/markdown/supported.md", import.meta.url),
 );
+
+async function installFakeAudioRecorder(page: Page) {
+  await page.addInitScript(() => {
+    const stream = {
+      getTracks: () => [{ stop: () => undefined }],
+    };
+    Object.defineProperty(navigator, "mediaDevices", {
+      configurable: true,
+      value: { getUserMedia: async () => stream },
+    });
+    class FixtureMediaRecorder {
+      static isTypeSupported() {
+        return true;
+      }
+      mimeType = "audio/webm";
+      state = "inactive";
+      ondataavailable?: (event: { data: Blob }) => void;
+      onerror?: () => void;
+      onstop?: () => void;
+      start() {
+        this.state = "recording";
+      }
+      stop() {
+        this.ondataavailable?.({
+          data: new Blob(
+            [new Uint8Array([0x1a, 0x45, 0xdf, 0xa3, 0x42, 0x86, 0x81, 0x01])],
+            { type: this.mimeType },
+          ),
+        });
+        this.state = "inactive";
+        queueMicrotask(() => this.onstop?.());
+      }
+    }
+    Object.defineProperty(window, "MediaRecorder", {
+      configurable: true,
+      value: FixtureMediaRecorder,
+    });
+  });
+}
 
 const supportedEpub = Buffer.from(
   "UEsDBBQAAAAAAAAAIQBvYassFAAAABQAAAAIAAAAbWltZXR5cGVhcHBsaWNhdGlvbi9lcHViK3ppcFBLAwQUAAAACAD9eO1cHBxuKlQAAABrAAAAFgAAAE1FVEEtSU5GL2NvbnRhaW5lci54bWyzsa/IzVEoSy0qzszPs1Uy1DNQsrezSc7PK0nMzEstsrMpys8vScvMSS1GMBXSSnNydAsSSzJslVwDQp30CxKTsxPTU/XyC9KU9O1s9JH06COMAgBQSwMEFAAAAAgA/XjtXFlgKDfMAAAAbQEAABAAAABFUFVCL3BhY2thZ2Uub3BmjdA9bsMwDAXgqwhag0RxstIKEMBbhy49ACEzCVFJFiQmdW9f2c7f2E16JD48EA5j8OpGufAQW91stvpgIaH7xjO98n3NLQQS7FHQgrB4ssc8/BTKqvv8OoJZMnCZUIZsP66BVbfrwDwS8BjP1+paimCeHzAvN2DkExWxwEJBcd/qiDetLplO83MzXiR4rQL1jGv5TdRqTMmzQ6lNzTxejdNKykOiLExlQcwb6pqHKTSKcc3/XTMVftYsiSMtcOWqPaOVn9buQ3M/p/0DUEsDBBQAAAAIAP147Vxvj8P2PgAAAEgAAAAOAAAARVBVQi9uYXYueGh0bWyzySjJzbGzScpPqbSzyUsss7NJVMgoSk2zVSpJrSjRTzbUqwCpULJzzkgsKEktstFPtLPRByvUh2jSB5sAAFBLAwQUAAAACAD9eO1cT/i+nUcAAABNAAAAEgAAAEVQVUIvdGV4dC9jMS54aHRtbLPJKMnNsbNJyk+ptLPJMLRzzkgsKEktstEHsm0K7AJSi4ozi0tS80oUilITcxRcA0KdFDJzC/KLSvRs9AvsbPQhOvXBxgAAUEsBAhQDFAAAAAAAAAAhAG9hqywUAAAAFAAAAAgAAAAAAAAAAAAAAIABAAAAAG1pbWV0eXBlUEsBAhQDFAAAAAgA/XjtXBwcbipUAAAAawAAABYAAAAAAAAAAAAAAIABOgAAAE1FVEEtSU5GL2NvbnRhaW5lci54bWxQSwECFAMUAAAACAD9eO1cWWAoN8wAAABtAQAAEAAAAAAAAAAAAAAAgAHCAAAARVBVQi9wYWNrYWdlLm9wZlBLAQIUAxQAAAAIAP147Vxvj8P2PgAAAEgAAAAOAAAAAAAAAAAAAACAAbwBAABFUFVCL25hdi54aHRtbFBLAQIUAxQAAAAIAP147VxP+L6dRwAAAE0AAAASAAAAAAAAAAAAAACAASYCAABFUFVCL3RleHQvYzEueGh0bWxQSwUGAAAAAAUABQA0AQAAnQIAAAAA",
@@ -313,39 +352,7 @@ test("offers a reload-safe deterministic session after reading", async ({
   page,
 }) => {
   test.setTimeout(90_000);
-  await page.addInitScript(() => {
-    const stream = {
-      getTracks: () => [{ stop: () => undefined }],
-    };
-    Object.defineProperty(navigator, "mediaDevices", {
-      configurable: true,
-      value: { getUserMedia: async () => stream },
-    });
-    class FixtureMediaRecorder {
-      static isTypeSupported() {
-        return true;
-      }
-      mimeType = "audio/webm";
-      state = "inactive";
-      ondataavailable?: (event: { data: Blob }) => void;
-      onerror?: () => void;
-      onstop?: () => void;
-      start() {
-        this.state = "recording";
-      }
-      stop() {
-        this.ondataavailable?.({
-          data: new Blob(["lumi-e2e-audio"], { type: this.mimeType }),
-        });
-        this.state = "inactive";
-        queueMicrotask(() => this.onstop?.());
-      }
-    }
-    Object.defineProperty(window, "MediaRecorder", {
-      configurable: true,
-      value: FixtureMediaRecorder,
-    });
-  });
+  await installFakeAudioRecorder(page);
   await page.goto("/");
   await page
     .getByRole("button", { name: "Создать фразу восстановления" })
@@ -735,6 +742,7 @@ test("imports and reads a PDF with selectable text and anchored highlights", asy
 
 test("persists an API-backed EPUB library lifecycle", async ({ page }) => {
   test.setTimeout(60_000);
+  await installFakeAudioRecorder(page);
   await page.goto("/");
 
   await expect(
@@ -869,7 +877,7 @@ test("persists an API-backed EPUB library lifecycle", async ({ page }) => {
   await expect(page.locator(".annotation-highlight").first()).toBeVisible();
 
   await selectReaderText(page);
-  await page.getByRole("button", { name: "Заметка" }).click();
+  await page.getByRole("button", { name: "Заметка", exact: true }).click();
   await page.getByLabel("Текст заметки").fill("Заметка Stage 5");
   const noteSaved = page.waitForResponse(
     (response) =>
@@ -950,6 +958,66 @@ test("persists an API-backed EPUB library lifecycle", async ({ page }) => {
     page.getByRole("button", { name: /Заметки \(2\)/ }),
   ).toBeVisible();
 
+  await reader.getByRole("button", { name: "Голосовая заметка" }).click();
+  const voiceComposer = page.getByRole("dialog", {
+    name: "Новая голосовая заметка",
+  });
+  await voiceComposer.getByRole("button", { name: "Начать запись" }).click();
+  await expect(voiceComposer.getByText("Идёт запись…")).toBeVisible();
+  await voiceComposer
+    .getByRole("button", { name: "Остановить запись" })
+    .click();
+  await expect(
+    voiceComposer.getByLabel("Предпрослушивание голосовой заметки"),
+  ).toBeVisible();
+  const voiceNoteSaved = page.waitForResponse(
+    (response) =>
+      response.url().endsWith("/annotations") &&
+      response.request().method() === "POST" &&
+      response.ok(),
+  );
+  await voiceComposer
+    .getByRole("button", { name: "Сохранить голосовую заметку" })
+    .click();
+  await voiceNoteSaved;
+  await page.getByRole("button", { name: /Заметки \(3\)/ }).click();
+  await notes.getByRole("tab", { name: "Голос" }).click();
+  await expect(notes.getByLabel("Голосовая заметка")).toBeVisible();
+  await notes.getByRole("button", { name: "Закрыть заметки" }).click();
+
+  await reader.getByRole("button", { name: "Запись на полях" }).click();
+  await page.getByLabel("Заголовок (необязательно)").fill("Связанная мысль");
+  await page.getByLabel("Текст заметки").fill("Продолжение [[Идея");
+  const suggestion = page.getByRole("option", { name: /Идея главы/ });
+  await expect(suggestion).toBeVisible();
+  await suggestion.click();
+  await expect(page.getByLabel("Текст заметки")).toHaveValue(
+    /Продолжение \[\[.*Идея главы\]\]/,
+  );
+  const linkedNoteSaved = page.waitForResponse(
+    (response) =>
+      response.url().endsWith("/annotations") &&
+      response.request().method() === "POST" &&
+      response.ok(),
+  );
+  await page.getByRole("button", { name: "Сохранить заметку" }).click();
+  await linkedNoteSaved;
+  await page.getByRole("button", { name: /Заметки \(4\)/ }).click();
+  await notes.getByRole("tab", { name: "Все" }).click();
+  await expect(
+    notes
+      .locator(".annotation-item")
+      .filter({ hasText: "Идея главы" })
+      .getByText("Обратные ссылки (1)"),
+  ).toBeVisible();
+  await expect(
+    notes
+      .locator(".annotation-item")
+      .filter({ hasText: "Связанная мысль" })
+      .getByRole("button", { name: /Идея главы/ }),
+  ).toBeVisible();
+  await notes.getByRole("button", { name: "Закрыть заметки" }).click();
+
   await page.getByRole("button", { name: "Дальше" }).click();
   await expect(
     page.getByRole("article", { name: /Страница 2 из/ }),
@@ -1016,9 +1084,26 @@ test("persists an API-backed EPUB library lifecycle", async ({ page }) => {
   await expect(
     page.getByRole("article", { name: /Страница (?:[2-9]|[1-9][0-9]+) из/ }),
   ).toBeVisible();
-  await page.getByRole("button", { name: /Заметки \(2\)/ }).click();
+  await page.getByRole("button", { name: /Заметки \(4\)/ }).click();
   await expect(page.getByText("Заметка Stage 5 · edit")).toBeVisible();
-  await expect(page.getByText("Идея главы")).toBeVisible();
+  await expect(notes.getByText("Идея главы", { exact: true })).toBeVisible();
+  await notes.getByRole("tab", { name: "Голос" }).click();
+  const durableAudio = notes.getByLabel("Голосовая заметка");
+  await expect(durableAudio).toBeVisible();
+  const durableAudioResponse = await durableAudio.evaluate(
+    async (element: HTMLAudioElement) => {
+      const response = await fetch(`${element.src}?e2e-reload=1`, {
+        credentials: "include",
+        cache: "no-store",
+        headers: { Range: "bytes=0-7" },
+      });
+      return {
+        status: response.status,
+        bytes: (await response.arrayBuffer()).byteLength,
+      };
+    },
+  );
+  expect(durableAudioResponse).toEqual({ status: 206, bytes: 8 });
   await page.getByRole("button", { name: "Закрыть заметки" }).click();
   await page.setViewportSize({ width: 390, height: 844 });
   await expect(page.getByRole("article", { name: /Страница/ })).toBeVisible();

@@ -46,6 +46,10 @@ plugin, AI, search and account/auth boundaries.
   ordered hint evidence и bounded Challenges projection.
 - [`0030`](0030-annotation-v2-rich-reader.md) — совместимый Annotation v2,
   source-backed targets и paint-only rich overlays Reader.
+- [`0031`](0031-voice-note-audio-lifecycle.md) — общий owner-scoped audio
+  lifecycle для Voice Notes и learning.
+- [`0032`](0032-stable-record-links-backlinks.md) — stable `LinkTarget`,
+  wikilinks, ambiguous/unresolved states и backlinks.
 
 ## Template
 

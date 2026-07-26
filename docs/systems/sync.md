@@ -340,8 +340,14 @@ status, relation, object revision и timestamps. Create/update/delete сохра
 один change в той же транзакции, что primary row; delete остаётся tombstone.
 Legacy payload без v2 metadata детерминированно восстанавливается как active
 text-range annotation. Текущий domain marker —
-`s1.2026-07-26.records-v2`; правила совместимости описаны в
+`s1.2026-07-26.records-links-v1`; правила совместимости описаны в
 [`ADR 0030`](../adr/0030-annotation-v2-rich-reader.md).
+
+Voice Note change хранит attachment id, но не audio bytes. Link bindings и
+backlinks являются rebuildable projection из Markdown body плюс explicit
+stable target; Web server сохраняет `annotation_links` в той же транзакции,
+что primary annotation command, согласно
+[`ADR 0032`](../adr/0032-stable-record-links-backlinks.md).
 
 ## Реализация
 

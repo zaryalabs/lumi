@@ -11,6 +11,7 @@ mod auth;
 mod epub;
 mod fixtures;
 mod learning;
+mod links;
 #[cfg(feature = "markdown-import")]
 mod lum;
 #[cfg(feature = "markdown-import")]
@@ -31,6 +32,7 @@ pub use fixtures::{
     ImportedFixture, LearningFixture, LearningFixtureItem,
 };
 pub use learning::*;
+pub use links::*;
 #[cfg(feature = "markdown-import")]
 pub use lum::*;
 #[cfg(feature = "markdown-import")]
@@ -47,7 +49,7 @@ use serde::{Deserialize, Serialize};
 pub const API_VERSION: &str = "v1";
 
 /// Current domain schema marker for the frozen `0.2.0` AI contracts.
-pub const DOMAIN_SCHEMA_VERSION: &str = "s1.2026-07-26.records-v2";
+pub const DOMAIN_SCHEMA_VERSION: &str = "s1.2026-07-26.records-links-v1";
 
 /// Current normalized content package marker for reflowable S1 documents.
 pub const NORMALIZED_PACKAGE_VERSION: &str = "normalized.reflowable.s1";

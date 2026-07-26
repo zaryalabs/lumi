@@ -24,6 +24,8 @@ Dioxus Fullstack/server functions можно использовать для UI-
 /api/v1/materials/*
 /api/v1/revisions/*
 /api/v1/blobs/*
+/api/v1/audio/attachments/*
+/api/v1/links/*
 /api/v1/imports/*
 /api/v1/jobs/*
 /api/v1/search/*
@@ -57,6 +59,10 @@ Responsibilities:
   portable export с optimistic revision и идемпотентными мутациями.
 - `blobs` - generic upload/download, resumable transfer, checksums, object
   storage and reusable attachment references.
+- `audio/attachments` - generic owner-scoped attachment complete/play/delete
+  для learning и Voice Notes; playback поддерживает safe byte ranges.
+- `links` - suggestions, explicit stable-target resolution, owner-scoped
+  backlinks и rebuild derived link projection для Annotation v2.
 - `imports/jobs` - one durable execution runtime for imports, AI, indexing,
   transcription, fingerprints, export/delete and other typed job kinds.
 - `search` - serious server-side web search and retrieval API.
@@ -124,6 +130,13 @@ note. `target` принимает `text_range`, `block`, `section`, `document` �
 Старые payload без v2-полей декодируются как active text-range annotation.
 Полный контракт и migration policy закреплены в
 [`ADR 0030`](../adr/0030-annotation-v2-rich-reader.md).
+
+Voice Note создаётся только после completed generic upload и
+`AudioAttachment`; audio bytes не входят в annotation payload. Внутренние
+`[[wikilinks]]` сохраняют raw Markdown, а после разрешения — stable
+`LinkTarget`. Durable contracts закреплены в
+[`ADR 0031`](../adr/0031-voice-note-audio-lifecycle.md) и
+[`ADR 0032`](../adr/0032-stable-record-links-backlinks.md).
 
 Domain requests such as `AiTask`, `IndexRequest`, `TranscriptionRequest` and
 `FingerprintRequest` may have their own payload/status tables, but leases,

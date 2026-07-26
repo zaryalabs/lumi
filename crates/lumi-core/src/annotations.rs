@@ -9,7 +9,10 @@ use uuid::Uuid;
 use crate::models::{
     Anchor, AnnotationId, DocumentRevisionId, Material, MaterialId, SourceIdentity, TimestampMs,
 };
-use crate::{AudioAttachmentId, TranscriptArtifactId};
+use crate::{
+    AnnotationBacklink, AnnotationLink, AudioAttachmentId, AudioRetentionPolicy,
+    TranscriptArtifactId,
+};
 
 /// Portable Annotation v2 schema marker.
 pub const ANNOTATION_SCHEMA_VERSION: &str = "lumi.annotations.v2";
@@ -589,6 +592,15 @@ pub struct AnnotationExport {
     pub source: SourceIdentity,
     /// Exported annotation entries.
     pub entries: Vec<AnnotationExportEntry>,
+    /// Resolved and unresolved readable links extracted from note bodies.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub links: Vec<AnnotationLink>,
+    /// Incoming resolved links targeting this material or its records.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub backlinks: Vec<AnnotationBacklink>,
+    /// Audio metadata manifest; raw bytes are never embedded in this JSON.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub audio_manifest: Vec<AnnotationAudioExportEntry>,
 }
 
 impl AnnotationExport {
@@ -605,8 +617,36 @@ impl AnnotationExport {
                 .iter()
                 .map(AnnotationExportEntry::from_annotation)
                 .collect(),
+            links: Vec::new(),
+            backlinks: Vec::new(),
+            audio_manifest: Vec::new(),
         }
     }
+}
+
+/// Portable metadata for one Voice Note attachment.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct AnnotationAudioExportEntry {
+    /// Voice annotation referencing the attachment.
+    pub annotation_id: AnnotationId,
+    /// Stable owner-scoped attachment id.
+    pub audio_attachment_id: AudioAttachmentId,
+    /// Validated media type.
+    pub media_type: String,
+    /// Exact byte length.
+    pub byte_length: u64,
+    /// Optional duration in milliseconds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub duration_ms: Option<u64>,
+    /// Content checksum for backup verification.
+    pub checksum_sha256: String,
+    /// Retention policy at export time.
+    pub retention: AudioRetentionPolicy,
+    /// Optional linked transcript artifact.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub transcript_artifact_id: Option<TranscriptArtifactId>,
+    /// JSON export is manifest-only unless a future explicit archive format says otherwise.
+    pub audio_bytes_included: bool,
 }
 
 /// One record entry in a portable Annotation v2 export.

@@ -123,6 +123,9 @@ pub struct AudioAttachment {
     pub media_type: String,
     /// Original byte length.
     pub byte_length: u64,
+    /// Optional validated media duration supplied by a trusted client adapter.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub duration_ms: Option<u64>,
     /// Content checksum.
     pub checksum_sha256: String,
     /// Owner-selected retention policy.
@@ -131,6 +134,20 @@ pub struct AudioAttachment {
     pub audio_deleted_at: Option<TimestampMs>,
     /// Creation timestamp.
     pub created_at: TimestampMs,
+}
+
+/// Command linking a completed generic upload to an owner-scoped attachment.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct CreateAudioAttachmentCommand {
+    /// Completed owner-scoped upload.
+    pub upload_id: AudioUploadId,
+    /// Original-audio retention choice.
+    pub retention: AudioRetentionPolicy,
+    /// Optional media duration in milliseconds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub duration_ms: Option<u64>,
+    /// Retry-safe mutation key.
+    pub idempotency_key: String,
 }
 
 /// Command linking a completed generic upload to a learning session item.
