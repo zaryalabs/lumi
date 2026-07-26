@@ -18,6 +18,7 @@ mod mcp;
 mod models;
 mod pdf;
 mod reader;
+mod social;
 mod sources;
 
 pub use ai::*;
@@ -37,6 +38,7 @@ pub use mcp::*;
 pub use models::*;
 pub use pdf::*;
 pub use reader::*;
+pub use social::*;
 pub use sources::*;
 
 use serde::{Deserialize, Serialize};
@@ -45,7 +47,7 @@ use serde::{Deserialize, Serialize};
 pub const API_VERSION: &str = "v1";
 
 /// Current domain schema marker for the frozen `0.2.0` AI contracts.
-pub const DOMAIN_SCHEMA_VERSION: &str = "s1.2026-07-26.learning-voice-v1";
+pub const DOMAIN_SCHEMA_VERSION: &str = "s1.2026-07-26.community-spaces-v1";
 
 /// Current normalized content package marker for reflowable S1 documents.
 pub const NORMALIZED_PACKAGE_VERSION: &str = "normalized.reflowable.s1";

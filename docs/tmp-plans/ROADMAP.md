@@ -75,8 +75,12 @@ Knowledge Base, native full-copy replicas, Obsidian, plugin platform, будущ
 
 Ещё не готово:
 
-- Desk/search/RAG и Community Spaces. Внешний staging operator acceptance
-  остаётся gate конкретного окружения.
+- Desk/search/RAG;
+- следующие social verticals: публикация и сопоставление материалов,
+  совместное чтение, коммуникации и выпуск. Зависимости E1 от ещё не
+  завершённого `0.4.0` перечислены в
+  [`0.5.0-deferred-until-0.4.0.md`](0.5.0-deferred-until-0.4.0.md).
+  Внешний staging operator acceptance остаётся gate конкретного окружения.
 
 Persistent server публикует capabilities `ai-provider-openrouter`,
 `ai-provider-byok`, `ai-explicit-context`, `ai-global-chat`, `ai-task-queue`,
@@ -86,7 +90,7 @@ Persistent server публикует capabilities `ai-provider-openrouter`,
 `learning-explain-back`, `learning-audio-attachments`, `learning-voice` и
 `learning-mcp` при готовых prerequisites.
 
-После перехода на новую шкалу выполнено `9/18` продуктовых эпиков. Stage 0,
+После перехода на новую шкалу выполнено `10/18` продуктовых эпиков. Stage 0,
 Contract Freeze 1 и A1 остаются закрытыми prerequisites.
 
 Repository-side gates `make c`, PostgreSQL/compatibility/security/performance,
@@ -177,7 +181,7 @@ record-scoped RAG без второго контура данных.
 Подробный план:
 [`0.5.0-social-plan.md`](0.5.0-social-plan.md).
 
-1. [ ] **E1 — Community Spaces и доступ.** Social foundation, Community/
+1. [x] **E1 — Community Spaces и доступ.** Social foundation, Community/
    SyncSpace boundary, create/preview/join, roles, links, membership UX и
    permission/security gate.
 2. [ ] **E2 — Публикация и сопоставление материалов.** Share flow,

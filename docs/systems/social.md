@@ -113,10 +113,24 @@ entry: by_link
 
 Space не обязан отображаться в глобальном каталоге или поиске сообществ, но
 человек со ссылкой может открыть его и пройти предусмотренный flow входа.
-Ссылка должна быть отзывной и перевыпускаемой. Точная граница между guest view,
-автоматическим вступлением и подтверждением вступления остается отдельным
-продуктовым решением; право комментировать, писать в chat и добавлять материалы
-требует membership и проверяется сервером.
+Ссылка должна быть отзывной и перевыпускаемой. Открытие ссылки показывает
+безопасный preview с name, description и числом участников. Membership
+создаётся только после явного действия `Вступить`. Preview не возвращает
+identities участников, материалы, activity или social content. Право
+комментировать, писать в chat и добавлять материалы требует active membership
+и проверяется сервером.
+
+Секрет ссылки передаётся в fragment URL. Browser извлекает его и отправляет
+только в bounded JSON body preview/join; token не попадает в HTTP request URL,
+Referer или application logs. В PostgreSQL хранится cryptographic hash, а
+зашифрованный envelope нужен только для deterministic idempotent replay
+create/rotate response. После успешного join Web заменяет fragment route и тем
+самым очищает token из адресной строки.
+
+`left` membership может снова стать active по действующей ссылке. `removed`
+membership не восстанавливается общей ссылкой: нужен отдельный будущий
+moderation/invite command. Owner не может выйти, быть удалён или понижен без
+явной передачи ownership.
 
 Доступ по ссылке не дает доступа к приватным source blobs, личным notes,
 прогрессу или learning state участников.
@@ -230,6 +244,11 @@ Chat и comments имеют разные контексты:
 - Admin/owner can moderate comments.
 - Deletes create tombstones for sync consistency.
 - Export/audit should show who created shared content and when.
+- Выход из Space не удаляет уже опубликованный social content: оно сохраняет
+  stable authorship до удаления автором, moderator action или account deletion
+  policy.
+- Удалённый account отображается как `Удалённый пользователь`; ACL и
+  provenance продолжают ссылаться на stable `user_id`, а не nickname.
 
 ## Нефункциональные требования
 

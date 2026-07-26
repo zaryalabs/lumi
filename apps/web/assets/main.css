@@ -484,6 +484,80 @@ p {
 .library-section {
   margin-top: 56px;
 }
+
+.community-view {
+  display: grid;
+  gap: 1rem;
+}
+
+.community-grid,
+.community-shell-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 16rem), 1fr));
+  gap: 1rem;
+}
+
+.community-card {
+  display: grid;
+  gap: 0.7rem;
+  padding: 1.1rem;
+  border: 1px solid var(--border);
+  border-radius: 1rem;
+  background: var(--paper);
+}
+
+.community-create,
+.community-settings,
+.community-links {
+  display: grid;
+  gap: 0.8rem;
+}
+
+.community-create label,
+.community-settings label,
+.community-links label {
+  display: grid;
+  gap: 0.35rem;
+  font-weight: 650;
+}
+
+.community-create input,
+.community-create textarea,
+.community-settings input,
+.community-settings textarea,
+.community-links input {
+  width: 100%;
+}
+
+.community-member-list,
+.community-link-list {
+  display: grid;
+  gap: 0.65rem;
+  padding: 0;
+  list-style: none;
+}
+
+.community-member-list li,
+.community-link-list li {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.6rem;
+  padding-block: 0.65rem;
+  border-bottom: 1px solid var(--border);
+}
+
+.community-preview {
+  max-width: 42rem;
+  margin: 2rem auto;
+}
+
+.privacy-note {
+  padding: 0.85rem;
+  border-radius: 0.75rem;
+  background: color-mix(in srgb, var(--sage) 18%, transparent);
+}
 .continue-section {
   margin: 0 0 54px;
 }

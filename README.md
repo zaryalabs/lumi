@@ -103,6 +103,15 @@ performance suites, `make c`, Web E2E и staging image smoke. Workspace и Web
 package имеют версию `0.3.0`; внешний staging operator acceptance остаётся
 отдельным gate окружения.
 
+Для `0.5.0/E1` реализован Community Spaces vertical: отдельные product/sync
+identities, owner/admin/member permission matrix, scoped memberships,
+отзывные и ротируемые link invitations, safe preview и explicit join.
+Community Web shell поддерживает создание и настройку Space, управление
+ролями, ссылками и выходом; capability flags публикуются только для готового
+контура. Зависимые от ещё выполняемого `0.4.0` shared anchors, social search,
+generic images и fingerprint/matching перечислены в
+[`docs/tmp-plans/0.5.0-deferred-until-0.4.0.md`](docs/tmp-plans/0.5.0-deferred-until-0.4.0.md).
+
 ## Локальный запуск
 
 Для основного пути нужны Docker с Compose и `make`. Он собирает и запускает

@@ -26,6 +26,9 @@ pub(crate) const API_BASE: &str = match option_env!("LUMI_API_BASE") {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum AppRoute {
     Library,
+    Community,
+    CommunitySpace(Uuid),
+    CommunityJoin,
     Challenges,
     AiQueue,
     Connections,
@@ -41,6 +44,17 @@ fn initial_route() -> AppRoute {
         .unwrap_or_default();
     if hash == "#settings" {
         return AppRoute::Settings;
+    }
+    if hash == "#communities" {
+        return AppRoute::Community;
+    }
+    if hash.starts_with("#join/") {
+        return AppRoute::CommunityJoin;
+    }
+    if let Some(value) = hash.strip_prefix("#community/") {
+        return Uuid::parse_str(value)
+            .map(AppRoute::CommunitySpace)
+            .unwrap_or(AppRoute::Community);
     }
     if hash == "#challenges" {
         return AppRoute::Challenges;
@@ -76,6 +90,9 @@ fn initial_route() -> AppRoute {
 fn set_browser_route(route: AppRoute) {
     let hash = match route {
         AppRoute::Library => "library".to_owned(),
+        AppRoute::Community => "communities".to_owned(),
+        AppRoute::CommunitySpace(space_id) => format!("community/{space_id}"),
+        AppRoute::CommunityJoin => "join".to_owned(),
         AppRoute::Challenges => "challenges".to_owned(),
         AppRoute::AiQueue => "ai-queue".to_owned(),
         AppRoute::Connections => "connections".to_owned(),
@@ -93,6 +110,13 @@ fn set_browser_route(route: AppRoute) {
     if let Some(window) = web_sys::window() {
         let _ = window.location().set_hash(&hash);
     }
+}
+
+fn community_join_token() -> Option<String> {
+    web_sys::window()
+        .and_then(|window| window.location().hash().ok())
+        .and_then(|hash| hash.strip_prefix("#join/").map(str::to_owned))
+        .filter(|token| !token.is_empty())
 }
 
 fn parse_reader_route(value: &str) -> Option<(Uuid, Option<Uuid>)> {
@@ -139,6 +163,8 @@ pub(crate) fn AccountGate() -> Element {
     let mut route = use_signal(initial_route);
     let mut csrf = use_signal(String::new);
     let mut bootstrap_generation = use_signal(|| 0_u64);
+    let mut community_available = use_signal(|| false);
+    let mut capability_error = use_signal(String::new);
     use_effect(move || {
         let Some(window) = web_sys::window() else {
             return;
@@ -169,6 +195,9 @@ pub(crate) fn AccountGate() -> Element {
     use_effect(move || {
         let title = match route() {
             AppRoute::Library => "Библиотека — Lumi",
+            AppRoute::Community => "Сообщества — Lumi",
+            AppRoute::CommunitySpace(_) => "Сообщество — Lumi",
+            AppRoute::CommunityJoin => "Вступление в сообщество — Lumi",
             AppRoute::Challenges => "Челленджи — Lumi",
             AppRoute::AiQueue => "AI-задачи — Lumi",
             AppRoute::Connections => "Подключения — Lumi",
@@ -187,6 +216,23 @@ pub(crate) fn AccountGate() -> Element {
             match load_account().await {
                 Ok(account) => {
                     csrf.set(read_cookie("lumi_csrf").unwrap_or_default());
+                    match load_capabilities().await {
+                        Ok(capabilities) => {
+                            community_available.set(
+                                capabilities
+                                    .features
+                                    .iter()
+                                    .any(|feature| feature == "community-spaces"),
+                            );
+                            capability_error.set(String::new());
+                        }
+                        Err(api_error) => {
+                            community_available.set(false);
+                            capability_error.set(format!(
+                                "Не удалось проверить возможности сервера: {api_error}"
+                            ));
+                        }
+                    }
                     if account.instance_role != InstanceRole::Admin
                         && (route() == AppRoute::Settings || browser_requests_system_settings())
                     {
@@ -213,6 +259,25 @@ pub(crate) fn AccountGate() -> Element {
             AccountEntry {
                 on_authenticated: move |session: SessionBootstrap| {
                     csrf.set(session.csrf_token.clone());
+                    spawn(async move {
+                        match load_capabilities().await {
+                            Ok(capabilities) => {
+                                community_available.set(
+                                    capabilities
+                                        .features
+                                        .iter()
+                                        .any(|feature| feature == "community-spaces"),
+                                );
+                                capability_error.set(String::new());
+                            }
+                            Err(api_error) => {
+                                community_available.set(false);
+                                capability_error.set(format!(
+                                    "Не удалось проверить возможности сервера: {api_error}"
+                                ));
+                            }
+                        }
+                    });
                     if session.account.instance_role != InstanceRole::Admin
                         && (route() == AppRoute::Settings || browser_requests_system_settings())
                     {
@@ -258,6 +323,12 @@ pub(crate) fn AccountGate() -> Element {
                                 set_browser_route(AppRoute::Library);
                                 route.set(AppRoute::Library);
                             }, "Библиотека" }
+                            if community_available() {
+                                a { href: "#communities", aria_current: if matches!(route(), AppRoute::Community | AppRoute::CommunitySpace(_) | AppRoute::CommunityJoin) { "page" } else { "false" }, onclick: move |_| {
+                                    set_browser_route(AppRoute::Community);
+                                    route.set(AppRoute::Community);
+                                }, "Сообщества" }
+                            }
                             a { href: "#challenges", aria_current: if route() == AppRoute::Challenges { "page" } else { "false" }, onclick: move |_| {
                                 set_browser_route(AppRoute::Challenges);
                                 route.set(AppRoute::Challenges);
@@ -294,6 +365,29 @@ pub(crate) fn AccountGate() -> Element {
                             }
                         }
                     }
+                    }
+                    if !capability_error().is_empty() {
+                        div { class: "library-alert", role: "alert",
+                            span { "{capability_error}" }
+                            button { r#type: "button", onclick: move |_| {
+                                capability_error.set(String::new());
+                                spawn(async move {
+                                    match load_capabilities().await {
+                                        Ok(capabilities) => {
+                                            community_available.set(
+                                                capabilities
+                                                    .features
+                                                    .iter()
+                                                    .any(|feature| feature == "community-spaces"),
+                                            );
+                                        }
+                                        Err(api_error) => capability_error.set(format!(
+                                            "Не удалось проверить возможности сервера: {api_error}"
+                                        )),
+                                    }
+                                });
+                            }, "Повторить" }
+                        }
                     }
                     if let AppRoute::Reader(material_id, return_to) = route() {
                         crate::pdf_reader::ReaderRoute {
@@ -342,6 +436,23 @@ pub(crate) fn AccountGate() -> Element {
                         }
                     } else if route() == AppRoute::Connections {
                         ConnectionsApp { csrf_token: csrf.read().clone() }
+                    } else if matches!(route(), AppRoute::Community | AppRoute::CommunitySpace(_) | AppRoute::CommunityJoin) {
+                        crate::community::CommunityPage {
+                            current_user_id: account.user_id,
+                            csrf_token: csrf.read().clone(),
+                            space_id: if let AppRoute::CommunitySpace(space_id) = route() { Some(space_id) } else { None },
+                            join_token: if route() == AppRoute::CommunityJoin { community_join_token() } else { None },
+                            available: community_available(),
+                            on_open_space: move |space_id| {
+                                let next = AppRoute::CommunitySpace(space_id);
+                                set_browser_route(next);
+                                route.set(next);
+                            },
+                            on_open_list: move |_| {
+                                set_browser_route(AppRoute::Community);
+                                route.set(AppRoute::Community);
+                            },
+                        }
                     } else if route() == AppRoute::Challenges {
                         crate::learning::ChallengesPage {
                             csrf_token: csrf.read().clone(),
@@ -1675,7 +1786,7 @@ fn AccountEntry(on_authenticated: EventHandler<SessionBootstrap>) -> Element {
 }
 
 #[derive(Debug)]
-enum ApiError {
+pub(crate) enum ApiError {
     Unauthorized,
     Message(String),
 }
@@ -2123,7 +2234,7 @@ where
     parse_json(response).await
 }
 
-async fn parse_json<T>(response: gloo_net::http::Response) -> Result<T, ApiError>
+pub(crate) async fn parse_json<T>(response: gloo_net::http::Response) -> Result<T, ApiError>
 where
     T: for<'de> serde::Deserialize<'de>,
 {
@@ -2133,7 +2244,7 @@ where
     response.json().await.map_err(network_error)
 }
 
-fn api_response_error(response: &gloo_net::http::Response) -> ApiError {
+pub(crate) fn api_response_error(response: &gloo_net::http::Response) -> ApiError {
     if response.status() == 401 {
         notify_session_expired();
         ApiError::Unauthorized
@@ -2234,7 +2345,7 @@ fn defer_account_dialog(id: &str) {
     });
 }
 
-fn network_error(error: impl std::fmt::Display) -> ApiError {
+pub(crate) fn network_error(error: impl std::fmt::Display) -> ApiError {
     ApiError::Message(format!("Сеть/API недоступны: {error}"))
 }
 

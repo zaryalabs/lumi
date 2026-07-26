@@ -17,6 +17,7 @@ mod mcp;
 mod pdf_engine;
 mod scheduler;
 pub mod secrets;
+mod social;
 mod telegram;
 mod telegram_media;
 mod telegram_runtime;
@@ -275,6 +276,7 @@ pub struct AppState {
     learning_operation_limits: Arc<learning::limits::LearningOperationLimits>,
     audio: Option<Arc<audio::AudioRuntime>>,
     mcp: Arc<mcp::McpRuntime>,
+    social: Arc<social::SocialRuntime>,
     ai_capabilities: ai::AiCapabilityReadiness,
 }
 
@@ -317,6 +319,7 @@ impl AppState {
             ),
             audio: None,
             mcp: Arc::new(mcp::McpRuntime::memory()),
+            social: Arc::new(social::SocialRuntime::memory()),
             ai_capabilities: ai::AiCapabilityReadiness::default(),
         }
     }
@@ -376,6 +379,11 @@ impl AppState {
         .await
         .map_err(|error| anyhow::anyhow!(error))?;
         let mcp = Arc::new(mcp::McpRuntime::postgres(accounts.pool().clone()));
+        let social = Arc::new(
+            social::SocialRuntime::postgres(accounts.pool().clone(), config.secret_root())
+                .await
+                .map_err(|error| anyhow::anyhow!(error))?,
+        );
         let learning = Arc::new(learning::LearningRuntime::postgres(accounts.pool().clone()));
         let audio = Some(Arc::new(audio::AudioRuntime::postgres(
             accounts.pool().clone(),
@@ -394,6 +402,7 @@ impl AppState {
             ),
             audio,
             mcp,
+            social,
             ai_capabilities: ai::AiCapabilityReadiness::e4_release(),
         })
     }
@@ -419,6 +428,7 @@ impl AppState {
             ),
             audio: None,
             mcp: Arc::new(mcp::McpRuntime::memory()),
+            social: Arc::new(social::SocialRuntime::memory()),
             ai_capabilities: ai::AiCapabilityReadiness::default(),
         }
     }
@@ -449,6 +459,10 @@ impl AppState {
 
     fn mcp_runtime(&self) -> &mcp::McpRuntime {
         self.mcp.as_ref()
+    }
+
+    fn social_runtime(&self) -> &social::SocialRuntime {
+        self.social.as_ref()
     }
 
     fn learning_runtime(&self) -> &learning::LearningRuntime {
@@ -694,6 +708,12 @@ pub(crate) fn service_capabilities(state: &AppState) -> ServiceCapabilities {
             .features
             .push("learning-explain-back".to_owned());
     }
+    capabilities.route_groups.push("spaces".to_owned());
+    capabilities.route_groups.push("shares".to_owned());
+    capabilities.features.push("community-spaces".to_owned());
+    capabilities
+        .features
+        .push("community-link-access".to_owned());
     capabilities
 }
 
@@ -1846,6 +1866,7 @@ enum AppError {
     Unauthorized,
     Forbidden(&'static str),
     Conflict(String),
+    Unprocessable(String),
     TooManyRequests(&'static str),
     PayloadTooLarge,
     Unavailable(&'static str),
@@ -1868,6 +1889,11 @@ impl IntoResponse for AppError {
             ),
             AppError::Forbidden(detail) => (StatusCode::FORBIDDEN, "forbidden", detail.to_owned()),
             AppError::Conflict(detail) => (StatusCode::CONFLICT, "conflict", detail),
+            AppError::Unprocessable(detail) => (
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "unprocessable_entity",
+                detail,
+            ),
             AppError::TooManyRequests(detail) => (
                 StatusCode::TOO_MANY_REQUESTS,
                 "too_many_requests",
@@ -1927,6 +1953,7 @@ mod tests {
     use lumi_core::{
         sample_fixture_highlight, AnnotationKind, HighlightStyle, ImportedFixture, WebAccount,
     };
+    use sqlx_core::row::Row;
     use tower::ServiceExt;
 
     use super::*;
@@ -2186,7 +2213,7 @@ mod tests {
         let migrations: Vec<SchemaMigration> =
             json_get(build_router(), "/api/v1/schema/migrations").await?;
 
-        assert_eq!(migrations.len(), 23);
+        assert_eq!(migrations.len(), 24);
         assert!(migrations
             .iter()
             .any(|migration| migration.id == "s1-0017-learning-core"));
@@ -2199,6 +2226,9 @@ mod tests {
         assert!(migrations
             .iter()
             .any(|migration| migration.id == "s1-0020-learning-voice"));
+        assert!(migrations
+            .iter()
+            .any(|migration| migration.id == "s1-0021-community-spaces-access"));
         Ok(())
     }
 
@@ -2703,6 +2733,184 @@ mod tests {
                 .await?;
             assert_eq!(response.status(), StatusCode::NOT_FOUND);
         }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn postgres_community_link_flow_enforces_membership_and_revocation(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let Ok(database_url) = std::env::var("LUMI_TEST_DATABASE_URL") else {
+            return Ok(());
+        };
+        let _recovery_guard = crate::imports::POSTGRES_RECOVERY_TEST_LOCK.lock().await;
+        run_migrations(&database_url).await?;
+        let blob_root =
+            std::env::temp_dir().join(format!("lumi-community-{}", uuid::Uuid::now_v7()));
+        let secret_root =
+            std::env::temp_dir().join(format!("lumi-community-secrets-{}", uuid::Uuid::now_v7()));
+        let mut config = AppConfig::from_env();
+        config.database_url = database_url.clone();
+        config.blob_root = blob_root;
+        config.secret_root = secret_root;
+        config.bind_address = DEFAULT_BIND_ADDRESS.to_owned();
+        config.deployment_mode = "local".to_owned();
+        let app = build_router_with_state(AppState::persistent(&config).await?);
+        let owner = register_test_session(app.clone(), 0x81).await?;
+        let member = register_test_session(app.clone(), 0x91).await?;
+
+        let create_response = app
+            .clone()
+            .oneshot(
+                owner.apply(
+                    Request::builder()
+                        .method("POST")
+                        .uri("/api/v1/spaces")
+                        .header(header::CONTENT_TYPE, "application/json")
+                        .header("idempotency-key", "community-create-flow")
+                        .body(json_body(&lumi_core::CreateCommunitySpaceRequest {
+                            name: "Книжный клуб".to_owned(),
+                            description: Some("Два браузера".to_owned()),
+                        })?)?,
+                ),
+            )
+            .await?;
+        assert_eq!(create_response.status(), StatusCode::CREATED);
+        let body = axum::body::to_bytes(create_response.into_body(), usize::MAX).await?;
+        let created: lumi_core::CommunitySpaceDetail = serde_json::from_slice(&body)?;
+
+        let link_response = app
+            .clone()
+            .oneshot(
+                owner.apply(
+                    Request::builder()
+                        .method("POST")
+                        .uri(format!("/api/v1/spaces/{}/access-links", created.space.id))
+                        .header(header::CONTENT_TYPE, "application/json")
+                        .header("idempotency-key", "community-link-flow")
+                        .body(json_body(&lumi_core::CreateCommunityAccessLinkRequest {
+                            expires_at: None,
+                            max_uses: None,
+                        })?)?,
+                ),
+            )
+            .await?;
+        assert_eq!(link_response.status(), StatusCode::CREATED);
+        let body = axum::body::to_bytes(link_response.into_body(), usize::MAX).await?;
+        let link: lumi_core::CreatedCommunityAccessLink = serde_json::from_slice(&body)?;
+
+        let preview_response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/shares/community-link/preview")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(json_body(&lumi_core::PreviewCommunityLinkRequest {
+                        token: link.token.clone(),
+                    })?)?,
+            )
+            .await?;
+        assert_eq!(preview_response.status(), StatusCode::OK);
+
+        let hidden_before_join = app
+            .clone()
+            .oneshot(
+                member.apply(
+                    Request::builder()
+                        .uri(format!("/api/v1/spaces/{}", created.space.id))
+                        .body(Body::empty())?,
+                ),
+            )
+            .await?;
+        assert_eq!(hidden_before_join.status(), StatusCode::NOT_FOUND);
+
+        let join_response = app
+            .clone()
+            .oneshot(
+                member.apply(
+                    Request::builder()
+                        .method("POST")
+                        .uri("/api/v1/shares/community-link/join")
+                        .header(header::CONTENT_TYPE, "application/json")
+                        .header("idempotency-key", "community-join-flow")
+                        .body(json_body(&lumi_core::JoinCommunityLinkRequest {
+                            token: link.token.clone(),
+                        })?)?,
+                ),
+            )
+            .await?;
+        assert_eq!(join_response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(join_response.into_body(), usize::MAX).await?;
+        let joined: lumi_core::CommunitySpaceDetail = serde_json::from_slice(&body)?;
+
+        let revoke_response = app
+            .clone()
+            .oneshot(
+                owner.apply(
+                    Request::builder()
+                        .method("DELETE")
+                        .uri(format!(
+                            "/api/v1/spaces/{}/access-links/{}",
+                            created.space.id, link.link.id
+                        ))
+                        .header("idempotency-key", "community-revoke-flow")
+                        .body(Body::empty())?,
+                ),
+            )
+            .await?;
+        assert_eq!(revoke_response.status(), StatusCode::NO_CONTENT);
+
+        let revoked_preview = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/shares/community-link/preview")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(json_body(&lumi_core::PreviewCommunityLinkRequest {
+                        token: link.token.clone(),
+                    })?)?,
+            )
+            .await?;
+        assert_eq!(revoked_preview.status(), StatusCode::NOT_FOUND);
+
+        let remove_response = app
+            .clone()
+            .oneshot(
+                owner.apply(
+                    Request::builder()
+                        .method("DELETE")
+                        .uri(format!(
+                            "/api/v1/spaces/{}/members/{}",
+                            created.space.id, joined.membership.user_id
+                        ))
+                        .header("idempotency-key", "community-remove-flow")
+                        .body(Body::empty())?,
+                ),
+            )
+            .await?;
+        assert_eq!(remove_response.status(), StatusCode::NO_CONTENT);
+        let hidden_after_remove = app
+            .oneshot(
+                member.apply(
+                    Request::builder()
+                        .uri(format!("/api/v1/spaces/{}", created.space.id))
+                        .body(Body::empty())?,
+                ),
+            )
+            .await?;
+        assert_eq!(hidden_after_remove.status(), StatusCode::NOT_FOUND);
+
+        let audit_store = PgAccountStore::connect(&database_url, HashSet::new()).await?;
+        let stored_response: serde_json::Value = sqlx_core::query::query(
+            "SELECT response_body FROM idempotency_keys
+             WHERE scope_id = $1 AND idempotency_key = 'community-link-flow'",
+        )
+        .bind(created.space.id)
+        .fetch_one(audit_store.pool())
+        .await?
+        .try_get("response_body")?;
+        assert!(!stored_response.to_string().contains(&link.token));
         Ok(())
     }
 
