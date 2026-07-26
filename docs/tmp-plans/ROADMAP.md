@@ -62,10 +62,16 @@ Knowledge Base, native full-copy replicas, Obsidian, plugin platform, будущ
 
 Persistent server публикует capabilities `ai-provider-openrouter`,
 `ai-provider-byok`, `ai-explicit-context`, `ai-global-chat`, `ai-task-queue`,
-`ai-summary`, `mcp-account-tools`, `mcp-ai-worker` и `ai-abridged-lum`.
+`ai-summary-artifacts`, `mcp-account-agent`, `mcp-ai-worker` и
+`ai-abridged-lum`.
 
 После перехода на новую шкалу выполнено `4/18` продуктовых эпиков. Stage 0,
 Contract Freeze 1 и A1 остаются закрытыми prerequisites.
+
+Repository-side gates `make c`, PostgreSQL/compatibility/security/performance,
+полный Web E2E и локальный staging image smoke проходят. Внешний staging
+operator acceptance остаётся release gate окружения и не меняет статус
+реализации продуктовых эпиков.
 
 В прежней шкале это соответствовало `3/57` закрытым checkpoint roadmap, но
 такой процент отражал в основном количество мелких шагов, а не продуктовую

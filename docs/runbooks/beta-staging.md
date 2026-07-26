@@ -96,7 +96,9 @@ make beta
 `beta-local` поднимает PostgreSQL, применяет migrations и запускает обязательные
 PG, compatibility, security, release performance, validator contract,
 `make c` и browser E2E suites. Он доказывает repository mechanics, но не
-принимает закрытую beta.
+принимает закрытую beta. PostgreSQL и blob state создаются в disposable
+Compose project на свободном локальном порту и удаляются после gate; сохранённая
+локальная database не используется и не изменяется.
 
 `beta` дополнительно требует `RESTORE_ATTESTATION` — JSON
 `lumi.restore-attestation.v1`, который ссылается на backup manifest,

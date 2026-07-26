@@ -43,6 +43,7 @@ class WorkflowContractTests(unittest.TestCase):
         makefile = (ROOT / "Makefile").read_text(encoding="utf-8")
         self.assertIn(
             "CARGO ?= $(if $(RUSTUP_TOOLCHAIN_BIN),"
+            "PATH=$(RUSTUP_TOOLCHAIN_BIN):$$PATH "
             "$(RUSTUP_TOOLCHAIN_BIN)/cargo,cargo)",
             makefile,
         )
@@ -137,6 +138,27 @@ class OperationsContractTests(unittest.TestCase):
             text,
         )
         self.assertNotIn("platform-auth-chain@file", text)
+
+    def test_local_release_smokes_do_not_consume_persistent_state_or_placeholders(
+        self,
+    ) -> None:
+        makefile = (ROOT / "Makefile").read_text(encoding="utf-8")
+        web_e2e = (ROOT / "scripts" / "web-e2e.sh").read_text(encoding="utf-8")
+        beta_local = (ROOT / "scripts" / "beta-local-gate.sh").read_text(
+            encoding="utf-8"
+        )
+        staging_smoke = (ROOT / "scripts" / "staging-smoke.sh").read_text(
+            encoding="utf-8"
+        )
+
+        self.assertIn('./scripts/web-e2e.sh', makefile)
+        self.assertIn('mktemp -d /tmp/lumi-e2e.', web_e2e)
+        self.assertIn('down --volumes --remove-orphans', web_e2e)
+        self.assertIn('Dockerfile.poppler', web_e2e)
+        self.assertIn('mktemp -d /tmp/lumi-beta-local.', beta_local)
+        self.assertIn('down --volumes --remove-orphans', beta_local)
+        self.assertIn("export LUMI_ADMIN_LOOKUP_IDS=''", staging_smoke)
+        self.assertIn('export LUMI_STAGING_PORT="$staging_port"', staging_smoke)
 
     def test_root_wrapper_limits_manifest_source(self) -> None:
         text = (ROOT / "ops" / "lumi-ci-root").read_text(encoding="utf-8")

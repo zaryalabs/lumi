@@ -166,6 +166,12 @@ make web-e2e
 make web-e2e
 ```
 
+Команда использует отдельный disposable Compose project, выбирает свободные
+локальные порты и после завершения удаляет тестовые PostgreSQL/blob volumes.
+PDF flow не требует host-установки Poppler: `pdfinfo`, `pdftotext` и
+`pdftoppm` запускаются через изолированный E2E image. Docker остаётся
+обязательной зависимостью полного browser gate.
+
 Реальный локальный профиль для host-native процессов:
 
 ```sh

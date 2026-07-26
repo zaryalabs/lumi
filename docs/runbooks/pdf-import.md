@@ -108,6 +108,10 @@ make c
 make web-e2e
 ```
 
+`make web-e2e` использует disposable containerized Poppler, поэтому полный PDF
+flow проходит и на host без установленных `pdfinfo`, `pdftotext` и
+`pdftoppm`.
+
 Ручной smoke flow: создать аккаунт, выбрать вкладку PDF, загрузить
 `tests/fixtures/pdf/text-layer.pdf`, дождаться `Готово`, открыть материал,
 проверить две страницы разной ориентации, zoom, selection, highlight, reload и

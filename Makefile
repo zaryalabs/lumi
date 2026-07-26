@@ -365,7 +365,7 @@ e2e-dl: ## Run optional Playwright static checks when dependencies exist
 
 web-e2e: ## Run Playwright browser E2E tests
 	@if [ -f "$(E2E_PACKAGE)" ]; then \
-		if [ -d "$(E2E_NODE_MODULES)" ]; then $(NPM) --prefix $(E2E_DIR) test; else echo "E2E dependencies are not installed; run make init"; exit 1; fi; \
+		if [ -d "$(E2E_NODE_MODULES)" ]; then NPM="$(NPM)" ./scripts/web-e2e.sh; else echo "E2E dependencies are not installed; run make init"; exit 1; fi; \
 	else \
 		echo "No $(E2E_PACKAGE) found; cannot run E2E tests"; \
 		exit 1; \
