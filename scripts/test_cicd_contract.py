@@ -3,6 +3,7 @@ import re
 import stat
 import subprocess
 import tempfile
+import tomllib
 import unittest
 from pathlib import Path
 
@@ -12,6 +13,53 @@ WORKFLOWS = ROOT / ".github" / "workflows"
 
 
 class WorkflowContractTests(unittest.TestCase):
+    def test_rust_toolchain_is_synchronized_across_build_environments(self) -> None:
+        toolchain = tomllib.loads(
+            (ROOT / "rust-toolchain.toml").read_text(encoding="utf-8")
+        )["toolchain"]
+        version = toolchain["channel"]
+
+        workspace = tomllib.loads((ROOT / "Cargo.toml").read_text(encoding="utf-8"))
+        self.assertEqual(version, workspace["workspace"]["package"]["rust-version"])
+
+        workflow = (WORKFLOWS / "main.yml").read_text(encoding="utf-8")
+        self.assertIn(f"toolchain: {version}", workflow)
+
+        for name in ("Dockerfile.server", "Dockerfile.web"):
+            dockerfile = (ROOT / "deployments" / name).read_text(encoding="utf-8")
+            self.assertIn(f"FROM rust:{version}-bookworm AS builder", dockerfile)
+
+        devcontainer = (ROOT / ".devcontainer" / "Dockerfile").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn(
+            "COPY --chown=vscode:vscode rust-toolchain.toml "
+            "/tmp/lumi-toolchain/rust-toolchain.toml",
+            devcontainer,
+        )
+        self.assertIn("rustup toolchain install", devcontainer)
+        self.assertNotIn("ARG RUST_VERSION", devcontainer)
+
+        makefile = (ROOT / "Makefile").read_text(encoding="utf-8")
+        self.assertIn(
+            "CARGO ?= $(if $(RUSTUP_TOOLCHAIN_BIN),"
+            "$(RUSTUP_TOOLCHAIN_BIN)/cargo,cargo)",
+            makefile,
+        )
+        self.assertIn(
+            "$(DEVCONTAINER) up --workspace-folder .",
+            makefile,
+        )
+        self.assertIn(
+            "$(DEVCONTAINER) exec --workspace-folder . bash",
+            makefile,
+        )
+        self.assertIn(
+            "--project-name $(DEVCONTAINER_COMPOSE_PROJECT) "
+            "--file $(DEVCONTAINER_COMPOSE_FILE) down --remove-orphans",
+            makefile,
+        )
+
     def test_workflows_never_run_for_pull_requests(self) -> None:
         for path in sorted(WORKFLOWS.glob("*.yml")):
             text = path.read_text(encoding="utf-8")

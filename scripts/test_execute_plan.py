@@ -6,6 +6,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 
 MODULE_PATH = Path(__file__).with_name("execute_plan.py")
@@ -159,6 +160,32 @@ class ExecutePlanTests(unittest.TestCase):
                 for line in log_path.read_text(encoding="utf-8").splitlines()
             ]
             self.assertEqual(raw_events, [event])
+
+    def test_codex_command_uses_xhigh_reasoning_by_default(self) -> None:
+        with mock.patch.dict(
+            execute_plan.os.environ,
+            {"LUMI_CODEX_MODEL": "test-model"},
+            clear=True,
+        ):
+            command = execute_plan.codex_command(Path("/tmp/last-message.md"))
+
+        self.assertIn("test-model", command)
+        self.assertIn('model_reasoning_effort="xhigh"', command)
+
+    def test_codex_reasoning_effort_can_be_overridden_and_is_validated(self) -> None:
+        with mock.patch.dict(
+            execute_plan.os.environ,
+            {"LUMI_CODEX_REASONING_EFFORT": "high"},
+            clear=True,
+        ):
+            self.assertEqual(execute_plan.codex_reasoning_effort(), "high")
+        with mock.patch.dict(
+            execute_plan.os.environ,
+            {"LUMI_CODEX_REASONING_EFFORT": "extreme"},
+            clear=True,
+        ):
+            with self.assertRaisesRegex(execute_plan.RunnerError, "Unsupported"):
+                execute_plan.codex_reasoning_effort()
 
 
 if __name__ == "__main__":

@@ -1,8 +1,6 @@
 FROM mcr.microsoft.com/playwright:v1.57.0-noble
 
-ARG CODEX_VERSION=0.144.1
 ARG DIOXUS_VERSION=0.7.9
-ARG RUST_VERSION=1.88.0
 
 ENV DEBIAN_FRONTEND=noninteractive
 
@@ -52,7 +50,7 @@ RUN if id -u pwuser >/dev/null 2>&1; then \
     && echo "vscode ALL=(root) NOPASSWD:ALL" > /etc/sudoers.d/vscode \
     && chmod 0440 /etc/sudoers.d/vscode
 
-RUN npm install --global "@openai/codex@${CODEX_VERSION}"
+RUN npm install --global "@openai/codex@latest"
 
 USER vscode
 
@@ -60,11 +58,13 @@ ENV CARGO_HOME=/home/vscode/.cargo
 ENV PATH=/home/vscode/.cargo/bin:${PATH}
 ENV RUSTUP_HOME=/home/vscode/.rustup
 
+COPY --chown=vscode:vscode rust-toolchain.toml /tmp/lumi-toolchain/rust-toolchain.toml
+WORKDIR /tmp/lumi-toolchain
+
 RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
         | sh -s -- -y --no-modify-path --profile minimal \
-            --default-toolchain "${RUST_VERSION}" \
-    && rustup component add clippy rustfmt \
-    && rustup target add wasm32-unknown-unknown \
+            --default-toolchain none \
+    && rustup toolchain install \
     && cargo install dioxus-cli --version "${DIOXUS_VERSION}" --locked
 
 WORKDIR /workspaces/lumi

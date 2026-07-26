@@ -22,6 +22,10 @@ DEFAULT_STATE_ROOT = REPO_ROOT / ".local" / "codex-plan-runs"
 ROADMAP_PATH = "docs/tmp-plans/ROADMAP.md"
 STATE_VERSION = 1
 STAGE_TRAILER = "Lumi-Plan-Stage"
+DEFAULT_CODEX_REASONING_EFFORT = "xhigh"
+CODEX_REASONING_EFFORTS = frozenset(
+    {"minimal", "low", "medium", "high", "xhigh"}
+)
 
 Command = tuple[str, ...]
 
@@ -805,6 +809,7 @@ def preflight(*, require_clean: bool, require_auth: bool) -> None:
         )
     help_text = run_capture(("codex", "exec", "--help")).stdout
     expected_flags = (
+        "--config",
         "--dangerously-bypass-approvals-and-sandbox",
         "--dangerously-bypass-hook-trust",
         "--ephemeral",
@@ -825,6 +830,25 @@ def preflight(*, require_clean: bool, require_auth: bool) -> None:
                 "Codex is not authenticated inside the devcontainer. "
                 f"Run `codex login --device-auth`. Details: {detail}"
             )
+
+
+def codex_reasoning_effort() -> str:
+    effort = os.environ.get(
+        "LUMI_CODEX_REASONING_EFFORT",
+        DEFAULT_CODEX_REASONING_EFFORT,
+    ).strip()
+    if effort not in CODEX_REASONING_EFFORTS:
+        allowed = ", ".join(sorted(CODEX_REASONING_EFFORTS))
+        raise RunnerError(
+            "Unsupported LUMI_CODEX_REASONING_EFFORT "
+            f"{effort!r}; expected one of: {allowed}"
+        )
+    return effort
+
+
+def print_codex_configuration() -> None:
+    model = os.environ.get("LUMI_CODEX_MODEL") or "<Codex CLI default>"
+    print(f"Codex configuration: model={model}, reasoning={codex_reasoning_effort()}")
 
 
 def stream_process(
@@ -970,6 +994,8 @@ def codex_command(last_message_path: Path) -> list[str]:
         "--dangerously-bypass-hook-trust",
         "--ephemeral",
         "--ignore-user-config",
+        "--config",
+        f'model_reasoning_effort="{codex_reasoning_effort()}"',
         "--json",
         "--color",
         "never",
@@ -1319,6 +1345,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         selected = select_stages(args.from_stage, args.only_stage, args.release)
         if args.dry_run:
             print("Dry run; no Codex calls, gates or commits will run.\n")
+            print_codex_configuration()
+            print()
             if not selected:
                 print(f"Release {args.release} is already complete.")
                 return 0
@@ -1329,6 +1357,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             print(f"Release {args.release} is already complete; nothing to run.")
             return 0
 
+        print_codex_configuration()
         state_file = args.state_root / "state.json"
         if args.resume:
             if not state_file.is_file():

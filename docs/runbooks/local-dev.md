@@ -49,7 +49,8 @@ blob-данные; используйте его только когда нуж�
 
 Host-native запуск удобен при активной разработке. Для него нужны:
 
-- Rust 1.88+ с `cargo`, `rustfmt` и `clippy`;
+- Rust `1.93.1` с `cargo`, `rustfmt` и `clippy`; версия и компоненты
+  зафиксированы в корневом `rust-toolchain.toml`;
 - target `wasm32-unknown-unknown`;
 - Dioxus CLI `dx` версии, совместимой с Dioxus 0.7;
 - Node.js и npm для Playwright;

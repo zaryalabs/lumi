@@ -85,7 +85,22 @@ git status --short
 Runner принципиально не смешивает уже существующий dirty worktree с первым
 этапом.
 
-В VS Code выполните `Dev Containers: Reopen in Container`. Через CLI:
+В VS Code выполните `Dev Containers: Reopen in Container`. Через Make:
+
+```sh
+make devcontainer-up
+```
+
+Команда создаёт или запускает devcontainer и открывает внутри интерактивный
+`bash`. После выхода из shell остановить и удалить его Compose-сервисы можно
+с хоста:
+
+```sh
+make devcontainer-down
+```
+
+Named volumes `codex-home` и `docker-data` при этом сохраняются. Эквивалентный
+ручной запуск через CLI:
 
 ```sh
 devcontainer up --workspace-folder .
@@ -94,11 +109,23 @@ devcontainer exec --workspace-folder . bash
 
 Первичная сборка устанавливает:
 
-- Codex CLI `0.144.1`;
-- Rust `1.88.0`, `rustfmt`, `clippy` и wasm target;
+- последний опубликованный Codex CLI из npm tag `latest`;
+- Rust `1.93.1`, `rustfmt`, `clippy` и wasm target из корневого
+  `rust-toolchain.toml`;
 - Dioxus CLI `0.7.9`;
 - Node.js и Playwright Chromium image `1.57.0`;
 - Docker CLI/Compose, PostgreSQL client, pre-commit и project dependencies.
+
+Docker layer с `npm install` может быть взят из build cache. Поэтому
+`postCreateCommand` дополнительно выполняет
+`npm install --global @openai/codex@latest` при каждом создании devcontainer и
+перед началом работы обновляет CLI по текущему npm tag. Уже запущенный
+container сам по себе не обновляется; для ручного обновления без пересоздания:
+
+```sh
+sudo npm install --global @openai/codex@latest
+codex --version
+```
 
 После открытия container авторизуйте Codex:
 
@@ -230,11 +257,24 @@ python3 scripts/execute_plan.py --resume
 
 ## Модель и обслуживание manifest
 
-По умолчанию модель берётся из Codex. Для явного выбора:
+По умолчанию модель берётся из Codex, а reasoning effort runner явно
+устанавливает в `xhigh` для обоих вызовов каждого этапа. Для явного выбора
+модели:
 
 ```sh
 LUMI_CODEX_MODEL="<model-id>" python3 scripts/execute_plan.py --only 0.2.0/A1
 ```
+
+Reasoning можно понизить для конкретного запуска:
+
+```sh
+LUMI_CODEX_REASONING_EFFORT=high \
+  python3 scripts/execute_plan.py --release 0.2.0
+```
+
+Допустимые значения: `minimal`, `low`, `medium`, `high`, `xhigh`. Выбранная
+модель должна поддерживать указанный effort. Эффективные model и reasoning
+печатаются перед началом запуска и при `--dry-run`.
 
 Не передавайте дополнительные CLI flags строкой из environment: runner
 собирает аргументы без shell, чтобы избежать command injection.

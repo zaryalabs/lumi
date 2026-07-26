@@ -5,6 +5,7 @@ repo_root="/workspaces/lumi"
 
 sudo chown -R vscode:vscode /home/vscode/.codex
 git config --global --add safe.directory "${repo_root}"
+sudo npm install --global @openai/codex@latest
 
 for attempt in $(seq 1 30); do
   if docker info >/dev/null 2>&1; then

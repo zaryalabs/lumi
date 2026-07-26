@@ -1,12 +1,14 @@
 SHELL := /bin/sh
 
-CARGO ?= cargo
 DX ?= dx
 NPM ?= npm
 PRE_COMMIT ?= pre-commit
 DOCKER ?= docker
+DEVCONTAINER ?= devcontainer
 
 RUST_MANIFEST := Cargo.toml
+DEVCONTAINER_COMPOSE_FILE := .devcontainer/docker-compose.yml
+DEVCONTAINER_COMPOSE_PROJECT := lumi_devcontainer
 STAGE0_SPIKE_PACKAGE := lumi-stage0-spikes
 WEB_DIR := apps/web
 WEB_PACKAGE := $(WEB_DIR)/Cargo.toml
@@ -46,10 +48,11 @@ LUMI_BLOB_ROOT ?= .local/blob-store
 LUMI_PROTOTYPE_PORT ?= 4173
 RUSTUP_TOOLCHAIN_BIN ?= $(shell if command -v rustup >/dev/null 2>&1; then dirname "$$(rustup which rustc 2>/dev/null)"; fi)
 RUSTUP_PATH_ENV := $(if $(RUSTUP_TOOLCHAIN_BIN),PATH=$(RUSTUP_TOOLCHAIN_BIN):$$PATH,)
+CARGO ?= $(if $(RUSTUP_TOOLCHAIN_BIN),$(RUSTUP_TOOLCHAIN_BIN)/cargo,cargo)
 
 .DEFAULT_GOAL := help
 
-.PHONY: help prepare build push release-manifest deploy ci-clean-images ops-config cicd-contract-test production-compose-smoke init fmt l dl t c pc docs-fmt docs-l rust-fmt rust-l rust-web-check rust-web-l rust-dl rust-t plan-runner-check plan-list up logs down reset server-r admin-lookup-id telegram-r db-up db-down db-migrate pdfjs-assets web-r prototype-r prototype-e2e pagination-spike-r pagination-spike-e2e ai-chat-spike-e2e stage0-spikes web-build e2e-fmt e2e-fmt-check e2e-l e2e-dl web-e2e pg-t compatibility security performance staging-config staging-smoke backup restore-drill restore-attestation-test restore-attestation beta-local beta agent-inspect
+.PHONY: help prepare build push release-manifest deploy ci-clean-images ops-config cicd-contract-test production-compose-smoke init fmt l dl t c pc docs-fmt docs-l rust-fmt rust-l rust-web-check rust-web-l rust-dl rust-t plan-runner-check plan-list devcontainer-up devcontainer-down up logs down reset server-r admin-lookup-id telegram-r db-up db-down db-migrate pdfjs-assets web-r prototype-r prototype-e2e pagination-spike-r pagination-spike-e2e ai-chat-spike-e2e stage0-spikes web-build e2e-fmt e2e-fmt-check e2e-l e2e-dl web-e2e pg-t compatibility security performance staging-config staging-smoke backup restore-drill restore-attestation-test restore-attestation beta-local beta agent-inspect
 
 help: ## Show available make targets
 	@awk 'BEGIN {FS = ":.*## "}; /^[a-zA-Z0-9_.-]+:.*## / {printf "  %-16s %s\n", $$1, $$2}' $(MAKEFILE_LIST)
@@ -152,6 +155,13 @@ plan-runner-check: ## Validate the autonomous plan runner and stage manifest
 
 plan-list: ## List autonomous implementation stages, commits and gates
 	python3 scripts/execute_plan.py --list
+
+devcontainer-up: ## Build/start the devcontainer and open an interactive shell
+	$(DEVCONTAINER) up --workspace-folder .
+	$(DEVCONTAINER) exec --workspace-folder . bash
+
+devcontainer-down: ## Stop and remove devcontainer services while preserving named volumes
+	$(DOCKER) compose --project-name $(DEVCONTAINER_COMPOSE_PROJECT) --file $(DEVCONTAINER_COMPOSE_FILE) down --remove-orphans
 
 docs-fmt: ## Format/check docs when a formatter is available
 	@echo "No docs formatter configured yet; skipping docs format"
@@ -416,4 +426,4 @@ clean: ## Remove common local build and cache artifacts
 	rm -rf $(WEB_DIR)/dist $(WEB_DIR)/target
 	rm -rf $(E2E_DIR)/test-results $(E2E_DIR)/playwright-report
 
-.PHONY: help init fmt l dl t c pc docs-fmt docs-l rust-fmt rust-l rust-web-check rust-web-l rust-dl rust-t up logs down reset db-up db-down db-migrate server-r web-r prototype-r prototype-e2e pagination-spike-r pagination-spike-e2e ai-chat-spike-e2e stage0-spikes web-build e2e-fmt e2e-l e2e-dl web-e2e agent-inspect clean
+.PHONY: help init fmt l dl t c pc docs-fmt docs-l rust-fmt rust-l rust-web-check rust-web-l rust-dl rust-t devcontainer-up devcontainer-down up logs down reset db-up db-down db-migrate server-r web-r prototype-r prototype-e2e pagination-spike-r pagination-spike-e2e ai-chat-spike-e2e stage0-spikes web-build e2e-fmt e2e-l e2e-dl web-e2e agent-inspect clean
