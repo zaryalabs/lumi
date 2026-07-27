@@ -59,7 +59,7 @@ help: ## Show available make targets
 
 # CI/CD contract
 
-prepare: docs-l rust-l rust-t e2e-fmt-check e2e-l e2e-dl ops-config restore-attestation-test cicd-contract-test ## Run non-mutating release checks
+prepare: pdfjs-assets docs-l rust-l rust-t e2e-fmt-check e2e-l e2e-dl ops-config restore-attestation-test cicd-contract-test ## Prepare generated assets and run release checks
 
 build: ## Build commit-tagged server and web images
 	$(DOCKER) build --pull --file deployments/Dockerfile.server --tag "$(LUMI_SERVER_IMAGE)" .

@@ -123,6 +123,13 @@ class OperationsContractTests(unittest.TestCase):
         }
         self.assertEqual(set(), required - targets)
 
+    def test_release_prepare_generates_pinned_pdfjs_assets_first(self) -> None:
+        text = (ROOT / "Makefile").read_text(encoding="utf-8")
+        prepare = re.search(r"(?m)^prepare: (.+?) ##", text)
+
+        self.assertIsNotNone(prepare)
+        self.assertEqual("pdfjs-assets", prepare.group(1).split()[0])
+
     def test_external_smoke_uses_server_owned_origin_without_sourcing_env(self) -> None:
         text = (ROOT / "ops" / "Makefile").read_text(encoding="utf-8")
         self.assertIn("s/^LUMI_WEB_ORIGIN=//p", text)
