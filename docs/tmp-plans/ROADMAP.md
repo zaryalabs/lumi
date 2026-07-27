@@ -2,7 +2,7 @@
 
 Status: `active`
 
-Последнее обновление: 2026-07-26
+Последнее обновление: 2026-07-27
 
 ## Назначение
 
@@ -83,13 +83,16 @@ Knowledge Base, native full-copy replicas, Obsidian, plugin platform, будущ
 - `0.4.0 / E4`: rebuildable Desk projection, material/cross-material Web
   surfaces, единый Global/Library/Reader/Desk search, typed direct routes,
   inline Annotation edit и MCP parity `mcp-tools.v3`;
+- `0.4.0 / E5`: bounded owner-scoped RAG по записям через общий retrieval и
+  durable global AI chat, visible included context, exact citations/open
+  targets, Reader/Desk/Search entry points и repository-side выпуск `0.4.0`;
 - release evidence A1 зафиксирован commit trailer
   `Lumi-Plan-Stage: 0.2.0/A1`.
 
 Ещё не готово:
 
-- record-scoped RAG и Community Spaces. Внешний staging operator acceptance
-  остаётся gate конкретного окружения.
+- Community Spaces. Внешний staging operator acceptance остаётся gate
+  конкретного окружения.
 
 Persistent server публикует capabilities `ai-provider-openrouter`,
 `ai-provider-byok`, `ai-explicit-context`, `ai-global-chat`, `ai-task-queue`,
@@ -104,8 +107,10 @@ Persistent server публикует capabilities `ai-provider-openrouter`,
 groups `audio`, `links`. Этапы E3–E4 добавляют `search-index`,
 `search-query`, `ai-retrieval`, `desk-projection`, `desk-query`,
 `desk-inline-edit`, `desk-mcp`, `search-mcp` и route groups `search`, `desk`.
+Этап E5 публикует `record-rag`, когда одновременно готовы общий AI chat и
+search runtime.
 
-После перехода на новую шкалу выполнено `13/18` продуктовых эпиков. Stage 0,
+После перехода на новую шкалу выполнено `14/18` продуктовых эпиков. Stage 0,
 Contract Freeze 1 и A1 остаются закрытыми prerequisites.
 
 Repository-side gates `make c`, PostgreSQL/compatibility/security/performance,
@@ -118,7 +123,7 @@ operator acceptance остаётся release gate окружения и не м�
 готовность. Поэтому новая шкала начинается с нуля завершённых end-to-end
 эпиков и отдельно сохраняет перечень уже готового foundation выше.
 
-Текущий следующий эпик — `0.4.0/E5: RAG по записям и выпуск`.
+Текущий следующий эпик — `0.5.0/E1: Community Spaces и доступ`.
 
 ## Последовательность
 
@@ -172,7 +177,8 @@ operator gate.
 Начинается только после `0.3.0/E5`.
 
 Подробный план:
-[`0.4.0-notes-and-desk-plan.md`](0.4.0-notes-and-desk-plan.md).
+[`0.4.0-notes-and-desk-plan.md`](../archive/0.4.0-notes-and-desk-plan.md)
+(архив).
 
 1. [x] **E1 — Records v2 и Rich Reader.** Совместимая Annotation v2,
    targets, rich highlights/notes, Reader CRUD, migration и export.
@@ -182,12 +188,13 @@ operator gate.
    indexing/rebuild jobs, permission-aware query/retrieval API и benchmarks.
 4. [x] **E4 — Desk и единый поиск.** Desk projection/surfaces, global,
    library, Reader и Desk search, routing, inline edit и MCP parity.
-5. [ ] **E5 — RAG по записям и выпуск.** Record-scoped retrieval в общем
+5. [x] **E5 — RAG по записям и выпуск.** Record-scoped retrieval в общем
    AI-чате, citations, сквозной Reader → Desk → Search → Chat flow и release
    hardening.
 
 Результат: единая модель записей проходит через Reader, Desk, поиск, MCP и
-record-scoped RAG без второго контура данных.
+record-scoped RAG без второго контура данных; workspace и Web package имеют
+версию `0.4.0`.
 
 ### 4. Lumi 0.5.0 — социальные пространства
 

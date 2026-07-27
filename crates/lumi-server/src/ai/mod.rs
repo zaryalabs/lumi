@@ -14,6 +14,7 @@ pub mod chat;
 pub mod context;
 pub mod mock;
 pub mod providers;
+pub(crate) mod record_context;
 pub mod repository;
 pub(crate) mod routes;
 pub(crate) mod tasks;

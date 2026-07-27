@@ -153,6 +153,13 @@ Query/retrieve начинают с authenticated account scope. Stored snippets 
 Schema, jobs и model failure behavior закреплены в
 [`ADR 0033`](../adr/0033-search-chunks-tantivy-fasttext.md).
 
+Record-scoped RAG не добавляет отдельный answer route. Существующий
+`POST /api/v1/ai/conversations/{conversation_id}/messages` принимает
+`record_search` attachment, server-side разрешает его через
+`/search/retrieve`, сохраняет exact disclosure в message/context pack и
+использует прежние generation/SSE/cancel/retry routes. Контракт закреплён в
+[`ADR 0035`](../adr/0035-record-scoped-rag-global-chat.md).
+
 Domain requests such as `AiTask`, `IndexRequest`, `TranscriptionRequest` and
 `FingerprintRequest` may have their own payload/status tables, but leases,
 claim fencing, retry, cancellation, progress and recovery use one common

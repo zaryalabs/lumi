@@ -179,6 +179,19 @@ impl SearchIndex {
                 source_types_query(self.fields.source_type, &request.source_types),
             ));
         }
+        if !request.material_ids.is_empty() {
+            clauses.push((
+                Occur::Must,
+                text_values_query(
+                    self.fields.material_id,
+                    &request
+                        .material_ids
+                        .iter()
+                        .map(Uuid::to_string)
+                        .collect::<Vec<_>>(),
+                ),
+            ));
+        }
         for tag in &request.tags {
             clauses.push((
                 Occur::Must,
@@ -199,8 +212,24 @@ impl SearchIndex {
                 .doc::<TantivyDocument>(address)
                 .map_err(|_| SearchIndexError::InvalidDocument)?;
             let payload = stored_str(&document, self.fields.payload)?;
-            let chunk =
+            let chunk: SearchChunk =
                 serde_json::from_str(payload).map_err(|_| SearchIndexError::InvalidDocument)?;
+            if !request.statuses.is_empty()
+                && !chunk
+                    .status
+                    .as_ref()
+                    .is_some_and(|status| request.statuses.contains(status))
+            {
+                continue;
+            }
+            if request.updated_range.is_some_and(|range| {
+                chunk.updated_at.is_none_or(|updated_at| {
+                    range.from.is_some_and(|from| updated_at < from)
+                        || range.to.is_some_and(|to| updated_at > to)
+                })
+            }) {
+                continue;
+            }
             let vector = stored_bytes(&document, self.fields.vector)
                 .map(decode_vector)
                 .transpose()?
@@ -304,6 +333,15 @@ fn source_types_query(field: Field, source_types: &[SearchSourceType]) -> Box<dy
     ))
 }
 
+fn text_values_query(field: Field, values: &[String]) -> Box<dyn Query> {
+    Box::new(BooleanQuery::new(
+        values
+            .iter()
+            .map(|value| (Occur::Should, term_query(field, value)))
+            .collect(),
+    ))
+}
+
 fn stored_str(document: &TantivyDocument, field: Field) -> Result<&str, SearchIndexError> {
     document
         .get_first(field)
@@ -389,6 +427,9 @@ mod tests {
             scope: SearchScope::Personal,
             source_types: Vec::new(),
             tags: Vec::new(),
+            material_ids: Vec::new(),
+            statuses: Vec::new(),
+            updated_range: None,
             ranking: SearchRankingProfile::Global,
             cursor: None,
             limit: 20,

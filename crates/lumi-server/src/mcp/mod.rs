@@ -1757,6 +1757,9 @@ fn search_request_from_tool(
         scope,
         source_types,
         tags,
+        material_ids: Vec::new(),
+        statuses: Vec::new(),
+        updated_range: None,
         ranking,
         cursor: arguments
             .get("cursor")
@@ -2164,6 +2167,9 @@ mod tests {
             scope: SearchScope::Personal,
             source_types: Vec::new(),
             tags: Vec::new(),
+            material_ids: Vec::new(),
+            statuses: Vec::new(),
+            updated_range: None,
             ranking: SearchRankingProfile::Global,
             cursor: None,
             limit: 10,

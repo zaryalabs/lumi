@@ -5,6 +5,10 @@ Status: accepted
 Runbook относится к `0.4.0/E3` и ADR
 [`0033`](../adr/0033-search-chunks-tantivy-fasttext.md).
 
+После `0.4.0/E5` актуальные derived versions — `tantivy.v2` и
+`search.chunker.v2`: chunk payload дополнительно хранит lifecycle/update
+metadata для record scopes. Обновление с v1 требует full rebuild.
+
 ## Конфигурация
 
 Search primary data остаётся в PostgreSQL и normalized packages. Tantivy

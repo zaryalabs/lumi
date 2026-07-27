@@ -635,8 +635,8 @@ test("keeps Desk and unified search routes reload-safe", async ({ page }) => {
       contentType: "application/json",
       body: JSON.stringify({
         state: "ready",
-        index_version: "tantivy.v1",
-        chunker_version: "search.chunker.v1",
+        index_version: "tantivy.v2",
+        chunker_version: "search.chunker.v2",
         model_version: "fixture.fasttext.v1",
         index_generation: 7,
         document_count: 1,
@@ -682,6 +682,73 @@ test("keeps Desk and unified search routes reload-safe", async ({ page }) => {
   await expect(page).toHaveURL(new RegExp(`#desk/material/${materialId}$`));
   await page.goBack();
   await expect(page).toHaveURL(/#search\?q=Markdown&type=material$/);
+});
+
+test("hands an explicit record scope from Search to the durable AI chat", async ({
+  page,
+}) => {
+  await page.goto("/");
+  await page
+    .getByRole("button", { name: "Создать фразу восстановления" })
+    .click();
+  await page.getByText("Я сохранил(а) все 24 слова", { exact: false }).click();
+  await page.getByRole("button", { name: "Создать аккаунт" }).click();
+
+  const materialId = "018f0f84-4a67-7a10-b2c2-111111111111";
+  const annotationId = "018f0f84-4a67-7a10-b2c2-222222222222";
+  await page.route("**/api/v1/search/status", async (route) => {
+    await route.fulfill({
+      contentType: "application/json",
+      body: JSON.stringify({
+        state: "ready",
+        index_version: "tantivy.v2",
+        chunker_version: "search.chunker.v2",
+        model_version: "fixture.fasttext.v1",
+        index_generation: 8,
+        document_count: 1,
+        chunk_count: 1,
+        no_text_document_count: 0,
+        pending_jobs: 0,
+      }),
+    });
+  });
+  await page.route(/\/api\/v1\/search\?.*q=/, async (route) => {
+    await route.fulfill({
+      contentType: "application/json",
+      body: JSON.stringify({
+        items: [
+          {
+            chunk_id: "record-chunk",
+            source_type: "note",
+            source_id: annotationId,
+            material_id: materialId,
+            title: "Проверяемая заметка",
+            heading_path: ["Введение"],
+            snippet: "Главная мысль записи",
+            open_target: {
+              kind: "annotation",
+              material_id: materialId,
+              annotation_id: annotationId,
+            },
+            score: { bm25: 2.5, fasttext: 0.8, boost: 0.2, total: 3.5 },
+          },
+        ],
+        index_generation: 8,
+      }),
+    });
+  });
+
+  await page.goto("/#search?q=главная&type=note");
+  const search = page.getByRole("main", { name: "Единый поиск" });
+  await search.getByRole("button", { name: "Спросить по записям" }).click();
+
+  const chat = page.getByRole("complementary", {
+    name: "Персональный AI-ассистент",
+  });
+  await expect(chat).toBeVisible();
+  await expect(
+    chat.getByText("Записи по запросу «главная»", { exact: true }),
+  ).toBeVisible();
 });
 
 test("imports a multi-chapter LUM package through the shared reader", async ({

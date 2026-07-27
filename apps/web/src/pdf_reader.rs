@@ -163,10 +163,16 @@ fn PdfReaderApp(
                 Ok((data, progress, loaded_annotations)) => {
                     let target = crate::ai::take_reader_target(material_id);
                     let target_anchor = target.as_ref().and_then(|attachment| {
-                        if attachment.revision_id != data.document.revision_id {
+                        let AiContextAttachment::Source {
+                            revision_id, scope, ..
+                        } = attachment
+                        else {
+                            return None;
+                        };
+                        if *revision_id != data.document.revision_id {
                             return None;
                         }
-                        match &attachment.scope {
+                        match scope {
                             AiSourceScope::Selection { anchor, .. } => {
                                 Some(anchor.as_ref().clone())
                             }
@@ -608,7 +614,7 @@ fn dispatch_pdf_ai_handoff(
 ) {
     let quote = anchor.quote.chars().take(80).collect::<String>();
     let handoff = crate::ai::ReaderAiHandoff {
-        attachment: AiContextAttachment {
+        attachment: AiContextAttachment::Source {
             kind: "selection".to_owned(),
             material_id: data.entry.id,
             revision_id: data.document.revision_id,
@@ -682,11 +688,17 @@ fn apply_pdf_ai_reader_target(
     let PdfReaderState::Ready(data) = &*state.read() else {
         return;
     };
-    if target.revision_id != data.document.revision_id {
+    let AiContextAttachment::Source {
+        revision_id, scope, ..
+    } = target
+    else {
+        return;
+    };
+    if revision_id != data.document.revision_id {
         reader_message.set("Источник ответа относится к другой версии материала.".to_owned());
         return;
     }
-    let (page, anchor) = match target.scope {
+    let (page, anchor) = match scope {
         AiSourceScope::Selection { anchor, .. } => {
             let page = match anchor.source_locator.as_ref() {
                 Some(SourceLocator::Pdf(locator)) => locator.page_index,

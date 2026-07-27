@@ -143,6 +143,17 @@ cursors и open targets. Решение и эксплуатация описан
 [`ADR 0034`](docs/adr/0034-desk-projection-and-search-surfaces.md) и
 [`Desk runbook`](docs/runbooks/desk-projection.md).
 
+Для `0.4.0/E5` реализован record-scoped RAG без второго AI-контура:
+Search/Desk/Reader передают видимый `RecordSearchScope` в существующий
+durable global chat, server выполняет owner-filtered retrieval, сохраняет
+exact chunk ids/hashes и возвращает citations с едиными open targets.
+Слабый retrieval не вызывает provider, а найденный текст считается
+недоверенными данными. Workspace и Web package имеют версию `0.4.0`.
+Решение, эксплуатация и rollback описаны в
+[`ADR 0035`](docs/adr/0035-record-scoped-rag-global-chat.md),
+[`runbook`](docs/runbooks/record-rag.md) и
+[`release notes`](docs/releases/0.4.0.md).
+
 ## Локальный запуск
 
 Для основного пути нужны Docker с Compose и `make`. Он собирает и запускает

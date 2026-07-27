@@ -748,6 +748,10 @@ pub(crate) fn service_capabilities(state: &AppState) -> ServiceCapabilities {
         && ai_features
             .iter()
             .any(|feature| feature == "ai-provider-byok");
+    let record_rag_ready = ai_features
+        .iter()
+        .any(|feature| feature == "ai-global-chat")
+        && state.search.is_query_ready();
     capabilities.features.extend(ai_features);
     capabilities.route_groups.push("learning".to_owned());
     capabilities.features.push("learning-core".to_owned());
@@ -779,6 +783,9 @@ pub(crate) fn service_capabilities(state: &AppState) -> ServiceCapabilities {
         capabilities.features.push("search-query".to_owned());
         capabilities.features.push("ai-retrieval".to_owned());
         capabilities.features.push("search-mcp".to_owned());
+    }
+    if record_rag_ready {
+        capabilities.features.push("record-rag".to_owned());
     }
     capabilities.route_groups.push("desk".to_owned());
     capabilities.features.push("desk-projection".to_owned());

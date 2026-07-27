@@ -12,8 +12,9 @@ use lumi_core::{
     BulkExecuteTasksRequest, BulkTaskResult, ConversationDetail, CreateAbridgementTaskRequest,
     CreateConversationRequest, CreateMessageRequest, CreateMessageResponse,
     CreateSummaryTaskRequest, GenerationMutationRequest, ProviderCredentialState,
-    PutProviderCredentialRequest, SourceCitation, SummaryArtifact, SummaryForm, SummaryScopeKind,
-    TaskMutationRequest, UpdateConversationRequest, UpdateSummaryRequest, ValidateProviderRequest,
+    PutProviderCredentialRequest, RecordSearchScope, SourceCitation, SummaryArtifact, SummaryForm,
+    SummaryScopeKind, TaskMutationRequest, UpdateConversationRequest, UpdateSummaryRequest,
+    ValidateProviderRequest,
 };
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
@@ -53,6 +54,23 @@ pub(crate) fn dispatch_reader_handoff(handoff: &ReaderAiHandoff) -> Result<(), S
         .dispatch_event(&event)
         .map_err(|_| "Не удалось открыть AI-чат.".to_owned())?;
     Ok(())
+}
+
+/// Open the durable global chat with one visible record-only retrieval scope.
+pub(crate) fn dispatch_record_handoff(
+    record_scope: RecordSearchScope,
+    display_label: String,
+) -> Result<(), String> {
+    dispatch_reader_handoff(&ReaderAiHandoff {
+        attachment: AiContextAttachment::Records {
+            kind: "record_search".to_owned(),
+            record_scope,
+            display_label,
+            included_context: Vec::new(),
+        },
+        instruction: String::new(),
+        auto_submit: false,
+    })
 }
 
 #[component]
@@ -954,10 +972,23 @@ pub(crate) fn GlobalAiChat(csrf_token: String) -> Element {
                                             if message.role == AiMessageRole::Assistant && !message.attachments.is_empty() {
                                                 nav { class: "ai-citations", aria_label: "Источники ответа",
                                                     for (index, citation) in message.attachments.clone().into_iter().enumerate() {
-                                                        button {
-                                                            r#type: "button",
-                                                            onclick: move |_| open_source(&citation),
-                                                            "Источник {index + 1}: {citation.display_label}"
+                                                        if citation.included_context().is_empty() {
+                                                            button {
+                                                                r#type: "button",
+                                                                onclick: move |_| open_source(&citation),
+                                                                "Источник {index + 1}: {citation.display_label()}"
+                                                            }
+                                                        } else {
+                                                            for source in citation.included_context().to_vec() {
+                                                                button {
+                                                                    r#type: "button",
+                                                                    onclick: move |_| crate::search_ui::open_search_target(&source.open_target),
+                                                                    "{source.title}"
+                                                                    if !source.heading_path.is_empty() {
+                                                                        span { " · {source.heading_path.join(\" › \")}" }
+                                                                    }
+                                                                }
+                                                            }
                                                         }
                                                     }
                                                 }
@@ -972,7 +1003,7 @@ pub(crate) fn GlobalAiChat(csrf_token: String) -> Element {
                                     div { class: "ai-attachment-list", aria_label: "Прикреплённый контекст",
                                         for attachment in attachment_items.clone() {
                                             span {
-                                                strong { "{attachment.display_label}" }
+                                                strong { "{attachment.display_label()}" }
                                                 button { r#type: "button", aria_label: "Убрать контекст", onclick: move |_| attachments.set(Vec::new()), "×" }
                                             }
                                         }
@@ -1150,7 +1181,24 @@ fn consume_reader_handoff(
     attachments.set(vec![handoff.attachment.clone()]);
     draft.set(handoff.instruction.clone());
     if !handoff.auto_submit {
-        defer_focus("ai-chat-composer");
+        let csrf_token = csrf.read().clone();
+        let selected_model = model.read().clone();
+        spawn_forever(async move {
+            busy.set(true);
+            error.set(String::new());
+            match ensure_conversation(
+                &mut conversations,
+                &mut detail,
+                &selected_model,
+                &csrf_token,
+            )
+            .await
+            {
+                Ok(_) => defer_focus("ai-chat-composer"),
+                Err(message) => error.set(message),
+            }
+            busy.set(false);
+        });
         return;
     }
     let csrf_token = csrf.read().clone();
@@ -1251,6 +1299,9 @@ fn take_handoff() -> Option<ReaderAiHandoff> {
 }
 
 fn open_source(attachment: &AiContextAttachment) {
+    let AiContextAttachment::Source { material_id, .. } = attachment else {
+        return;
+    };
     let Some(window) = web_sys::window() else {
         return;
     };
@@ -1259,9 +1310,7 @@ fn open_source(attachment: &AiContextAttachment) {
             let _ = storage.set_item(READER_TARGET_STORAGE_KEY, &payload);
         }
     }
-    let _ = window
-        .location()
-        .set_hash(&format!("reader/{}", attachment.material_id));
+    let _ = window.location().set_hash(&format!("reader/{material_id}"));
     if let Ok(event) = web_sys::CustomEvent::new(READER_TARGET_EVENT) {
         let _ = window.dispatch_event(&event);
     }
@@ -1284,7 +1333,13 @@ pub(crate) fn take_reader_target(material_id: Uuid) -> Option<AiContextAttachmen
     let storage = web_sys::window()?.local_storage().ok()??;
     let payload = storage.get_item(READER_TARGET_STORAGE_KEY).ok()??;
     let attachment: AiContextAttachment = serde_json::from_str(&payload).ok()?;
-    if attachment.material_id != material_id {
+    if !matches!(
+        attachment,
+        AiContextAttachment::Source {
+            material_id: source_material_id,
+            ..
+        } if source_material_id == material_id
+    ) {
         return None;
     }
     let _ = storage.remove_item(READER_TARGET_STORAGE_KEY);
@@ -1740,7 +1795,7 @@ fn open_summary_source(
             revision_id,
         },
     };
-    let attachment = AiContextAttachment {
+    let attachment = AiContextAttachment::Source {
         kind: "summary_citation".to_owned(),
         material_id,
         revision_id,
@@ -1774,7 +1829,7 @@ pub(crate) fn open_derived_source(citation: &SourceCitation) {
             anchor: anchor.clone(),
         },
     );
-    open_source(&AiContextAttachment {
+    open_source(&AiContextAttachment::Source {
         kind: "derived_material_source".to_owned(),
         material_id: citation.material_id,
         revision_id: citation.revision_id,

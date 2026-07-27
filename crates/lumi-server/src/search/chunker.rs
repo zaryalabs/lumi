@@ -40,6 +40,8 @@ pub(crate) fn reflowable_material(
             text: &metadata,
             language: package.manifest.language.as_deref(),
             tags: &[],
+            status: None,
+            updated_at: None,
             anchor: None,
         },
     );
@@ -76,6 +78,8 @@ pub(crate) fn reflowable_material(
                     text,
                     language: package.manifest.language.as_deref(),
                     tags: &[],
+                    status: None,
+                    updated_at: None,
                     anchor: Some(anchor_for_block(package.revision_id, block)),
                 },
             );
@@ -113,6 +117,8 @@ pub(crate) fn fixed_layout_material(
             text: &metadata,
             language: package.manifest.language.as_deref(),
             tags: &[],
+            status: None,
+            updated_at: None,
             anchor: None,
         },
     );
@@ -181,6 +187,8 @@ pub(crate) fn fixed_layout_material(
                     text: &block.text,
                     language,
                     tags: &[],
+                    status: None,
+                    updated_at: None,
                     anchor: Some(anchor),
                 },
             );
@@ -239,6 +247,8 @@ pub(crate) fn annotation(
             text,
             language: None,
             tags: &annotation.tags,
+            status: Some("active"),
+            updated_at: Some(annotation.updated_at),
             anchor: Some(annotation.anchor.clone()),
         },
     );
@@ -274,6 +284,8 @@ pub(crate) fn ai_artifact(
             text: &text,
             language: None,
             tags: &[],
+            status: Some("active"),
+            updated_at: None,
             anchor: None,
         },
     );
@@ -325,6 +337,8 @@ pub(crate) fn learning_item(
             text: &text,
             language: None,
             tags: &[],
+            status: Some("active"),
+            updated_at: None,
             anchor,
         },
     );
@@ -343,6 +357,8 @@ struct ChunkSeed<'a> {
     text: &'a str,
     language: Option<&'a str>,
     tags: &'a [String],
+    status: Option<&'a str>,
+    updated_at: Option<u64>,
     anchor: Option<Anchor>,
 }
 
@@ -370,6 +386,8 @@ fn push_text_chunks(chunks: &mut Vec<SearchChunk>, seed: ChunkSeed<'_>) {
             text,
             language: seed.language.map(str::to_owned),
             tags: seed.tags.to_vec(),
+            status: seed.status.map(str::to_owned),
+            updated_at: seed.updated_at,
             anchor: seed.anchor.clone(),
             chunker_version: SEARCH_CHUNKER_VERSION.to_owned(),
         });

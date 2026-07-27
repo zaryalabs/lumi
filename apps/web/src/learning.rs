@@ -1236,7 +1236,7 @@ fn source_attachment(
             anchor: Box::new(anchor.clone()),
         },
     );
-    AiContextAttachment {
+    AiContextAttachment::Source {
         kind: "learning_source".to_owned(),
         material_id: session.source.material_id,
         revision_id: session.source.document_revision_id,

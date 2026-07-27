@@ -10,7 +10,10 @@ use thiserror::Error;
 use uuid::Uuid;
 use zeroize::Zeroize;
 
-use crate::{Anchor, DocumentRevisionId, MaterialId, TimestampMs, UserId};
+use crate::{
+    Anchor, DocumentRevisionId, MaterialId, SearchOpenTarget, SearchSourceType, SearchUpdatedRange,
+    TimestampMs, UserId,
+};
 
 /// Version of the frozen AI task and API contract.
 pub const AI_CONTRACT_VERSION: &str = "ai.contract.v1";
@@ -20,6 +23,10 @@ pub const AI_CONTEXT_PACK_SCHEMA_VERSION: &str = "ai-context-pack.v1";
 pub const SOURCE_CITATION_SCHEMA_VERSION: &str = "source-citation.v1";
 /// Version of the explicit-context limit policy.
 pub const EXPLICIT_CONTEXT_LIMITS_VERSION: &str = "explicit-context-limits.v1";
+/// Version of record-scoped retrieval and packing.
+pub const RECORD_RETRIEVAL_VERSION: &str = "record-retrieval.v1";
+/// Version of the fixed prompt policy for untrusted personal records.
+pub const RECORD_RAG_PROMPT_VERSION: &str = "record-rag.prompt.v1";
 /// Version of the first summary artifact payload.
 pub const SUMMARY_ARTIFACT_SCHEMA_VERSION: &str = "summary-artifact.v1";
 /// Version of the generated abridgement artifact payload.
@@ -614,6 +621,9 @@ pub struct AiContextPack {
     pub message_id: Option<AiMessageId>,
     /// Explicit source scope.
     pub scope: AiSourceScope,
+    /// Optional record-only retrieval scope that produced this pack.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub record_scope: Option<RecordSearchScope>,
     /// Authorization audit snapshot.
     pub permission_snapshot: AiPermissionSnapshot,
     /// Applied limit profile.
@@ -623,6 +633,12 @@ pub struct AiContextPack {
     /// Optional expanded citation projections.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub citations: Vec<SourceCitation>,
+    /// Exact record chunks disclosed to the user and issued to the provider.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub record_context: Vec<RecordContextSource>,
+    /// Fixed record-RAG prompt policy version.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prompt_version: Option<String>,
     /// Hash of the canonical pack content.
     pub pack_hash: String,
 }
@@ -644,6 +660,22 @@ impl AiContextPack {
         require_version(&self.schema_version, AI_CONTEXT_PACK_SCHEMA_VERSION)?;
         require_version(&self.limits_version, EXPLICIT_CONTEXT_LIMITS_VERSION)?;
         self.scope.validate()?;
+        if let Some(scope) = &self.record_scope {
+            scope.validate()?;
+            require_version(
+                self.prompt_version.as_deref().unwrap_or_default(),
+                RECORD_RAG_PROMPT_VERSION,
+            )?;
+            if self.record_context.is_empty() || self.record_context.len() != self.fragments.len() {
+                return Err(AiContractError::InvalidContextPack(
+                    "record context must describe every issued fragment",
+                ));
+            }
+        } else if !self.record_context.is_empty() || self.prompt_version.is_some() {
+            return Err(AiContractError::InvalidContextPack(
+                "record metadata requires a record scope",
+            ));
+        }
         if self.task_id.is_some() == self.message_id.is_some() {
             return Err(AiContractError::InvalidContextPack(
                 "exactly one task_id or message_id is required",
@@ -692,11 +724,27 @@ impl AiContextPack {
                     "citation does not reference a fragment",
                 ));
             }
-            if citation.revision_id != self.scope.revision_id()
-                || citation.material_id != self.scope.material_id()
+            if self.record_scope.is_none()
+                && (citation.revision_id != self.scope.revision_id()
+                    || citation.material_id != self.scope.material_id())
             {
                 return Err(AiContractError::InvalidContextPack(
                     "citation source does not match pack scope",
+                ));
+            }
+        }
+        for source in &self.record_context {
+            require_non_empty("chunk_id", &source.chunk_id, 256)?;
+            require_non_empty("text_hash", &source.text_hash, 256)?;
+            require_non_empty("citation_id", &source.citation_id, 256)?;
+            if !citation_ids.contains(source.citation_id.as_str()) {
+                return Err(AiContractError::InvalidContextPack(
+                    "record source does not reference a fragment",
+                ));
+            }
+            if !source.source_type.is_record() {
+                return Err(AiContractError::InvalidContextPack(
+                    "material text is not allowed in record-only context",
                 ));
             }
         }
@@ -1093,19 +1141,158 @@ pub struct ConversationDetail {
     pub active_generation: Option<AiGeneration>,
 }
 
-/// Explicit chat attachment preview.
+/// Explicit record-only retrieval scope attached to one chat message.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct RecordSearchScope {
+    /// Optional retrieval query; the user message is used when absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub query: Option<String>,
+    /// Optional parent-material allowlist.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub material_ids: Vec<MaterialId>,
+    /// Record source families admitted to retrieval.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub record_types: Vec<SearchSourceType>,
+    /// Normalized tag allowlist.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tags: Vec<String>,
+    /// Record lifecycle allowlist.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub statuses: Vec<String>,
+    /// Optional inclusive update range.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub updated_range: Option<SearchUpdatedRange>,
+    /// Retrieval contract version.
+    pub retrieval_version: String,
+}
+
+impl RecordSearchScope {
+    /// Validate bounds and record-only source families.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed error when the scope is oversized, unsupported or
+    /// admits normalized material text.
+    pub fn validate(&self) -> Result<(), AiContractError> {
+        require_version(&self.retrieval_version, RECORD_RETRIEVAL_VERSION)?;
+        if self
+            .query
+            .as_deref()
+            .is_some_and(|query| query.trim().is_empty() || query.len() > 2_048)
+            || self.material_ids.len() > 128
+            || self.record_types.len() > 16
+            || self.tags.len() > 64
+            || self.statuses.len() > 16
+            || self.record_types.iter().any(|kind| !kind.is_record())
+            || self.updated_range.is_some_and(|range| {
+                range
+                    .from
+                    .is_some_and(|from| range.to.is_some_and(|to| from > to))
+            })
+        {
+            return Err(AiContractError::InvalidSourceScope(
+                "record search scope is outside policy",
+            ));
+        }
+        Ok(())
+    }
+}
+
+/// One exact retrieved record disclosed before and after generation.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub struct AiContextAttachment {
-    /// Attachment kind such as `selection`, `chapter` or `material`.
-    pub kind: String,
-    /// Source material.
-    pub material_id: MaterialId,
-    /// Immutable source revision.
-    pub revision_id: DocumentRevisionId,
-    /// Explicit scope.
-    pub scope: AiSourceScope,
-    /// Reader-facing label.
-    pub display_label: String,
+pub struct RecordContextSource {
+    /// Stable indexed chunk identifier.
+    pub chunk_id: String,
+    /// Hash of exact untrusted text issued to the provider.
+    pub text_hash: String,
+    /// Citation identifier used in the generated answer.
+    pub citation_id: String,
+    /// Record source family.
+    pub source_type: SearchSourceType,
+    /// Stable primary object identifier.
+    pub source_id: Uuid,
+    /// Reader-facing source title.
+    pub title: String,
+    /// Structural source path.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub heading_path: Vec<String>,
+    /// Exact Desk/Reader target.
+    pub open_target: SearchOpenTarget,
+}
+
+/// Explicit chat attachment preview.
+///
+/// The untagged source variant preserves the `0.2.0` JSON shape. Record
+/// attachments carry no synthetic material or revision identifier.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum AiContextAttachment {
+    /// One explicit immutable material scope.
+    Source {
+        /// Attachment kind such as `selection`, `chapter` or `material`.
+        kind: String,
+        /// Source material.
+        material_id: MaterialId,
+        /// Immutable source revision.
+        revision_id: DocumentRevisionId,
+        /// Explicit scope.
+        scope: AiSourceScope,
+        /// Reader-facing label.
+        display_label: String,
+    },
+    /// Permission-aware personal record retrieval scope.
+    Records {
+        /// Stable attachment kind; must be `record_search`.
+        kind: String,
+        /// Record-only filters visible before send.
+        record_scope: RecordSearchScope,
+        /// Reader-facing label.
+        display_label: String,
+        /// Exact included context populated by the server.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        included_context: Vec<RecordContextSource>,
+    },
+}
+
+impl AiContextAttachment {
+    /// Reader-facing attachment label.
+    #[must_use]
+    pub fn display_label(&self) -> &str {
+        match self {
+            Self::Source { display_label, .. } | Self::Records { display_label, .. } => {
+                display_label
+            }
+        }
+    }
+
+    /// Return an explicit immutable source scope when present.
+    #[must_use]
+    pub fn source_scope(&self) -> Option<&AiSourceScope> {
+        match self {
+            Self::Source { scope, .. } => Some(scope),
+            Self::Records { .. } => None,
+        }
+    }
+
+    /// Return a record-only retrieval scope when present.
+    #[must_use]
+    pub fn record_scope(&self) -> Option<&RecordSearchScope> {
+        match self {
+            Self::Records { record_scope, .. } => Some(record_scope),
+            Self::Source { .. } => None,
+        }
+    }
+
+    /// Return exact server-resolved record disclosure.
+    #[must_use]
+    pub fn included_context(&self) -> &[RecordContextSource] {
+        match self {
+            Self::Records {
+                included_context, ..
+            } => included_context,
+            Self::Source { .. } => &[],
+        }
+    }
 }
 
 /// Chat generation lifecycle.

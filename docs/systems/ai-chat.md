@@ -224,6 +224,14 @@ surface. Замена Deep Chat не должна менять `AiConversation`,
 Точная схема, правила удаления, reconnect и синхронизации будут определены в
 детальном design/implementation плане.
 
+В `0.4.0/E5` `AiContextAttachment` получил совместимый `record_search`
+variant. Он хранит versioned material/type/tag/status/update filters, а после
+server-side retrieval — exact included chunk ids/hashes и `SearchOpenTarget`.
+Пустой или слабый retrieval не вызывает provider. Text записей всегда
+передаётся как untrusted data; fixed prompt запрещает исполнять найденные
+инструкции и отвечать из внешних знаний. Решение описано в
+[`ADR 0035`](../adr/0035-record-scoped-rag-global-chat.md).
+
 ## Privacy и provider
 
 - Для текущего web scope BYOK credential хранится в защищенном server-side

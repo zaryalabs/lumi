@@ -3,14 +3,14 @@
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use crate::{content_hash, Anchor, DocumentRevisionId, MaterialId, SourceCitation};
+use crate::{content_hash, Anchor, DocumentRevisionId, MaterialId, SourceCitation, TimestampMs};
 
 /// Version of the indexed-search API and persisted chunk contract.
 pub const SEARCH_CONTRACT_VERSION: &str = "search.contract.v1";
 /// Version of source-aware chunking rules.
-pub const SEARCH_CHUNKER_VERSION: &str = "search.chunker.v1";
+pub const SEARCH_CHUNKER_VERSION: &str = "search.chunker.v2";
 /// Version of the initial Tantivy schema.
-pub const SEARCH_INDEX_VERSION: &str = "tantivy.v1";
+pub const SEARCH_INDEX_VERSION: &str = "tantivy.v2";
 /// Version of the fastText score-fusion policy.
 pub const SEARCH_RANKING_VERSION: &str = "bm25-fasttext.v1";
 /// Maximum UTF-8 query size accepted by the public API.
@@ -165,6 +165,12 @@ pub struct SearchChunk {
     /// Normalized user tags.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub tags: Vec<String>,
+    /// Source lifecycle used by record-scoped retrieval.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub status: Option<String>,
+    /// Last primary-object update used by bounded record scopes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub updated_at: Option<TimestampMs>,
     /// Exact source-backed anchor when available.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub anchor: Option<Anchor>,
@@ -209,6 +215,15 @@ pub struct SearchRequest {
     /// Optional normalized tag filters.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub tags: Vec<String>,
+    /// Optional parent-material allowlist applied before retrieval disclosure.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub material_ids: Vec<MaterialId>,
+    /// Optional source lifecycle allowlist.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub statuses: Vec<String>,
+    /// Optional inclusive primary-object update range.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub updated_range: Option<SearchUpdatedRange>,
     /// Ranking profile.
     #[serde(default)]
     pub ranking: SearchRankingProfile,
@@ -217,6 +232,17 @@ pub struct SearchRequest {
     pub cursor: Option<String>,
     /// Requested bounded page size.
     pub limit: usize,
+}
+
+/// Inclusive primary-object update range for record retrieval.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct SearchUpdatedRange {
+    /// Earliest accepted update timestamp.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub from: Option<TimestampMs>,
+    /// Latest accepted update timestamp.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub to: Option<TimestampMs>,
 }
 
 /// Open target shared by global, Reader and future Desk search surfaces.
@@ -447,6 +473,23 @@ impl SearchRequest {
             .collect();
         self.tags.sort();
         self.tags.dedup();
+        self.material_ids.sort_unstable();
+        self.material_ids.dedup();
+        self.statuses = self
+            .statuses
+            .iter()
+            .map(|status| status.trim().to_lowercase())
+            .filter(|status| !status.is_empty())
+            .collect();
+        self.statuses.sort();
+        self.statuses.dedup();
+        if self.updated_range.is_some_and(|range| {
+            range
+                .from
+                .is_some_and(|from| range.to.is_some_and(|to| from > to))
+        }) {
+            return Err(SearchContractError::InvalidContextPolicy);
+        }
         Ok(())
     }
 }
@@ -512,6 +555,9 @@ mod tests {
             scope: SearchScope::Personal,
             source_types: vec![SearchSourceType::Note, SearchSourceType::Note],
             tags: vec!["  Rust ".to_owned(), "rust".to_owned()],
+            material_ids: Vec::new(),
+            statuses: Vec::new(),
+            updated_range: None,
             ranking: SearchRankingProfile::Global,
             cursor: None,
             limit: 20,

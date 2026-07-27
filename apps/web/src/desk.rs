@@ -4,7 +4,8 @@ use dioxus::prelude::*;
 use gloo_net::http::Request;
 use lumi_core::{
     Annotation, AnnotationBacklink, AnnotationKind, DeskItem, DeskItemPage, DeskLearningState,
-    DeskMaterialPage, DeskObjectType, MaterialDesk, SearchOpenTarget, UpdateAnnotationCommand,
+    DeskMaterialPage, DeskObjectType, MaterialDesk, RecordSearchScope, SearchOpenTarget,
+    SearchSourceType, UpdateAnnotationCommand, RECORD_RETRIEVAL_VERSION,
 };
 use uuid::Uuid;
 use web_sys::RequestCredentials;
@@ -54,6 +55,31 @@ pub(crate) fn DeskPage(
     });
 
     let selected_view = route.view.clone();
+    let ask_material = material_from_view(&route.view);
+    let ask_types = match &route.view {
+        DeskView::Learning(_) => vec![SearchSourceType::LearningItem],
+        DeskView::Artifacts(_) => vec![SearchSourceType::AiArtifact],
+        DeskView::Records(_) | DeskView::Item(DeskObjectType::Annotation, _) => vec![
+            SearchSourceType::Highlight,
+            SearchSourceType::Note,
+            SearchSourceType::MarginNote,
+            SearchSourceType::VoiceTranscript,
+        ],
+        _ => Vec::new(),
+    };
+    let ask_scope = RecordSearchScope {
+        query: None,
+        material_ids: ask_material.into_iter().collect(),
+        record_types: ask_types,
+        tags: route.tag.clone().into_iter().collect(),
+        statuses: vec!["active".to_owned()],
+        updated_range: None,
+        retrieval_version: RECORD_RETRIEVAL_VERSION.to_owned(),
+    };
+    let ask_label = ask_material.map_or_else(
+        || "Все личные записи".to_owned(),
+        |_| "Записи текущего материала".to_owned(),
+    );
     rsx! {
         main { id: "main-content", class: "desk-view", aria_label: "Desk",
             header { class: "desk-hero",
@@ -89,6 +115,17 @@ pub(crate) fn DeskPage(
                         }
                     }
                     button { class: "secondary-action", r#type: "submit", "Найти" }
+                }
+                button {
+                    class: "primary-action",
+                    r#type: "button",
+                    onclick: move |_| {
+                        let _ = crate::ai::dispatch_record_handoff(
+                            ask_scope.clone(),
+                            ask_label.clone(),
+                        );
+                    },
+                    "Спросить по записям"
                 }
             }
             nav { class: "desk-tabs", aria_label: "Разделы Desk",

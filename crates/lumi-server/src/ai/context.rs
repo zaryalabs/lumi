@@ -568,6 +568,7 @@ fn build_pack(
         task_id: context_owner.task_id(),
         message_id: context_owner.message_id(),
         scope,
+        record_scope: None,
         permission_snapshot: AiPermissionSnapshot {
             actor_id: owner_id,
             decision: AiPermissionDecision::Allowed,
@@ -576,6 +577,8 @@ fn build_pack(
         limits_version: EXPLICIT_CONTEXT_LIMITS_VERSION.to_owned(),
         fragments,
         citations,
+        record_context: Vec::new(),
+        prompt_version: None,
         pack_hash: content_hash(&hash_payload),
     };
     pack.validate()

@@ -16,7 +16,7 @@ ed25519-dalek.workspace = true
 encoding_rs.workspace = true
 futures-util.workspace = true
 finalfusion.workspace = true
-lumi-core = { version = "0.3.0", path = "../lumi-core", features = [
+lumi-core = { version = "0.4.0", path = "../lumi-core", features = [
   "markdown-import",
 ] }
 rand.workspace = true

@@ -519,6 +519,9 @@ fn request_from_query(query: SearchQuery) -> Result<SearchRequest, AppError> {
             .tag
             .map(|tags| tags.split(',').map(str::to_owned).collect())
             .unwrap_or_default(),
+        material_ids: Vec::new(),
+        statuses: Vec::new(),
+        updated_range: None,
         ranking,
         cursor: query.cursor,
         limit: query.limit.unwrap_or(DEFAULT_PAGE_SIZE),
@@ -632,8 +635,19 @@ fn plain_snippet(text: &str, query: &str) -> String {
 fn citation_for_chunk(chunk: &SearchChunk) -> Option<SourceCitation> {
     let material_id = chunk.material_id?;
     let revision_id = chunk.revision_id?;
-    let anchor = chunk.anchor.as_ref()?;
-    let source_locator = ai_locator(anchor.source_locator.as_ref()?)?;
+    let source_locator = chunk
+        .anchor
+        .as_ref()
+        .and_then(|anchor| anchor.source_locator.as_ref())
+        .and_then(ai_locator)
+        .unwrap_or_else(|| AiSourceLocator::Web {
+            canonical_url: format!(
+                "lumi://record/{}/{}",
+                chunk.source_type.as_str(),
+                chunk.source_id
+            ),
+            block_id: Some(chunk.id.clone()),
+        });
     let citation_suffix = chunk.id.chars().take(16).collect::<String>();
     Some(SourceCitation {
         schema_version: SOURCE_CITATION_SCHEMA_VERSION.to_owned(),
@@ -645,13 +659,13 @@ fn citation_for_chunk(chunk: &SearchChunk) -> Option<SourceCitation> {
             .first()
             .cloned()
             .unwrap_or_else(|| "document".to_owned()),
-        block_id: anchor
-            .node_path
-            .last()
-            .cloned()
+        block_id: chunk
+            .anchor
+            .as_ref()
+            .and_then(|anchor| anchor.node_path.last().cloned())
             .unwrap_or_else(|| chunk.id.clone()),
         source_locator,
-        anchor: Some(Box::new(anchor.clone())),
+        anchor: chunk.anchor.clone().map(Box::new),
         quote_hash: chunk.text_hash.clone(),
         fragment_byte_start: 0,
         fragment_byte_end: chunk.text.len(),
@@ -757,6 +771,9 @@ mod tests {
                     scope: SearchScope::Personal,
                     source_types: Vec::new(),
                     tags: Vec::new(),
+                    material_ids: Vec::new(),
+                    statuses: Vec::new(),
+                    updated_range: None,
                     ranking: SearchRankingProfile::Global,
                     cursor: None,
                     limit: 10,
@@ -829,6 +846,9 @@ mod tests {
                         scope: SearchScope::Records,
                         source_types: vec![SearchSourceType::Note],
                         tags: Vec::new(),
+                        material_ids: Vec::new(),
+                        statuses: Vec::new(),
+                        updated_range: None,
                         ranking: SearchRankingProfile::Records,
                         cursor: None,
                         limit: 10,
@@ -861,6 +881,9 @@ mod tests {
             scope: SearchScope::Personal,
             source_types: Vec::new(),
             tags: Vec::new(),
+            material_ids: Vec::new(),
+            statuses: Vec::new(),
+            updated_range: None,
             ranking: SearchRankingProfile::Global,
             cursor: None,
             limit: 10,
@@ -879,6 +902,9 @@ mod tests {
             scope: SearchScope::Personal,
             source_types: Vec::new(),
             tags: Vec::new(),
+            material_ids: Vec::new(),
+            statuses: Vec::new(),
+            updated_range: None,
             ranking: SearchRankingProfile::Global,
             cursor: None,
             limit: 10,
@@ -914,6 +940,9 @@ mod tests {
             scope: SearchScope::Personal,
             source_types: Vec::new(),
             tags: Vec::new(),
+            material_ids: Vec::new(),
+            statuses: Vec::new(),
+            updated_range: None,
             ranking: SearchRankingProfile::Global,
             cursor: None,
             limit: 20,
@@ -994,6 +1023,8 @@ mod tests {
             text,
             language: Some("ru".to_owned()),
             tags: Vec::new(),
+            status: None,
+            updated_at: None,
             anchor: None,
             chunker_version: SEARCH_CHUNKER_VERSION.to_owned(),
         }
@@ -1019,6 +1050,8 @@ mod tests {
             text: text.to_owned(),
             language: None,
             tags: Vec::new(),
+            status: Some("active".to_owned()),
+            updated_at: None,
             anchor: None,
             text_hash: content_hash(text.as_bytes()),
             chunker_version: SEARCH_CHUNKER_VERSION.to_owned(),

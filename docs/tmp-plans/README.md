@@ -43,9 +43,6 @@ coordination document.
 - [`0.2.0-ai-plan.md`](0.2.0-ai-plan.md) — реализация BYOK, глобального
   ИИ-чата, саммари, durable AI task queue и MCP-интеграции для внешних агентов.
 
-- [`0.4.0-notes-and-desk-plan.md`](0.4.0-notes-and-desk-plan.md) — богатые
-  записи по чтению, Desk, BM25 + fastText поиск и RAG по записям.
-
 - [`0.5.0-social-plan.md`](0.5.0-social-plan.md) — Community Spaces,
   совместное чтение, comments, shared highlights и chat.
 
@@ -61,3 +58,5 @@ coordination document.
 
 - [`0.3.0-learn-plan.md`](../archive/0.3.0-learn-plan.md) — закрытый
   repository-side выпуск обучения после чтения.
+- [`0.4.0-notes-and-desk-plan.md`](../archive/0.4.0-notes-and-desk-plan.md) —
+  закрытый repository-side выпуск записей, Desk, поиска и record-scoped RAG.

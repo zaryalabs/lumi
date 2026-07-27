@@ -1269,7 +1269,7 @@ fn ask_ai_about_selection(
         };
         let label_quote = anchor.quote.chars().take(80).collect::<String>();
         crate::ai::ReaderAiHandoff {
-            attachment: AiContextAttachment {
+            attachment: AiContextAttachment::Source {
                 kind: "selection".to_owned(),
                 material_id: view.entry.id,
                 revision_id: view.document.revision_id,
@@ -1304,13 +1304,22 @@ fn apply_ai_reader_target(view: &mut ReaderView) {
     let Some(target) = crate::ai::take_reader_target(view.entry.id) else {
         return;
     };
-    if target.revision_id != view.document.revision_id {
+    let AiContextAttachment::Source {
+        kind,
+        revision_id,
+        scope,
+        ..
+    } = target
+    else {
+        return;
+    };
+    if revision_id != view.document.revision_id {
         view.annotation_message =
             Some("Источник ответа относится к другой версии материала.".to_owned());
         return;
     }
-    let learning_source = target.kind == "learning_source";
-    match target.scope {
+    let learning_source = kind == "learning_source";
+    match scope {
         AiSourceScope::Selection { anchor, .. } => match view.plan.resolve_anchor(&anchor) {
             AnchorResolution::Resolved { anchor, .. } => {
                 let offset = anchor.text_range.map_or(0, |range| range.start);

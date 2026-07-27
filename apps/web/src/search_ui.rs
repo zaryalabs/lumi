@@ -3,7 +3,8 @@
 use dioxus::prelude::*;
 use gloo_net::http::Request;
 use lumi_core::{
-    SearchIndexState, SearchOpenTarget, SearchPage, SearchResult, SearchSourceType, SearchStatus,
+    RecordSearchScope, SearchIndexState, SearchOpenTarget, SearchPage, SearchResult,
+    SearchSourceType, SearchStatus, RECORD_RETRIEVAL_VERSION,
 };
 use uuid::Uuid;
 use web_sys::RequestCredentials;
@@ -57,6 +58,22 @@ pub(crate) fn GlobalSearchPage(
         .as_ref()
         .map(|page| page.items.clone())
         .unwrap_or_default();
+    let record_types = route
+        .source_type
+        .filter(|source_type| source_type.is_record())
+        .into_iter()
+        .collect::<Vec<_>>();
+    let ask_scope = RecordSearchScope {
+        query: (!route.query.trim().is_empty()).then(|| route.query.trim().to_owned()),
+        material_ids: route.material_id.into_iter().collect(),
+        record_types,
+        tags: Vec::new(),
+        statuses: vec!["active".to_owned()],
+        updated_range: None,
+        retrieval_version: RECORD_RETRIEVAL_VERSION.to_owned(),
+    };
+    let can_ask =
+        !route.query.trim().is_empty() && items.iter().any(|item| item.source_type.is_record());
     rsx! {
         main { id: "main-content", class: "search-view", aria_label: "Единый поиск",
             header { class: "search-hero",
@@ -97,6 +114,20 @@ pub(crate) fn GlobalSearchPage(
                         }
                     }
                     button { class: "primary-action", r#type: "submit", "Найти" }
+                }
+                button {
+                    class: "secondary-action",
+                    r#type: "button",
+                    disabled: !can_ask,
+                    onclick: move |_| {
+                        if let Err(message) = crate::ai::dispatch_record_handoff(
+                            ask_scope.clone(),
+                            format!("Записи по запросу «{}»", route.query.trim()),
+                        ) {
+                            state.write().error = Some(message);
+                        }
+                    },
+                    "Спросить по записям"
                 }
             }
             if let Some(status) = snapshot.status {
@@ -185,6 +216,25 @@ pub(crate) fn ReaderSearch(material_id: Uuid) -> Element {
                     }
                 }
                 button { class: "secondary-action", r#type: "submit", "Найти" }
+            }
+            button {
+                class: "secondary-action",
+                r#type: "button",
+                onclick: move |_| {
+                    let _ = crate::ai::dispatch_record_handoff(
+                        RecordSearchScope {
+                            query: None,
+                            material_ids: vec![material_id],
+                            record_types: Vec::new(),
+                            tags: Vec::new(),
+                            statuses: vec!["active".to_owned()],
+                            updated_range: None,
+                            retrieval_version: RECORD_RETRIEVAL_VERSION.to_owned(),
+                        },
+                        "Записи текущего материала".to_owned(),
+                    );
+                },
+                "Спросить по записям"
             }
             if loading() {
                 p { role: "status", "Ищем…" }

@@ -2832,6 +2832,7 @@ mod tests {
                     revision_id: self.revision_id,
                     scope_ref: "chapter-1".to_owned(),
                 },
+                record_scope: None,
                 permission_snapshot: AiPermissionSnapshot {
                     actor_id: self.owner_id,
                     decision: AiPermissionDecision::Allowed,
@@ -2860,6 +2861,8 @@ mod tests {
                     fragment_byte_start: 0,
                     fragment_byte_end: 42,
                 }],
+                record_context: Vec::new(),
+                prompt_version: None,
                 pack_hash: format!("fixture-pack-{task_id}-{context_pack_id}"),
             }
         }

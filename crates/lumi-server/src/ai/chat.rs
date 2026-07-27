@@ -31,6 +31,7 @@ use uuid::Uuid;
 use super::{
     context::{SourceContextError, SourceContextResolver},
     providers::{self, AiProviderClient, AiProviderError},
+    record_context::{self, RecordContextError},
 };
 use crate::{account::AuthenticatedSession, AppError, AppState};
 
@@ -246,17 +247,49 @@ async fn create_message(
     validate_message_request(&request)?;
     let runtime = Arc::clone(state.ai_runtime()?);
     let message_id = Uuid::now_v7();
-    let context_pack = if let Some(attachment) = request.attachments.first() {
-        validate_attachment(attachment)?;
-        Some(
-            runtime
-                .context()
-                .resolve_for_message(session.user_id, message_id, attachment.scope.clone())
-                .await
-                .map_err(map_context_error)?,
-        )
-    } else {
-        None
+    let (context_pack, persisted_attachments) = match request.attachments.first() {
+        Some(attachment) => {
+            validate_attachment(attachment)?;
+            match attachment {
+                AiContextAttachment::Source { scope, .. } => (
+                    Some(
+                        runtime
+                            .context()
+                            .resolve_for_message(session.user_id, message_id, scope.clone())
+                            .await
+                            .map_err(map_context_error)?,
+                    ),
+                    request.attachments.clone(),
+                ),
+                AiContextAttachment::Records {
+                    kind,
+                    record_scope,
+                    display_label,
+                    ..
+                } => {
+                    let pack = record_context::resolve_for_message(
+                        &state.search,
+                        session.user_id,
+                        message_id,
+                        record_scope.clone(),
+                        &request.content,
+                    )
+                    .await
+                    .map_err(map_record_context_error)?;
+                    let resolved = AiContextAttachment::Records {
+                        kind: kind.clone(),
+                        record_scope: pack
+                            .record_scope
+                            .clone()
+                            .ok_or(AppError::Internal("record context"))?,
+                        display_label: display_label.clone(),
+                        included_context: pack.record_context.clone(),
+                    };
+                    (Some(pack), vec![resolved])
+                }
+            }
+        }
+        None => (None, Vec::new()),
     };
     let created = create_message_transaction(
         &runtime,
@@ -264,6 +297,7 @@ async fn create_message(
         conversation_id,
         message_id,
         &request,
+        &persisted_attachments,
         context_pack.as_ref(),
     )
     .await?;
@@ -412,6 +446,7 @@ async fn create_message_transaction(
     conversation_id: Uuid,
     message_id: Uuid,
     request: &CreateMessageRequest,
+    persisted_attachments: &[AiContextAttachment],
     context_pack: Option<&AiContextPack>,
 ) -> Result<CreateMessageResponse, AppError> {
     let mut transaction = runtime
@@ -486,7 +521,7 @@ async fn create_message_transaction(
     .map_err(|_| AppError::Unavailable("AI conversations"))?;
     let assistant_id = Uuid::now_v7();
     let generation_id = Uuid::now_v7();
-    let attachments = serde_json::to_value(&request.attachments)
+    let attachments = serde_json::to_value(persisted_attachments)
         .map_err(|_| AppError::BadRequest("context attachments are invalid".to_owned()))?;
     sqlx::query(
         "INSERT INTO ai_messages (
@@ -1422,17 +1457,36 @@ fn validate_message_request(request: &CreateMessageRequest) -> Result<(), AppErr
 }
 
 fn validate_attachment(attachment: &AiContextAttachment) -> Result<(), AppError> {
-    if attachment.kind.trim().is_empty()
-        || attachment.display_label.trim().is_empty()
-        || attachment.material_id != attachment.scope.material_id()
-        || attachment.revision_id != attachment.scope.revision_id()
-        || attachment.scope.validate().is_err()
-    {
-        Err(AppError::BadRequest(
-            "source context attachment is invalid".to_owned(),
-        ))
-    } else {
-        Ok(())
+    match attachment {
+        AiContextAttachment::Source {
+            kind,
+            material_id,
+            revision_id,
+            scope,
+            display_label,
+        } if !kind.trim().is_empty()
+            && !display_label.trim().is_empty()
+            && *material_id == scope.material_id()
+            && *revision_id == scope.revision_id()
+            && scope.validate().is_ok() =>
+        {
+            Ok(())
+        }
+        AiContextAttachment::Records {
+            kind,
+            record_scope,
+            display_label,
+            included_context,
+        } if kind == "record_search"
+            && !display_label.trim().is_empty()
+            && included_context.is_empty()
+            && record_scope.validate().is_ok() =>
+        {
+            Ok(())
+        }
+        _ => Err(AppError::BadRequest(
+            "context attachment is invalid".to_owned(),
+        )),
     }
 }
 
@@ -1464,6 +1518,18 @@ fn map_context_error(error: SourceContextError) -> AppError {
             AppError::BadRequest("source context exceeds configured limits".to_owned())
         }
         SourceContextError::Storage => AppError::Unavailable("AI context"),
+    }
+}
+
+fn map_record_context_error(error: RecordContextError) -> AppError {
+    match error {
+        RecordContextError::InvalidScope => {
+            AppError::BadRequest("record context scope is invalid".to_owned())
+        }
+        RecordContextError::InsufficientContext => {
+            AppError::BadRequest("record context is too weak to ground an answer".to_owned())
+        }
+        RecordContextError::Unavailable => AppError::Unavailable("record retrieval"),
     }
 }
 

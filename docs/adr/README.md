@@ -54,6 +54,8 @@ plugin, AI, search and account/auth boundaries.
   Tantivy BM25, fastText rerank, общий indexing job и retrieval API.
 - [`0034`](0034-desk-projection-and-search-surfaces.md) — rebuildable Desk
   projection, типизированные routes и единые Web/MCP search surfaces.
+- [`0035`](0035-record-scoped-rag-global-chat.md) — record-only retrieval,
+  visible context и citations в существующем durable global chat.
 
 ## Template
 

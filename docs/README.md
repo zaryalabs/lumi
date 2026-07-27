@@ -15,6 +15,8 @@
   изолированный последовательный запуск этапов через Codex CLI.
 - [`visuals/`](visuals/) - статический UI/UX-прототип и связанные визуальные
   решения.
+- [`releases/0.4.0.md`](releases/0.4.0.md) - release notes, ограничения и
+  rollback выпуска записей, Desk, Search и record RAG.
 
 Временные реализационные планы живут отдельно в
 [`tmp-plans`](tmp-plans). Это tactical working documents для активных

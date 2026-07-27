@@ -151,6 +151,12 @@ chunks, common indexing jobs, owner-filtered query и bounded retrieval API.
 Пользовательские search surfaces `SEARCH-004`, MCP adapters и social
 permissions `SEARCH-006` остаются следующими эпиками.
 
+Эпики `0.4.0/E4–E5` закрывают `SEARCH-004` и record-scoped применение
+`SEARCH-005`: Global/Library/Reader/Desk используют один query service, а
+`record-rag` передаёт bounded owner-filtered records в существующий global
+chat с visible disclosure и exact open targets. Community scope
+`SEARCH-006` остаётся `0.5.0`.
+
 ## Learning And AI
 
 | ID | Функция | Тип | Зависит от | Документы |
@@ -170,6 +176,7 @@ permissions `SEARCH-006` остаются следующими эпиками.
 | AI-007 | Account-scoped MCP interface with target parity for product user operations and AI queue worker tools | extension | AI-002, API-001 | `mcp.md`, `ai.md`, `backend-api.md` |
 | AI-008 | Context policy, cost controls, user-visible context and source citations | foundation | AI-001, CORE-013, SEC-001 | `ai.md`, `security-privacy.md` |
 | AI-009 | Один active summary на главу/материал и отдельный сокращенный `.lum`-материал со связью с источником | product | AI-003, CORE-002, FMT-LUM-001 | `ai-summaries.md`, `ai.md`, `formats/lum.md` |
+| AI-010 | Record-scoped RAG в global chat с explicit filters, visible included context и проверяемыми citations | product | AI-005, AI-008, SEARCH-005, DESK-002 | `ai-chat.md`, `search.md`, `../adr/0035-record-scoped-rag-global-chat.md` |
 
 Реализация `0.3.0/E1–E4` закрывает deterministic baseline `LRN-001`, `LRN-003`,
 `LRN-004` и части `LRN-005`: revision-bound ручные items, durable completion,

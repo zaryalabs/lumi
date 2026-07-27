@@ -57,7 +57,7 @@ PROTOTYPE_GATE: tuple[Command, ...] = DOC_GATE + (("make", "prototype-e2e"),)
 
 PLAN_020 = "docs/tmp-plans/0.2.0-ai-plan.md"
 PLAN_030 = "docs/archive/0.3.0-learn-plan.md"
-PLAN_040 = "docs/tmp-plans/0.4.0-notes-and-desk-plan.md"
+PLAN_040 = "docs/archive/0.4.0-notes-and-desk-plan.md"
 PLAN_050 = "docs/tmp-plans/0.5.0-social-plan.md"
 
 # Historical micro-stage manifest retained only to explain trailers created
