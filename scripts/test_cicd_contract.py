@@ -195,6 +195,9 @@ class OperationsContractTests(unittest.TestCase):
         self.assertIn("-f $root/ops/compose.smoke.yaml", text)
         self.assertIn("$compose ps -aq blob-init", text)
         self.assertNotIn("$docker_cmd wait lumi-blob-init", text)
+        self.assertIn('--volume "$temporary:/cleanup"', text)
+        self.assertIn("--cap-drop ALL --cap-add DAC_OVERRIDE", text)
+        self.assertIn("'rm -rf /cleanup/*", text)
         self.assertEqual(7, override.count("container_name:"))
         self.assertNotIn("container_name: lumi-", override)
 

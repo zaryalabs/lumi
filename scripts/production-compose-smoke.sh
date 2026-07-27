@@ -23,6 +23,12 @@ cleanup() {
   if [ "$platform_created" = 1 ]; then
     $docker_cmd network rm platform >/dev/null 2>&1 || true
   fi
+  $docker_cmd run --rm --network none --read-only \
+    --cap-drop ALL --cap-add DAC_OVERRIDE \
+    --security-opt no-new-privileges \
+    --volume "$temporary:/cleanup" \
+    busybox:1.37 sh -c \
+    'rm -rf /cleanup/* /cleanup/.[!.]* /cleanup/..?*' >/dev/null 2>&1 || true
   rm -rf "$temporary"
   exit "$status"
 }
