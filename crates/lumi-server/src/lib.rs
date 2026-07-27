@@ -94,6 +94,7 @@ pub struct AppConfig {
     fasttext_model_path: Option<std::path::PathBuf>,
     fasttext_model_sha256: Option<String>,
     fasttext_model_version: String,
+    search_fixture_model: bool,
     openrouter_endpoint: String,
     openai_transcription_endpoint: String,
     deployment_mode: String,
@@ -129,6 +130,9 @@ impl AppConfig {
         let fasttext_model_sha256 = std::env::var("LUMI_FASTTEXT_MODEL_SHA256").ok();
         let fasttext_model_version = std::env::var("LUMI_FASTTEXT_MODEL_VERSION")
             .unwrap_or_else(|_| "cc.ru.300.fasttext.v1".to_owned());
+        let search_fixture_model = std::env::var("LUMI_SEARCH_FIXTURE_MODEL")
+            .map(|value| value == "1" || value.eq_ignore_ascii_case("true"))
+            .unwrap_or(false);
         let openrouter_endpoint = std::env::var("LUMI_OPENROUTER_ENDPOINT")
             .unwrap_or_else(|_| DEFAULT_OPENROUTER_ENDPOINT.to_owned());
         let openai_transcription_endpoint = std::env::var("LUMI_OPENAI_TRANSCRIPTION_ENDPOINT")
@@ -149,6 +153,7 @@ impl AppConfig {
             fasttext_model_path,
             fasttext_model_sha256,
             fasttext_model_version,
+            search_fixture_model,
             openrouter_endpoint,
             openai_transcription_endpoint,
             deployment_mode,
@@ -208,6 +213,12 @@ impl AppConfig {
     #[must_use]
     pub fn fasttext_model_version(&self) -> &str {
         &self.fasttext_model_version
+    }
+
+    /// Whether the deterministic local-only semantic model is enabled.
+    #[must_use]
+    pub fn search_fixture_model(&self) -> bool {
+        self.search_fixture_model
     }
 
     /// Fixed server-controlled OpenRouter endpoint.
@@ -437,6 +448,7 @@ impl AppState {
                 config.fasttext_model_path(),
                 config.fasttext_model_sha256(),
                 config.fasttext_model_version().to_owned(),
+                config.search_fixture_model(),
             )
             .await,
         );
@@ -646,6 +658,9 @@ fn validate_deployment_security(config: &AppConfig) -> anyhow::Result<()> {
         anyhow::bail!(
             "staging/production require HTTPS origin, matching auth audience and secure cookies"
         );
+    }
+    if config.search_fixture_model && config.deployment_mode != "local" {
+        anyhow::bail!("LUMI_SEARCH_FIXTURE_MODEL is allowed only in local deployment mode");
     }
     let bind_address = config
         .bind_address
@@ -2166,6 +2181,19 @@ mod tests {
         local.bind_address = "0.0.0.0:8080".to_owned();
 
         assert!(validate_deployment_security(&local).is_err());
+    }
+
+    #[test]
+    fn deployment_security_rejects_fixture_search_outside_local_mode() {
+        let mut staging = AppConfig::from_env();
+        staging.deployment_mode = "staging".to_owned();
+        staging.bind_address = "0.0.0.0:8080".to_owned();
+        staging.web_origin = "https://reader.staging.example".to_owned();
+        staging.auth_audience = staging.web_origin.clone();
+        staging.secure_cookie = true;
+        staging.search_fixture_model = true;
+
+        assert!(validate_deployment_security(&staging).is_err());
     }
 
     #[test]

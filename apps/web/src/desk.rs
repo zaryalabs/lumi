@@ -17,6 +17,7 @@ use crate::routing::{percent_encode, AppRoute, DeskRoute, DeskView, SearchRoute}
 pub(crate) fn DeskPage(
     route: DeskRoute,
     csrf_token: String,
+    record_rag_enabled: bool,
     on_route: EventHandler<AppRoute>,
 ) -> Element {
     let mut state = use_signal(|| DeskState::Loading);
@@ -116,16 +117,18 @@ pub(crate) fn DeskPage(
                     }
                     button { class: "secondary-action", r#type: "submit", "Найти" }
                 }
-                button {
-                    class: "primary-action",
-                    r#type: "button",
-                    onclick: move |_| {
-                        let _ = crate::ai::dispatch_record_handoff(
-                            ask_scope.clone(),
-                            ask_label.clone(),
-                        );
-                    },
-                    "Спросить по записям"
+                if record_rag_enabled {
+                    button {
+                        class: "primary-action",
+                        r#type: "button",
+                        onclick: move |_| {
+                            let _ = crate::ai::dispatch_record_handoff(
+                                ask_scope.clone(),
+                                ask_label.clone(),
+                            );
+                        },
+                        "Спросить по записям"
+                    }
                 }
             }
             nav { class: "desk-tabs", aria_label: "Разделы Desk",

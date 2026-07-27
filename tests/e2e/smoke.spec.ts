@@ -590,7 +590,21 @@ test("imports Markdown through the shared reflowable reader", async ({
   ).toHaveAttribute("rel", /noopener/);
 });
 
-test("keeps Desk and unified search routes reload-safe", async ({ page }) => {
+test("keeps Desk and unified search routes reload-safe and gates record RAG", async ({
+  page,
+}) => {
+  await page.route("**/api/v1/capabilities", async (route) => {
+    await route.fulfill({
+      contentType: "application/json",
+      body: JSON.stringify({
+        api_version: "v1",
+        domain_schema_version: "e2e",
+        normalized_package_version: "e2e",
+        route_groups: [],
+        features: ["markdown-import"],
+      }),
+    });
+  });
   await page.goto("/");
   await page
     .getByRole("button", { name: "Создать фразу восстановления" })
@@ -620,6 +634,9 @@ test("keeps Desk and unified search routes reload-safe", async ({ page }) => {
   await page.getByRole("link", { name: "Desk", exact: true }).click();
   const desk = page.getByRole("main", { name: "Desk" });
   await expect(desk.getByRole("heading", { name: "Desk" })).toBeVisible();
+  await expect(
+    desk.getByRole("button", { name: "Спросить по записям" }),
+  ).toHaveCount(0);
   await expect(
     desk.getByText("Руководство Lumi", { exact: true }),
   ).toBeVisible();
@@ -676,17 +693,40 @@ test("keeps Desk and unified search routes reload-safe", async ({ page }) => {
   await expect(
     search.getByText("Импортировать Markdown", { exact: false }),
   ).toBeVisible();
+  await expect(
+    search.getByRole("button", { name: "Спросить по записям" }),
+  ).toHaveCount(0);
   await page.reload();
   await expect(search.getByLabel("Что найти")).toHaveValue("Markdown");
   await search.getByRole("button", { name: "Открыть" }).click();
   await expect(page).toHaveURL(new RegExp(`#desk/material/${materialId}$`));
   await page.goBack();
   await expect(page).toHaveURL(/#search\?q=Markdown&type=material$/);
+  await page.getByRole("link", { name: "Библиотека", exact: true }).click();
+  await page
+    .getByRole("article", { name: "Материал Руководство Lumi" })
+    .getByRole("button", { name: "Читать" })
+    .click();
+  await expect(
+    page.getByRole("button", { name: "Спросить по записям" }),
+  ).toHaveCount(0);
 });
 
 test("hands an explicit record scope from Search to the durable AI chat", async ({
   page,
 }) => {
+  await page.route("**/api/v1/capabilities", async (route) => {
+    await route.fulfill({
+      contentType: "application/json",
+      body: JSON.stringify({
+        api_version: "v1",
+        domain_schema_version: "e2e",
+        normalized_package_version: "e2e",
+        route_groups: ["search"],
+        features: ["record-rag"],
+      }),
+    });
+  });
   await page.goto("/");
   await page
     .getByRole("button", { name: "Создать фразу восстановления" })

@@ -85,6 +85,7 @@ impl SearchRuntime {
         model_path: Option<&Path>,
         model_sha256: Option<&str>,
         model_version: String,
+        fixture_model: bool,
     ) -> Self {
         let index_path = search_root.join(SEARCH_INDEX_VERSION);
         let (index, index_failure) = match SearchIndex::persistent(&index_path) {
@@ -92,12 +93,17 @@ impl SearchRuntime {
             Err(error) => (None, Some(error.code().to_owned())),
         };
         let (model, model_failure): (Option<Arc<dyn SemanticModel>>, Option<String>) =
-            match (model_path, model_sha256) {
-                (Some(path), Some(checksum)) => match FinalFusionFastText::load(path, checksum) {
-                    Ok(model) => (Some(Arc::new(model)), None),
-                    Err(error) => (None, Some(error.code().to_owned())),
-                },
-                _ => (None, Some(FastTextLoadError::Unavailable.code().to_owned())),
+            if fixture_model {
+                (Some(Arc::new(FixtureFastText)), None)
+            } else {
+                match (model_path, model_sha256) {
+                    (Some(path), Some(checksum)) => match FinalFusionFastText::load(path, checksum)
+                    {
+                        Ok(model) => (Some(Arc::new(model)), None),
+                        Err(error) => (None, Some(error.code().to_owned())),
+                    },
+                    _ => (None, Some(FastTextLoadError::Unavailable.code().to_owned())),
+                }
             };
         let failure_code = index_failure.or(model_failure);
         let runtime = Self {

@@ -146,6 +146,7 @@ pub(crate) fn ReaderApp(
     material_id: Uuid,
     initial_anchor: Option<String>,
     csrf_token: String,
+    record_rag_enabled: bool,
     on_close: EventHandler<()>,
     on_open_learning_session: EventHandler<Uuid>,
     on_manage_learning: EventHandler<(Uuid, Uuid)>,
@@ -384,7 +385,7 @@ pub(crate) fn ReaderApp(
                             span { "{creators}" }
                         }
                         div { class: "reader-tools", role: "toolbar", aria_label: "Инструменты чтения",
-                            crate::search_ui::ReaderSearch { material_id }
+                            crate::search_ui::ReaderSearch { material_id, record_rag_enabled }
                             button { id: "reader-toc-button", r#type: "button", aria_expanded: view.toc_open, aria_controls: "reader-toc-panel", onclick: move |_| toggle_reader_panel(state, ReaderPanel::Toc), "Оглавление" }
                             button { id: "reader-settings-button", r#type: "button", aria_expanded: view.settings_open, aria_controls: "reader-settings-panel", onclick: move |_| toggle_reader_panel(state, ReaderPanel::Settings), "Настройки" }
                             button { id: "reader-margin-note-button", r#type: "button", onclick: move |_| start_margin_note(state, current_page), "Запись на полях" }

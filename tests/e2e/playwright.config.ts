@@ -36,9 +36,9 @@ export default defineConfig({
           command: `make -C ../.. web-r LUMI_API_BASE=${apiBase} LUMI_WEB_PORT=${webPort}`,
           reuseExistingServer: true,
           timeout: 120_000,
-          // The root answers with a build placeholder while Dioxus is still
-          // compiling. A bundled PDF.js module is the stronger app-ready probe.
-          url: `${baseURL}/assets/pdfjs/pdf.mjs`,
+          // The generated wasm exists only after the current Dioxus build is
+          // ready; the source PDF.js asset is available too early.
+          url: `${baseURL}/wasm/lumi-web_bg.wasm`,
         },
         {
           command: `LUMI_E2E_OPENROUTER_PORT=${openRouterPort} node ./openrouter-mock.mjs`,

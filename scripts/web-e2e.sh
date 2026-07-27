@@ -25,7 +25,8 @@ free_port() {
 : "${LUMI_E2E_WEB_PORT:=$(free_port)}"
 : "${LUMI_E2E_OPENROUTER_PORT:=$(free_port)}"
 
-mkdir -p "$runtime/bin" "$runtime/blob-store" "$runtime/tmp"
+mkdir -p "$runtime/bin" "$runtime/blob-store" "$runtime/search-index" "$runtime/tmp"
+rm -rf -- "$root/target/dx/lumi-web/debug/web"
 for tool in pdfinfo pdftotext pdftoppm; do
   ln -s "$root/scripts/e2e-poppler-tool.sh" "$runtime/bin/$tool"
 done
@@ -37,6 +38,9 @@ docker build \
 
 export COMPOSE_PROJECT_NAME="$project"
 export LUMI_BLOB_ROOT="$runtime/blob-store"
+export LUMI_SEARCH_ROOT="$runtime/search-index"
+export LUMI_SEARCH_FIXTURE_MODEL=1
+export LUMI_FASTTEXT_MODEL_VERSION=fixture.fasttext.v1
 export LUMI_E2E_POPPLER_IMAGE="$poppler_image"
 export LUMI_PDFINFO_BIN="$runtime/bin/pdfinfo"
 export LUMI_PDFTOTEXT_BIN="$runtime/bin/pdftotext"
@@ -46,5 +50,6 @@ export LUMI_E2E_POSTGRES_PORT
 export LUMI_E2E_API_PORT
 export LUMI_E2E_WEB_PORT
 export LUMI_E2E_OPENROUTER_PORT
+export DATABASE_URL="postgres://lumi:lumi-local@127.0.0.1:$LUMI_E2E_POSTGRES_PORT/lumi"
 
 "$npm" --prefix "$root/tests/e2e" test

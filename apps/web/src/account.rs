@@ -54,6 +54,7 @@ pub(crate) fn AccountGate() -> Element {
     let mut state = use_signal(|| AccountState::Loading);
     let mut route = use_signal(initial_route);
     let mut csrf = use_signal(String::new);
+    let mut service_capabilities = use_signal(|| Option::<ServiceCapabilities>::None);
     let mut bootstrap_generation = use_signal(|| 0_u64);
     use_effect(move || {
         let Some(window) = web_sys::window() else {
@@ -62,6 +63,7 @@ pub(crate) fn AccountGate() -> Element {
         let handler = Closure::<dyn FnMut(web_sys::Event)>::new(move |_| {
             clear_csrf_cookie();
             csrf.set(String::new());
+            service_capabilities.set(None);
             route.set(AppRoute::Library);
             state.set(AccountState::Expired);
         });
@@ -100,6 +102,18 @@ pub(crate) fn AccountGate() -> Element {
         }
     });
     use_effect(move || {
+        let needs_record_capability = matches!(
+            route(),
+            AppRoute::Reader(_, _, _) | AppRoute::Desk(_) | AppRoute::Search(_)
+        );
+        let signed_in = matches!(&*state.read(), AccountState::SignedIn(_));
+        if signed_in && needs_record_capability {
+            spawn(async move {
+                service_capabilities.set(load_capabilities().await.ok());
+            });
+        }
+    });
+    use_effect(move || {
         let _ = bootstrap_generation();
         spawn(async move {
             match load_account().await {
@@ -113,13 +127,25 @@ pub(crate) fn AccountGate() -> Element {
                     }
                     state.set(AccountState::SignedIn(account));
                 }
-                Err(ApiError::Unauthorized) => state.set(AccountState::SignedOut),
+                Err(ApiError::Unauthorized) => {
+                    service_capabilities.set(None);
+                    state.set(AccountState::SignedOut);
+                }
                 Err(error) => state.set(AccountState::Failed(error.to_string())),
             }
         });
     });
 
     let account_state = state.read().clone();
+    let record_rag_enabled = service_capabilities
+        .read()
+        .as_ref()
+        .is_some_and(|capabilities| {
+            capabilities
+                .features
+                .iter()
+                .any(|feature| feature == "record-rag")
+        });
     match account_state {
         AccountState::Loading => rsx! {
             main { class: "account-screen", aria_label: "Загрузка аккаунта",
@@ -215,6 +241,7 @@ pub(crate) fn AccountGate() -> Element {
                                         if logout(&csrf_token).await.is_ok() {
                                             state.set(AccountState::SignedOut);
                                             csrf.set(String::new());
+                                            service_capabilities.set(None);
                                         }
                                     });
                                 },
@@ -228,6 +255,7 @@ pub(crate) fn AccountGate() -> Element {
                             material_id,
                             initial_anchor: anchor,
                             csrf_token: csrf.read().clone(),
+                            record_rag_enabled,
                             on_close: move |_| {
                                 let next = return_to.map_or(AppRoute::Library, AppRoute::LearningSession);
                                 set_browser_route(&next);
@@ -286,6 +314,7 @@ pub(crate) fn AccountGate() -> Element {
                         crate::desk::DeskPage {
                             route: desk_route,
                             csrf_token: csrf.read().clone(),
+                            record_rag_enabled,
                             on_route: move |next| {
                                 set_browser_route(&next);
                                 route.set(next);
@@ -294,6 +323,7 @@ pub(crate) fn AccountGate() -> Element {
                     } else if let AppRoute::Search(search_route) = route() {
                         crate::search_ui::GlobalSearchPage {
                             route: search_route,
+                            record_rag_enabled,
                             on_open: move |target| crate::search_ui::open_search_target(&target),
                         }
                     } else if route() == AppRoute::Settings && is_admin {

@@ -53,6 +53,7 @@ pub(crate) fn ReaderRoute(
     material_id: Uuid,
     initial_anchor: Option<String>,
     csrf_token: String,
+    record_rag_enabled: bool,
     on_close: EventHandler<()>,
     on_open_learning_session: EventHandler<Uuid>,
     on_manage_learning: EventHandler<(Uuid, Uuid)>,
@@ -77,6 +78,7 @@ pub(crate) fn ReaderRoute(
                 material_id,
                 initial_anchor: initial_anchor.clone(),
                 csrf_token,
+                record_rag_enabled,
                 on_close,
                 on_open_learning_session,
                 on_manage_learning,
@@ -87,6 +89,7 @@ pub(crate) fn ReaderRoute(
                 material_id,
                 initial_anchor,
                 csrf_token,
+                record_rag_enabled,
                 on_close,
                 on_open_learning_session,
                 on_manage_learning,
@@ -107,6 +110,7 @@ fn PdfReaderApp(
     material_id: Uuid,
     initial_anchor: Option<String>,
     csrf_token: String,
+    record_rag_enabled: bool,
     on_close: EventHandler<()>,
     on_open_learning_session: EventHandler<Uuid>,
     on_manage_learning: EventHandler<(Uuid, Uuid)>,
@@ -288,7 +292,7 @@ fn PdfReaderApp(
                         }
                         span { class: "reader-save-state saved", aria_live: "polite", "{save_message}" }
                         div { class: "reader-tools", aria_label: "Управление PDF",
-                            crate::search_ui::ReaderSearch { material_id }
+                            crate::search_ui::ReaderSearch { material_id, record_rag_enabled }
                             button { r#type: "button", aria_label: "Предыдущая страница", disabled: current_page() == 0, onclick: move |_| {
                                 let page = current_page().saturating_sub(1);
                                 current_page.set(page);

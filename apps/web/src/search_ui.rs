@@ -15,6 +15,7 @@ use crate::routing::{percent_encode, source_type_token, SearchRoute};
 #[component]
 pub(crate) fn GlobalSearchPage(
     route: SearchRoute,
+    record_rag_enabled: bool,
     on_open: EventHandler<SearchOpenTarget>,
 ) -> Element {
     let mut query = use_signal(|| route.query.clone());
@@ -74,6 +75,7 @@ pub(crate) fn GlobalSearchPage(
     };
     let can_ask =
         !route.query.trim().is_empty() && items.iter().any(|item| item.source_type.is_record());
+    let ask_label = format!("Записи по запросу «{}»", route.query.trim());
     rsx! {
         main { id: "main-content", class: "search-view", aria_label: "Единый поиск",
             header { class: "search-hero",
@@ -115,19 +117,21 @@ pub(crate) fn GlobalSearchPage(
                     }
                     button { class: "primary-action", r#type: "submit", "Найти" }
                 }
-                button {
-                    class: "secondary-action",
-                    r#type: "button",
-                    disabled: !can_ask,
-                    onclick: move |_| {
-                        if let Err(message) = crate::ai::dispatch_record_handoff(
-                            ask_scope.clone(),
-                            format!("Записи по запросу «{}»", route.query.trim()),
-                        ) {
-                            state.write().error = Some(message);
-                        }
-                    },
-                    "Спросить по записям"
+                if record_rag_enabled {
+                    button {
+                        class: "secondary-action",
+                        r#type: "button",
+                        disabled: !can_ask,
+                        onclick: move |_| {
+                            if let Err(message) = crate::ai::dispatch_record_handoff(
+                                ask_scope.clone(),
+                                ask_label.clone(),
+                            ) {
+                                state.write().error = Some(message);
+                            }
+                        },
+                        "Спросить по записям"
+                    }
                 }
             }
             if let Some(status) = snapshot.status {
@@ -183,7 +187,7 @@ pub(crate) fn LibrarySearch(on_submit: EventHandler<String>) -> Element {
 }
 
 #[component]
-pub(crate) fn ReaderSearch(material_id: Uuid) -> Element {
+pub(crate) fn ReaderSearch(material_id: Uuid, record_rag_enabled: bool) -> Element {
     let mut query = use_signal(String::new);
     let mut page = use_signal(|| Option::<SearchPage>::None);
     let mut error = use_signal(String::new);
@@ -217,24 +221,26 @@ pub(crate) fn ReaderSearch(material_id: Uuid) -> Element {
                 }
                 button { class: "secondary-action", r#type: "submit", "Найти" }
             }
-            button {
-                class: "secondary-action",
-                r#type: "button",
-                onclick: move |_| {
-                    let _ = crate::ai::dispatch_record_handoff(
-                        RecordSearchScope {
-                            query: None,
-                            material_ids: vec![material_id],
-                            record_types: Vec::new(),
-                            tags: Vec::new(),
-                            statuses: vec!["active".to_owned()],
-                            updated_range: None,
-                            retrieval_version: RECORD_RETRIEVAL_VERSION.to_owned(),
-                        },
-                        "Записи текущего материала".to_owned(),
-                    );
-                },
-                "Спросить по записям"
+            if record_rag_enabled {
+                button {
+                    class: "secondary-action",
+                    r#type: "button",
+                    onclick: move |_| {
+                        let _ = crate::ai::dispatch_record_handoff(
+                            RecordSearchScope {
+                                query: None,
+                                material_ids: vec![material_id],
+                                record_types: Vec::new(),
+                                tags: Vec::new(),
+                                statuses: vec!["active".to_owned()],
+                                updated_range: None,
+                                retrieval_version: RECORD_RETRIEVAL_VERSION.to_owned(),
+                            },
+                            "Записи текущего материала".to_owned(),
+                        );
+                    },
+                    "Спросить по записям"
+                }
             }
             if loading() {
                 p { role: "status", "Ищем…" }

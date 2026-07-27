@@ -2807,6 +2807,7 @@ impl ImportService {
             }
         };
         heartbeat.abort();
+        let _ = heartbeat.await;
         self.remove_cancellation(job_id);
         result
     }

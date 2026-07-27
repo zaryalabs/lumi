@@ -223,6 +223,21 @@ mod tests {
         Ok(())
     }
 
+    #[test]
+    fn record_pack_rejects_context_below_grounding_threshold() {
+        let owner_id = Uuid::now_v7();
+        let message_id = Uuid::now_v7();
+        let mut chunk = fixture_chunk(Uuid::now_v7(), "weak-chunk", "Слабое совпадение");
+        chunk.score.total = MIN_RETRIEVAL_SCORE / 2.0;
+
+        let result = build_pack(owner_id, message_id, fixture_scope(), vec![chunk]);
+
+        assert!(matches!(
+            result,
+            Err(RecordContextError::InsufficientContext)
+        ));
+    }
+
     fn fixture_scope() -> RecordSearchScope {
         RecordSearchScope {
             query: Some("Что важно?".to_owned()),
