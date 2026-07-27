@@ -17,6 +17,9 @@
   scripts/
   volumes/postgres-data/
   volumes/blobs/
+  volumes/secrets/
+  volumes/search/
+  volumes/models/
   backups/
 ```
 
@@ -29,7 +32,7 @@ operational contract. Обычный релиз устанавливает то�
 
 Bootstrap меняет production state и выполняется оператором после review:
 
-1. Создать `/opt/apps/lumi/{builds/releases,scripts,volumes/postgres-data,volumes/blobs,backups}`.
+1. Создать `/opt/apps/lumi/{builds/releases,scripts,volumes/postgres-data,volumes/blobs,volumes/secrets,volumes/search,volumes/models,backups}`.
 2. Установить reviewed-файлы из `ops/`, включая
    `ops/validate-release-manifest.sh` как
    `/opt/apps/lumi/scripts/validate-release-manifest.sh`, а также
@@ -68,7 +71,9 @@ Git SHA и digest-pinned server/web images. Production никогда не ис�
 
 Forward migrations выполняются до замены приложения. Изменения schema должны
 быть совместимы как минимум с предыдущим release приложения; иначе rollback
-требует согласованного восстановления PostgreSQL и blobs.
+требует согласованного восстановления PostgreSQL, blobs и secret key ring.
+Search index является derived state и после restore перестраивается из primary
+данных.
 
 ## Operations
 
@@ -82,11 +87,14 @@ make restore-verify BACKUP=<backup-id>
 ```
 
 `make backup` намеренно останавливает server для quiesce writes, создаёт общий
-PostgreSQL + blob backup и снова запускает server даже при ошибке backup.
+PostgreSQL + blob + secret key ring backup и снова запускает server даже при
+ошибке backup.
 Оператор передаёт `LUMI_BACKUP_DESTINATION_ENCRYPTED=1` только после проверки,
 что `backups/` находится на encrypted destination или покрыт синхронной
 encrypted off-site копией. Перед допуском beta-пользователей выполняется
-disposable restore drill.
+disposable restore drill. `volumes/search` в backup не входит: индекс
+перестраивается. Модель в `volumes/models` поставляется и проверяется оператором
+отдельно, её checksum задаётся через `.env`.
 
 ## Logs
 

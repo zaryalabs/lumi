@@ -118,19 +118,27 @@ impl AppConfig {
             .map(|value| value != "0" && !value.eq_ignore_ascii_case("false"))
             .unwrap_or(false);
         let blob_root = std::env::var_os("LUMI_BLOB_ROOT")
+            .filter(|value| !value.is_empty())
             .map(std::path::PathBuf::from)
             .unwrap_or_else(|| std::path::PathBuf::from(DEFAULT_BLOB_ROOT));
         let secret_root = std::env::var_os("LUMI_SECRET_ROOT")
+            .filter(|value| !value.is_empty())
             .map(std::path::PathBuf::from)
             .unwrap_or_else(|| std::path::PathBuf::from(DEFAULT_SECRET_ROOT));
         let search_root = std::env::var_os("LUMI_SEARCH_ROOT")
+            .filter(|value| !value.is_empty())
             .map(std::path::PathBuf::from)
             .unwrap_or_else(|| std::path::PathBuf::from(DEFAULT_SEARCH_ROOT));
-        let fasttext_model_path =
-            std::env::var_os("LUMI_FASTTEXT_MODEL").map(std::path::PathBuf::from);
-        let fasttext_model_sha256 = std::env::var("LUMI_FASTTEXT_MODEL_SHA256").ok();
+        let fasttext_model_path = std::env::var_os("LUMI_FASTTEXT_MODEL")
+            .filter(|value| !value.is_empty())
+            .map(std::path::PathBuf::from);
+        let fasttext_model_sha256 = std::env::var("LUMI_FASTTEXT_MODEL_SHA256")
+            .ok()
+            .filter(|value| !value.is_empty());
         let fasttext_model_version = std::env::var("LUMI_FASTTEXT_MODEL_VERSION")
-            .unwrap_or_else(|_| "cc.ru.300.fasttext.v1".to_owned());
+            .ok()
+            .filter(|value| !value.is_empty())
+            .unwrap_or_else(|| "cc.ru.300.fasttext.v1".to_owned());
         let search_fixture_model = std::env::var("LUMI_SEARCH_FIXTURE_MODEL")
             .map(|value| value == "1" || value.eq_ignore_ascii_case("true"))
             .unwrap_or(false);

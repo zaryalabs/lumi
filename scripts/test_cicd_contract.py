@@ -139,6 +139,59 @@ class OperationsContractTests(unittest.TestCase):
         )
         self.assertNotIn("platform-auth-chain@file", text)
 
+    def test_production_persists_runtime_state_outside_read_only_container(
+        self,
+    ) -> None:
+        text = (ROOT / "ops" / "compose.yaml").read_text(encoding="utf-8")
+
+        self.assertIn(
+            "chown -R 65532:65532 /var/lib/lumi/blobs "
+            "/var/lib/lumi/secrets /var/lib/lumi/search",
+            text,
+        )
+        self.assertIn("LUMI_SECRET_ROOT: /var/lib/lumi/secrets", text)
+        self.assertIn("LUMI_SEARCH_ROOT: /var/lib/lumi/search", text)
+        self.assertIn("./volumes/secrets:/var/lib/lumi/secrets", text)
+        self.assertIn("./volumes/search:/var/lib/lumi/search", text)
+        self.assertIn("./volumes/models:/var/lib/lumi/models:ro", text)
+
+    def test_backup_contract_covers_secret_keyring(self) -> None:
+        backup = (ROOT / "scripts" / "backup.sh").read_text(encoding="utf-8")
+        restore = (ROOT / "scripts" / "restore-drill.sh").read_text(
+            encoding="utf-8"
+        )
+        validator = (
+            ROOT / "scripts" / "validate_restore_attestation.py"
+        ).read_text(encoding="utf-8")
+
+        self.assertIn('"lumi.backup.v2"', backup)
+        self.assertIn('"secrets":"secrets.tar.gz"', backup)
+        self.assertIn('"$target/secrets.tar.gz"', backup)
+        self.assertIn('"$backup/secrets.tar.gz"', restore)
+        self.assertIn("secret-store.instance", restore)
+        self.assertIn("secret-store.active", restore)
+        self.assertIn('"secrets", "row_counts"', validator)
+        self.assertIn('"secret_keyring_match"', validator)
+
+    def test_production_smoke_runs_backup_and_restore_drill(self) -> None:
+        text = (ROOT / "scripts" / "production-compose-smoke.sh").read_text(
+            encoding="utf-8"
+        )
+
+        self.assertIn('cp "$root/scripts/backup.sh"', text)
+        self.assertIn("LUMI_BACKUP_DRILL_MODE=1", text)
+        self.assertIn("$compose run --rm backup", text)
+        self.assertIn("$compose run --rm restore-drill", text)
+
+    def test_main_release_smokes_production_topology_before_push(self) -> None:
+        text = (WORKFLOWS / "main.yml").read_text(encoding="utf-8")
+        build = text.index("make build ")
+        smoke = text.index("make production-compose-smoke ")
+        push = text.index("make push ")
+
+        self.assertLess(build, smoke)
+        self.assertLess(smoke, push)
+
     def test_local_release_smokes_do_not_consume_persistent_state_or_placeholders(
         self,
     ) -> None:
