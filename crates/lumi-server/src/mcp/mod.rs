@@ -903,6 +903,9 @@ fn tool_enabled(state: &AppState, name: &str) -> bool {
         "list_space_chat_messages" | "create_space_chat_message" => {
             has_feature("community-communications")
         }
+        "search_shared_comments" | "search_space_chat" => {
+            state.search.is_query_ready() && has_feature("social-search-index")
+        }
         "search" | "search_material" | "search_notes" | "get_search_result_context" => {
             state.search.is_query_ready()
         }
@@ -1667,6 +1670,50 @@ async fn call_tool(
                 .map(|page| json!(page))
                 .map_err(map_search_tool)
         }
+        "search_shared_comments" => {
+            let space_id = uuid_arg(&arguments, "space_id")?;
+            let shared_material_id = arguments
+                .get("shared_material_id")
+                .and_then(Value::as_str)
+                .map(|value| Uuid::parse_str(value).map_err(|_| ToolError::Invalid))
+                .transpose()?;
+            let request = search_request_from_tool(
+                &arguments,
+                SearchScope::Community {
+                    space_id,
+                    shared_material_id,
+                },
+                SearchRankingProfile::Community,
+                vec![
+                    SearchSourceType::SharedComment,
+                    SearchSourceType::SharedHighlight,
+                ],
+            )?;
+            state
+                .search
+                .search(principal.user_id, request)
+                .await
+                .map(|page| json!(page))
+                .map_err(map_search_tool)
+        }
+        "search_space_chat" => {
+            let space_id = uuid_arg(&arguments, "space_id")?;
+            let request = search_request_from_tool(
+                &arguments,
+                SearchScope::Community {
+                    space_id,
+                    shared_material_id: None,
+                },
+                SearchRankingProfile::Community,
+                vec![SearchSourceType::SharedChatMessage],
+            )?;
+            state
+                .search
+                .search(principal.user_id, request)
+                .await
+                .map(|page| json!(page))
+                .map_err(map_search_tool)
+        }
         "get_search_result_context" => {
             let top_k = arguments
                 .get("top_k")
@@ -1784,6 +1831,7 @@ async fn call_tool(
                             &input.idempotency_key,
                             CreateSharedThreadRequest {
                                 body_markdown: input.body_markdown,
+                                target: Default::default(),
                             },
                         )
                         .await
@@ -1989,6 +2037,9 @@ fn search_request_from_tool(
                     Some("voice_transcript") => Ok(SearchSourceType::VoiceTranscript),
                     Some("ai_artifact") => Ok(SearchSourceType::AiArtifact),
                     Some("learning_item") => Ok(SearchSourceType::LearningItem),
+                    Some("shared_comment") => Ok(SearchSourceType::SharedComment),
+                    Some("shared_chat_message") => Ok(SearchSourceType::SharedChatMessage),
+                    Some("shared_highlight") => Ok(SearchSourceType::SharedHighlight),
                     _ => Err(ToolError::Invalid),
                 })
                 .collect::<Result<Vec<_>, _>>()

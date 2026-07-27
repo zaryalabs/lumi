@@ -172,6 +172,35 @@ impl SearchIndex {
                     ],
                 ),
             )),
+            SearchScope::Community {
+                space_id,
+                shared_material_id,
+            } => {
+                clauses.push((
+                    Occur::Must,
+                    term_query(self.fields.community_space_id, &space_id.to_string()),
+                ));
+                clauses.push((
+                    Occur::Must,
+                    source_types_query(
+                        self.fields.source_type,
+                        &[
+                            SearchSourceType::SharedComment,
+                            SearchSourceType::SharedChatMessage,
+                            SearchSourceType::SharedHighlight,
+                        ],
+                    ),
+                ));
+                if let Some(shared_material_id) = shared_material_id {
+                    clauses.push((
+                        Occur::Must,
+                        term_query(
+                            self.fields.shared_material_id,
+                            &shared_material_id.to_string(),
+                        ),
+                    ));
+                }
+            }
         }
         if !request.source_types.is_empty() {
             clauses.push((
@@ -256,6 +285,8 @@ struct SearchFields {
     owner_id: Field,
     source_type: Field,
     material_id: Field,
+    community_space_id: Field,
+    shared_material_id: Field,
     title: Field,
     heading: Field,
     tags: Field,
@@ -273,6 +304,8 @@ fn search_schema() -> (Schema, SearchFields) {
         owner_id: builder.add_text_field("owner_id", STRING),
         source_type: builder.add_text_field("source_type", STRING),
         material_id: builder.add_text_field("material_id", STRING),
+        community_space_id: builder.add_text_field("community_space_id", STRING),
+        shared_material_id: builder.add_text_field("shared_material_id", STRING),
         title: builder.add_text_field("title", TEXT | STORED),
         heading: builder.add_text_field("heading", TEXT | STORED),
         tags: builder.add_text_field("tags", TEXT),
@@ -301,6 +334,12 @@ fn add_chunk_document(
     document.add_text(fields.source_type, chunk.source_type.as_str());
     if let Some(material_id) = chunk.material_id {
         document.add_text(fields.material_id, material_id.to_string());
+    }
+    if let Some(space_id) = chunk.community_space_id {
+        document.add_text(fields.community_space_id, space_id.to_string());
+    }
+    if let Some(shared_material_id) = chunk.shared_material_id {
+        document.add_text(fields.shared_material_id, shared_material_id.to_string());
     }
     document.add_text(fields.title, &chunk.title);
     document.add_text(fields.heading, chunk.heading_path.join(" / "));
@@ -404,7 +443,9 @@ impl SearchIndexError {
 
 #[cfg(test)]
 mod tests {
-    use lumi_core::{rich_epub_fixture, SearchRankingProfile};
+    use lumi_core::{
+        content_hash, rich_epub_fixture, SearchField, SearchRankingProfile, SEARCH_CHUNKER_VERSION,
+    };
 
     use super::*;
     use crate::search::chunker;
@@ -441,5 +482,71 @@ mod tests {
         assert!(!first.is_empty());
         assert!(foreign.is_empty());
         Ok(())
+    }
+
+    #[test]
+    fn community_filter_isolates_spaces_before_return() -> Result<(), Box<dyn std::error::Error>> {
+        let owner_id = Uuid::now_v7();
+        let first_space = Uuid::now_v7();
+        let second_space = Uuid::now_v7();
+        let first = social_chunk(first_space, Uuid::now_v7(), "обсуждаем общую главу");
+        let second = social_chunk(second_space, Uuid::now_v7(), "обсуждаем общую главу");
+        let index = SearchIndex::memory()?;
+        index.replace(owner_id, "first-space", &[(first.clone(), vec![1.0, 0.0])])?;
+        index.replace(owner_id, "second-space", &[(second, vec![1.0, 0.0])])?;
+        let request = SearchRequest {
+            query: "обсуждаем".to_owned(),
+            scope: SearchScope::Community {
+                space_id: first_space,
+                shared_material_id: None,
+            },
+            source_types: vec![SearchSourceType::SharedComment],
+            tags: Vec::new(),
+            material_ids: Vec::new(),
+            statuses: Vec::new(),
+            updated_range: None,
+            ranking: SearchRankingProfile::Community,
+            cursor: None,
+            limit: 20,
+        };
+
+        let results = index.candidates(owner_id, &request, 100)?;
+
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].chunk.id, first.id);
+        assert!(results
+            .iter()
+            .all(|candidate| candidate.chunk.community_space_id == Some(first_space)));
+        Ok(())
+    }
+
+    fn social_chunk(space_id: Uuid, source_id: Uuid, text: &str) -> SearchChunk {
+        SearchChunk {
+            id: SearchChunk::stable_id(
+                SearchSourceType::SharedComment,
+                source_id,
+                "shared-comment.v1",
+                SearchField::Message,
+                0,
+            ),
+            source_type: SearchSourceType::SharedComment,
+            source_id,
+            material_id: None,
+            revision_id: None,
+            community_space_id: Some(space_id),
+            shared_material_id: Some(Uuid::now_v7()),
+            source_version: "shared-comment.v1".to_owned(),
+            field: SearchField::Message,
+            title: "Комментарий сообщества".to_owned(),
+            heading_path: Vec::new(),
+            text: text.to_owned(),
+            text_hash: content_hash(text.as_bytes()),
+            language: Some("ru".to_owned()),
+            tags: Vec::new(),
+            status: None,
+            updated_at: None,
+            anchor: None,
+            chunker_version: SEARCH_CHUNKER_VERSION.to_owned(),
+        }
     }
 }

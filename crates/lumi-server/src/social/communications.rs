@@ -694,7 +694,9 @@ mod tests {
         .await?;
         let secret_root =
             std::env::temp_dir().join(format!("lumi-social-performance-{}", Uuid::now_v7()));
-        let runtime = super::super::SocialRuntime::postgres(pool, &secret_root).await?;
+        let runtime =
+            super::super::SocialRuntime::postgres(pool, &secret_root, secret_root.join("blobs"))
+                .await?;
 
         let chat_started = std::time::Instant::now();
         let chat = runtime.list_chat(user_id, space_id, None, 50).await?;

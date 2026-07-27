@@ -165,22 +165,25 @@ Community Web shell поддерживает создание и настрой�
 консервативными состояниями `matched`, `manual_review` или `rejected`.
 Карточка, сведения и оба Reader предоставляют явный Share flow, а участник
 может подключить только материал из собственной библиотеки. Persistent server
-публикует capability `material-sharing`. Зависимые от ещё выполняемого `0.4.0`
-shared anchors, social search, generic images и автоматический fingerprint
-lifecycle перечислены в
-[`docs/tmp-plans/0.5.0-deferred-until-0.4.0.md`](docs/tmp-plans/0.5.0-deferred-until-0.4.0.md).
+публикует capability `material-sharing`. После закрытия зависимостей `0.4.0`
+также реализованы shared anchors и Reader overlays, permission-aware social
+search, generic avatar/cover blobs и автоматический fingerprint lifecycle;
+release evidence сохранён в
+[`docs/tmp-plans/0.5.0-deferred-until-0.4.0.md`](docs/tmp-plans/0.5.0-deferred-until-0.4.0.md)
+и [`ADR 0040`](docs/adr/0040-shared-reading-social-index-images-and-fingerprint-lifecycle.md).
 Для независимой части `0.5.0/E3` реализованы material-level threads/replies,
 author edit/delete, moderation tombstones, cursor API и Community discussion
-surface. Persistent server публикует capability `material-discussions`, но не
+surface. Persistent server публикует capabilities `material-discussions` и
 `shared-reading`: anchor comments, published highlights и Reader overlay
-остаются отложены до общего Records v2 target/provenance contract `0.4.0`.
+переиспользуют общий Records v2 target/provenance contract.
 Для независимой части `0.5.0/E4` добавлены отдельные Space chat и append-only
 activity, author CRUD/moderation tombstones, bounded cursor/polling delivery и
 account-scoped social tools в registry `mcp-tools.v4` поверх общих application
 services. Backup/restore evidence включает community state и revoked links,
 performance gate проверяет 50 000 сообщений и 100 000 событий. Workspace и Web
-package имеют версию `0.5.0`. Permission-aware social search events остаются
-выключены до завершения интеграции social surface с общим search runtime.
+package имеют версию `0.5.0`. Общий search runtime индексирует разрешённые
+shared comments/chat/highlights, а MCP registry `mcp-tools.v5` предоставляет
+permission-aware social search.
 
 ## Локальный запуск
 

@@ -4,10 +4,11 @@ use dioxus::prelude::*;
 use gloo_net::http::Request;
 use lumi_core::{
     AiContextAttachment, AiSourceScope, Anchor, Annotation, AnnotationKind, AnnotationStatus,
-    AnnotationTarget, CreateAnnotationCommand, DeleteAnnotationCommand, HighlightStyle,
-    LibraryEntry, MaterialKind, MoveReadingPositionCommand, PageFidelityDocument, PageRect,
-    PdfPage, PdfRect, PdfSourceLocator, ReadingProgress, SourceLocator, TextRange,
-    UpdateAnnotationCommand,
+    AnnotationTarget, CreateAnnotationCommand, CreateSharedThreadRequest, DeleteAnnotationCommand,
+    HighlightStyle, LibraryEntry, MaterialKind, MoveReadingPositionCommand, PageFidelityDocument,
+    PageRect, PdfPage, PdfRect, PdfSourceLocator, PublishSharedHighlightRequest, ReadingProgress,
+    SharedAnchorDraft, SharedAnchorPlacement, SharedReaderSpaceLayer, SharedThreadTargetDraft,
+    SourceLocator, TextRange, UnpublishSharedHighlightRequest, UpdateAnnotationCommand,
 };
 use serde_json::json;
 use uuid::Uuid;
@@ -55,6 +56,7 @@ pub(crate) fn ReaderRoute(
     csrf_token: String,
     record_rag_enabled: bool,
     material_sharing_available: bool,
+    shared_reading_available: bool,
     on_close: EventHandler<()>,
     on_open_learning_session: EventHandler<Uuid>,
     on_manage_learning: EventHandler<(Uuid, Uuid)>,
@@ -81,6 +83,7 @@ pub(crate) fn ReaderRoute(
                 csrf_token,
                 record_rag_enabled,
                 material_sharing_available,
+                shared_reading_available,
                 on_close,
                 on_open_learning_session,
                 on_manage_learning,
@@ -93,6 +96,7 @@ pub(crate) fn ReaderRoute(
                 csrf_token,
                 record_rag_enabled,
                 material_sharing_available,
+                shared_reading_available,
                 on_close,
                 on_open_learning_session,
                 on_manage_learning,
@@ -115,6 +119,7 @@ fn PdfReaderApp(
     csrf_token: String,
     record_rag_enabled: bool,
     material_sharing_available: bool,
+    shared_reading_available: bool,
     on_close: EventHandler<()>,
     on_open_learning_session: EventHandler<Uuid>,
     on_manage_learning: EventHandler<(Uuid, Uuid)>,
@@ -139,6 +144,8 @@ fn PdfReaderApp(
     let mut reader_message = use_signal(String::new);
     let save_message = use_signal(|| "Сохранено".to_owned());
     let mut mount_config = use_signal(|| None::<String>);
+    let mut shared_layers = use_signal(Vec::<SharedReaderSpaceLayer>::new);
+    let social_thread_draft = use_signal(String::new);
     let progress_generation = use_signal(|| 0_u64);
     let csrf = use_signal(|| csrf_token);
 
@@ -169,6 +176,13 @@ fn PdfReaderApp(
         spawn(async move {
             match load_pdf_reader(material_id).await {
                 Ok((data, progress, loaded_annotations)) => {
+                    let loaded_shared_layers = if shared_reading_available {
+                        get_json(&format!("/shared-reading/materials/{material_id}"))
+                            .await
+                            .unwrap_or_default()
+                    } else {
+                        Vec::new()
+                    };
                     let target = crate::ai::take_reader_target(material_id);
                     let target_anchor = target.as_ref().and_then(|attachment| {
                         let AiContextAttachment::Source {
@@ -202,11 +216,13 @@ fn PdfReaderApp(
                         "initialPage": initial_page,
                         "pages": data.document.pages,
                         "annotations": annotation_overlays(&loaded_annotations),
+                        "sharedAnnotations": shared_annotation_overlays(&loaded_shared_layers),
                     })
                     .to_string();
                     current_page.set(initial_page);
                     selected_anchor.set(target_anchor);
                     annotations.set(loaded_annotations);
+                    shared_layers.set(loaded_shared_layers);
                     if let Some(page_index) = initial_anchor
                         .as_deref()
                         .and_then(|value| value.strip_prefix("page-"))
@@ -547,6 +563,18 @@ fn PdfReaderApp(
                                     }
                                 }
                             }
+                            if shared_reading_available {
+                                PdfSocialPanel {
+                                    layers: shared_layers,
+                                    annotations,
+                                    selected_anchor,
+                                    selected_target,
+                                    social_thread_draft,
+                                    current_page,
+                                    reader_message,
+                                    csrf,
+                                }
+                            }
                         }
                     }
                     if current_page() as usize + 1 == page_count {
@@ -619,6 +647,332 @@ fn PdfAiActions(data: PdfReaderData, anchor: Anchor, reader_message: Signal<Stri
     }
 }
 
+#[component]
+fn PdfSocialPanel(
+    layers: Signal<Vec<SharedReaderSpaceLayer>>,
+    annotations: Signal<Vec<Annotation>>,
+    selected_anchor: Signal<Option<Anchor>>,
+    selected_target: Signal<AnnotationTarget>,
+    social_thread_draft: Signal<String>,
+    current_page: Signal<u32>,
+    reader_message: Signal<String>,
+    csrf: Signal<String>,
+) -> Element {
+    let spaces = layers.read().clone();
+    let selected = selected_anchor.read().clone();
+    let private_highlights = annotations
+        .read()
+        .iter()
+        .filter_map(|annotation| match annotation.kind {
+            AnnotationKind::Highlight { style }
+                if annotation.status == AnnotationStatus::Active =>
+            {
+                Some((annotation.clone(), style))
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    rsx! {
+        section { class: "pdf-social-panel", aria_label: "Совместное чтение PDF",
+            h2 { "Сообщество" }
+            if spaces.is_empty() {
+                p { class: "capability-note",
+                    "Для этой копии нет подтверждённого совпадения с материалом сообщества."
+                }
+            } else {
+                if let Some(anchor) = selected {
+                    label { "Обсудить выбранное место"
+                        textarea {
+                            maxlength: "32768",
+                            value: "{social_thread_draft}",
+                            oninput: move |event| social_thread_draft.set(event.value()),
+                        }
+                    }
+                    for space in spaces.clone() {
+                        button {
+                            class: "secondary-action compact-action",
+                            r#type: "button",
+                            disabled: social_thread_draft().trim().is_empty(),
+                            onclick: {
+                                let anchor = anchor.clone();
+                                let target = selected_target.read().clone();
+                                let body = social_thread_draft();
+                                let csrf_token = csrf.read().clone();
+                                move |_| {
+                                    let anchor = anchor.clone();
+                                    let target = target.clone();
+                                    let body = body.clone();
+                                    let csrf_token = csrf_token.clone();
+                                    let space = space.clone();
+                                    spawn(async move {
+                                        let page_label = match anchor.source_locator.as_ref() {
+                                            Some(SourceLocator::Pdf(locator)) => {
+                                                Some(locator.page_label.clone())
+                                            }
+                                            _ => None,
+                                        };
+                                        let request = CreateSharedThreadRequest {
+                                            body_markdown: body,
+                                            target: SharedThreadTargetDraft::Anchor(Box::new(
+                                                SharedAnchorDraft {
+                                                    anchor,
+                                                    target,
+                                                    provenance_annotation_id: None,
+                                                    heading_path: Vec::new(),
+                                                    page_label,
+                                                },
+                                            )),
+                                        };
+                                        match post_pdf_social_json(
+                                            &format!(
+                                                "/spaces/{}/materials/{}/threads",
+                                                space.community_space_id,
+                                                space.shared_material_id
+                                            ),
+                                            &request,
+                                            &csrf_token,
+                                        )
+                                        .await
+                                        {
+                                            Ok(thread) => {
+                                                if let Some(layer) = layers
+                                                    .write()
+                                                    .iter_mut()
+                                                    .find(|layer| {
+                                                        layer.community_space_id
+                                                            == space.community_space_id
+                                                    })
+                                                {
+                                                    layer.layer.threads.push(thread);
+                                                }
+                                                social_thread_draft.set(String::new());
+                                                update_combined_annotation_overlays(
+                                                    &annotations.read(),
+                                                    &layers.read(),
+                                                );
+                                                reader_message.set(format!(
+                                                    "Обсуждение опубликовано в «{}».",
+                                                    space.community_space_name
+                                                ));
+                                            }
+                                            Err(error) => reader_message.set(error),
+                                        }
+                                    });
+                                }
+                            },
+                            "В «{space.community_space_name}»"
+                        }
+                    }
+                } else {
+                    p { class: "capability-note",
+                        "Выделите текст или область страницы, чтобы начать обсуждение."
+                    }
+                }
+                for space in spaces {
+                    PdfSocialSpace {
+                        space,
+                        private_highlights: private_highlights.clone(),
+                        layers,
+                        annotations,
+                        current_page,
+                        reader_message,
+                        csrf,
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[component]
+fn PdfSocialSpace(
+    space: SharedReaderSpaceLayer,
+    private_highlights: Vec<(Annotation, HighlightStyle)>,
+    layers: Signal<Vec<SharedReaderSpaceLayer>>,
+    annotations: Signal<Vec<Annotation>>,
+    current_page: Signal<u32>,
+    reader_message: Signal<String>,
+    csrf: Signal<String>,
+) -> Element {
+    let space_id = space.community_space_id;
+    let shared_material_id = space.shared_material_id;
+    let name = space.community_space_name.clone();
+    let threads = space.layer.threads.clone();
+    let highlights = space.layer.highlights.clone();
+    rsx! {
+        details { class: "pdf-social-space",
+            summary { "{name}" }
+            if !private_highlights.is_empty() {
+                details {
+                    summary { "Опубликовать личное выделение" }
+                    for (annotation, style) in private_highlights {
+                        div { class: "reader-social-item",
+                            span { "{pdf_bounded_preview(&annotation.anchor.quote, 96)}" }
+                            button {
+                                r#type: "button",
+                                onclick: {
+                                    let annotation = annotation.clone();
+                                    let csrf_token = csrf.read().clone();
+                                    move |_| {
+                                        let annotation = annotation.clone();
+                                        let csrf_token = csrf_token.clone();
+                                        spawn(async move {
+                                            let request = PublishSharedHighlightRequest {
+                                                anchor: SharedAnchorDraft::from_annotation(&annotation),
+                                                style,
+                                            };
+                                            match post_pdf_social_json(
+                                                &format!(
+                                                    "/spaces/{space_id}/materials/{shared_material_id}/highlights"
+                                                ),
+                                                &request,
+                                                &csrf_token,
+                                            )
+                                            .await
+                                            {
+                                                Ok(highlight) => {
+                                                    if let Some(layer) = layers
+                                                        .write()
+                                                        .iter_mut()
+                                                        .find(|layer| {
+                                                            layer.community_space_id == space_id
+                                                        })
+                                                    {
+                                                        layer.layer.highlights.push(highlight);
+                                                    }
+                                                    update_combined_annotation_overlays(
+                                                        &annotations.read(),
+                                                        &layers.read(),
+                                                    );
+                                                    reader_message.set(
+                                                        "Выделение опубликовано отдельно; личная запись не изменена.".to_owned(),
+                                                    );
+                                                }
+                                                Err(error) => reader_message.set(error),
+                                            }
+                                        });
+                                    }
+                                },
+                                "Опубликовать"
+                            }
+                        }
+                    }
+                }
+            }
+            for thread in threads {
+                article { class: "reader-social-item",
+                    p { class: "eyebrow", "Обсуждение" }
+                    PdfSharedPlacement {
+                        placement: thread.placement.clone(),
+                        current_page,
+                    }
+                    for comment in thread.comments {
+                        if let Some(body) = comment.body_markdown {
+                            p { "{body}" }
+                        }
+                    }
+                }
+            }
+            for highlight in highlights {
+                article { class: "reader-social-item",
+                    p { class: "eyebrow", "Общее выделение" }
+                    PdfSharedPlacement {
+                        placement: Some(highlight.placement.clone()),
+                        current_page,
+                    }
+                    button {
+                        class: "text-action danger-text",
+                        r#type: "button",
+                        onclick: {
+                            let csrf_token = csrf.read().clone();
+                            move |_| {
+                                let csrf_token = csrf_token.clone();
+                                let highlight = highlight.clone();
+                                spawn(async move {
+                                    match delete_pdf_social_json(
+                                        &format!(
+                                            "/spaces/{space_id}/highlights/{}",
+                                            highlight.id
+                                        ),
+                                        &UnpublishSharedHighlightRequest {
+                                            expected_revision: highlight.object_revision,
+                                        },
+                                        &csrf_token,
+                                    )
+                                    .await
+                                    {
+                                        Ok(()) => {
+                                            if let Some(layer) = layers
+                                                .write()
+                                                .iter_mut()
+                                                .find(|layer| {
+                                                    layer.community_space_id == space_id
+                                                })
+                                            {
+                                                layer.layer.highlights.retain(|item| {
+                                                    item.id != highlight.id
+                                                });
+                                            }
+                                            update_combined_annotation_overlays(
+                                                &annotations.read(),
+                                                &layers.read(),
+                                            );
+                                            reader_message.set(
+                                                "Публикация убрана; личное выделение сохранено.".to_owned(),
+                                            );
+                                        }
+                                        Err(error) => reader_message.set(error),
+                                    }
+                                });
+                            }
+                        },
+                        "Убрать публикацию"
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[component]
+fn PdfSharedPlacement(
+    placement: Option<SharedAnchorPlacement>,
+    current_page: Signal<u32>,
+) -> Element {
+    let Some(placement) = placement else {
+        return rsx! {};
+    };
+    match placement {
+        SharedAnchorPlacement::Resolved { anchor, .. } => {
+            let page = pdf_anchor_page(&anchor);
+            rsx! {
+                blockquote { "{pdf_bounded_preview(&anchor.quote, 160)}" }
+                if let Some(page) = page {
+                    button {
+                        class: "text-action",
+                        r#type: "button",
+                        onclick: move |_| {
+                            current_page.set(page);
+                            call_pdf_two(
+                                "goToPage",
+                                JsValue::from_str(PDF_CONTAINER_ID),
+                                JsValue::from_f64(f64::from(page)),
+                            );
+                        },
+                        "Показать на странице {page + 1}"
+                    }
+                }
+            }
+        }
+        SharedAnchorPlacement::Unresolved { shared_anchor } => rsx! {
+            p { class: "library-alert compact", role: "status",
+                "Место не найдено в текущей версии."
+            }
+            blockquote { "{pdf_bounded_preview(&shared_anchor.quote, 160)}" }
+        },
+    }
+}
+
 fn dispatch_pdf_ai_handoff(
     data: &PdfReaderData,
     anchor: Anchor,
@@ -686,6 +1040,50 @@ async fn get_json<T: for<'de> serde::Deserialize<'de>>(path: &str) -> Result<T, 
         .json()
         .await
         .map_err(|error| format!("Некорректный ответ PDF reader API: {error}"))
+}
+
+async fn post_pdf_social_json<T, R>(path: &str, body: &T, csrf: &str) -> Result<R, String>
+where
+    T: serde::Serialize,
+    R: for<'de> serde::Deserialize<'de>,
+{
+    let request = Request::post(&format!("{API_BASE}{path}"))
+        .credentials(RequestCredentials::Include)
+        .header("X-Lumi-CSRF", csrf)
+        .header("Idempotency-Key", &Uuid::now_v7().to_string())
+        .json(body)
+        .map_err(|error| error.to_string())?;
+    let response = request.send().await.map_err(|error| error.to_string())?;
+    if response.status() == 401 {
+        super::account::notify_session_expired();
+    }
+    if !response.ok() {
+        return Err(format!(
+            "Социальный слой отклонил запрос: HTTP {}.",
+            response.status()
+        ));
+    }
+    response.json().await.map_err(|error| error.to_string())
+}
+
+async fn delete_pdf_social_json<T>(path: &str, body: &T, csrf: &str) -> Result<(), String>
+where
+    T: serde::Serialize,
+{
+    let request = Request::delete(&format!("{API_BASE}{path}"))
+        .credentials(RequestCredentials::Include)
+        .header("X-Lumi-CSRF", csrf)
+        .header("Idempotency-Key", &Uuid::now_v7().to_string())
+        .json(body)
+        .map_err(|error| error.to_string())?;
+    let response = request.send().await.map_err(|error| error.to_string())?;
+    if response.status() == 401 {
+        super::account::notify_session_expired();
+    }
+    response
+        .ok()
+        .then_some(())
+        .ok_or_else(|| format!("Не удалось убрать публикацию: HTTP {}.", response.status()))
 }
 
 fn apply_pdf_ai_reader_target(
@@ -1443,6 +1841,46 @@ fn annotation_overlays(annotations: &[Annotation]) -> Vec<serde_json::Value> {
         .collect()
 }
 
+fn shared_annotation_overlays(layers: &[SharedReaderSpaceLayer]) -> Vec<serde_json::Value> {
+    let mut overlays = Vec::new();
+    for layer in layers {
+        for thread in &layer.layer.threads {
+            let Some(SharedAnchorPlacement::Resolved { anchor, .. }) = &thread.placement else {
+                continue;
+            };
+            if let Some(overlay) = shared_pdf_overlay(anchor, "shared-note") {
+                overlays.push(overlay);
+            }
+        }
+        for highlight in &layer.layer.highlights {
+            let SharedAnchorPlacement::Resolved { anchor, .. } = &highlight.placement else {
+                continue;
+            };
+            let kind = match highlight.style {
+                HighlightStyle::Bold => "shared-highlight-bold",
+                HighlightStyle::Green => "shared-highlight-green",
+                HighlightStyle::Blue => "shared-highlight-blue",
+                HighlightStyle::Yellow => "shared-highlight",
+            };
+            if let Some(overlay) = shared_pdf_overlay(anchor, kind) {
+                overlays.push(overlay);
+            }
+        }
+    }
+    overlays
+}
+
+fn shared_pdf_overlay(anchor: &Anchor, kind: &str) -> Option<serde_json::Value> {
+    let SourceLocator::Pdf(locator) = anchor.source_locator.as_ref()? else {
+        return None;
+    };
+    Some(json!({
+        "pageIndex": locator.page_index,
+        "kind": kind,
+        "rects": locator.page_rects,
+    }))
+}
+
 fn update_annotation_overlays(annotations: &[Annotation]) {
     if let Ok(payload) = serde_json::to_string(&annotation_overlays(annotations)) {
         call_pdf_two(
@@ -1451,6 +1889,34 @@ fn update_annotation_overlays(annotations: &[Annotation]) {
             JsValue::from_str(&payload),
         );
     }
+}
+
+fn update_combined_annotation_overlays(
+    _annotations: &[Annotation],
+    layers: &[SharedReaderSpaceLayer],
+) {
+    if let Ok(payload) = serde_json::to_string(&shared_annotation_overlays(layers)) {
+        call_pdf_two(
+            "setSharedAnnotationsJson",
+            JsValue::from_str(PDF_CONTAINER_ID),
+            JsValue::from_str(&payload),
+        );
+    }
+}
+
+fn pdf_anchor_page(anchor: &Anchor) -> Option<u32> {
+    match anchor.source_locator.as_ref()? {
+        SourceLocator::Pdf(locator) => Some(locator.page_index),
+        _ => None,
+    }
+}
+
+fn pdf_bounded_preview(value: &str, max_chars: usize) -> String {
+    let mut output = value.chars().take(max_chars).collect::<String>();
+    if value.chars().count() > max_chars {
+        output.push('…');
+    }
+    output
 }
 
 fn pdf_annotation_page(annotation: &Annotation) -> Option<u32> {

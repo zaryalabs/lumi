@@ -5,14 +5,16 @@ use std::time::{Duration, Instant};
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
 use lumi_core::{
     ClaimSharedMaterialRequest, CommunityAccessLink, CommunityAccessLinkId, CommunityAction,
-    CommunityActivityPage, CommunityLinkPreview, CommunityMembership, CommunityRole,
-    CommunitySpace, CommunitySpaceDetail, CommunitySpaceId, CreateCommunityAccessLinkRequest,
-    CreateCommunitySpaceRequest, CreateSharedChatMessageRequest, CreateSharedCommentRequest,
-    CreateSharedThreadRequest, CreatedCommunityAccessLink, DeleteSharedChatMessageRequest,
-    DeleteSharedCommentRequest, JoinCommunityLinkRequest, ModerateSocialContentRequest,
-    ModerationAction, PreviewCommunityLinkRequest, ShareMaterialRequest, SharedChatMessage,
-    SharedChatMessageId, SharedChatPage, SharedComment, SharedCommentId, SharedCommentThread,
-    SharedCommentThreadId, SharedDiscussionPage, SharedMaterial, SharedMaterialId,
+    CommunityActivityPage, CommunityImageKind, CommunityImageRef, CommunityLinkPreview,
+    CommunityMembership, CommunityRole, CommunitySpace, CommunitySpaceDetail, CommunitySpaceId,
+    CreateCommunityAccessLinkRequest, CreateCommunitySpaceRequest, CreateSharedChatMessageRequest,
+    CreateSharedCommentRequest, CreateSharedThreadRequest, CreatedCommunityAccessLink,
+    DeleteSharedChatMessageRequest, DeleteSharedCommentRequest, JoinCommunityLinkRequest,
+    ModerateSocialContentRequest, ModerationAction, PreviewCommunityLinkRequest,
+    PublishSharedHighlightRequest, ShareMaterialRequest, SharedChatMessage, SharedChatMessageId,
+    SharedChatPage, SharedComment, SharedCommentId, SharedCommentThread, SharedCommentThreadId,
+    SharedDiscussionPage, SharedHighlight, SharedHighlightId, SharedMaterial, SharedMaterialId,
+    SharedReaderLayer, SharedReaderSpaceLayer, UnpublishSharedHighlightRequest,
     UpdateCommunityMemberRequest, UpdateCommunitySpaceRequest, UpdateSharedChatMessageRequest,
     UpdateSharedCommentRequest, UserId,
 };
@@ -24,6 +26,7 @@ use uuid::Uuid;
 
 use crate::secrets::SecretStore;
 
+use super::images::CommunityImageDownload;
 use super::permissions;
 use super::store::PgSocialStore;
 
@@ -98,12 +101,13 @@ impl SocialRuntime {
     pub(crate) async fn postgres(
         pool: PgPool,
         secret_root: &std::path::Path,
+        blob_root: std::path::PathBuf,
     ) -> Result<Self, SocialStoreError> {
         let secrets = SecretStore::open(pool.clone(), secret_root)
             .await
             .map_err(|_| SocialStoreError::Unavailable)?;
         Ok(Self {
-            backend: SocialBackend::Postgres(PgSocialStore::new(pool, secrets)),
+            backend: SocialBackend::Postgres(PgSocialStore::new(pool, secrets, blob_root)),
             limits: Arc::new(Mutex::new(RateLimitState::default())),
         })
     }
@@ -118,6 +122,26 @@ impl SocialRuntime {
 
     pub(crate) fn supports_communications(&self) -> bool {
         matches!(self.backend, SocialBackend::Postgres(_))
+    }
+
+    pub(crate) fn supports_shared_reading(&self) -> bool {
+        matches!(self.backend, SocialBackend::Postgres(_))
+    }
+
+    pub(crate) fn supports_images(&self) -> bool {
+        matches!(self.backend, SocialBackend::Postgres(_))
+    }
+
+    pub(crate) async fn run_worker(
+        self: Arc<Self>,
+        cancellation: tokio_util::sync::CancellationToken,
+    ) {
+        match self.backend.clone() {
+            SocialBackend::Postgres(store) => {
+                store.run_fingerprint_worker(cancellation).await;
+            }
+            SocialBackend::Memory(_) => cancellation.cancelled().await,
+        }
     }
 
     pub(crate) async fn list(
@@ -218,6 +242,61 @@ impl SocialRuntime {
             SocialBackend::Postgres(store) => {
                 store
                     .update(user_id, device_id, space_id, idempotency_key, &request)
+                    .await
+            }
+        }
+    }
+
+    pub(crate) async fn replace_image(
+        &self,
+        user_id: UserId,
+        space_id: CommunitySpaceId,
+        kind: CommunityImageKind,
+        expected_revision: u64,
+        media_type: &str,
+        bytes: &[u8],
+    ) -> Result<CommunityImageRef, SocialStoreError> {
+        match &self.backend {
+            SocialBackend::Memory(_) => Err(SocialStoreError::Unavailable),
+            SocialBackend::Postgres(store) => {
+                store
+                    .replace_image(
+                        user_id,
+                        space_id,
+                        kind,
+                        expected_revision,
+                        media_type,
+                        bytes,
+                    )
+                    .await
+            }
+        }
+    }
+
+    pub(crate) async fn download_image(
+        &self,
+        user_id: UserId,
+        space_id: CommunitySpaceId,
+        kind: CommunityImageKind,
+    ) -> Result<CommunityImageDownload, SocialStoreError> {
+        match &self.backend {
+            SocialBackend::Memory(_) => Err(SocialStoreError::Unavailable),
+            SocialBackend::Postgres(store) => store.download_image(user_id, space_id, kind).await,
+        }
+    }
+
+    pub(crate) async fn delete_image(
+        &self,
+        user_id: UserId,
+        space_id: CommunitySpaceId,
+        kind: CommunityImageKind,
+        expected_revision: u64,
+    ) -> Result<(), SocialStoreError> {
+        match &self.backend {
+            SocialBackend::Memory(_) => Err(SocialStoreError::Unavailable),
+            SocialBackend::Postgres(store) => {
+                store
+                    .delete_image(user_id, space_id, kind, expected_revision)
                     .await
             }
         }
@@ -747,6 +826,115 @@ impl SocialRuntime {
         }
     }
 
+    pub(crate) async fn reader_layer(
+        &self,
+        user_id: UserId,
+        space_id: CommunitySpaceId,
+        shared_material_id: SharedMaterialId,
+    ) -> Result<SharedReaderLayer, SocialStoreError> {
+        match &self.backend {
+            SocialBackend::Memory(_) => Err(SocialStoreError::Unavailable),
+            SocialBackend::Postgres(store) => {
+                store
+                    .reader_layer(user_id, space_id, shared_material_id)
+                    .await
+            }
+        }
+    }
+
+    pub(crate) async fn reader_layers_for_material(
+        &self,
+        user_id: UserId,
+        material_id: Uuid,
+    ) -> Result<Vec<SharedReaderSpaceLayer>, SocialStoreError> {
+        match &self.backend {
+            SocialBackend::Memory(_) => Ok(Vec::new()),
+            SocialBackend::Postgres(store) => {
+                store.reader_layers_for_material(user_id, material_id).await
+            }
+        }
+    }
+
+    pub(crate) async fn list_highlights(
+        &self,
+        user_id: UserId,
+        space_id: CommunitySpaceId,
+        shared_material_id: SharedMaterialId,
+    ) -> Result<Vec<SharedHighlight>, SocialStoreError> {
+        match &self.backend {
+            SocialBackend::Memory(_) => Err(SocialStoreError::Unavailable),
+            SocialBackend::Postgres(store) => {
+                store
+                    .list_highlights(user_id, space_id, shared_material_id)
+                    .await
+            }
+        }
+    }
+
+    pub(crate) async fn publish_highlight(
+        &self,
+        user_id: UserId,
+        device_id: Uuid,
+        space_id: CommunitySpaceId,
+        shared_material_id: SharedMaterialId,
+        idempotency_key: &str,
+        request: PublishSharedHighlightRequest,
+    ) -> Result<SharedHighlight, SocialStoreError> {
+        validate_key(idempotency_key)?;
+        self.check_rate(
+            hash_space_actor_key(user_id, space_id),
+            "publish-highlight",
+            SOCIAL_PUBLISH_LIMIT,
+        )?;
+        match &self.backend {
+            SocialBackend::Memory(_) => Err(SocialStoreError::Unavailable),
+            SocialBackend::Postgres(store) => {
+                store
+                    .publish_highlight(
+                        user_id,
+                        device_id,
+                        space_id,
+                        shared_material_id,
+                        idempotency_key,
+                        &request,
+                    )
+                    .await
+            }
+        }
+    }
+
+    pub(crate) async fn unpublish_highlight(
+        &self,
+        user_id: UserId,
+        device_id: Uuid,
+        space_id: CommunitySpaceId,
+        highlight_id: SharedHighlightId,
+        idempotency_key: &str,
+        request: UnpublishSharedHighlightRequest,
+    ) -> Result<(), SocialStoreError> {
+        validate_key(idempotency_key)?;
+        if request.expected_revision == 0 {
+            return Err(SocialStoreError::Invalid(
+                "expected_revision must be positive".to_owned(),
+            ));
+        }
+        match &self.backend {
+            SocialBackend::Memory(_) => Err(SocialStoreError::Unavailable),
+            SocialBackend::Postgres(store) => {
+                store
+                    .unpublish_highlight(
+                        user_id,
+                        device_id,
+                        space_id,
+                        highlight_id,
+                        idempotency_key,
+                        request,
+                    )
+                    .await
+            }
+        }
+    }
+
     pub(crate) async fn add_comment(
         &self,
         user_id: UserId,
@@ -1176,6 +1364,8 @@ fn memory_create(
         slug: format!("space-{}", &id.simple().to_string()[..12]),
         name: request.name,
         description: request.description,
+        avatar: None,
+        cover: None,
         discoverability: lumi_core::CommunityDiscoverability::Unlisted,
         entry_policy: lumi_core::CommunityEntryPolicy::ByLink,
         created_by_user_id: user_id,

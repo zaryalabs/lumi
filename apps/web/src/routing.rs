@@ -313,6 +313,9 @@ fn parse_search_source_type(value: &str) -> Option<SearchSourceType> {
         "voice_transcript" => Some(SearchSourceType::VoiceTranscript),
         "ai_artifact" => Some(SearchSourceType::AiArtifact),
         "learning_item" => Some(SearchSourceType::LearningItem),
+        "shared_comment" => Some(SearchSourceType::SharedComment),
+        "shared_chat_message" => Some(SearchSourceType::SharedChatMessage),
+        "shared_highlight" => Some(SearchSourceType::SharedHighlight),
         _ => None,
     }
 }

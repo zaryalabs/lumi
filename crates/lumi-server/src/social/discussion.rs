@@ -2,11 +2,16 @@ use std::collections::HashMap;
 
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
 use lumi_core::{
-    CommunityAction, CommunityRole, CommunitySpaceId, CreateSharedCommentRequest,
-    CreateSharedThreadRequest, DeleteSharedCommentRequest, ModerateSocialContentRequest,
-    ModerationAction, ModerationActionKind, ModerationTargetType, SharedComment, SharedCommentId,
-    SharedCommentThread, SharedCommentThreadId, SharedCommentThreadScope, SharedDiscussionPage,
-    SharedMaterialId, SocialContentState, UpdateSharedCommentRequest, UserId,
+    content_hash, Anchor, AnchorResolution, AnchorResolutionStrategy, CommunityAction,
+    CommunityRole, CommunitySpaceId, CreateSharedCommentRequest, CreateSharedThreadRequest,
+    DeleteSharedCommentRequest, FixedLayoutContentPackage, ModerateSocialContentRequest,
+    ModerationAction, ModerationActionKind, ModerationTargetType, NormalizedContentPackage,
+    PageRect, PdfSourceLocator, PublishSharedHighlightRequest, RenderPlan, SharedAnchor,
+    SharedAnchorDraft, SharedAnchorPlacement, SharedComment, SharedCommentId, SharedCommentThread,
+    SharedCommentThreadId, SharedCommentThreadScope, SharedDiscussionPage, SharedHighlight,
+    SharedHighlightId, SharedMaterialId, SharedReaderLayer, SharedReaderSpaceLayer,
+    SharedThreadTargetDraft, SocialContentState, SourceLocator, TextRange,
+    UnpublishSharedHighlightRequest, UpdateSharedCommentRequest, UserId,
     MATERIAL_DISCUSSION_CONTRACT_VERSION,
 };
 use serde::Serialize;
@@ -49,7 +54,8 @@ impl PgSocialStore {
             cursor.map_or((None, None), |(time, id)| (Some(time), Some(id)));
         let rows = sqlx::query(
             "SELECT thread.thread_id, thread.community_space_id,
-                    thread.shared_material_id, thread.created_by_user_id,
+                    thread.shared_material_id, thread.scope, thread.shared_anchor,
+                    thread.created_by_user_id,
                     profile.nickname AS creator_nickname, thread.object_revision,
                     thread.created_at, thread.updated_at, thread.hidden_at, thread.deleted_at
              FROM shared_comment_threads thread
@@ -75,6 +81,14 @@ impl PgSocialStore {
             .iter()
             .map(thread_from_row)
             .collect::<Result<Vec<_>, _>>()?;
+        hydrate_thread_placements(
+            &mut transaction,
+            user_id,
+            space_id,
+            shared_material_id,
+            &mut threads,
+        )
+        .await?;
         let thread_ids = threads.iter().map(|thread| thread.id).collect::<Vec<_>>();
         if !thread_ids.is_empty() {
             let comment_rows = sqlx::query(
@@ -158,20 +172,70 @@ impl PgSocialStore {
         let now = OffsetDateTime::now_utc();
         let thread_id = Uuid::now_v7();
         let comment_id = Uuid::now_v7();
+        let validated_anchor = match &request.target {
+            SharedThreadTargetDraft::Material => None,
+            SharedThreadTargetDraft::Anchor(draft) => Some(
+                validate_anchor_draft(
+                    &mut transaction,
+                    user_id,
+                    space_id,
+                    shared_material_id,
+                    draft,
+                )
+                .await?,
+            ),
+        };
+        let scope = validated_anchor
+            .as_ref()
+            .map_or(SharedCommentThreadScope::Material, |anchor| {
+                anchor.draft.scope()
+            });
         sqlx::query(
             "INSERT INTO shared_comment_threads
              (thread_id, community_space_id, shared_material_id, scope,
-              created_by_user_id, object_revision, created_at, updated_at)
-             VALUES ($1, $2, $3, 'material', $4, 1, $5, $5)",
+              anchor_payload, shared_anchor, created_by_user_id,
+              object_revision, created_at, updated_at)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, 1, $8, $8)",
         )
         .bind(thread_id)
         .bind(space_id)
         .bind(shared_material_id)
+        .bind(thread_scope_db(scope))
+        .bind(
+            validated_anchor
+                .as_ref()
+                .map(|anchor| serde_json::to_value(&anchor.draft.anchor))
+                .transpose()
+                .map_err(storage)?,
+        )
+        .bind(
+            validated_anchor
+                .as_ref()
+                .map(|anchor| serde_json::to_value(anchor.draft.shared_anchor()))
+                .transpose()
+                .map_err(storage)?,
+        )
         .bind(user_id)
         .bind(now)
         .execute(&mut *transaction)
         .await
         .map_err(storage)?;
+        if let Some(anchor) = &validated_anchor {
+            sqlx::query(
+                "INSERT INTO shared_anchor_provenance
+                 (provenance_id, thread_id, user_id, material_id, revision_id, annotation_id)
+                 VALUES ($1, $2, $3, $4, $5, $6)",
+            )
+            .bind(Uuid::now_v7())
+            .bind(thread_id)
+            .bind(user_id)
+            .bind(anchor.material_id)
+            .bind(anchor.revision_id)
+            .bind(anchor.draft.provenance_annotation_id)
+            .execute(&mut *transaction)
+            .await
+            .map_err(storage)?;
+        }
         sqlx::query(
             "INSERT INTO shared_comments
              (comment_id, thread_id, author_user_id, body_markdown,
@@ -203,7 +267,14 @@ impl PgSocialStore {
             id: thread_id,
             community_space_id: space_id,
             shared_material_id,
-            scope: SharedCommentThreadScope::Material,
+            scope,
+            placement: validated_anchor
+                .as_ref()
+                .map(|anchor| SharedAnchorPlacement::Resolved {
+                    anchor: Box::new(anchor.draft.anchor.clone()),
+                    strategy: AnchorResolutionStrategy::ExactPath,
+                    confidence: 1.0,
+                }),
             created_by_user_id: user_id,
             creator_nickname: nickname,
             state: SocialContentState::Visible,
@@ -637,6 +708,349 @@ impl PgSocialStore {
         transaction.commit().await.map_err(storage)?;
         Ok(response)
     }
+
+    pub(super) async fn reader_layer(
+        &self,
+        user_id: UserId,
+        space_id: CommunitySpaceId,
+        shared_material_id: SharedMaterialId,
+    ) -> Result<SharedReaderLayer, SocialStoreError> {
+        let threads = self
+            .list_discussions(user_id, space_id, shared_material_id, None, 100)
+            .await?
+            .threads;
+        let highlights = self
+            .list_highlights(user_id, space_id, shared_material_id)
+            .await?;
+        Ok(SharedReaderLayer {
+            threads,
+            highlights,
+        })
+    }
+
+    pub(super) async fn reader_layers_for_material(
+        &self,
+        user_id: UserId,
+        material_id: Uuid,
+    ) -> Result<Vec<SharedReaderSpaceLayer>, SocialStoreError> {
+        let rows = sqlx::query(
+            "SELECT claim.community_space_id, space.name, claim.shared_material_id
+               FROM user_material_claims claim
+               JOIN community_spaces space
+                 ON space.community_space_id = claim.community_space_id
+                AND space.deleted_at IS NULL
+               JOIN community_memberships membership
+                 ON membership.community_space_id = claim.community_space_id
+                AND membership.user_id = claim.user_id
+                AND membership.status = 'active'
+              WHERE claim.user_id = $1 AND claim.material_id = $2
+                AND claim.match_status = 'matched' AND claim.deleted_at IS NULL
+              ORDER BY space.name, claim.community_space_id",
+        )
+        .bind(user_id)
+        .bind(material_id)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(storage)?;
+        let mut layers = Vec::with_capacity(rows.len());
+        for row in rows {
+            let community_space_id = row.try_get("community_space_id").map_err(storage)?;
+            let shared_material_id = row.try_get("shared_material_id").map_err(storage)?;
+            layers.push(SharedReaderSpaceLayer {
+                community_space_id,
+                community_space_name: row.try_get("name").map_err(storage)?,
+                shared_material_id,
+                layer: self
+                    .reader_layer(user_id, community_space_id, shared_material_id)
+                    .await?,
+            });
+        }
+        Ok(layers)
+    }
+
+    pub(super) async fn list_highlights(
+        &self,
+        user_id: UserId,
+        space_id: CommunitySpaceId,
+        shared_material_id: SharedMaterialId,
+    ) -> Result<Vec<SharedHighlight>, SocialStoreError> {
+        let mut transaction = self.pool.begin().await.map_err(storage)?;
+        let actor = membership_in_transaction(&mut transaction, user_id, space_id).await?;
+        permissions::active(&actor, CommunityAction::View)?;
+        ensure_material(&mut transaction, space_id, shared_material_id).await?;
+        let rows = sqlx::query(
+            "SELECT highlight.highlight_id, highlight.community_space_id,
+                    highlight.shared_material_id, highlight.published_by_user_id,
+                    highlight.style, highlight.anchor_payload, highlight.shared_anchor,
+                    highlight.object_revision, highlight.created_at, highlight.updated_at
+               FROM shared_highlights highlight
+              WHERE highlight.community_space_id = $1
+                AND highlight.shared_material_id = $2
+                AND highlight.deleted_at IS NULL
+              ORDER BY highlight.created_at, highlight.highlight_id",
+        )
+        .bind(space_id)
+        .bind(shared_material_id)
+        .fetch_all(&mut *transaction)
+        .await
+        .map_err(storage)?;
+        let anchors = rows
+            .iter()
+            .map(|row| {
+                let id = row.try_get::<Uuid, _>("highlight_id").map_err(storage)?;
+                let value = row
+                    .try_get::<serde_json::Value, _>("anchor_payload")
+                    .map_err(storage)?;
+                let anchor = serde_json::from_value(value).map_err(storage)?;
+                Ok((id, anchor))
+            })
+            .collect::<Result<HashMap<Uuid, Anchor>, SocialStoreError>>()?;
+        let placements = resolve_shared_anchors(
+            &mut transaction,
+            user_id,
+            space_id,
+            shared_material_id,
+            &anchors,
+        )
+        .await?;
+        let highlights = rows
+            .iter()
+            .map(|row| {
+                let id: Uuid = row.try_get("highlight_id").map_err(storage)?;
+                let placement = if let Some(placement) = placements.get(&id) {
+                    placement.clone()
+                } else {
+                    let value = row
+                        .try_get::<serde_json::Value, _>("shared_anchor")
+                        .map_err(storage)?;
+                    SharedAnchorPlacement::Unresolved {
+                        shared_anchor: serde_json::from_value(value).map_err(storage)?,
+                    }
+                };
+                Ok(SharedHighlight {
+                    id,
+                    community_space_id: row.try_get("community_space_id").map_err(storage)?,
+                    shared_material_id: row.try_get("shared_material_id").map_err(storage)?,
+                    published_by_user_id: row.try_get("published_by_user_id").map_err(storage)?,
+                    style: serde_json::from_value(serde_json::Value::String(
+                        row.try_get("style").map_err(storage)?,
+                    ))
+                    .map_err(storage)?,
+                    placement,
+                    object_revision: u64_from_i64(
+                        row.try_get("object_revision").map_err(storage)?,
+                    )?,
+                    created_at: timestamp_ms(row.try_get("created_at").map_err(storage)?),
+                    updated_at: timestamp_ms(row.try_get("updated_at").map_err(storage)?),
+                })
+            })
+            .collect::<Result<Vec<_>, SocialStoreError>>()?;
+        transaction.commit().await.map_err(storage)?;
+        Ok(highlights)
+    }
+
+    pub(super) async fn publish_highlight(
+        &self,
+        user_id: UserId,
+        device_id: Uuid,
+        space_id: CommunitySpaceId,
+        shared_material_id: SharedMaterialId,
+        idempotency_key: &str,
+        request: &PublishSharedHighlightRequest,
+    ) -> Result<SharedHighlight, SocialStoreError> {
+        let operation = "community.highlight.publish";
+        let request_hash = request_hash(&(shared_material_id, request))?;
+        let mut transaction = self.pool.begin().await.map_err(storage)?;
+        if let Some(retry) = load_retry(
+            &mut transaction,
+            space_id,
+            idempotency_key,
+            operation,
+            &request_hash,
+        )
+        .await?
+        {
+            transaction.commit().await.map_err(storage)?;
+            return Ok(retry);
+        }
+        let actor = membership_in_transaction(&mut transaction, user_id, space_id).await?;
+        permissions::active(&actor, CommunityAction::CreateDiscussion)?;
+        ensure_material(&mut transaction, space_id, shared_material_id).await?;
+        let validated = validate_anchor_draft(
+            &mut transaction,
+            user_id,
+            space_id,
+            shared_material_id,
+            &request.anchor,
+        )
+        .await?;
+        ensure_highlight_provenance(
+            &mut transaction,
+            user_id,
+            validated.material_id,
+            validated.revision_id,
+            validated.draft.provenance_annotation_id,
+        )
+        .await?;
+        let now = OffsetDateTime::now_utc();
+        let highlight_id = Uuid::now_v7();
+        let style = serde_json::to_value(request.style)
+            .map_err(storage)?
+            .as_str()
+            .ok_or(SocialStoreError::Unavailable)?
+            .to_owned();
+        sqlx::query(
+            "INSERT INTO shared_highlights
+             (highlight_id, community_space_id, shared_material_id,
+              published_by_user_id, style, anchor_payload, shared_anchor,
+              object_revision, created_at, updated_at)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, 1, $8, $8)",
+        )
+        .bind(highlight_id)
+        .bind(space_id)
+        .bind(shared_material_id)
+        .bind(user_id)
+        .bind(style)
+        .bind(serde_json::to_value(&validated.draft.anchor).map_err(storage)?)
+        .bind(serde_json::to_value(validated.draft.shared_anchor()).map_err(storage)?)
+        .bind(now)
+        .execute(&mut *transaction)
+        .await
+        .map_err(storage)?;
+        sqlx::query(
+            "INSERT INTO shared_anchor_provenance
+             (provenance_id, highlight_id, user_id, material_id, revision_id, annotation_id)
+             VALUES ($1, $2, $3, $4, $5, $6)",
+        )
+        .bind(Uuid::now_v7())
+        .bind(highlight_id)
+        .bind(user_id)
+        .bind(validated.material_id)
+        .bind(validated.revision_id)
+        .bind(validated.draft.provenance_annotation_id)
+        .execute(&mut *transaction)
+        .await
+        .map_err(storage)?;
+        let response = SharedHighlight {
+            id: highlight_id,
+            community_space_id: space_id,
+            shared_material_id,
+            published_by_user_id: user_id,
+            style: request.style,
+            placement: SharedAnchorPlacement::Resolved {
+                anchor: Box::new(validated.draft.anchor),
+                strategy: AnchorResolutionStrategy::ExactPath,
+                confidence: 1.0,
+            },
+            object_revision: 1,
+            created_at: timestamp_ms(now),
+            updated_at: timestamp_ms(now),
+        };
+        let sync_space_id = sync_space_id(&mut transaction, space_id).await?;
+        append_discussion_change(
+            &mut transaction,
+            sync_space_id,
+            "shared_highlight",
+            highlight_id,
+            1,
+            None,
+            "create",
+            &response,
+            device_id,
+            idempotency_key,
+            now,
+        )
+        .await?;
+        save_retry(
+            &mut transaction,
+            space_id,
+            idempotency_key,
+            operation,
+            &request_hash,
+            201,
+            &response,
+        )
+        .await?;
+        transaction.commit().await.map_err(storage)?;
+        Ok(response)
+    }
+
+    pub(super) async fn unpublish_highlight(
+        &self,
+        user_id: UserId,
+        device_id: Uuid,
+        space_id: CommunitySpaceId,
+        highlight_id: SharedHighlightId,
+        idempotency_key: &str,
+        request: UnpublishSharedHighlightRequest,
+    ) -> Result<(), SocialStoreError> {
+        let operation = "community.highlight.unpublish";
+        let request_hash = request_hash(&(highlight_id, request))?;
+        let mut transaction = self.pool.begin().await.map_err(storage)?;
+        let actor = membership_in_transaction(&mut transaction, user_id, space_id).await?;
+        permissions::active(&actor, CommunityAction::CreateDiscussion)?;
+        let row = sqlx::query(
+            "SELECT published_by_user_id, object_revision
+               FROM shared_highlights
+              WHERE highlight_id = $1 AND community_space_id = $2
+                AND deleted_at IS NULL FOR UPDATE",
+        )
+        .bind(highlight_id)
+        .bind(space_id)
+        .fetch_optional(&mut *transaction)
+        .await
+        .map_err(storage)?
+        .ok_or(SocialStoreError::NotFound)?;
+        let publisher: Uuid = row.try_get("published_by_user_id").map_err(storage)?;
+        if publisher != user_id
+            && !matches!(actor.role, CommunityRole::Owner | CommunityRole::Admin)
+        {
+            return Err(SocialStoreError::Forbidden);
+        }
+        let revision = u64_from_i64(row.try_get("object_revision").map_err(storage)?)?;
+        if revision != request.expected_revision {
+            return Err(SocialStoreError::Conflict);
+        }
+        let now = OffsetDateTime::now_utc();
+        sqlx::query(
+            "UPDATE shared_highlights
+                SET deleted_at = $3, object_revision = object_revision + 1, updated_at = $3
+              WHERE highlight_id = $1 AND community_space_id = $2",
+        )
+        .bind(highlight_id)
+        .bind(space_id)
+        .bind(now)
+        .execute(&mut *transaction)
+        .await
+        .map_err(storage)?;
+        let sync_space_id = sync_space_id(&mut transaction, space_id).await?;
+        append_discussion_change(
+            &mut transaction,
+            sync_space_id,
+            "shared_highlight",
+            highlight_id,
+            revision + 1,
+            Some(revision),
+            "delete",
+            &json!({"highlight_id": highlight_id, "deleted": true}),
+            device_id,
+            idempotency_key,
+            now,
+        )
+        .await?;
+        save_retry(
+            &mut transaction,
+            space_id,
+            idempotency_key,
+            operation,
+            &request_hash,
+            204,
+            &json!({"deleted": true}),
+        )
+        .await?;
+        transaction.commit().await.map_err(storage)?;
+        Ok(())
+    }
 }
 
 async fn ensure_material(
@@ -662,6 +1076,376 @@ async fn ensure_material(
         Ok(())
     } else {
         Err(SocialStoreError::NotFound)
+    }
+}
+
+struct ValidatedAnchor {
+    draft: SharedAnchorDraft,
+    material_id: Uuid,
+    revision_id: Uuid,
+}
+
+async fn validate_anchor_draft(
+    transaction: &mut Transaction<'_, Postgres>,
+    user_id: UserId,
+    space_id: CommunitySpaceId,
+    shared_material_id: SharedMaterialId,
+    draft: &SharedAnchorDraft,
+) -> Result<ValidatedAnchor, SocialStoreError> {
+    if matches!(draft.target, lumi_core::AnnotationTarget::Document) {
+        return Err(SocialStoreError::Invalid(
+            "document targets must use a material-level thread".to_owned(),
+        ));
+    }
+    if draft.anchor.quote.len() > 16 * 1024
+        || draft.anchor.prefix.len() > 2 * 1024
+        || draft.anchor.suffix.len() > 2 * 1024
+        || draft.heading_path.len() > 64
+        || draft.heading_path.iter().any(|part| part.len() > 512)
+        || draft
+            .page_label
+            .as_ref()
+            .is_some_and(|label| label.len() > 128)
+    {
+        return Err(SocialStoreError::Invalid(
+            "shared anchor exceeds bounded limits".to_owned(),
+        ));
+    }
+    let row = sqlx::query(
+        "SELECT claim.material_id, material.active_revision_id
+           FROM user_material_claims claim
+           JOIN materials material
+             ON material.material_id = claim.material_id
+            AND material.owner_user_id = claim.user_id
+            AND material.deleted_at IS NULL
+          WHERE claim.community_space_id = $1
+            AND claim.shared_material_id = $2
+            AND claim.user_id = $3
+            AND claim.match_status = 'matched'
+            AND claim.deleted_at IS NULL",
+    )
+    .bind(space_id)
+    .bind(shared_material_id)
+    .bind(user_id)
+    .fetch_optional(&mut **transaction)
+    .await
+    .map_err(storage)?
+    .ok_or(SocialStoreError::Forbidden)?;
+    let material_id: Uuid = row.try_get("material_id").map_err(storage)?;
+    let revision_id: Uuid = row
+        .try_get::<Option<Uuid>, _>("active_revision_id")
+        .map_err(storage)?
+        .ok_or(SocialStoreError::Conflict)?;
+    if draft.anchor.revision_id != revision_id {
+        return Err(SocialStoreError::Conflict);
+    }
+    if let Some(annotation_id) = draft.provenance_annotation_id {
+        let annotation = sqlx::query(
+            "SELECT annotation.anchor, annotation.target_kind
+               FROM annotations annotation
+               JOIN materials material
+                 ON material.material_id = annotation.material_id
+                AND material.space_id = annotation.space_id
+              WHERE annotation.annotation_id = $1
+                AND annotation.material_id = $2
+                AND annotation.revision_id = $3
+                AND material.owner_user_id = $4
+                AND annotation.deleted_at IS NULL
+                AND annotation.status = 'active'",
+        )
+        .bind(annotation_id)
+        .bind(material_id)
+        .bind(revision_id)
+        .bind(user_id)
+        .fetch_optional(&mut **transaction)
+        .await
+        .map_err(storage)?
+        .ok_or(SocialStoreError::Forbidden)?;
+        let stored_anchor: serde_json::Value = annotation.try_get("anchor").map_err(storage)?;
+        let request_anchor = serde_json::to_value(&draft.anchor).map_err(storage)?;
+        let target_kind: String = annotation.try_get("target_kind").map_err(storage)?;
+        if stored_anchor != request_anchor || target_kind != draft.target.kind_str() {
+            return Err(SocialStoreError::Conflict);
+        }
+    }
+    Ok(ValidatedAnchor {
+        draft: draft.clone(),
+        material_id,
+        revision_id,
+    })
+}
+
+async fn ensure_highlight_provenance(
+    transaction: &mut Transaction<'_, Postgres>,
+    user_id: UserId,
+    material_id: Uuid,
+    revision_id: Uuid,
+    annotation_id: Option<Uuid>,
+) -> Result<(), SocialStoreError> {
+    let annotation_id = annotation_id.ok_or_else(|| {
+        SocialStoreError::Invalid(
+            "published highlight requires private Annotation v2 provenance".to_owned(),
+        )
+    })?;
+    let is_highlight: bool = sqlx::query(
+        "SELECT EXISTS(
+             SELECT 1
+               FROM annotations annotation
+               JOIN materials material
+                 ON material.material_id = annotation.material_id
+                AND material.space_id = annotation.space_id
+              WHERE annotation.annotation_id = $1
+                AND annotation.material_id = $2
+                AND annotation.revision_id = $3
+                AND annotation.annotation_type = 'highlight'
+                AND annotation.status = 'active'
+                AND annotation.deleted_at IS NULL
+                AND material.owner_user_id = $4
+         ) AS is_highlight",
+    )
+    .bind(annotation_id)
+    .bind(material_id)
+    .bind(revision_id)
+    .bind(user_id)
+    .fetch_one(&mut **transaction)
+    .await
+    .map_err(storage)?
+    .try_get("is_highlight")
+    .map_err(storage)?;
+    if is_highlight {
+        Ok(())
+    } else {
+        Err(SocialStoreError::Forbidden)
+    }
+}
+
+async fn hydrate_thread_placements(
+    transaction: &mut Transaction<'_, Postgres>,
+    user_id: UserId,
+    space_id: CommunitySpaceId,
+    shared_material_id: SharedMaterialId,
+    threads: &mut [SharedCommentThread],
+) -> Result<(), SocialStoreError> {
+    let anchored_ids = threads
+        .iter()
+        .filter(|thread| thread.placement.is_some())
+        .map(|thread| thread.id)
+        .collect::<Vec<_>>();
+    if anchored_ids.is_empty() {
+        return Ok(());
+    }
+    let rows = sqlx::query(
+        "SELECT thread_id, anchor_payload
+           FROM shared_comment_threads
+          WHERE thread_id = ANY($1)
+            AND community_space_id = $2
+            AND shared_material_id = $3",
+    )
+    .bind(&anchored_ids)
+    .bind(space_id)
+    .bind(shared_material_id)
+    .fetch_all(&mut **transaction)
+    .await
+    .map_err(storage)?;
+    let anchors = rows
+        .iter()
+        .filter_map(|row| {
+            let thread_id = row.try_get::<Uuid, _>("thread_id").ok()?;
+            let value = row
+                .try_get::<Option<serde_json::Value>, _>("anchor_payload")
+                .ok()??;
+            serde_json::from_value::<Anchor>(value)
+                .ok()
+                .map(|anchor| (thread_id, anchor))
+        })
+        .collect::<HashMap<_, _>>();
+    let placements =
+        resolve_shared_anchors(transaction, user_id, space_id, shared_material_id, &anchors)
+            .await?;
+    for thread in threads {
+        if let Some(placement) = placements.get(&thread.id) {
+            thread.placement = Some(placement.clone());
+        }
+    }
+    Ok(())
+}
+
+async fn resolve_shared_anchors(
+    transaction: &mut Transaction<'_, Postgres>,
+    user_id: UserId,
+    space_id: CommunitySpaceId,
+    shared_material_id: SharedMaterialId,
+    anchors: &HashMap<Uuid, Anchor>,
+) -> Result<HashMap<Uuid, SharedAnchorPlacement>, SocialStoreError> {
+    let claim = sqlx::query(
+        "SELECT claim.material_id, material.active_revision_id,
+                revision.source_format, package.payload
+           FROM user_material_claims claim
+           JOIN materials material
+             ON material.material_id = claim.material_id
+            AND material.owner_user_id = claim.user_id
+            AND material.deleted_at IS NULL
+           JOIN document_revisions revision
+             ON revision.revision_id = material.active_revision_id
+           JOIN normalized_packages package
+             ON package.revision_id = material.active_revision_id
+          WHERE claim.community_space_id = $1
+            AND claim.shared_material_id = $2
+            AND claim.user_id = $3
+            AND claim.match_status = 'matched'
+            AND claim.deleted_at IS NULL",
+    )
+    .bind(space_id)
+    .bind(shared_material_id)
+    .bind(user_id)
+    .fetch_optional(&mut **transaction)
+    .await
+    .map_err(storage)?;
+    let Some(claim) = claim else {
+        return Ok(HashMap::new());
+    };
+    let material_id: Uuid = claim.try_get("material_id").map_err(storage)?;
+    let revision_id: Uuid = claim
+        .try_get::<Option<Uuid>, _>("active_revision_id")
+        .map_err(storage)?
+        .ok_or(SocialStoreError::Unavailable)?;
+    let source_format: String = claim.try_get("source_format").map_err(storage)?;
+    let payload: serde_json::Value = claim.try_get("payload").map_err(storage)?;
+    let mut placements = HashMap::new();
+    if source_format == "pdf" {
+        let package =
+            serde_json::from_value::<FixedLayoutContentPackage>(payload).map_err(storage)?;
+        for (id, origin) in anchors {
+            if let Some(placement) = resolve_pdf_anchor(&package, origin) {
+                placements.insert(*id, placement);
+            }
+        }
+    } else {
+        let package =
+            serde_json::from_value::<NormalizedContentPackage>(payload).map_err(storage)?;
+        let plan = RenderPlan::from_document(&package.reading_document(material_id));
+        if plan.revision_id != revision_id {
+            return Err(SocialStoreError::Unavailable);
+        }
+        for (id, origin) in anchors {
+            if let AnchorResolution::Resolved {
+                anchor,
+                strategy,
+                confidence,
+            } = plan.resolve_anchor(origin)
+            {
+                placements.insert(
+                    *id,
+                    SharedAnchorPlacement::Resolved {
+                        anchor,
+                        strategy,
+                        confidence,
+                    },
+                );
+            }
+        }
+    }
+    Ok(placements)
+}
+
+fn resolve_pdf_anchor(
+    package: &FixedLayoutContentPackage,
+    origin: &Anchor,
+) -> Option<SharedAnchorPlacement> {
+    if package.revision_id == origin.revision_id {
+        return Some(SharedAnchorPlacement::Resolved {
+            anchor: Box::new(origin.clone()),
+            strategy: AnchorResolutionStrategy::ExactPath,
+            confidence: 1.0,
+        });
+    }
+    let quote = origin.quote.trim();
+    if quote.is_empty() {
+        return None;
+    }
+    let mut candidates = package.text_layers.iter().flat_map(|layer| {
+        layer.blocks.iter().filter_map(move |block| {
+            let ranges = char_ranges(&block.text, quote);
+            (ranges.len() == 1).then(|| (layer, block, ranges[0]))
+        })
+    });
+    let candidate = candidates.next()?;
+    if candidates.next().is_some() {
+        return None;
+    }
+    let (layer, block, range) = candidate;
+    let page = package
+        .pages
+        .iter()
+        .find(|page| page.page_index == layer.page_index)?;
+    let locator = PdfSourceLocator {
+        pdf_file_checksum: package.manifest.source.source_hash.clone(),
+        page_index: page.page_index,
+        page_label: page.page_label.clone(),
+        page_revision_hash: page.page_hash.clone(),
+        page_rects: vec![block.bbox],
+        page_quads: Vec::new(),
+        text_layer_revision: Some(layer.extraction_revision.clone()),
+        text_block_start: Some(block.block_index),
+        text_block_end: Some(block.block_index),
+        text_char_start: Some(range.start),
+        text_char_end: Some(range.end),
+        normalized_rects: vec![block.bbox],
+    };
+    let anchor = Anchor {
+        revision_id: package.revision_id,
+        node_path: vec![
+            format!("page-{}", page.page_index),
+            format!("block-{}", block.block_index),
+        ],
+        end_node_path: Vec::new(),
+        text_range: Some(range),
+        quote: quote.to_owned(),
+        prefix: String::new(),
+        suffix: String::new(),
+        content_hash: content_hash(block.text.as_bytes()),
+        source_locator: Some(SourceLocator::Pdf(locator.clone())),
+        end_source_locator: Some(SourceLocator::Pdf(locator)),
+        page_rects: vec![PageRect {
+            page_index: page.page_index,
+            x: block.bbox.x,
+            y: block.bbox.y,
+            width: block.bbox.width,
+            height: block.bbox.height,
+        }],
+    };
+    Some(SharedAnchorPlacement::Resolved {
+        anchor: Box::new(anchor),
+        strategy: AnchorResolutionStrategy::QuoteWithContext,
+        confidence: 0.82,
+    })
+}
+
+fn char_ranges(text: &str, quote: &str) -> Vec<TextRange> {
+    text.match_indices(quote)
+        .map(|(byte_start, value)| TextRange {
+            start: text[..byte_start].chars().count(),
+            end: text[..byte_start].chars().count() + value.chars().count(),
+        })
+        .collect()
+}
+
+fn thread_scope_db(scope: SharedCommentThreadScope) -> &'static str {
+    match scope {
+        SharedCommentThreadScope::Material => "material",
+        SharedCommentThreadScope::Section => "section",
+        SharedCommentThreadScope::Anchor => "anchor",
+        SharedCommentThreadScope::Page => "page",
+    }
+}
+
+fn thread_scope_from_db(value: &str) -> Result<SharedCommentThreadScope, SocialStoreError> {
+    match value {
+        "material" => Ok(SharedCommentThreadScope::Material),
+        "section" => Ok(SharedCommentThreadScope::Section),
+        "anchor" => Ok(SharedCommentThreadScope::Anchor),
+        "page" => Ok(SharedCommentThreadScope::Page),
+        _ => Err(SocialStoreError::Unavailable),
     }
 }
 
@@ -897,7 +1681,16 @@ fn thread_from_row(row: &PgRow) -> Result<SharedCommentThread, SocialStoreError>
         id: row.try_get("thread_id").map_err(storage)?,
         community_space_id: row.try_get("community_space_id").map_err(storage)?,
         shared_material_id: row.try_get("shared_material_id").map_err(storage)?,
-        scope: SharedCommentThreadScope::Material,
+        scope: thread_scope_from_db(&row.try_get::<String, _>("scope").map_err(storage)?)?,
+        placement: row
+            .try_get::<Option<serde_json::Value>, _>("shared_anchor")
+            .map_err(storage)?
+            .map(|value| {
+                serde_json::from_value::<SharedAnchor>(value)
+                    .map(|shared_anchor| SharedAnchorPlacement::Unresolved { shared_anchor })
+                    .map_err(storage)
+            })
+            .transpose()?,
         created_by_user_id: row.try_get("created_by_user_id").map_err(storage)?,
         creator_nickname: row.try_get("creator_nickname").map_err(storage)?,
         state: content_state(hidden_at, deleted_at),

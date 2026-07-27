@@ -407,6 +407,10 @@ pub(crate) fn open_search_target(target: &SearchOpenTarget) {
                 ..crate::routing::DeskRoute::default()
             })
         }
+        SearchOpenTarget::CommunityMaterial { space_id, .. }
+        | SearchOpenTarget::CommunityChat { space_id, .. } => {
+            crate::routing::AppRoute::CommunitySpace(*space_id)
+        }
     };
     crate::routing::set_browser_route(&route);
 }
@@ -458,6 +462,9 @@ fn parse_source_type(value: &str) -> Option<SearchSourceType> {
         "note" => Some(SearchSourceType::Note),
         "learning_item" => Some(SearchSourceType::LearningItem),
         "ai_artifact" => Some(SearchSourceType::AiArtifact),
+        "shared_comment" => Some(SearchSourceType::SharedComment),
+        "shared_chat_message" => Some(SearchSourceType::SharedChatMessage),
+        "shared_highlight" => Some(SearchSourceType::SharedHighlight),
         _ => None,
     }
 }
@@ -471,6 +478,9 @@ fn source_label(value: SearchSourceType) -> &'static str {
         SearchSourceType::VoiceTranscript => "Голос",
         SearchSourceType::AiArtifact => "AI-артефакт",
         SearchSourceType::LearningItem => "Обучение",
+        SearchSourceType::SharedComment => "Комментарий сообщества",
+        SearchSourceType::SharedChatMessage => "Чат сообщества",
+        SearchSourceType::SharedHighlight => "Общее выделение",
     }
 }
 
@@ -482,5 +492,8 @@ fn match_reason(value: SearchSourceType) -> &'static str {
         SearchSourceType::VoiceTranscript => "принятый транскрипт",
         SearchSourceType::AiArtifact => "сохранённый артефакт",
         SearchSourceType::LearningItem => "активный учебный вопрос",
+        SearchSourceType::SharedComment => "текст комментария сообщества",
+        SearchSourceType::SharedChatMessage => "сообщение чата сообщества",
+        SearchSourceType::SharedHighlight => "опубликованное выделение",
     }
 }

@@ -12,17 +12,22 @@ use lumi_core::{
     AnnotationId, AnnotationKind, AnnotationLink, AnnotationLinkState, AnnotationStatus,
     AnnotationTarget, AnnotationType, AudioAttachment, AudioRetentionPolicy, AudioUpload,
     CreateAnnotationCommand, CreateAudioAttachmentCommand, CreateAudioUploadCommand,
-    DeleteAnnotationCommand, HighlightStyle, LibraryEntry, LinkTarget, LinkTargetType,
-    MoveReadingPositionCommand, PageBoundary, PageFragment, PageMap, ReaderNavigation, ReaderPage,
-    ReaderSettings, ReaderTheme, ReaderWidth, ReadingDocument, ReadingLink, ReadingLinkKind,
-    ReadingProgress, RenderBlock, RenderPlan, ResolveAnnotationLinkCommand, TextRange,
-    TranscriptArtifact, UpdateAnnotationCommand, UpdateReaderSettingsCommand,
+    CreateSharedThreadRequest, DeleteAnnotationCommand, HighlightStyle, LibraryEntry, LinkTarget,
+    LinkTargetType, MoveReadingPositionCommand, PageBoundary, PageFragment, PageMap,
+    PublishSharedHighlightRequest, ReaderNavigation, ReaderPage, ReaderSettings, ReaderTheme,
+    ReaderWidth, ReadingDocument, ReadingLink, ReadingLinkKind, ReadingProgress, RenderBlock,
+    RenderPlan, ResolveAnnotationLinkCommand, SharedAnchorDraft, SharedAnchorPlacement,
+    SharedCommentThreadScope, SharedHighlight, SharedReaderSpaceLayer, SharedThreadTargetDraft,
+    TextRange, TranscriptArtifact, UnpublishSharedHighlightRequest, UpdateAnnotationCommand,
+    UpdateReaderSettingsCommand,
 };
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
 use wasm_bindgen::{closure::Closure, JsCast};
 use wasm_bindgen_futures::JsFuture;
-use web_sys::{Element as DomElement, HtmlElement, Node, RequestCredentials};
+use web_sys::{
+    Element as DomElement, HtmlElement, Node, RequestCredentials, ScrollBehavior, ScrollToOptions,
+};
 
 use super::account::API_BASE;
 
@@ -42,6 +47,9 @@ struct ReaderView {
     toc_query: String,
     settings_open: bool,
     notes_open: bool,
+    social_open: bool,
+    shared_layers: Vec<SharedReaderSpaceLayer>,
+    social_thread_draft: String,
     footnote: Option<ReadingLink>,
     annotations: Vec<AnnotationItem>,
     selected_anchor: Option<Anchor>,
@@ -129,6 +137,7 @@ enum ReaderPanel {
     Toc,
     Settings,
     Notes,
+    Social,
 }
 
 #[derive(Clone, Copy, Default, Eq, PartialEq)]
@@ -148,6 +157,7 @@ pub(crate) fn ReaderApp(
     csrf_token: String,
     record_rag_enabled: bool,
     material_sharing_available: bool,
+    shared_reading_available: bool,
     on_close: EventHandler<()>,
     on_open_learning_session: EventHandler<Uuid>,
     on_manage_learning: EventHandler<(Uuid, Uuid)>,
@@ -191,6 +201,13 @@ pub(crate) fn ReaderApp(
                     backlinks,
                     transcripts,
                 )) => {
+                    let shared_layers = if shared_reading_available {
+                        get_json(&format!("/shared-reading/materials/{material_id}"))
+                            .await
+                            .unwrap_or_default()
+                    } else {
+                        Vec::new()
+                    };
                     set_document_title(&format!("{} — Lumi", entry.display_title()));
                     let plan = Rc::new(RenderPlan::from_document(&document));
                     match browser_page_map(&plan, settings) {
@@ -216,6 +233,9 @@ pub(crate) fn ReaderApp(
                                 toc_query: String::new(),
                                 settings_open: false,
                                 notes_open: false,
+                                social_open: false,
+                                shared_layers,
+                                social_thread_draft: String::new(),
                                 footnote: None,
                                 annotations: annotations
                                     .into_iter()
@@ -363,12 +383,20 @@ pub(crate) fn ReaderApp(
                 "toc-open"
             } else if view.notes_open {
                 "notes-open"
+            } else if view.social_open {
+                "social-open"
             } else if view.settings_open {
                 "settings-open"
             } else {
                 ""
             };
-            let reader_overlay_open = view.toc_open || view.settings_open || view.notes_open;
+            let reader_overlay_open =
+                view.toc_open || view.settings_open || view.notes_open || view.social_open;
+            let shared_highlights = view
+                .shared_layers
+                .iter()
+                .flat_map(|space| space.layer.highlights.iter().cloned())
+                .collect::<Vec<_>>();
             rsx! {
                 main {
                     id: "main-content",
@@ -394,6 +422,16 @@ pub(crate) fn ReaderApp(
                             button { id: "reader-notes-button", r#type: "button", aria_expanded: view.notes_open, aria_controls: "reader-notes-panel", onclick: move |_| {
                                 toggle_reader_panel(state, ReaderPanel::Notes);
                             }, "Заметки ({view.annotations.len()})" }
+                            if shared_reading_available {
+                                button {
+                                    id: "reader-social-button",
+                                    r#type: "button",
+                                    aria_expanded: view.social_open,
+                                    aria_controls: "reader-social-panel",
+                                    onclick: move |_| toggle_reader_panel(state, ReaderPanel::Social),
+                                    "Сообщество ({view.shared_layers.len()})"
+                                }
+                            }
                             details { class: "reader-more",
                                 summary {
                                     role: "button",
@@ -430,7 +468,7 @@ pub(crate) fn ReaderApp(
                     }
 
                     div { class: "reader-layout {layout_class}",
-                        if view.toc_open || view.settings_open || view.notes_open {
+                        if view.toc_open || view.settings_open || view.notes_open || view.social_open {
                             button { class: "reader-scrim", r#type: "button", aria_label: "Закрыть панель", onclick: move |_| close_reader_overlay(state) }
                         }
                         if view.toc_open {
@@ -489,7 +527,7 @@ pub(crate) fn ReaderApp(
                                 if let Some(page) = page {
                                     for fragment in page.fragments {
                                         if let Some(block) = view.plan.block(&fragment.node_path).cloned() {
-                                            RenderedFragment { block, range: fragment.range, revision_id: view.document.revision_id, plan: view.plan.clone(), annotations: view.annotations.clone(), on_link: move |link: ReadingLink| activate_link(state, link, csrf, progress_generation, progress_in_flight, save_state) }
+                                            RenderedFragment { block, range: fragment.range, revision_id: view.document.revision_id, plan: view.plan.clone(), annotations: view.annotations.clone(), shared_highlights: shared_highlights.clone(), on_link: move |link: ReadingLink| activate_link(state, link, csrf, progress_generation, progress_in_flight, save_state) }
                                         }
                                     }
                                 }
@@ -569,6 +607,9 @@ pub(crate) fn ReaderApp(
                         if view.notes_open {
                             NotesPanel { state, csrf, save_state, progress_generation, progress_in_flight }
                         }
+                        if view.social_open {
+                            SocialPanel { state, csrf, save_state, progress_generation, progress_in_flight }
+                        }
                     }
 
                     if let Some(anchor) = view.selected_anchor.clone() {
@@ -616,9 +657,10 @@ fn RenderedFragment(
     revision_id: Uuid,
     plan: Rc<RenderPlan>,
     annotations: Vec<AnnotationItem>,
+    shared_highlights: Vec<SharedHighlight>,
     on_link: EventHandler<ReadingLink>,
 ) -> Element {
-    let segments = annotation_segments(&block, range, &plan, &annotations);
+    let segments = annotation_segments(&block, range, &plan, &annotations, &shared_highlights);
     let continued = range.start > 0;
     let content = rsx! {
         if continued { span { class: "continued-marker", aria_hidden: "true", "…" } }
@@ -731,6 +773,7 @@ fn annotation_segments(
     visible: TextRange,
     plan: &RenderPlan,
     annotations: &[AnnotationItem],
+    shared_highlights: &[SharedHighlight],
 ) -> Vec<TextSegment> {
     let text = block.text.as_deref().unwrap_or_default();
     let chars: Vec<char> = scalar_slice(text, visible.start, visible.end)
@@ -767,6 +810,39 @@ fn annotation_segments(
             } => "annotation-highlight",
             AnnotationKind::Note { .. } => "annotation-note",
             AnnotationKind::VoiceNote { .. } => "annotation-voice",
+        };
+        for scalar in start..end {
+            if let Some(value) = classes.get_mut(scalar.saturating_sub(visible.start)) {
+                if !value
+                    .split_ascii_whitespace()
+                    .any(|class| class == class_name)
+                {
+                    if !value.is_empty() {
+                        value.push(' ');
+                    }
+                    value.push_str(class_name);
+                }
+            }
+        }
+    }
+    for highlight in shared_highlights {
+        let SharedAnchorPlacement::Resolved { anchor, .. } = &highlight.placement else {
+            continue;
+        };
+        let resolved = match plan.resolve_anchor(anchor) {
+            AnchorResolution::Resolved { anchor, .. } => anchor,
+            AnchorResolution::Unresolved => continue,
+        };
+        let Some(highlight_range) = plan.anchor_range_for_block(&resolved, &block.node_path) else {
+            continue;
+        };
+        let start = highlight_range.start.max(visible.start);
+        let end = highlight_range.end.min(visible.end);
+        let class_name = match highlight.style {
+            HighlightStyle::Bold => "shared-highlight-bold",
+            HighlightStyle::Green => "shared-highlight-green",
+            HighlightStyle::Blue => "shared-highlight-blue",
+            HighlightStyle::Yellow => "shared-highlight",
         };
         for scalar in start..end {
             if let Some(value) = classes.get_mut(scalar.saturating_sub(visible.start)) {
@@ -877,6 +953,344 @@ fn NotesPanel(
             if let Some(draft) = view.conflict_draft { details { open: true, summary { "Несохранённая версия" } p { "{draft}" } } }
             button { class: "focus-sentinel", r#type: "button", aria_label: "Вернуться в начало панели", onfocus: move |_| focus_drawer_edge("reader-notes-panel", true) }
         }
+    }
+}
+
+#[component]
+fn SocialPanel(
+    state: Signal<ReaderState>,
+    csrf: Signal<String>,
+    save_state: Signal<SaveState>,
+    progress_generation: Signal<u64>,
+    progress_in_flight: Signal<bool>,
+) -> Element {
+    let snapshot = state.read().clone();
+    let ReaderState::Ready(view) = snapshot else {
+        return rsx! {};
+    };
+    let selected_anchor = view.selected_anchor.clone();
+    let selected_target = view.draft_target.clone();
+    let private_highlights = view
+        .annotations
+        .iter()
+        .filter_map(|item| match item.annotation.kind {
+            AnnotationKind::Highlight { style }
+                if item.annotation.status == AnnotationStatus::Active =>
+            {
+                Some((item.annotation.clone(), style))
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    rsx! {
+        aside {
+            id: "reader-social-panel",
+            class: "reader-drawer notes-drawer social-drawer",
+            tabindex: "-1",
+            aria_label: "Совместное чтение",
+            onkeydown: move |event| {
+                if event.key() == Key::Escape {
+                    close_reader_panel(state, ReaderPanel::Social);
+                }
+            },
+            button {
+                class: "focus-sentinel",
+                r#type: "button",
+                aria_label: "Перейти в конец панели",
+                onfocus: move |_| focus_drawer_edge("reader-social-panel", false)
+            }
+            div { class: "drawer-heading",
+                div {
+                    h2 { "Сообщество" }
+                    p { class: "private-label", "Публичный слой поверх вашей копии" }
+                }
+                button {
+                    id: "reader-social-close",
+                    r#type: "button",
+                    aria_label: "Закрыть совместное чтение",
+                    onclick: move |_| close_reader_panel(state, ReaderPanel::Social),
+                    "×"
+                }
+            }
+            if view.shared_layers.is_empty() {
+                p { class: "notes-empty",
+                    "Для этой копии нет подтверждённого совпадения с материалом сообщества."
+                }
+            } else {
+                section { class: "reader-social-compose", aria_label: "Новое обсуждение выделения",
+                    h3 { "Обсудить выбранное место" }
+                    if selected_anchor.is_some() {
+                        textarea {
+                            value: "{view.social_thread_draft}",
+                            maxlength: "32768",
+                            placeholder: "Первый комментарий…",
+                            oninput: move |event| {
+                                if let ReaderState::Ready(current) = &mut *state.write() {
+                                    current.social_thread_draft = event.value();
+                                }
+                            }
+                        }
+                        div { class: "dialog-actions",
+                            for space in view.shared_layers.clone() {
+                                button {
+                                    r#type: "button",
+                                    disabled: view.social_thread_draft.trim().is_empty(),
+                                    onclick: {
+                                        let anchor = selected_anchor.clone();
+                                        let target = selected_target.clone();
+                                        let body = view.social_thread_draft.clone();
+                                        let csrf_token = csrf.read().clone();
+                                        move |_| {
+                                            let Some(anchor) = anchor.clone() else {
+                                                return;
+                                            };
+                                            let target = target.clone();
+                                            let body = body.clone();
+                                            let csrf_token = csrf_token.clone();
+                                            let space = space.clone();
+                                            spawn(async move {
+                                                let draft = SharedAnchorDraft {
+                                                    page_label: shared_page_label(&anchor),
+                                                    anchor,
+                                                    target,
+                                                    provenance_annotation_id: None,
+                                                    heading_path: Vec::new(),
+                                                };
+                                                let request = CreateSharedThreadRequest {
+                                                    body_markdown: body,
+                                                    target: SharedThreadTargetDraft::Anchor(Box::new(draft)),
+                                                };
+                                                match post_social_json(
+                                                    &format!(
+                                                        "/spaces/{}/materials/{}/threads",
+                                                        space.community_space_id,
+                                                        space.shared_material_id
+                                                    ),
+                                                    &request,
+                                                    &csrf_token,
+                                                )
+                                                .await
+                                                {
+                                                    Ok(thread) => {
+                                                        if let ReaderState::Ready(current) = &mut *state.write() {
+                                                            if let Some(layer) = current.shared_layers.iter_mut().find(|layer| {
+                                                                layer.community_space_id == space.community_space_id
+                                                            }) {
+                                                                layer.layer.threads.push(thread);
+                                                            }
+                                                            current.social_thread_draft.clear();
+                                                            current.annotation_message = Some(
+                                                                format!(
+                                                                    "Обсуждение опубликовано в «{}».",
+                                                                    space.community_space_name
+                                                                ),
+                                                            );
+                                                        }
+                                                    }
+                                                    Err(error) => set_social_error(state, error),
+                                                }
+                                            });
+                                        }
+                                    },
+                                    "В «{space.community_space_name}»"
+                                }
+                            }
+                        }
+                    } else {
+                        p { "Сначала выделите текст или область страницы." }
+                    }
+                }
+                for space in view.shared_layers.clone() {
+                    section {
+                        class: "reader-social-space",
+                        aria_label: "Совместное чтение {space.community_space_name}",
+                        h3 { "{space.community_space_name}" }
+                        if !private_highlights.is_empty() {
+                            details {
+                                summary { "Опубликовать личное выделение" }
+                                ul { class: "annotation-list",
+                                    for (annotation, style) in private_highlights.clone() {
+                                        li {
+                                            span {
+                                                "{bounded_preview(&annotation.anchor.quote, 96)}"
+                                            }
+                                            button {
+                                                r#type: "button",
+                                                onclick: {
+                                                    let annotation = annotation.clone();
+                                                    let csrf_token = csrf.read().clone();
+                                                    move |_| {
+                                                        let annotation = annotation.clone();
+                                                        let csrf_token = csrf_token.clone();
+                                                        spawn(async move {
+                                                            let request = PublishSharedHighlightRequest {
+                                                                anchor: SharedAnchorDraft::from_annotation(&annotation),
+                                                                style,
+                                                            };
+                                                            match post_social_json(
+                                                                &format!(
+                                                                    "/spaces/{}/materials/{}/highlights",
+                                                                    space.community_space_id,
+                                                                    space.shared_material_id
+                                                                ),
+                                                                &request,
+                                                                &csrf_token,
+                                                            )
+                                                            .await
+                                                            {
+                                                                Ok(highlight) => {
+                                                                    if let ReaderState::Ready(current) = &mut *state.write() {
+                                                                        if let Some(layer) = current.shared_layers.iter_mut().find(|layer| {
+                                                                            layer.community_space_id == space.community_space_id
+                                                                        }) {
+                                                                            layer.layer.highlights.push(highlight);
+                                                                        }
+                                                                        current.annotation_message = Some(
+                                                                            "Выделение опубликовано отдельно; личная запись не изменена.".to_owned(),
+                                                                        );
+                                                                    }
+                                                                }
+                                                                Err(error) => set_social_error(state, error),
+                                                            }
+                                                        });
+                                                    }
+                                                },
+                                                "Опубликовать"
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        if space.layer.threads.is_empty() && space.layer.highlights.is_empty() {
+                            p { class: "notes-empty", "Публичный слой пока пуст." }
+                        }
+                        for thread in space.layer.threads.clone() {
+                            article { class: "reader-social-item",
+                                p { class: "eyebrow", "{shared_scope_label(thread.scope)}" }
+                                if let Some(placement) = thread.placement.clone() {
+                                    SharedPlacement {
+                                        placement,
+                                        state,
+                                        csrf,
+                                        save_state,
+                                        progress_generation,
+                                        progress_in_flight,
+                                    }
+                                }
+                                for comment in thread.comments {
+                                    if let Some(body) = comment.body_markdown {
+                                        p { "{body}" }
+                                    }
+                                }
+                            }
+                        }
+                        for highlight in space.layer.highlights.clone() {
+                            article { class: "reader-social-item shared-highlight-card",
+                                p { class: "eyebrow", "Общее выделение" }
+                                SharedPlacement {
+                                    placement: highlight.placement.clone(),
+                                    state,
+                                    csrf,
+                                    save_state,
+                                    progress_generation,
+                                    progress_in_flight,
+                                }
+                                button {
+                                    class: "text-action danger-text",
+                                    r#type: "button",
+                                    onclick: {
+                                        let csrf_token = csrf.read().clone();
+                                        move |_| {
+                                            let csrf_token = csrf_token.clone();
+                                            spawn(async move {
+                                                let request = UnpublishSharedHighlightRequest {
+                                                    expected_revision: highlight.object_revision,
+                                                };
+                                                match delete_social_json(
+                                                    &format!(
+                                                        "/spaces/{}/highlights/{}",
+                                                        space.community_space_id,
+                                                        highlight.id
+                                                    ),
+                                                    &request,
+                                                    &csrf_token,
+                                                )
+                                                .await
+                                                {
+                                                    Ok(()) => {
+                                                        if let ReaderState::Ready(current) = &mut *state.write() {
+                                                            if let Some(layer) = current.shared_layers.iter_mut().find(|layer| {
+                                                                layer.community_space_id == space.community_space_id
+                                                            }) {
+                                                                layer.layer.highlights.retain(|item| item.id != highlight.id);
+                                                            }
+                                                            current.annotation_message = Some(
+                                                                "Публикация убрана; личное выделение сохранено.".to_owned(),
+                                                            );
+                                                        }
+                                                    }
+                                                    Err(error) => set_social_error(state, error),
+                                                }
+                                            });
+                                        }
+                                    },
+                                    "Убрать публикацию"
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            button {
+                class: "focus-sentinel",
+                r#type: "button",
+                aria_label: "Вернуться в начало панели",
+                onfocus: move |_| focus_drawer_edge("reader-social-panel", true)
+            }
+        }
+    }
+}
+
+#[component]
+fn SharedPlacement(
+    placement: SharedAnchorPlacement,
+    state: Signal<ReaderState>,
+    csrf: Signal<String>,
+    save_state: Signal<SaveState>,
+    progress_generation: Signal<u64>,
+    progress_in_flight: Signal<bool>,
+) -> Element {
+    match placement {
+        SharedAnchorPlacement::Resolved {
+            anchor,
+            strategy,
+            confidence,
+        } => rsx! {
+            blockquote { class: "reader-social-quote", "{bounded_preview(&anchor.quote, 160)}" }
+            button {
+                class: "text-action",
+                r#type: "button",
+                title: "Сопоставление: {strategy:?}, уверенность {confidence:.2}",
+                onclick: move |_| navigate_to_annotation(
+                    state,
+                    &anchor,
+                    csrf,
+                    progress_generation,
+                    progress_in_flight,
+                    save_state,
+                ),
+                "Показать в моей копии"
+            }
+        },
+        SharedAnchorPlacement::Unresolved { shared_anchor } => rsx! {
+            p { class: "library-alert compact", role: "status",
+                "Место не найдено в текущей версии."
+            }
+            blockquote { class: "reader-social-quote",
+                "{bounded_preview(&shared_anchor.quote, 160)}"
+            }
+        },
     }
 }
 
@@ -2325,6 +2739,7 @@ fn navigate_to_annotation(
         if let Some(page) = view.page_map.page_for_boundary(&resolved.node_path, offset) {
             view.navigation.jump_to(page, view.page_map.pages.len());
             view.notes_open = false;
+            view.social_open = false;
             let node_id = view
                 .plan
                 .block(&resolved.node_path)
@@ -2365,10 +2780,14 @@ fn set_document_title(title: &str) {
 fn reset_reader_page_view() {
     spawn_forever(async move {
         browser_delay(20).await;
-        if let Some(window) = web_sys::window() {
-            window.scroll_to_with_x_and_y(0.0, 0.0);
-        }
         focus_reader_node("reader-page-surface");
+        if let Some(window) = web_sys::window() {
+            let options = ScrollToOptions::new();
+            options.set_left(0.0);
+            options.set_top(0.0);
+            options.set_behavior(ScrollBehavior::Instant);
+            window.scroll_to_with_scroll_to_options(&options);
+        }
     });
 }
 
@@ -2405,21 +2824,25 @@ fn toggle_reader_panel(mut state: Signal<ReaderState>, panel: ReaderPanel) {
             ReaderPanel::Toc => view.toc_open,
             ReaderPanel::Settings => view.settings_open,
             ReaderPanel::Notes => view.notes_open,
+            ReaderPanel::Social => view.social_open,
         };
         view.toc_open = false;
         view.settings_open = false;
         view.notes_open = false;
+        view.social_open = false;
         if !was_open {
             match panel {
                 ReaderPanel::Toc => view.toc_open = true,
                 ReaderPanel::Settings => view.settings_open = true,
                 ReaderPanel::Notes => view.notes_open = true,
+                ReaderPanel::Social => view.social_open = true,
             }
         }
         let target = match panel {
             ReaderPanel::Toc => "reader-toc-close",
             ReaderPanel::Settings => "reader-settings-close",
             ReaderPanel::Notes => "reader-notes-close",
+            ReaderPanel::Social => "reader-social-close",
         };
         (!was_open, target)
     } else {
@@ -2448,6 +2871,7 @@ fn close_reader_panel(mut state: Signal<ReaderState>, panel: ReaderPanel) {
             ReaderPanel::Toc => view.toc_open = false,
             ReaderPanel::Settings => view.settings_open = false,
             ReaderPanel::Notes => view.notes_open = false,
+            ReaderPanel::Social => view.social_open = false,
         }
     }
     defer_reader_focus(panel_trigger(panel));
@@ -2458,6 +2882,7 @@ fn panel_trigger(panel: ReaderPanel) -> &'static str {
         ReaderPanel::Toc => "reader-toc-button",
         ReaderPanel::Settings => "reader-settings-button",
         ReaderPanel::Notes => "reader-notes-button",
+        ReaderPanel::Social => "reader-social-button",
     }
 }
 
@@ -2475,6 +2900,9 @@ fn close_reader_overlay(mut state: Signal<ReaderState>) {
         } else if view.notes_open {
             view.notes_open = false;
             Some("reader-notes-button")
+        } else if view.social_open {
+            view.social_open = false;
+            Some("reader-social-button")
         } else if view.selected_anchor.is_some() {
             crate::voice::cancel_recording();
             if !view.voice_preview_url.is_empty() {
@@ -2793,6 +3221,50 @@ where
     response.json().await.map_err(|error| error.to_string())
 }
 
+async fn post_social_json<T, R>(path: &str, body: &T, csrf: &str) -> Result<R, String>
+where
+    T: serde::Serialize,
+    R: for<'de> serde::Deserialize<'de>,
+{
+    let request = Request::post(&format!("{API_BASE}{path}"))
+        .credentials(RequestCredentials::Include)
+        .header("X-Lumi-CSRF", csrf)
+        .header("Idempotency-Key", &Uuid::now_v7().to_string())
+        .json(body)
+        .map_err(|error| error.to_string())?;
+    let response = request.send().await.map_err(|error| error.to_string())?;
+    if response.status() == 401 {
+        super::account::notify_session_expired();
+    }
+    if !response.ok() {
+        return Err(format!(
+            "Социальный слой отклонил запрос: HTTP {}.",
+            response.status()
+        ));
+    }
+    response.json().await.map_err(|error| error.to_string())
+}
+
+async fn delete_social_json<T>(path: &str, body: &T, csrf: &str) -> Result<(), String>
+where
+    T: serde::Serialize,
+{
+    let request = Request::delete(&format!("{API_BASE}{path}"))
+        .credentials(RequestCredentials::Include)
+        .header("X-Lumi-CSRF", csrf)
+        .header("Idempotency-Key", &Uuid::now_v7().to_string())
+        .json(body)
+        .map_err(|error| error.to_string())?;
+    let response = request.send().await.map_err(|error| error.to_string())?;
+    if response.status() == 401 {
+        super::account::notify_session_expired();
+    }
+    response
+        .ok()
+        .then_some(())
+        .ok_or_else(|| format!("Не удалось убрать публикацию: HTTP {}.", response.status()))
+}
+
 async fn post_reader_empty<R>(path: &str, csrf: &str) -> Result<R, String>
 where
     R: for<'de> serde::Deserialize<'de>,
@@ -2810,6 +3282,36 @@ where
         return Err(format!("Lumi API вернул HTTP {}.", response.status()));
     }
     response.json().await.map_err(|error| error.to_string())
+}
+
+fn set_social_error(mut state: Signal<ReaderState>, error: String) {
+    if let ReaderState::Ready(view) = &mut *state.write() {
+        view.annotation_message = Some(error);
+    }
+}
+
+fn shared_page_label(anchor: &Anchor) -> Option<String> {
+    match anchor.source_locator.as_ref() {
+        Some(lumi_core::SourceLocator::Pdf(locator)) => Some(locator.page_label.clone()),
+        _ => None,
+    }
+}
+
+fn shared_scope_label(scope: SharedCommentThreadScope) -> &'static str {
+    match scope {
+        SharedCommentThreadScope::Material => "Весь материал",
+        SharedCommentThreadScope::Section => "Раздел",
+        SharedCommentThreadScope::Anchor => "Фрагмент",
+        SharedCommentThreadScope::Page => "Страница",
+    }
+}
+
+fn bounded_preview(value: &str, max_chars: usize) -> String {
+    let mut output = value.chars().take(max_chars).collect::<String>();
+    if value.chars().count() > max_chars {
+        output.push('…');
+    }
+    output
 }
 
 async fn put_audio_bytes(

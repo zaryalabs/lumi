@@ -18,10 +18,10 @@ use zip::CompressionMethod;
 use crate::{
     content_hash, BlobManifest, BlobManifestId, BlobRef, BlobRole, ContentBlock, ContentUnit,
     DiagnosticSeverity, DocumentRevision, DocumentRevisionId, EpubSourceLocator, ImportDiagnostic,
-    MaterialId, NavigationItem, NormalizedContentPackage, NormalizedPackageManifest,
-    ReadingDocument, ReadingLink, ReadingLinkKind, ReadingNode, ReadingNodeKind, SourceFormat,
-    SourceIdentity, SourceLocator, TextRange, UserId, EPUB_IMPORTER_ID, EPUB_IMPORTER_VERSION,
-    NORMALIZED_PACKAGE_VERSION,
+    MaterialId, MaterialIdentifier, MaterialIdentifierKind, NavigationItem,
+    NormalizedContentPackage, NormalizedPackageManifest, ReadingDocument, ReadingLink,
+    ReadingLinkKind, ReadingNode, ReadingNodeKind, SourceFormat, SourceIdentity, SourceLocator,
+    TextRange, UserId, EPUB_IMPORTER_ID, EPUB_IMPORTER_VERSION, NORMALIZED_PACKAGE_VERSION,
 };
 
 const MIB: u64 = 1024 * 1024;
@@ -380,13 +380,14 @@ where
         .iter()
         .map(|unit| unit.id.clone())
         .collect();
-    let manifest = NormalizedPackageManifest::s0(
+    let mut manifest = NormalizedPackageManifest::s0(
         package_model.title.clone(),
         package_model.creators.clone(),
         package_model.language.clone(),
         reading_order,
         source_identity,
     );
+    manifest.identifiers = normalize_epub_identifiers(&package_model.identifiers);
     let package_id = Uuid::now_v7();
     let package = NormalizedContentPackage {
         id: package_id,
@@ -644,6 +645,7 @@ struct SpineItem {
 struct PackageModel {
     title: String,
     creators: Vec<String>,
+    identifiers: Vec<String>,
     language: Option<String>,
     manifest: HashMap<String, PackageItem>,
     spine: Vec<SpineItem>,
@@ -659,6 +661,7 @@ fn parse_package(xml: &[u8]) -> Result<PackageModel, EpubImportError> {
     let mut meta_property = None;
     let mut title = String::new();
     let mut creators = Vec::new();
+    let mut identifiers = Vec::new();
     let mut language = None;
     let mut manifest = HashMap::new();
     let mut spine = Vec::new();
@@ -677,13 +680,16 @@ fn parse_package(xml: &[u8]) -> Result<PackageModel, EpubImportError> {
             Ok(Event::Start(element)) if element.local_name().as_ref() == b"language" => {
                 metadata_field = Some("language");
             }
+            Ok(Event::Start(element)) if element.local_name().as_ref() == b"identifier" => {
+                metadata_field = Some("identifier");
+            }
             Ok(Event::Start(element)) if element.local_name().as_ref() == b"meta" => {
                 meta_property = attributes(&element)?.get("property").cloned();
             }
             Ok(Event::End(element))
                 if matches!(
                     element.local_name().as_ref(),
-                    b"title" | b"creator" | b"language"
+                    b"title" | b"creator" | b"language" | b"identifier"
                 ) =>
             {
                 metadata_field = None;
@@ -700,6 +706,7 @@ fn parse_package(xml: &[u8]) -> Result<PackageModel, EpubImportError> {
                 match metadata_field {
                     Some("title") => title.push_str(&value),
                     Some("creator") if !value.is_empty() => creators.push(value),
+                    Some("identifier") if !value.is_empty() => identifiers.push(value),
                     Some("language") if !value.is_empty() => language = Some(value),
                     _ if meta_property.as_deref() == Some("rendition:layout")
                         && value == "pre-paginated" =>
@@ -768,6 +775,7 @@ fn parse_package(xml: &[u8]) -> Result<PackageModel, EpubImportError> {
     Ok(PackageModel {
         title,
         creators,
+        identifiers,
         language,
         manifest,
         spine,
@@ -775,6 +783,44 @@ fn parse_package(xml: &[u8]) -> Result<PackageModel, EpubImportError> {
         ncx_id,
         fixed_layout,
     })
+}
+
+fn normalize_epub_identifiers(values: &[String]) -> Vec<MaterialIdentifier> {
+    let mut identifiers = values
+        .iter()
+        .filter_map(|value| {
+            let trimmed = value.trim();
+            let lowercase = trimmed.to_lowercase();
+            let doi = lowercase
+                .strip_prefix("urn:doi:")
+                .or_else(|| lowercase.strip_prefix("doi:"))
+                .or_else(|| lowercase.strip_prefix("https://doi.org/"))
+                .or_else(|| lowercase.strip_prefix("http://doi.org/"));
+            if let Some(doi) = doi.filter(|doi| doi.starts_with("10.") && doi.contains('/')) {
+                return Some(MaterialIdentifier {
+                    kind: MaterialIdentifierKind::Doi,
+                    value: doi.trim().to_owned(),
+                });
+            }
+
+            let isbn_candidate = lowercase
+                .strip_prefix("urn:isbn:")
+                .or_else(|| lowercase.strip_prefix("isbn:"))
+                .unwrap_or(trimmed);
+            let isbn = isbn_candidate
+                .chars()
+                .filter(|character| character.is_ascii_digit() || matches!(character, 'x' | 'X'))
+                .collect::<String>()
+                .to_uppercase();
+            matches!(isbn.len(), 10 | 13).then_some(MaterialIdentifier {
+                kind: MaterialIdentifierKind::Isbn,
+                value: isbn,
+            })
+        })
+        .collect::<Vec<_>>();
+    identifiers.sort();
+    identifiers.dedup();
+    identifiers
 }
 
 fn attributes(element: &BytesStart<'_>) -> Result<HashMap<String, String>, EpubImportError> {

@@ -2,11 +2,11 @@
 
 ## Назначение
 
-Runbook описывает локальную проверку `0.5.0/E1–E4 independent`: закрытые Community Spaces,
+Runbook описывает локальную проверку полного `0.5.0/E1–E4`: закрытые Community Spaces,
 membership/roles, доступ по отзывной ссылке, публикацию безопасной material
 identity, привязку собственной копии, material-level discussions, Space chat,
-activity и MCP parity. Shared anchors/highlights, Social Reader overlay и
-social search пока не входят в опубликованные capabilities.
+activity, shared anchors/highlights, Social Reader overlay, permission-aware
+social search, avatar/cover и MCP parity.
 
 ## Capabilities
 
@@ -17,8 +17,10 @@ PostgreSQL projection, normalized packages и versioned feature key. Web
 показывает действия публикации только после получения этой capability.
 Persistent server также публикует `material-discussions`: material-level
 threads не требуют claim и не содержат quote/source body. Capability
-`community-communications` включает chat/activity REST, Web polling и social
-MCP tools. `shared-reading` и `social-search-index` остаются выключенными.
+`community-communications` включает chat/activity REST и Web polling.
+`shared-reading` включает cross-copy Reader layer, а `social-search-index` —
+общий search runtime и MCP search tools. `community-images` включает
+member-authorized avatar/cover lifecycle.
 
 ## Ручной сценарий
 
@@ -52,6 +54,20 @@ MCP tools. `shared-reading` и `social-search-index` остаются выклю
     запросы в hidden tab, после ошибки использует backoff и ручной retry.
 14. Через MCP проверить `list_community_spaces`, comment и chat tools. После
     удаления membership следующий вызов с прежним cursor возвращает not found.
+15. Создать личную note и highlight к фрагменту, открыть Social Reader panel,
+    начать anchor discussion и явно опубликовать highlight. У другого
+    участника с matched copy должны появиться overlay и переход; private body,
+    title и tags не должны попасть в DTO или search.
+16. Импортировать изменённую копию: уверенное место должно восстановиться на
+    active revision, а неоднозначное — отображаться как `unresolved`.
+17. Выполнить MCP `search_shared_comments` и `search_space_chat`. После
+    membership removal, claim transition и moderation hide результат должен
+    исчезнуть даже до обработки накопившегося index backlog.
+18. Загрузить PNG/JPEG avatar и cover. Проверить member download, запрет
+    постороннему, replacement, delete и optimistic conflict со старой revision.
+19. Активировать новую revision и проверить durable
+    `material_fingerprint` job, автоматическую re-evaluation claim и protected
+    ISBN/DOI/canonical URL evidence без сырых identifiers в API.
 
 Invitation передаётся как `#join/{token}`. Fragment не отправляется серверу
 браузером; Web передаёт token только в preview/join API и очищает route после
@@ -62,6 +78,7 @@ Invitation передаётся как `#join/{token}`. Fragment не отпра
 ```sh
 cargo test -p lumi-core social
 cargo test -p lumi-server social
+cargo test -p lumi-server search
 npm --prefix tests/e2e run test -- social.spec.ts
 make c
 make web-e2e
@@ -89,7 +106,9 @@ events и проверяет first-page budget 300 мс.
   status нельзя подложить с клиента.
 - Raw/protected signatures не входят в HTTP DTO, sync payload или activity;
   source/package routes сохраняют personal-owner scope.
-- Discussion DTO не содержит anchor/quote/private record. Hidden body
+- Material-level Discussion DTO не содержит private record. Shared anchor DTO
+  содержит только bounded public context; private provenance хранится отдельно.
+  Hidden body
   маскируется для member; delete очищает body и оставляет tombstone.
 - Discussion mutations требуют idempotency и expected revision; moderation
   разрешена только owner/admin и записывается append-only.
@@ -100,6 +119,10 @@ events и проверяет first-page budget 300 мс.
 - Vendor-neutral alert `lumi-community-communications-failures` отслеживает
   устойчивые `rate_limited`/`unavailable` результаты без content bodies.
 - Rate limit возвращает `429`, invalid mutation — `422`.
+- Social search повторно проверяет membership/claim/moderation после Tantivy и
+  не использует index как ACL source.
+- Image download проверяет active membership; Content-Type, signature,
+  dimensions и slot geometry проверяются до смены ref.
 
 ## Backup/restore
 
@@ -109,7 +132,9 @@ shared materials/comments/chat/activity/moderation. PostgreSQL custom dump
 остаётся authoritative snapshot, поэтому chat и activity восстанавливаются
 согласованно с membership state.
 
-## Отложенные зависимости
+## Release evidence
 
-Scope, зависящий от contracts `0.4.0`, зафиксирован в
+Закрытый dependency record:
 [`../tmp-plans/0.5.0-deferred-until-0.4.0.md`](../tmp-plans/0.5.0-deferred-until-0.4.0.md).
+Durable решение:
+[`ADR 0040`](../adr/0040-shared-reading-social-index-images-and-fingerprint-lifecycle.md).

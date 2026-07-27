@@ -8,12 +8,17 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use uuid::Uuid;
 
-use crate::{DocumentRevisionId, MaterialId, SourceFormat, TimestampMs, UserId};
+use crate::{
+    Anchor, AnchorResolutionStrategy, Annotation, AnnotationId, AnnotationTarget,
+    DocumentRevisionId, HighlightStyle, MaterialId, SourceFormat, TimestampMs, UserId,
+};
 
 /// Version of the first Community Space contract.
 pub const COMMUNITY_CONTRACT_VERSION: &str = "community-space.v1";
 /// Version of material-level Community discussions independent from private records.
 pub const MATERIAL_DISCUSSION_CONTRACT_VERSION: &str = "material-discussion.v1";
+/// Version of cross-copy shared anchors, comments and published highlights.
+pub const SHARED_READING_CONTRACT_VERSION: &str = "shared-reading.v1";
 /// Version of Space chat and activity cursor delivery.
 pub const COMMUNITY_COMMUNICATIONS_CONTRACT_VERSION: &str = "community-communications.v1";
 /// Maximum Community Space name length in Unicode scalar values.
@@ -30,6 +35,10 @@ pub const MODERATION_REASON_MAX_BYTES: usize = 1024;
 pub const SHARED_THREAD_PAGE_MAX: u16 = 100;
 /// Maximum number of chat messages or activity events returned by one cursor page.
 pub const COMMUNITY_FEED_PAGE_MAX: u16 = 100;
+/// Maximum accepted avatar or cover upload size.
+pub const COMMUNITY_IMAGE_MAX_BYTES: usize = 5 * 1024 * 1024;
+/// Maximum accepted raster dimension.
+pub const COMMUNITY_IMAGE_MAX_DIMENSION: u32 = 4_096;
 
 /// Stable product identifier of a Community Space.
 pub type CommunitySpaceId = Uuid;
@@ -47,10 +56,43 @@ pub type UserMaterialClaimId = Uuid;
 pub type SharedCommentThreadId = Uuid;
 /// Stable identifier of one shared comment or reply.
 pub type SharedCommentId = Uuid;
+/// Stable identifier of a separately published shared highlight.
+pub type SharedHighlightId = Uuid;
 /// Stable identifier of one Space chat message.
 pub type SharedChatMessageId = Uuid;
 /// Stable identifier of an append-only moderation decision.
 pub type ModerationActionId = Uuid;
+/// Stable identifier of one generic image reference.
+pub type CommunityImageId = Uuid;
+
+/// Image slot owned by a Community Space.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CommunityImageKind {
+    /// Square or near-square Space identity image.
+    Avatar,
+    /// Wide Space header image.
+    Cover,
+}
+
+/// Public metadata for a member-authorized Space image.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct CommunityImageRef {
+    /// Stable reference identity, independent from the content-addressed blob.
+    pub id: CommunityImageId,
+    /// Slot occupied by this reference.
+    pub kind: CommunityImageKind,
+    /// Validated media type.
+    pub media_type: String,
+    /// Pixel width.
+    pub width: u32,
+    /// Pixel height.
+    pub height: u32,
+    /// Optimistic concurrency revision.
+    pub object_revision: u64,
+    /// Last replacement timestamp.
+    pub updated_at: TimestampMs,
+}
 
 /// Allowlisted system event kinds exposed by the member-only activity feed.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -158,12 +200,139 @@ pub enum UserMaterialClaimStatus {
     ManualReview,
 }
 
-/// Scope supported before shared anchors from Records v2 become available.
+/// Reader target scope of a shared discussion.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SharedCommentThreadScope {
     /// Discussion is about the shared material as a whole.
     Material,
+    /// Discussion is attached to a structural section.
+    Section,
+    /// Discussion is attached to an exact reflowable selection.
+    Anchor,
+    /// Discussion is attached to a fixed-layout page or page area.
+    Page,
+}
+
+/// Public cross-copy anchor without private material, revision or record identities.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct SharedAnchor {
+    /// Source target granularity.
+    pub target: AnnotationTarget,
+    /// Exact quote or bounded block excerpt used for recovery.
+    pub quote: String,
+    /// Bounded prefix context.
+    pub prefix: String,
+    /// Bounded suffix context.
+    pub suffix: String,
+    /// Optional structural heading path.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub heading_path: Vec<String>,
+    /// Optional human-facing page label.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub page_label: Option<String>,
+}
+
+/// Private command draft created from an Annotation v2 target or live selection.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct SharedAnchorDraft {
+    /// Source-backed anchor from the caller's current private revision.
+    pub anchor: Anchor,
+    /// Annotation v2 target copied without its private note body.
+    pub target: AnnotationTarget,
+    /// Optional private record used only for server-side provenance validation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provenance_annotation_id: Option<AnnotationId>,
+    /// Optional structural heading path shown when exact recovery fails.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub heading_path: Vec<String>,
+    /// Optional human-facing page label.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub page_label: Option<String>,
+}
+
+impl SharedAnchorDraft {
+    /// Create a draft from Annotation v2 without copying title, tags or private note content.
+    #[must_use]
+    pub fn from_annotation(annotation: &Annotation) -> Self {
+        let page_label =
+            annotation
+                .anchor
+                .source_locator
+                .as_ref()
+                .and_then(|locator| match locator {
+                    crate::SourceLocator::Pdf(locator) => Some(locator.page_label.clone()),
+                    _ => None,
+                });
+        let heading_path = match &annotation.target {
+            AnnotationTarget::Section { path } => path.clone(),
+            _ => Vec::new(),
+        };
+        Self {
+            anchor: annotation.anchor.clone(),
+            target: annotation.target.clone(),
+            provenance_annotation_id: Some(annotation.id),
+            heading_path,
+            page_label,
+        }
+    }
+
+    /// Strip private provenance and revision details for shared storage and unresolved UI.
+    #[must_use]
+    pub fn shared_anchor(&self) -> SharedAnchor {
+        SharedAnchor {
+            target: self.target.clone(),
+            quote: self.anchor.quote.clone(),
+            prefix: self.anchor.prefix.clone(),
+            suffix: self.anchor.suffix.clone(),
+            heading_path: self.heading_path.clone(),
+            page_label: self.page_label.clone(),
+        }
+    }
+
+    /// Derive the reader scope from the Annotation v2 target.
+    #[must_use]
+    pub const fn scope(&self) -> SharedCommentThreadScope {
+        match self.target {
+            AnnotationTarget::Section { .. } => SharedCommentThreadScope::Section,
+            AnnotationTarget::PageArea { .. } => SharedCommentThreadScope::Page,
+            AnnotationTarget::TextRange | AnnotationTarget::Block { .. } => {
+                SharedCommentThreadScope::Anchor
+            }
+            AnnotationTarget::Document => SharedCommentThreadScope::Material,
+        }
+    }
+}
+
+/// Caller-specific placement after mapping a shared anchor to the current private copy.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", tag = "status")]
+pub enum SharedAnchorPlacement {
+    /// Anchor resolved to the caller's current private revision.
+    Resolved {
+        /// Current-revision anchor safe to pass to Reader.
+        anchor: Box<Anchor>,
+        /// Conservative recovery strategy.
+        strategy: AnchorResolutionStrategy,
+        /// Mapping confidence from 0.0 to 1.0.
+        confidence: f32,
+    },
+    /// No candidate met the conservative recovery threshold.
+    Unresolved {
+        /// Public context used to explain and retry the placement later.
+        shared_anchor: SharedAnchor,
+    },
+}
+
+/// Target selected when starting a shared discussion.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", tag = "kind", content = "anchor")]
+pub enum SharedThreadTargetDraft {
+    /// Material-level thread.
+    #[default]
+    Material,
+    /// Section, selection or page target derived from Annotation v2.
+    Anchor(Box<SharedAnchorDraft>),
 }
 
 /// Reader-visible lifecycle of social content.
@@ -203,7 +372,7 @@ pub enum ModerationActionKind {
 }
 
 /// Material-level thread returned with a bounded comment projection.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct SharedCommentThread {
     /// Stable thread identity.
     pub id: SharedCommentThreadId,
@@ -211,8 +380,11 @@ pub struct SharedCommentThread {
     pub community_space_id: CommunitySpaceId,
     /// Shared material discussed by the thread.
     pub shared_material_id: SharedMaterialId,
-    /// Current scope. Anchor-bearing scopes are intentionally absent until Records v2.
+    /// Current target scope.
     pub scope: SharedCommentThreadScope,
+    /// Caller-specific mapped placement for non-material threads.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub placement: Option<SharedAnchorPlacement>,
     /// Stable creator identity.
     pub created_by_user_id: UserId,
     /// Mutable display nickname, never used for authorization.
@@ -255,7 +427,7 @@ pub struct SharedComment {
 }
 
 /// Cursor-paginated material discussion response.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct SharedDiscussionPage {
     /// Threads ordered by `(updated_at, thread_id)`.
     pub threads: Vec<SharedCommentThread>,
@@ -349,10 +521,74 @@ pub struct DeleteSharedChatMessageRequest {
 }
 
 /// Input for starting a material-level discussion with its first comment.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct CreateSharedThreadRequest {
     /// First comment body.
     pub body_markdown: String,
+    /// Material or Annotation v2-derived reader target.
+    #[serde(default)]
+    pub target: SharedThreadTargetDraft,
+}
+
+/// Separately published highlight; deleting it never deletes the private Annotation.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct SharedHighlight {
+    /// Stable shared entity identity.
+    pub id: SharedHighlightId,
+    /// Community Space containing the highlight.
+    pub community_space_id: CommunitySpaceId,
+    /// Shared material identity.
+    pub shared_material_id: SharedMaterialId,
+    /// Stable publisher identity.
+    pub published_by_user_id: UserId,
+    /// Public visual style copied at publication time.
+    pub style: HighlightStyle,
+    /// Caller-specific mapped placement.
+    pub placement: SharedAnchorPlacement,
+    /// Optimistic concurrency revision.
+    pub object_revision: u64,
+    /// Publication timestamp.
+    pub created_at: TimestampMs,
+    /// Last mutation timestamp.
+    pub updated_at: TimestampMs,
+}
+
+/// Publish one private highlight as a separate Space entity.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct PublishSharedHighlightRequest {
+    /// Private Annotation v2-derived target and provenance.
+    pub anchor: SharedAnchorDraft,
+    /// Public visual style copied from the private highlight.
+    pub style: HighlightStyle,
+}
+
+/// Remove a published highlight without mutating its private source record.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct UnpublishSharedHighlightRequest {
+    /// Revision observed by the publisher.
+    pub expected_revision: u64,
+}
+
+/// Shared overlay consumed by reflowable and PDF Reader adapters.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct SharedReaderLayer {
+    /// Anchor-bearing and material-level discussion threads.
+    pub threads: Vec<SharedCommentThread>,
+    /// Independently published highlights.
+    pub highlights: Vec<SharedHighlight>,
+}
+
+/// One Space overlay available for a caller's matched private material copy.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct SharedReaderSpaceLayer {
+    /// Community Space identity.
+    pub community_space_id: CommunitySpaceId,
+    /// Current Space display name.
+    pub community_space_name: String,
+    /// Community-safe shared material identity.
+    pub shared_material_id: SharedMaterialId,
+    /// Resolved and unresolved social objects for Reader.
+    pub layer: SharedReaderLayer,
 }
 
 /// Input for adding a top-level comment or a single-level reply.
@@ -422,6 +658,8 @@ pub struct ModerationAction {
 pub enum MaterialMatchBasis {
     /// Identity creator's exact private revision.
     CreatorCopy,
+    /// A protected ISBN, DOI or canonical URL is identical.
+    StrongIdentifier,
     /// Complete canonical normalized text is identical.
     ExactContent,
     /// Protected similarity passed the conservative threshold and guards.
@@ -522,6 +760,12 @@ pub struct CommunitySpace {
     pub name: String,
     /// Optional user-facing description.
     pub description: Option<String>,
+    /// Optional member-authorized avatar reference.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub avatar: Option<CommunityImageRef>,
+    /// Optional member-authorized cover reference.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cover: Option<CommunityImageRef>,
     /// Closed-release discoverability.
     pub discoverability: CommunityDiscoverability,
     /// Closed-release entry policy.
@@ -1086,6 +1330,7 @@ fn validate_revision(value: u64) -> Result<(), CommunityContractError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{AnnotationKind, AnnotationStatus, CreateAnnotationCommand, TextRange};
 
     #[test]
     fn member_can_view_active_space() {
@@ -1217,5 +1462,51 @@ mod tests {
             ),
             Ok(())
         );
+    }
+
+    #[test]
+    fn public_shared_anchor_does_not_expose_private_note_or_record_identity(
+    ) -> Result<(), serde_json::Error> {
+        let material_id = Uuid::from_u128(41);
+        let revision_id = Uuid::from_u128(42);
+        let annotation = Annotation::create(
+            CreateAnnotationCommand {
+                material_id,
+                revision_id,
+                anchor: Anchor {
+                    revision_id,
+                    node_path: vec!["chapter-1".to_owned()],
+                    end_node_path: vec!["chapter-1".to_owned()],
+                    text_range: Some(TextRange { start: 3, end: 12 }),
+                    quote: "общая цитата".to_owned(),
+                    prefix: "до".to_owned(),
+                    suffix: "после".to_owned(),
+                    content_hash: "content-hash".to_owned(),
+                    source_locator: None,
+                    end_source_locator: None,
+                    page_rects: Vec::new(),
+                },
+                target: AnnotationTarget::TextRange,
+                kind: AnnotationKind::Note {
+                    body: "СЕКРЕТНОЕ ТЕЛО ЗАМЕТКИ".to_owned(),
+                },
+                title: Some("СЕКРЕТНЫЙ ЗАГОЛОВОК".to_owned()),
+                tags: vec!["секретный-тег".to_owned()],
+                status: AnnotationStatus::Active,
+                related_annotation_id: None,
+            },
+            1_785_024_000_000,
+        );
+
+        let draft = SharedAnchorDraft::from_annotation(&annotation);
+        let public_json = serde_json::to_string(&draft.shared_anchor())?;
+
+        assert!(public_json.contains("общая цитата"));
+        assert!(!public_json.contains("СЕКРЕТ"));
+        assert!(!public_json.contains("секретный-тег"));
+        assert!(!public_json.contains(&material_id.to_string()));
+        assert!(!public_json.contains(&revision_id.to_string()));
+        assert!(!public_json.contains(&annotation.id.to_string()));
+        Ok(())
     }
 }

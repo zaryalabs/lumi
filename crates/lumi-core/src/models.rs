@@ -305,6 +305,13 @@ pub fn s1_schema_migrations() -> Vec<SchemaMigration> {
                 "Member-only Space chat, cursor activity delivery and chat moderation tombstones."
                     .to_owned(),
         },
+        SchemaMigration {
+            id: "s1-0029-deferred-social-reading".to_owned(),
+            schema_version: DOMAIN_SCHEMA_VERSION.to_owned(),
+            description:
+                "Cross-copy shared anchors, social search invalidation, generic Space images and durable fingerprint jobs."
+                    .to_owned(),
+        },
     ]);
     migrations
 }
@@ -514,6 +521,52 @@ pub struct NormalizedContentPackage {
     pub diagnostics: Vec<ImportDiagnostic>,
 }
 
+impl NormalizedContentPackage {
+    /// Build the platform-independent Reader projection for this package.
+    #[must_use]
+    pub fn reading_document(&self, material_id: MaterialId) -> ReadingDocument {
+        let nodes = self
+            .units
+            .iter()
+            .enumerate()
+            .map(|(index, unit)| ReadingNode {
+                id: unit.id.clone(),
+                path: vec![format!("unit-{index}")],
+                kind: ReadingNodeKind::Section,
+                text: Some(unit.title.clone()),
+                resource_hash: None,
+                content_hash: content_hash(unit.title.as_bytes()),
+                source_locator: unit.source_locator.clone(),
+                links: Vec::new(),
+                children: unit
+                    .block_ids
+                    .iter()
+                    .filter_map(|id| self.blocks.iter().find(|block| block.id == *id))
+                    .map(|block| ReadingNode {
+                        id: block.id.clone(),
+                        path: block.node_path.clone(),
+                        kind: block.kind.clone(),
+                        text: block.text.clone(),
+                        resource_hash: block.resource_hash.clone(),
+                        content_hash: block.content_hash.clone(),
+                        source_locator: block.source_locator.clone(),
+                        links: block.links.clone(),
+                        children: Vec::new(),
+                    })
+                    .collect(),
+            })
+            .collect();
+        ReadingDocument {
+            material_id,
+            revision_id: self.revision_id,
+            title: self.manifest.title.clone(),
+            creators: self.manifest.creators.clone(),
+            nodes,
+            navigation: self.navigation.clone(),
+        }
+    }
+}
+
 /// Manifest fields for a normalized package.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct NormalizedPackageManifest {
@@ -529,6 +582,9 @@ pub struct NormalizedPackageManifest {
     pub reading_order: Vec<String>,
     /// Source provenance summary.
     pub source: SourceIdentity,
+    /// Strong normalized identifiers used only as matching evidence.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub identifiers: Vec<MaterialIdentifier>,
 }
 
 impl NormalizedPackageManifest {
@@ -548,8 +604,30 @@ impl NormalizedPackageManifest {
             language,
             reading_order,
             source,
+            identifiers: Vec::new(),
         }
     }
+}
+
+/// Kind of strong material identifier retained in normalized metadata.
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MaterialIdentifierKind {
+    /// International Standard Book Number.
+    Isbn,
+    /// Digital Object Identifier.
+    Doi,
+    /// Canonical public URL for a captured web publication.
+    CanonicalUrl,
+}
+
+/// Bounded normalized identifier used by revision matching.
+#[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
+pub struct MaterialIdentifier {
+    /// Identifier family.
+    pub kind: MaterialIdentifierKind,
+    /// Canonical value. Social APIs never expose the protected derived hash.
+    pub value: String,
 }
 
 /// A chapter, section or comparable reading unit.
@@ -1680,7 +1758,7 @@ mod tests {
     fn migrations_cover_s1_contract_groups() {
         let migrations = s1_schema_migrations();
 
-        assert_eq!(migrations.len(), 31);
+        assert_eq!(migrations.len(), 32);
         assert!(migrations
             .iter()
             .any(|migration| migration.id == "s1-0011-ai-contract-freeze-v1"));
@@ -1732,5 +1810,8 @@ mod tests {
         assert!(migrations
             .iter()
             .any(|migration| migration.id == "s1-0028-community-chat-activity"));
+        assert!(migrations
+            .iter()
+            .any(|migration| migration.id == "s1-0029-deferred-social-reading"));
     }
 }

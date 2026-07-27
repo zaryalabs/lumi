@@ -318,6 +318,7 @@ where
                 .map(|page| format!("page-{}", page.page_index))
                 .collect(),
             source: source_identity,
+            identifiers: Vec::new(),
         },
         pages: inspected.pages,
         text_layers: inspected.text_layers,

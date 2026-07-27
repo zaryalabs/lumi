@@ -220,8 +220,9 @@ Social entities:
 Personal notes are not social comments. User can convert/share selected note или
 highlight explicitly.
 
-До готовности Records v2 отдельно выпускается material-level discussion
-contract из [`ADR 0038`](../adr/0038-material-discussions-and-moderation.md):
+Material-level discussion contract из
+[`ADR 0038`](../adr/0038-material-discussions-and-moderation.md) остаётся
+отдельным capability slice:
 
 - active member видит и создаёт discussion целого материала даже без matched
   claim, потому что ответ не содержит quote или текст книги;
@@ -232,9 +233,23 @@ contract из [`ADR 0038`](../adr/0038-material-discussions-and-moderation.md):
 - выдача cursor-paginated и не содержит anchor, source annotation, private
   material/revision или normalized package.
 
-Эта capability называется `material-discussions`. Она не публикует
-`shared-reading`: anchor comments, shared highlights и Reader overlay остаются
-зависимыми от общего target/provenance contract `0.4.0`.
+Эта capability называется `material-discussions` и сама по себе не публикует
+`shared-reading`. После стабилизации общего target/provenance contract `0.4.0`
+отдельный `shared-reading` добавляет anchor/section/page discussions, explicit
+published highlights и reflowable/PDF Reader overlays. Публичный shared anchor
+не содержит private annotation/material/revision identity, note body, title или
+tags; placement относительно текущей revision всегда возвращается как
+`resolved` или честный `unresolved`.
+
+Shared comments, Space chat и published highlights индексируются общим search
+runtime. Capability `social-search-index` требует active membership и, для
+anchor-bearing результатов, matched claim как при индексации, так и при выдаче.
+Avatar/cover доступны через `community-images`: PNG/JPEG проходят signature и
+geometry validation, download требует active membership, replacement использует
+refcount и retention generic BlobStore. Fingerprint lifecycle выполняется
+durable job/backfill и использует protected ISBN/DOI/canonical URL evidence.
+Полный contract принят в
+[`ADR 0040`](../adr/0040-shared-reading-social-index-images-and-fingerprint-lifecycle.md).
 
 Chat и comments имеют разные контексты:
 

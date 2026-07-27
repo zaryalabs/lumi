@@ -454,6 +454,19 @@ idempotency, owner material scope и removed-membership denial не дублир
 transport слое. Registry snapshot находится в
 `tests/fixtures/mcp/contracts/v4`.
 
+## Расширение отложенного контура `0.5.0`: social search
+
+Registry `mcp-tools.v5` сохраняет все инструменты v4 и добавляет:
+
+- `search_shared_comments`;
+- `search_space_chat`.
+
+Оба инструмента используют общий permission-aware search runtime. Пространство
+задаётся явно, membership и доступ к материалу перепроверяются при каждом
+запросе, поэтому исключение участника или удаление claim немедленно закрывает
+результаты без ожидания переиндексации. Frozen registry snapshot находится в
+`tests/fixtures/mcp/contracts/v5`.
+
 Операторский smoke и пример клиентской конфигурации:
 [`../runbooks/mcp-external-agents.md`](../runbooks/mcp-external-agents.md).
 

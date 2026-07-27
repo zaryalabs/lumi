@@ -838,6 +838,33 @@ p {
   background: var(--paper);
 }
 
+.community-header {
+  position: relative;
+  overflow: hidden;
+}
+
+.community-cover {
+  width: 100%;
+  max-height: 280px;
+  object-fit: cover;
+  border-radius: 16px;
+}
+
+.community-avatar {
+  width: 88px;
+  height: 88px;
+  object-fit: cover;
+  border: 4px solid var(--paper);
+  border-radius: 24px;
+  box-shadow: 0 8px 24px rgb(28 36 31 / 18%);
+}
+
+.community-image-settings {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 15rem), 1fr));
+  gap: 0.8rem;
+}
+
 .community-create,
 .community-settings,
 .community-links {
@@ -1868,6 +1895,24 @@ h6.reading-heading {
   background: rgb(181 211 231 / 62%);
   box-shadow: 0 0 0 2px rgb(181 211 231 / 62%);
 }
+.shared-highlight,
+.shared-highlight-green,
+.shared-highlight-blue {
+  border-bottom: 2px solid var(--accent);
+}
+.shared-highlight {
+  background: rgb(255 223 82 / 28%);
+}
+.shared-highlight-green {
+  background: rgb(115 184 132 / 24%);
+}
+.shared-highlight-blue {
+  background: rgb(92 153 196 / 22%);
+}
+.shared-highlight-bold {
+  text-decoration: underline double var(--accent);
+  text-underline-offset: 3px;
+}
 .annotation-note {
   border-bottom: 2px solid var(--accent);
   background: rgb(223 234 228 / 45%);
@@ -1914,6 +1959,27 @@ h6.reading-heading {
 }
 .notes-drawer {
   border-left: 1px solid color-mix(in srgb, var(--reader-ink) 16%, transparent);
+}
+.social-drawer,
+.reader-social-space,
+.reader-social-compose,
+.reader-social-item,
+.pdf-social-panel,
+.pdf-social-space {
+  display: grid;
+  gap: 10px;
+}
+.reader-social-space,
+.reader-social-compose,
+.reader-social-item {
+  padding: 12px;
+  border: 1px solid color-mix(in srgb, var(--reader-ink) 16%, transparent);
+  border-radius: 12px;
+}
+.reader-social-quote {
+  margin: 0;
+  color: var(--reader-muted);
+  font: 0.9rem/1.45 Georgia, serif;
 }
 .toc-drawer ol,
 .annotation-list {
@@ -2331,6 +2397,24 @@ h6.reading-heading {
 }
 .pdf-annotation-rect.voice {
   border-bottom: 3px dotted var(--accent);
+}
+.pdf-annotation-rect.shared-highlight {
+  border-bottom: 2px solid var(--accent);
+  background: rgb(255 223 82 / 28%);
+}
+.pdf-annotation-rect.shared-highlight-bold {
+  border: 2px double var(--accent);
+}
+.pdf-annotation-rect.shared-highlight-green {
+  border-bottom: 2px solid var(--accent);
+  background: rgb(115 184 132 / 24%);
+}
+.pdf-annotation-rect.shared-highlight-blue {
+  border-bottom: 2px solid var(--accent);
+  background: rgb(92 153 196 / 22%);
+}
+.pdf-annotation-rect.shared-note {
+  border: 2px dotted var(--accent);
 }
 .pdf-annotation-panel {
   min-height: 0;

@@ -326,6 +326,46 @@ impl SearchRuntime {
                 SELECT 'learning_item', item_id, space_id
                   FROM learning_items
                  WHERE owner_user_id = $1 AND status = 'active' AND deleted_at IS NULL
+                UNION ALL
+                SELECT 'shared_comment', comment.comment_id, thread.community_space_id
+                  FROM shared_comments comment
+                  JOIN shared_comment_threads thread ON thread.thread_id = comment.thread_id
+                  JOIN community_memberships membership
+                    ON membership.community_space_id = thread.community_space_id
+                   AND membership.user_id = $1
+                   AND membership.status = 'active'
+                 WHERE comment.hidden_at IS NULL AND comment.deleted_at IS NULL
+                   AND thread.hidden_at IS NULL AND thread.deleted_at IS NULL
+                   AND (
+                       thread.scope = 'material' OR EXISTS (
+                           SELECT 1 FROM user_material_claims claim
+                            WHERE claim.community_space_id = thread.community_space_id
+                              AND claim.shared_material_id = thread.shared_material_id
+                              AND claim.user_id = $1 AND claim.match_status = 'matched'
+                              AND claim.deleted_at IS NULL
+                       )
+                   )
+                UNION ALL
+                SELECT 'shared_chat_message', message.message_id, message.community_space_id
+                  FROM shared_chat_messages message
+                  JOIN community_memberships membership
+                    ON membership.community_space_id = message.community_space_id
+                   AND membership.user_id = $1
+                   AND membership.status = 'active'
+                 WHERE message.hidden_at IS NULL AND message.deleted_at IS NULL
+                UNION ALL
+                SELECT 'shared_highlight', highlight.highlight_id, highlight.community_space_id
+                  FROM shared_highlights highlight
+                  JOIN community_memberships membership
+                    ON membership.community_space_id = highlight.community_space_id
+                   AND membership.user_id = $1
+                   AND membership.status = 'active'
+                  JOIN user_material_claims claim
+                    ON claim.community_space_id = highlight.community_space_id
+                   AND claim.shared_material_id = highlight.shared_material_id
+                   AND claim.user_id = $1 AND claim.match_status = 'matched'
+                   AND claim.deleted_at IS NULL
+                 WHERE highlight.deleted_at IS NULL
             ) sources
             ORDER BY source_type, source_id",
         )
@@ -444,6 +484,13 @@ async fn extract_source(
         "annotation" => extract_annotation(pool, request.owner_id, request.source_id).await,
         "ai_artifact" => extract_ai_artifact(pool, request.owner_id, request.source_id).await,
         "learning_item" => extract_learning_item(pool, request.owner_id, request.source_id).await,
+        "shared_comment" => extract_shared_comment(pool, request.owner_id, request.source_id).await,
+        "shared_chat_message" => {
+            extract_shared_chat_message(pool, request.owner_id, request.source_id).await
+        }
+        "shared_highlight" => {
+            extract_shared_highlight(pool, request.owner_id, request.source_id).await
+        }
         _ => Err(SearchError::Storage),
     }
 }
@@ -703,6 +750,179 @@ async fn extract_learning_item(
     ))
 }
 
+async fn extract_shared_comment(
+    pool: &PgPool,
+    owner_id: Uuid,
+    comment_id: Uuid,
+) -> Result<Vec<SearchChunk>, SearchError> {
+    let row = sqlx_core::query::query(
+        "SELECT comment.body_markdown, comment.object_revision, comment.updated_at,
+                thread.community_space_id, thread.shared_material_id, thread.scope,
+                identity.canonical_title
+           FROM shared_comments comment
+           JOIN shared_comment_threads thread ON thread.thread_id = comment.thread_id
+           JOIN shared_material_identities identity
+             ON identity.shared_material_id = thread.shared_material_id
+            AND identity.community_space_id = thread.community_space_id
+            AND identity.deleted_at IS NULL
+           JOIN community_memberships membership
+             ON membership.community_space_id = thread.community_space_id
+            AND membership.user_id = $2 AND membership.status = 'active'
+          WHERE comment.comment_id = $1
+            AND comment.hidden_at IS NULL AND comment.deleted_at IS NULL
+            AND thread.hidden_at IS NULL AND thread.deleted_at IS NULL
+            AND (
+                thread.scope = 'material' OR EXISTS (
+                    SELECT 1 FROM user_material_claims claim
+                     WHERE claim.community_space_id = thread.community_space_id
+                       AND claim.shared_material_id = thread.shared_material_id
+                       AND claim.user_id = $2 AND claim.match_status = 'matched'
+                       AND claim.deleted_at IS NULL
+                )
+            )",
+    )
+    .bind(comment_id)
+    .bind(owner_id)
+    .fetch_optional(pool)
+    .await
+    .map_err(|_| SearchError::Storage)?;
+    let Some(row) = row else {
+        return Ok(Vec::new());
+    };
+    let revision = positive_u64(
+        row.try_get("object_revision")
+            .map_err(|_| SearchError::Storage)?,
+    )?;
+    Ok(chunker::social_text(
+        lumi_core::SearchSourceType::SharedComment,
+        comment_id,
+        &revision.to_string(),
+        &row.try_get::<String, _>("canonical_title")
+            .map_err(|_| SearchError::Storage)?,
+        &row.try_get::<String, _>("body_markdown")
+            .map_err(|_| SearchError::Storage)?,
+        row.try_get("community_space_id")
+            .map_err(|_| SearchError::Storage)?,
+        Some(
+            row.try_get("shared_material_id")
+                .map_err(|_| SearchError::Storage)?,
+        ),
+        timestamp_ms(
+            row.try_get("updated_at")
+                .map_err(|_| SearchError::Storage)?,
+        ),
+    ))
+}
+
+async fn extract_shared_chat_message(
+    pool: &PgPool,
+    owner_id: Uuid,
+    message_id: Uuid,
+) -> Result<Vec<SearchChunk>, SearchError> {
+    let row = sqlx_core::query::query(
+        "SELECT message.body_markdown, message.object_revision, message.updated_at,
+                message.community_space_id, space.name
+           FROM shared_chat_messages message
+           JOIN community_spaces space
+             ON space.community_space_id = message.community_space_id
+            AND space.deleted_at IS NULL
+           JOIN community_memberships membership
+             ON membership.community_space_id = message.community_space_id
+            AND membership.user_id = $2 AND membership.status = 'active'
+          WHERE message.message_id = $1
+            AND message.hidden_at IS NULL AND message.deleted_at IS NULL",
+    )
+    .bind(message_id)
+    .bind(owner_id)
+    .fetch_optional(pool)
+    .await
+    .map_err(|_| SearchError::Storage)?;
+    let Some(row) = row else {
+        return Ok(Vec::new());
+    };
+    let revision = positive_u64(
+        row.try_get("object_revision")
+            .map_err(|_| SearchError::Storage)?,
+    )?;
+    Ok(chunker::social_text(
+        lumi_core::SearchSourceType::SharedChatMessage,
+        message_id,
+        &revision.to_string(),
+        &row.try_get::<String, _>("name")
+            .map_err(|_| SearchError::Storage)?,
+        &row.try_get::<String, _>("body_markdown")
+            .map_err(|_| SearchError::Storage)?,
+        row.try_get("community_space_id")
+            .map_err(|_| SearchError::Storage)?,
+        None,
+        timestamp_ms(
+            row.try_get("updated_at")
+                .map_err(|_| SearchError::Storage)?,
+        ),
+    ))
+}
+
+async fn extract_shared_highlight(
+    pool: &PgPool,
+    owner_id: Uuid,
+    highlight_id: Uuid,
+) -> Result<Vec<SearchChunk>, SearchError> {
+    let row = sqlx_core::query::query(
+        "SELECT highlight.shared_anchor, highlight.object_revision, highlight.updated_at,
+                highlight.community_space_id, highlight.shared_material_id,
+                identity.canonical_title
+           FROM shared_highlights highlight
+           JOIN shared_material_identities identity
+             ON identity.shared_material_id = highlight.shared_material_id
+            AND identity.community_space_id = highlight.community_space_id
+            AND identity.deleted_at IS NULL
+           JOIN community_memberships membership
+             ON membership.community_space_id = highlight.community_space_id
+            AND membership.user_id = $2 AND membership.status = 'active'
+           JOIN user_material_claims claim
+             ON claim.community_space_id = highlight.community_space_id
+            AND claim.shared_material_id = highlight.shared_material_id
+            AND claim.user_id = $2 AND claim.match_status = 'matched'
+            AND claim.deleted_at IS NULL
+          WHERE highlight.highlight_id = $1 AND highlight.deleted_at IS NULL",
+    )
+    .bind(highlight_id)
+    .bind(owner_id)
+    .fetch_optional(pool)
+    .await
+    .map_err(|_| SearchError::Storage)?;
+    let Some(row) = row else {
+        return Ok(Vec::new());
+    };
+    let shared_anchor: lumi_core::SharedAnchor = serde_json::from_value(
+        row.try_get("shared_anchor")
+            .map_err(|_| SearchError::Storage)?,
+    )
+    .map_err(|_| SearchError::Storage)?;
+    let revision = positive_u64(
+        row.try_get("object_revision")
+            .map_err(|_| SearchError::Storage)?,
+    )?;
+    Ok(chunker::social_text(
+        lumi_core::SearchSourceType::SharedHighlight,
+        highlight_id,
+        &revision.to_string(),
+        &row.try_get::<String, _>("canonical_title")
+            .map_err(|_| SearchError::Storage)?,
+        &shared_anchor.quote,
+        row.try_get("community_space_id")
+            .map_err(|_| SearchError::Storage)?,
+        Some(
+            row.try_get("shared_material_id")
+                .map_err(|_| SearchError::Storage)?,
+        ),
+        timestamp_ms(
+            row.try_get("updated_at")
+                .map_err(|_| SearchError::Storage)?,
+        ),
+    ))
+}
+
 async fn persist_projection(
     pool: &PgPool,
     request: &IndexRequest,
@@ -738,6 +958,23 @@ async fn persist_projection(
     .await
     .map_err(|_| SearchError::Storage)?
     .unwrap_or_else(Uuid::now_v7);
+    if chunks.is_empty() && is_social_source(&request.source_type) {
+        sqlx_core::query::query(
+            "DELETE FROM search_documents
+              WHERE user_id = $1 AND source_type = $2 AND source_id = $3",
+        )
+        .bind(request.owner_id)
+        .bind(&request.source_type)
+        .bind(request.source_id)
+        .execute(&mut *transaction)
+        .await
+        .map_err(|_| SearchError::Storage)?;
+        transaction
+            .commit()
+            .await
+            .map_err(|_| SearchError::Storage)?;
+        return Ok(());
+    }
     if chunks.is_empty() {
         sqlx_core::query::query(
             "INSERT INTO search_documents (
@@ -824,8 +1061,9 @@ async fn persist_projection(
         sqlx_core::query::query(
             "INSERT INTO search_chunks (
                 chunk_id, document_id, user_id, source_type, source_id,
-                material_id, revision_id, field, text_hash, payload, fasttext_vector
-             ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)",
+                material_id, revision_id, community_space_id, shared_material_id,
+                field, text_hash, payload, fasttext_vector
+             ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)",
         )
         .bind(&chunk.id)
         .bind(document_id)
@@ -834,6 +1072,8 @@ async fn persist_projection(
         .bind(chunk.source_id)
         .bind(chunk.material_id)
         .bind(chunk.revision_id)
+        .bind(chunk.community_space_id)
+        .bind(chunk.shared_material_id)
         .bind(chunk.field.as_str())
         .bind(&chunk.text_hash)
         .bind(payload)
@@ -843,6 +1083,13 @@ async fn persist_projection(
         .map_err(|_| SearchError::Storage)?;
     }
     transaction.commit().await.map_err(|_| SearchError::Storage)
+}
+
+fn is_social_source(value: &str) -> bool {
+    matches!(
+        value,
+        "shared_comment" | "shared_chat_message" | "shared_highlight"
+    )
 }
 
 fn parse_annotation_type(value: String) -> Result<AnnotationType, SearchError> {

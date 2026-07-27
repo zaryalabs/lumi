@@ -21,7 +21,10 @@ function renderAnnotations(state, shell) {
   const pageWidth = Number(shell.dataset.pageWidth);
   const pageHeight = Number(shell.dataset.pageHeight);
   if (!(pageWidth > 0 && pageHeight > 0)) return;
-  for (const annotation of state.annotations) {
+  for (const annotation of [
+    ...state.annotations,
+    ...state.sharedAnnotations,
+  ]) {
     if (annotation.pageIndex !== pageIndex) continue;
     for (const rect of annotation.rects) {
       const marker = document.createElement("span");
@@ -268,6 +271,7 @@ async function mount(config) {
     observer: null,
     destroyed: false,
     annotations: config.annotations || [],
+    sharedAnnotations: config.sharedAnnotations || [],
   };
   readers.set(config.containerId, state);
   const fragment = document.createDocumentFragment();
@@ -365,6 +369,15 @@ function setAnnotations(containerId, annotations) {
   }
 }
 
+function setSharedAnnotations(containerId, annotations) {
+  const state = readers.get(containerId);
+  if (!state) return;
+  state.sharedAnnotations = annotations || [];
+  for (const shell of state.container.querySelectorAll("[data-pdf-page]")) {
+    if (shell.dataset.renderState === "ready") renderAnnotations(state, shell);
+  }
+}
+
 window.LumiPdfReader = {
   mount,
   mountJson: (config) => mount(JSON.parse(config)),
@@ -373,4 +386,6 @@ window.LumiPdfReader = {
   goToPage,
   setAnnotationsJson: (containerId, annotations) =>
     setAnnotations(containerId, JSON.parse(annotations)),
+  setSharedAnnotationsJson: (containerId, annotations) =>
+    setSharedAnnotations(containerId, JSON.parse(annotations)),
 };

@@ -656,5 +656,7 @@ fn open_target_route(target: &SearchOpenTarget) -> AppRoute {
             view: DeskView::Item(DeskObjectType::AiArtifact, *artifact_id),
             ..DeskRoute::default()
         }),
+        SearchOpenTarget::CommunityMaterial { space_id, .. }
+        | SearchOpenTarget::CommunityChat { space_id, .. } => AppRoute::CommunitySpace(*space_id),
     }
 }

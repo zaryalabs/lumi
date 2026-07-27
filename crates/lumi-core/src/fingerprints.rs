@@ -6,8 +6,10 @@
 
 use sha2::{Digest, Sha256};
 
+use crate::MaterialIdentifier;
+
 /// Stable algorithm marker persisted with every derived fingerprint.
-pub const MATERIAL_FINGERPRINT_ALGORITHM: &str = "material-fingerprint.v1";
+pub const MATERIAL_FINGERPRINT_ALGORITHM: &str = "material-fingerprint.v2";
 /// Number of independent MinHash lanes in the protected similarity signature.
 pub const MATERIAL_FINGERPRINT_LANES: usize = 32;
 const SHINGLE_WIDTH: usize = 5;
@@ -26,6 +28,8 @@ pub struct MaterialFingerprintInput {
     pub sections: Vec<String>,
     /// Ordered normalized text stream.
     pub text: String,
+    /// Strong normalized identifiers, such as ISBN, DOI or canonical URL.
+    pub identifiers: Vec<MaterialIdentifier>,
 }
 
 /// Server-internal derived signals for one immutable document revision.
@@ -39,6 +43,8 @@ pub struct MaterialFingerprintEvidence {
     pub exact_content_hash: [u8; 32],
     /// Hash of the ordered normalized section labels.
     pub section_sequence_hash: [u8; 32],
+    /// Key-protected strong identifiers. Raw values never leave normalized source metadata.
+    pub protected_identifier_hashes: Vec<[u8; 32]>,
     /// Key-protected MinHash signature. It must never be returned by social API.
     pub protected_similarity_signature: Vec<u64>,
     /// Number of canonical word tokens.
@@ -50,6 +56,8 @@ pub struct MaterialFingerprintEvidence {
 /// Conservative result of comparing two immutable revision fingerprints.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum MaterialMatchDecision {
+    /// At least one protected ISBN, DOI or canonical URL is identical.
+    StrongIdentifier,
     /// Complete canonical text is byte-identical after normalization.
     ExactContent,
     /// Protected similarity and compatibility guards pass the auto-match bar.
@@ -97,12 +105,27 @@ pub fn build_material_fingerprint(
     let canonical_content = tokens.join(" ");
     let token_count = u32::try_from(tokens.len()).unwrap_or(u32::MAX);
     let protected_similarity_signature = minhash_signature(&tokens, &mut keyed_hash);
+    let mut protected_identifier_hashes = input
+        .identifiers
+        .iter()
+        .map(|identifier| {
+            let canonical = format!(
+                "{:?}:{}",
+                identifier.kind,
+                canonical_identifier_value(&identifier.value)
+            );
+            keyed_hash(canonical.as_bytes())
+        })
+        .collect::<Vec<_>>();
+    protected_identifier_hashes.sort_unstable();
+    protected_identifier_hashes.dedup();
 
     MaterialFingerprintEvidence {
         algorithm_version: MATERIAL_FINGERPRINT_ALGORITHM.to_owned(),
         metadata_key: digest(metadata.as_bytes()),
         exact_content_hash: digest(canonical_content.as_bytes()),
         section_sequence_hash: digest(canonical_sections.as_bytes()),
+        protected_identifier_hashes,
         protected_similarity_signature,
         token_count,
         text_length_bucket: length_bucket(tokens.len()),
@@ -117,6 +140,12 @@ pub fn compare_material_fingerprints(
 ) -> MaterialMatchDecision {
     if left.algorithm_version != right.algorithm_version {
         return MaterialMatchDecision::ManualReview { score_bps: 0 };
+    }
+    if protected_identifiers_overlap(
+        &left.protected_identifier_hashes,
+        &right.protected_identifier_hashes,
+    ) {
+        return MaterialMatchDecision::StrongIdentifier;
     }
     if left.token_count > 0
         && right.token_count > 0
@@ -146,6 +175,14 @@ pub fn compare_material_fingerprints(
     } else {
         MaterialMatchDecision::Rejected
     }
+}
+
+fn canonical_identifier_value(value: &str) -> String {
+    value.trim().to_lowercase()
+}
+
+fn protected_identifiers_overlap(left: &[[u8; 32]], right: &[[u8; 32]]) -> bool {
+    left.iter().any(|identifier| right.contains(identifier))
 }
 
 fn canonical_tokens(value: &str) -> Vec<String> {
@@ -227,7 +264,29 @@ mod tests {
             creators: vec!["Автор".to_owned()],
             sections: vec!["Глава 1".to_owned()],
             text: text.to_owned(),
+            identifiers: Vec::new(),
         }
+    }
+
+    #[test]
+    fn strong_identifier_matches_different_text() {
+        let mut first_input = input("Первое", "короткий первый текст");
+        first_input.identifiers.push(MaterialIdentifier {
+            kind: crate::MaterialIdentifierKind::Doi,
+            value: "10.1234/EXAMPLE".to_owned(),
+        });
+        let mut second_input = input("Второе", "совсем другой фрагмент");
+        second_input.identifiers.push(MaterialIdentifier {
+            kind: crate::MaterialIdentifierKind::Doi,
+            value: "10.1234/example".to_owned(),
+        });
+        let first = build_material_fingerprint(&first_input, keyed);
+        let second = build_material_fingerprint(&second_input, keyed);
+
+        assert_eq!(
+            compare_material_fingerprints(&first, &second),
+            MaterialMatchDecision::StrongIdentifier
+        );
     }
 
     #[test]

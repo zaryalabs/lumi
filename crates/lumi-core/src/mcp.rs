@@ -14,7 +14,7 @@ use crate::{
 /// Frozen MCP protocol snapshot.
 pub const MCP_PROTOCOL_VERSION: &str = "2025-06-18";
 /// Version of Lumi MCP tool schemas and DTOs.
-pub const MCP_TOOL_CONTRACT_VERSION: &str = "mcp-tools.v4";
+pub const MCP_TOOL_CONTRACT_VERSION: &str = "mcp-tools.v5";
 /// Maximum MCP control request body.
 pub const MCP_CONTROL_REQUEST_MAX_BYTES: usize = 1024 * 1024;
 /// Maximum ordinary inline MCP tool result.
@@ -387,6 +387,8 @@ pub const MCP_TOOL_NAMES: &[&str] = &[
     "search",
     "search_material",
     "search_notes",
+    "search_shared_comments",
+    "search_space_chat",
     "get_search_result_context",
     "list_community_spaces",
     "get_community_space",
@@ -616,6 +618,16 @@ const MCP_TOOL_SCHEMAS: &[McpToolSchemaContract] = &[
         output_schema: "search-page.output.v1",
     },
     McpToolSchemaContract {
+        name: "search_shared_comments",
+        input_schema: "search-shared-comments.input.v1",
+        output_schema: "search-page.output.v1",
+    },
+    McpToolSchemaContract {
+        name: "search_space_chat",
+        input_schema: "search-space-chat.input.v1",
+        output_schema: "search-page.output.v1",
+    },
+    McpToolSchemaContract {
         name: "get_search_result_context",
         input_schema: "retrieval-request.input.v1",
         output_schema: "retrieved-chunks.output.v1",
@@ -759,7 +771,7 @@ mod tests {
     #[test]
     fn frozen_mcp_tool_snapshot_matches_allowlist() -> Result<(), Box<dyn std::error::Error>> {
         let registry: Value = serde_json::from_str(include_str!(
-            "../../../tests/fixtures/mcp/contracts/v4/tool-registry.json"
+            "../../../tests/fixtures/mcp/contracts/v5/tool-registry.json"
         ))?;
         let tools = registry["tools"]
             .as_array()

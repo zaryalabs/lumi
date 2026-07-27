@@ -44,6 +44,7 @@ pub(super) fn compute(
                 creators: package.manifest.creators.clone(),
                 sections,
                 text,
+                identifiers: package.manifest.identifiers.clone(),
             },
             SourceFormat::Pdf,
         )
@@ -67,6 +68,7 @@ pub(super) fn compute(
                     .map(|unit| unit.title.clone())
                     .collect(),
                 text,
+                identifiers: package.manifest.identifiers.clone(),
             },
             source_format,
         )

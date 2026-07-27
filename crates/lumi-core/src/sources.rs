@@ -9,11 +9,12 @@ use url::Url;
 use crate::{
     content_hash, short_content_hash, BlobManifest, BlobRef, BlobRole, ContentBlock, ContentUnit,
     DiagnosticSeverity, DocumentRevision, DocumentRevisionId, ImportDiagnostic, MaterialId,
-    NavigationItem, NormalizedContentPackage, NormalizedPackageManifest, ReadingLink,
-    ReadingLinkKind, ReadingNodeKind, SourceFormat, SourceIdentity, SourceLocator,
-    TelegramSourceLocator, TimestampMs, UserId, WebSourceLocator, NORMALIZED_PACKAGE_VERSION,
-    TELEGRAM_COMPOSITE_IMPORTER_ID, TELEGRAM_COMPOSITE_IMPORTER_VERSION, TELEGRAM_IMPORTER_ID,
-    TELEGRAM_IMPORTER_VERSION, WEB_IMPORTER_ID, WEB_IMPORTER_VERSION,
+    MaterialIdentifier, MaterialIdentifierKind, NavigationItem, NormalizedContentPackage,
+    NormalizedPackageManifest, ReadingLink, ReadingLinkKind, ReadingNodeKind, SourceFormat,
+    SourceIdentity, SourceLocator, TelegramSourceLocator, TimestampMs, UserId, WebSourceLocator,
+    NORMALIZED_PACKAGE_VERSION, TELEGRAM_COMPOSITE_IMPORTER_ID,
+    TELEGRAM_COMPOSITE_IMPORTER_VERSION, TELEGRAM_IMPORTER_ID, TELEGRAM_IMPORTER_VERSION,
+    WEB_IMPORTER_ID, WEB_IMPORTER_VERSION,
 };
 
 const MAX_WEB_BLOCKS: usize = 4_096;
@@ -575,7 +576,7 @@ pub fn import_web_snapshot(
     }
     let title = web_title(snapshot, &document, &blocks);
     let creators = snapshot.metadata.author.iter().cloned().collect::<Vec<_>>();
-    build_publication(
+    let mut publication = build_publication(
         material_id,
         revision_id,
         title,
@@ -607,7 +608,24 @@ pub fn import_web_snapshot(
             text_offset_end: None,
         }),
         owner_id,
-    )
+    )?;
+    let canonical_url = snapshot
+        .canonical_url
+        .as_deref()
+        .unwrap_or(&snapshot.final_url);
+    if let Ok(url) = Url::parse(canonical_url) {
+        publication.package.manifest.identifiers = vec![MaterialIdentifier {
+            kind: MaterialIdentifierKind::CanonicalUrl,
+            value: canonical_web_identifier(&url),
+        }];
+    }
+    Ok(publication)
+}
+
+fn canonical_web_identifier(url: &Url) -> String {
+    let mut canonical = url.clone();
+    canonical.set_fragment(None);
+    canonical.to_string()
 }
 
 /// Normalize one Telegram text message into the shared publication model.

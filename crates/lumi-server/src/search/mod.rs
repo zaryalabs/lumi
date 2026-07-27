@@ -133,7 +133,9 @@ impl SearchRuntime {
         request
             .normalize_and_validate()
             .map_err(|_| SearchError::InvalidRequest)?;
-        let ranked = self.rank(owner_id, &request)?;
+        let ranked = self
+            .filter_authorized_social(owner_id, self.rank(owner_id, &request)?)
+            .await?;
         let generation = self.index.as_ref().map_or(0, |index| index.generation());
         let offset = decode_cursor(request.cursor.as_deref(), generation, &request)?;
         let end = offset.saturating_add(request.limit).min(ranked.len());
@@ -159,7 +161,9 @@ impl SearchRuntime {
         request
             .normalize_and_validate()
             .map_err(|_| SearchError::InvalidRequest)?;
-        let ranked = self.rank(owner_id, &request.search)?;
+        let ranked = self
+            .filter_authorized_social(owner_id, self.rank(owner_id, &request.search)?)
+            .await?;
         let mut per_source = HashMap::<Uuid, usize>::new();
         let mut used_bytes = 0_usize;
         let mut retrieved = Vec::new();
@@ -315,7 +319,8 @@ impl SearchRuntime {
                     SearchRankingProfile::AiRetrieval => 0.38,
                     SearchRankingProfile::Global
                     | SearchRankingProfile::Reader
-                    | SearchRankingProfile::Records => 0.28,
+                    | SearchRankingProfile::Records
+                    | SearchRankingProfile::Community => 0.28,
                 };
                 let total = lexical * (1.0 - semantic_weight)
                     + ((semantic + 1.0) / 2.0) * semantic_weight
@@ -344,6 +349,94 @@ impl SearchRuntime {
                 item.candidate.chunk.source_id,
                 item.candidate.chunk.text_hash.clone(),
             ))
+        });
+        Ok(ranked)
+    }
+
+    async fn filter_authorized_social(
+        &self,
+        owner_id: UserId,
+        mut ranked: Vec<RankedChunk>,
+    ) -> Result<Vec<RankedChunk>, SearchError> {
+        let Some(pool) = self.pool.as_ref() else {
+            return Ok(ranked);
+        };
+        let comments = ranked
+            .iter()
+            .filter(|item| item.candidate.chunk.source_type == SearchSourceType::SharedComment)
+            .map(|item| item.candidate.chunk.source_id)
+            .collect::<Vec<_>>();
+        let messages = ranked
+            .iter()
+            .filter(|item| item.candidate.chunk.source_type == SearchSourceType::SharedChatMessage)
+            .map(|item| item.candidate.chunk.source_id)
+            .collect::<Vec<_>>();
+        let highlights = ranked
+            .iter()
+            .filter(|item| item.candidate.chunk.source_type == SearchSourceType::SharedHighlight)
+            .map(|item| item.candidate.chunk.source_id)
+            .collect::<Vec<_>>();
+        if comments.is_empty() && messages.is_empty() && highlights.is_empty() {
+            return Ok(ranked);
+        }
+        let rows = sqlx_core::query::query(
+            "SELECT source_id FROM (
+                SELECT comment.comment_id AS source_id
+                  FROM shared_comments comment
+                  JOIN shared_comment_threads thread ON thread.thread_id = comment.thread_id
+                  JOIN community_memberships membership
+                    ON membership.community_space_id = thread.community_space_id
+                   AND membership.user_id = $1 AND membership.status = 'active'
+                 WHERE comment.comment_id = ANY($2)
+                   AND comment.hidden_at IS NULL AND comment.deleted_at IS NULL
+                   AND thread.hidden_at IS NULL AND thread.deleted_at IS NULL
+                   AND (
+                       thread.scope = 'material' OR EXISTS (
+                           SELECT 1 FROM user_material_claims claim
+                            WHERE claim.community_space_id = thread.community_space_id
+                              AND claim.shared_material_id = thread.shared_material_id
+                              AND claim.user_id = $1 AND claim.match_status = 'matched'
+                              AND claim.deleted_at IS NULL
+                       )
+                   )
+                UNION ALL
+                SELECT message.message_id
+                  FROM shared_chat_messages message
+                  JOIN community_memberships membership
+                    ON membership.community_space_id = message.community_space_id
+                   AND membership.user_id = $1 AND membership.status = 'active'
+                 WHERE message.message_id = ANY($3)
+                   AND message.hidden_at IS NULL AND message.deleted_at IS NULL
+                UNION ALL
+                SELECT highlight.highlight_id
+                  FROM shared_highlights highlight
+                  JOIN community_memberships membership
+                    ON membership.community_space_id = highlight.community_space_id
+                   AND membership.user_id = $1 AND membership.status = 'active'
+                  JOIN user_material_claims claim
+                    ON claim.community_space_id = highlight.community_space_id
+                   AND claim.shared_material_id = highlight.shared_material_id
+                   AND claim.user_id = $1 AND claim.match_status = 'matched'
+                   AND claim.deleted_at IS NULL
+                 WHERE highlight.highlight_id = ANY($4)
+                   AND highlight.deleted_at IS NULL
+            ) allowed",
+        )
+        .bind(owner_id)
+        .bind(&comments)
+        .bind(&messages)
+        .bind(&highlights)
+        .fetch_all(pool)
+        .await
+        .map_err(|_| SearchError::Storage)?;
+        use sqlx_core::row::Row;
+        let allowed = rows
+            .iter()
+            .filter_map(|row| row.try_get::<Uuid, _>("source_id").ok())
+            .collect::<HashSet<_>>();
+        ranked.retain(|item| {
+            !item.candidate.chunk.source_type.is_social()
+                || allowed.contains(&item.candidate.chunk.source_id)
         });
         Ok(ranked)
     }
@@ -439,6 +532,8 @@ struct SearchQuery {
     scope: Option<String>,
     r#type: Option<String>,
     material_id: Option<Uuid>,
+    space_id: Option<Uuid>,
+    shared_material_id: Option<Uuid>,
     tag: Option<String>,
     cursor: Option<String>,
     limit: Option<usize>,
@@ -510,12 +605,19 @@ fn request_from_query(query: SearchQuery) -> Result<SearchRequest, AppError> {
                 .material_id
                 .ok_or_else(|| AppError::BadRequest("material_id is required".to_owned()))?,
         },
+        Some("community") => SearchScope::Community {
+            space_id: query
+                .space_id
+                .ok_or_else(|| AppError::BadRequest("space_id is required".to_owned()))?,
+            shared_material_id: query.shared_material_id,
+        },
         Some(_) => return Err(AppError::BadRequest("unknown search scope".to_owned())),
     };
     let ranking = match scope {
         SearchScope::Material { .. } => SearchRankingProfile::Reader,
         SearchScope::Records => SearchRankingProfile::Records,
         SearchScope::Personal => SearchRankingProfile::Global,
+        SearchScope::Community { .. } => SearchRankingProfile::Community,
     };
     Ok(SearchRequest {
         query: query.q,
@@ -543,6 +645,9 @@ fn parse_source_type(value: &str) -> Result<SearchSourceType, AppError> {
         "voice_transcript" => Ok(SearchSourceType::VoiceTranscript),
         "ai_artifact" => Ok(SearchSourceType::AiArtifact),
         "learning_item" => Ok(SearchSourceType::LearningItem),
+        "shared_comment" => Ok(SearchSourceType::SharedComment),
+        "shared_chat_message" => Ok(SearchSourceType::SharedChatMessage),
+        "shared_highlight" => Ok(SearchSourceType::SharedHighlight),
         _ => Err(AppError::BadRequest(
             "unknown search source type".to_owned(),
         )),
@@ -573,6 +678,9 @@ fn score_boost(chunk: &SearchChunk, query: &str, request: &SearchRequest) -> f32
         boost += 0.05;
     }
     if matches!(request.ranking, SearchRankingProfile::Records) && chunk.source_type.is_record() {
+        boost += 0.05;
+    }
+    if matches!(request.ranking, SearchRankingProfile::Community) && chunk.source_type.is_social() {
         boost += 0.05;
     }
     boost
@@ -620,6 +728,17 @@ fn open_target(chunk: &SearchChunk) -> SearchOpenTarget {
         },
         SearchSourceType::LearningItem => SearchOpenTarget::LearningItem {
             item_id: chunk.source_id,
+        },
+        SearchSourceType::SharedComment | SearchSourceType::SharedHighlight => {
+            SearchOpenTarget::CommunityMaterial {
+                space_id: chunk.community_space_id.unwrap_or_default(),
+                shared_material_id: chunk.shared_material_id.unwrap_or_default(),
+                source_id: Some(chunk.source_id),
+            }
+        }
+        SearchSourceType::SharedChatMessage => SearchOpenTarget::CommunityChat {
+            space_id: chunk.community_space_id.unwrap_or_default(),
+            message_id: chunk.source_id,
         },
     }
 }
@@ -1021,6 +1140,8 @@ mod tests {
             source_id,
             material_id: (source_type == SearchSourceType::Material).then_some(source_id),
             revision_id: None,
+            community_space_id: None,
+            shared_material_id: None,
             source_version: "performance.v1".to_owned(),
             field: SearchField::Body,
             title: format!("Benchmark {source_id}"),
@@ -1049,6 +1170,8 @@ mod tests {
             source_id,
             material_id: Some(source_id),
             revision_id: None,
+            community_space_id: None,
+            shared_material_id: None,
             source_version: "quality.v1".to_owned(),
             field: SearchField::Body,
             title: title.to_owned(),

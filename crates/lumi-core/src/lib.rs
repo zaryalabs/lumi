@@ -57,7 +57,7 @@ use serde::{Deserialize, Serialize};
 pub const API_VERSION: &str = "v1";
 
 /// Current domain schema marker for the frozen `0.2.0` AI contracts.
-pub const DOMAIN_SCHEMA_VERSION: &str = "s1.2026-07-27.community-spaces-v1";
+pub const DOMAIN_SCHEMA_VERSION: &str = "s1.2026-07-27.shared-reading-v1";
 
 /// Current normalized content package marker for reflowable S1 documents.
 pub const NORMALIZED_PACKAGE_VERSION: &str = "normalized.reflowable.s1";

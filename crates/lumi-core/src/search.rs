@@ -6,11 +6,11 @@ use uuid::Uuid;
 use crate::{content_hash, Anchor, DocumentRevisionId, MaterialId, SourceCitation, TimestampMs};
 
 /// Version of the indexed-search API and persisted chunk contract.
-pub const SEARCH_CONTRACT_VERSION: &str = "search.contract.v1";
+pub const SEARCH_CONTRACT_VERSION: &str = "search.contract.v2";
 /// Version of source-aware chunking rules.
-pub const SEARCH_CHUNKER_VERSION: &str = "search.chunker.v2";
+pub const SEARCH_CHUNKER_VERSION: &str = "search.chunker.v3";
 /// Version of the initial Tantivy schema.
-pub const SEARCH_INDEX_VERSION: &str = "tantivy.v2";
+pub const SEARCH_INDEX_VERSION: &str = "tantivy.v3";
 /// Version of the fastText score-fusion policy.
 pub const SEARCH_RANKING_VERSION: &str = "bm25-fasttext.v1";
 /// Maximum UTF-8 query size accepted by the public API.
@@ -41,6 +41,12 @@ pub enum SearchSourceType {
     AiArtifact,
     /// Active learning item.
     LearningItem,
+    /// Member-visible comment in a shared material discussion.
+    SharedComment,
+    /// Member-visible Community chat message.
+    SharedChatMessage,
+    /// Separately published shared highlight quote.
+    SharedHighlight,
 }
 
 impl SearchSourceType {
@@ -55,13 +61,33 @@ impl SearchSourceType {
             Self::VoiceTranscript => "voice_transcript",
             Self::AiArtifact => "ai_artifact",
             Self::LearningItem => "learning_item",
+            Self::SharedComment => "shared_comment",
+            Self::SharedChatMessage => "shared_chat_message",
+            Self::SharedHighlight => "shared_highlight",
         }
     }
 
     /// Return whether this source is a personal record rather than source text.
     #[must_use]
     pub const fn is_record(self) -> bool {
-        !matches!(self, Self::Material)
+        matches!(
+            self,
+            Self::Highlight
+                | Self::Note
+                | Self::MarginNote
+                | Self::VoiceTranscript
+                | Self::AiArtifact
+                | Self::LearningItem
+        )
+    }
+
+    /// Return whether this source is permission-bearing Community content.
+    #[must_use]
+    pub const fn is_social(self) -> bool {
+        matches!(
+            self,
+            Self::SharedComment | Self::SharedChatMessage | Self::SharedHighlight
+        )
     }
 }
 
@@ -85,6 +111,8 @@ pub enum SearchField {
     Prompt,
     /// Learning explanation.
     Explanation,
+    /// Shared comment or chat body.
+    Message,
 }
 
 impl SearchField {
@@ -100,6 +128,7 @@ impl SearchField {
             Self::Transcript => "transcript",
             Self::Prompt => "prompt",
             Self::Explanation => "explanation",
+            Self::Message => "message",
         }
     }
 }
@@ -118,6 +147,14 @@ pub enum SearchScope {
     },
     /// Personal annotations, accepted artifacts and learning items only.
     Records,
+    /// Content visible inside one active Community membership boundary.
+    Community {
+        /// Authorized Space restriction.
+        space_id: Uuid,
+        /// Optional shared material restriction.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        shared_material_id: Option<Uuid>,
+    },
 }
 
 /// Ranking behavior shared by the Web, Desk and AI adapters.
@@ -133,6 +170,8 @@ pub enum SearchRankingProfile {
     Records,
     /// Retrieval favoring source diversity and citation quality.
     AiRetrieval,
+    /// Community discussion and chat search.
+    Community,
 }
 
 /// Canonical source-aware chunk persisted in derived search storage.
@@ -148,6 +187,12 @@ pub struct SearchChunk {
     pub material_id: Option<MaterialId>,
     /// Immutable normalized revision when available.
     pub revision_id: Option<DocumentRevisionId>,
+    /// Community Space for social sources.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub community_space_id: Option<Uuid>,
+    /// Shared material for anchored social sources.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shared_material_id: Option<Uuid>,
     /// Source object revision or immutable version marker.
     pub source_version: String,
     /// Indexed field.
@@ -280,6 +325,23 @@ pub enum SearchOpenTarget {
     AiArtifact {
         /// Stable artifact id.
         artifact_id: Uuid,
+    },
+    /// Open a shared material discussion or published highlight.
+    CommunityMaterial {
+        /// Community Space.
+        space_id: Uuid,
+        /// Shared material identity.
+        shared_material_id: Uuid,
+        /// Optional exact social object.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        source_id: Option<Uuid>,
+    },
+    /// Open Community chat at one message.
+    CommunityChat {
+        /// Community Space.
+        space_id: Uuid,
+        /// Stable message identity.
+        message_id: Uuid,
     },
 }
 

@@ -1,3 +1,6 @@
+use std::sync::Arc;
+
+use base64::{engine::general_purpose::STANDARD, Engine};
 use lumi_core::{
     compare_material_fingerprints, ClaimSharedMaterialRequest, CommunityAccessLink,
     CommunityAccessLinkId, CommunityAccessLinkStatus, CommunityAction, CommunityDiscoverability,
@@ -17,7 +20,10 @@ use sqlx_postgres::{PgPool, Postgres};
 use time::OffsetDateTime;
 use uuid::Uuid;
 
-use crate::secrets::{SecretContext, SecretStore, SecretValue};
+use crate::{
+    blob::{BlobStore, LocalBlobStore},
+    secrets::{SecretContext, SecretStore, SecretValue},
+};
 
 use super::SocialStoreError;
 use super::{matching, permissions};
@@ -30,11 +36,16 @@ mod sqlx {
 pub(super) struct PgSocialStore {
     pub(super) pool: PgPool,
     secrets: SecretStore,
+    pub(super) blobs: Arc<dyn BlobStore>,
 }
 
 impl PgSocialStore {
-    pub(super) fn new(pool: PgPool, secrets: SecretStore) -> Self {
-        Self { pool, secrets }
+    pub(super) fn new(pool: PgPool, secrets: SecretStore, blob_root: std::path::PathBuf) -> Self {
+        Self {
+            pool,
+            secrets,
+            blobs: Arc::new(LocalBlobStore::new(blob_root)),
+        }
     }
 
     pub(super) async fn list(
@@ -45,6 +56,8 @@ impl PgSocialStore {
             "SELECT s.community_space_id, s.sync_space_id, s.slug, s.name, s.description,
                     s.discoverability, s.entry_policy, s.created_by_user_id,
                     s.object_revision, s.created_at, s.updated_at,
+                    lumi_community_image_ref(s.community_space_id, 'avatar') AS avatar,
+                    lumi_community_image_ref(s.community_space_id, 'cover') AS cover,
                     (SELECT count(*) FROM community_memberships count_members
                      WHERE count_members.community_space_id = s.community_space_id
                        AND count_members.status = 'active') AS member_count
@@ -158,6 +171,8 @@ impl PgSocialStore {
             slug,
             name: request.name.clone(),
             description: request.description.clone(),
+            avatar: None,
+            cover: None,
             discoverability: CommunityDiscoverability::Unlisted,
             entry_policy: CommunityEntryPolicy::ByLink,
             created_by_user_id: user_id,
@@ -1273,6 +1288,7 @@ impl PgSocialStore {
             })
             .filter(|(_, decision)| !matches!(decision, MaterialMatchDecision::Rejected))
             .max_by_key(|(_, decision)| match decision {
+                MaterialMatchDecision::StrongIdentifier => 30_000,
                 MaterialMatchDecision::ExactContent => 20_000,
                 MaterialMatchDecision::HighSimilarity { score_bps } => 10_000 + *score_bps,
                 MaterialMatchDecision::ManualReview { score_bps } => *score_bps,
@@ -1635,8 +1651,8 @@ impl PgSocialStore {
              (fingerprint_id, material_id, revision_id, owner_user_id,
               algorithm_version, key_version, metadata_key, exact_normalized_hash,
               protected_similarity_signature, section_sequence_hash,
-              text_token_count, text_length_bucket, status)
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, 'ready')
+              protected_identifier_hashes, text_token_count, text_length_bucket, status)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, 'ready')
              ON CONFLICT (revision_id, algorithm_version, key_version)
              DO UPDATE SET material_id = EXCLUDED.material_id
              RETURNING fingerprint_id",
@@ -1651,6 +1667,17 @@ impl PgSocialStore {
         .bind(computed.evidence.exact_content_hash.to_vec())
         .bind(encoded_signature)
         .bind(computed.evidence.section_sequence_hash.to_vec())
+        .bind(
+            serde_json::to_value(
+                computed
+                    .evidence
+                    .protected_identifier_hashes
+                    .iter()
+                    .map(|hash| STANDARD.encode(hash))
+                    .collect::<Vec<_>>(),
+            )
+            .map_err(storage)?,
+        )
         .bind(i32::try_from(computed.evidence.token_count).map_err(storage)?)
         .bind(i32::from(computed.evidence.text_length_bucket))
         .fetch_one(&mut **transaction)
@@ -1668,6 +1695,63 @@ impl PgSocialStore {
             creators: computed.creators,
             source_format: computed.source_format,
         })
+    }
+
+    pub(super) async fn process_fingerprint_request(
+        &self,
+        owner_id: UserId,
+        material_id: Uuid,
+    ) -> Result<(), SocialStoreError> {
+        let mut transaction = self.pool.begin().await.map_err(storage)?;
+        let fingerprint = self
+            .ensure_fingerprint(&mut transaction, owner_id, material_id)
+            .await?;
+        let rows = sqlx::query(
+            "SELECT claim.claim_id, claim.community_space_id,
+                    claim.shared_material_id, claim.user_id
+               FROM user_material_claims claim
+              WHERE claim.material_id = $1 AND claim.user_id = $2
+                AND claim.deleted_at IS NULL
+              FOR UPDATE",
+        )
+        .bind(material_id)
+        .bind(owner_id)
+        .fetch_all(&mut *transaction)
+        .await
+        .map_err(storage)?;
+        for row in rows {
+            let claim_id: Uuid = row.try_get("claim_id").map_err(storage)?;
+            let space_id: Uuid = row.try_get("community_space_id").map_err(storage)?;
+            let shared_material_id: Uuid = row.try_get("shared_material_id").map_err(storage)?;
+            let canonical =
+                canonical_fingerprint(&mut transaction, space_id, shared_material_id).await?;
+            let decision =
+                ClaimDecision::from_match(compare_stored_fingerprint(&fingerprint, &canonical));
+            sqlx::query(
+                "UPDATE user_material_claims
+                    SET revision_id = $2, fingerprint_id = $3,
+                        match_status = $4, match_basis = $5, match_score_bps = $6,
+                        fingerprint_version = $7,
+                        match_evidence = jsonb_build_object(
+                            'algorithm_version', $8::text,
+                            'automatic_recheck', true
+                        ),
+                        object_revision = object_revision + 1, updated_at = now()
+                  WHERE claim_id = $1",
+            )
+            .bind(claim_id)
+            .bind(fingerprint.revision_id)
+            .bind(fingerprint.fingerprint_id)
+            .bind(claim_status_db(decision.status))
+            .bind(match_basis_db(decision.basis))
+            .bind(decision.score_bps.map(i32::from))
+            .bind(matching::fingerprint_version(fingerprint.key_version))
+            .bind(MATERIAL_FINGERPRINT_ALGORITHM)
+            .execute(&mut *transaction)
+            .await
+            .map_err(storage)?;
+        }
+        transaction.commit().await.map_err(storage)
     }
 }
 
@@ -1715,6 +1799,11 @@ impl ClaimDecision {
 
     fn from_match(decision: MaterialMatchDecision) -> Self {
         match decision {
+            MaterialMatchDecision::StrongIdentifier => Self {
+                status: UserMaterialClaimStatus::Matched,
+                basis: MaterialMatchBasis::StrongIdentifier,
+                score_bps: Some(10_000),
+            },
             MaterialMatchDecision::ExactContent => Self {
                 status: UserMaterialClaimStatus::Matched,
                 basis: MaterialMatchBasis::ExactContent,
@@ -1764,6 +1853,7 @@ async fn candidate_fingerprints(
         "SELECT identity.shared_material_id, stored.algorithm_version, stored.key_version,
                 stored.metadata_key, stored.exact_normalized_hash,
                 stored.protected_similarity_signature, stored.section_sequence_hash,
+                stored.protected_identifier_hashes,
                 stored.text_token_count, stored.text_length_bucket
          FROM shared_material_identities identity
          JOIN material_fingerprints stored
@@ -1799,6 +1889,7 @@ async fn canonical_fingerprint(
         "SELECT identity.shared_material_id, stored.algorithm_version, stored.key_version,
                 stored.metadata_key, stored.exact_normalized_hash,
                 stored.protected_similarity_signature, stored.section_sequence_hash,
+                stored.protected_identifier_hashes,
                 stored.text_token_count, stored.text_length_bucket
          FROM shared_material_identities identity
          JOIN material_fingerprints stored
@@ -1833,6 +1924,20 @@ fn evidence_from_row(
                 .map_err(storage)?,
         )?,
         section_sequence_hash: bytes_32(row.try_get("section_sequence_hash").map_err(storage)?)?,
+        protected_identifier_hashes: row
+            .try_get::<Value, _>("protected_identifier_hashes")
+            .map_err(storage)?
+            .as_array()
+            .ok_or(SocialStoreError::Unavailable)?
+            .iter()
+            .map(|value| {
+                value
+                    .as_str()
+                    .ok_or(SocialStoreError::Unavailable)
+                    .and_then(|value| STANDARD.decode(value).map_err(storage))
+                    .and_then(bytes_32)
+            })
+            .collect::<Result<Vec<_>, _>>()?,
         token_count: u32::try_from(row.try_get::<i32, _>("text_token_count").map_err(storage)?)
             .map_err(storage)?,
         text_length_bucket: u16::try_from(
@@ -2051,6 +2156,7 @@ fn claim_status_from_db(value: &str) -> Result<UserMaterialClaimStatus, SocialSt
 fn match_basis_db(value: MaterialMatchBasis) -> &'static str {
     match value {
         MaterialMatchBasis::CreatorCopy => "creator_copy",
+        MaterialMatchBasis::StrongIdentifier => "strong_identifier",
         MaterialMatchBasis::ExactContent => "exact_content",
         MaterialMatchBasis::HighSimilarity => "high_similarity",
         MaterialMatchBasis::Ambiguous => "ambiguous",
@@ -2061,6 +2167,7 @@ fn match_basis_db(value: MaterialMatchBasis) -> &'static str {
 fn match_basis_from_db(value: &str) -> Result<MaterialMatchBasis, SocialStoreError> {
     match value {
         "creator_copy" => Ok(MaterialMatchBasis::CreatorCopy),
+        "strong_identifier" => Ok(MaterialMatchBasis::StrongIdentifier),
         "exact_content" => Ok(MaterialMatchBasis::ExactContent),
         "high_similarity" => Ok(MaterialMatchBasis::HighSimilarity),
         "ambiguous" => Ok(MaterialMatchBasis::Ambiguous),
@@ -2083,6 +2190,8 @@ async fn detail_in_transaction(
                 space.name, space.description, space.discoverability,
                 space.entry_policy, space.created_by_user_id,
                 space.object_revision, space.created_at, space.updated_at,
+                lumi_community_image_ref(space.community_space_id, 'avatar') AS avatar,
+                lumi_community_image_ref(space.community_space_id, 'cover') AS cover,
                 membership.membership_id, membership.user_id,
                 profile.nickname, membership.role, membership.status,
                 membership.object_revision AS membership_revision,
@@ -2176,6 +2285,18 @@ fn space_from_row(row: &sqlx_postgres::PgRow) -> Result<CommunitySpace, SocialSt
         slug: row.try_get("slug").map_err(storage)?,
         name: row.try_get("name").map_err(storage)?,
         description: row.try_get("description").map_err(storage)?,
+        avatar: row
+            .try_get::<Option<Value>, _>("avatar")
+            .unwrap_or(None)
+            .map(serde_json::from_value)
+            .transpose()
+            .map_err(storage)?,
+        cover: row
+            .try_get::<Option<Value>, _>("cover")
+            .unwrap_or(None)
+            .map(serde_json::from_value)
+            .transpose()
+            .map_err(storage)?,
         discoverability: match row
             .try_get::<String, _>("discoverability")
             .map_err(storage)?
@@ -2440,6 +2561,7 @@ pub(super) fn u64_from_i64(value: i64) -> Result<u64, SocialStoreError> {
     u64::try_from(value).map_err(|_| SocialStoreError::Unavailable)
 }
 
-pub(super) fn storage<T>(_error: T) -> SocialStoreError {
+pub(super) fn storage<T: std::fmt::Display>(error: T) -> SocialStoreError {
+    tracing::error!(%error, "Community repository operation failed");
     SocialStoreError::Unavailable
 }

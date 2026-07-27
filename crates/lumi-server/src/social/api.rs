@@ -1,25 +1,30 @@
 //! Typed Axum routes for Community Spaces and revocable access links.
 
 use axum::{
+    body::Bytes,
     extract::{DefaultBodyLimit, Path, Query, State},
-    http::{HeaderMap, StatusCode},
+    http::{header, HeaderMap, HeaderValue, StatusCode},
+    response::IntoResponse,
     routing::{delete, get, patch, post},
     Extension, Json, Router,
 };
 use lumi_core::{
     ClaimSharedMaterialRequest, CommunityAccessLink, CommunityAccessLinkId, CommunityActivityPage,
-    CommunityLinkPreview, CommunityMembership, CommunitySpace, CommunitySpaceDetail,
-    CommunitySpaceId, CreateCommunityAccessLinkRequest, CreateCommunitySpaceRequest,
-    CreateSharedChatMessageRequest, CreateSharedCommentRequest, CreateSharedThreadRequest,
-    CreatedCommunityAccessLink, DeleteSharedChatMessageRequest, DeleteSharedCommentRequest,
-    JoinCommunityLinkRequest, ModerateSocialContentRequest, ModerationAction,
-    PreviewCommunityLinkRequest, ShareMaterialRequest, SharedChatMessage, SharedChatMessageId,
-    SharedChatPage, SharedComment, SharedCommentId, SharedCommentThread, SharedCommentThreadId,
-    SharedDiscussionPage, SharedMaterial, SharedMaterialId, UpdateCommunityMemberRequest,
+    CommunityImageKind, CommunityImageRef, CommunityLinkPreview, CommunityMembership,
+    CommunitySpace, CommunitySpaceDetail, CommunitySpaceId, CreateCommunityAccessLinkRequest,
+    CreateCommunitySpaceRequest, CreateSharedChatMessageRequest, CreateSharedCommentRequest,
+    CreateSharedThreadRequest, CreatedCommunityAccessLink, DeleteSharedChatMessageRequest,
+    DeleteSharedCommentRequest, JoinCommunityLinkRequest, ModerateSocialContentRequest,
+    ModerationAction, PreviewCommunityLinkRequest, PublishSharedHighlightRequest,
+    ShareMaterialRequest, SharedChatMessage, SharedChatMessageId, SharedChatPage, SharedComment,
+    SharedCommentId, SharedCommentThread, SharedCommentThreadId, SharedDiscussionPage,
+    SharedHighlight, SharedHighlightId, SharedMaterial, SharedMaterialId, SharedReaderLayer,
+    SharedReaderSpaceLayer, UnpublishSharedHighlightRequest, UpdateCommunityMemberRequest,
     UpdateCommunitySpaceRequest, UpdateSharedChatMessageRequest, UpdateSharedCommentRequest,
     UserId, UserMaterialClaim,
 };
 use serde::Deserialize;
+use uuid::Uuid;
 
 use crate::{account::AuthenticatedSession, required_idempotency_key, AppError, AppState};
 
@@ -35,8 +40,21 @@ pub(crate) fn protected_routes() -> Router<AppState> {
     Router::new()
         .route("/spaces", get(list_spaces).post(create_space))
         .route(
+            "/shared-reading/materials/{material_id}",
+            get(reader_layers_for_material),
+        )
+        .route(
             "/spaces/{space_id}",
             get(get_space).patch(update_space).delete(delete_space),
+        )
+        .route(
+            "/spaces/{space_id}/images/{kind}",
+            get(download_image)
+                .put(replace_image)
+                .delete(delete_image)
+                .layer(DefaultBodyLimit::max(
+                    lumi_core::COMMUNITY_IMAGE_MAX_BYTES + 1024,
+                )),
         )
         .route("/spaces/{space_id}/members", get(list_members))
         .route(
@@ -75,6 +93,18 @@ pub(crate) fn protected_routes() -> Router<AppState> {
             get(list_discussions).post(create_thread),
         )
         .route(
+            "/spaces/{space_id}/materials/{shared_material_id}/reader-layer",
+            get(reader_layer),
+        )
+        .route(
+            "/spaces/{space_id}/materials/{shared_material_id}/highlights",
+            get(list_highlights).post(publish_highlight),
+        )
+        .route(
+            "/spaces/{space_id}/highlights/{highlight_id}",
+            delete(unpublish_highlight),
+        )
+        .route(
             "/spaces/{space_id}/threads/{thread_id}/comments",
             post(add_comment),
         )
@@ -107,6 +137,11 @@ struct DiscussionQuery {
 
 type CommunicationsQuery = DiscussionQuery;
 
+#[derive(Deserialize)]
+struct ImageMutationQuery {
+    expected_revision: u64,
+}
+
 async fn preview_link(
     State(state): State<AppState>,
     Json(request): Json<PreviewCommunityLinkRequest>,
@@ -126,6 +161,19 @@ async fn list_spaces(
     state
         .social_runtime()
         .list(session.user_id)
+        .await
+        .map(Json)
+        .map_err(map_social_error)
+}
+
+async fn reader_layers_for_material(
+    State(state): State<AppState>,
+    Extension(session): Extension<AuthenticatedSession>,
+    Path(material_id): Path<Uuid>,
+) -> Result<Json<Vec<SharedReaderSpaceLayer>>, AppError> {
+    state
+        .social_runtime()
+        .reader_layers_for_material(session.user_id, material_id)
         .await
         .map(Json)
         .map_err(map_social_error)
@@ -157,6 +205,88 @@ async fn get_space(
         .await
         .map(Json)
         .map_err(map_social_error)
+}
+
+async fn replace_image(
+    State(state): State<AppState>,
+    Extension(session): Extension<AuthenticatedSession>,
+    Path((space_id, kind)): Path<(CommunitySpaceId, String)>,
+    Query(query): Query<ImageMutationQuery>,
+    headers: HeaderMap,
+    bytes: Bytes,
+) -> Result<Json<CommunityImageRef>, AppError> {
+    let kind = image_kind(&kind)?;
+    let media_type = headers
+        .get(header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.split(';').next())
+        .map(str::trim)
+        .ok_or_else(|| AppError::BadRequest("image Content-Type is required".to_owned()))?;
+    state
+        .social_runtime()
+        .replace_image(
+            session.user_id,
+            space_id,
+            kind,
+            query.expected_revision,
+            media_type,
+            &bytes,
+        )
+        .await
+        .map(Json)
+        .map_err(map_social_error)
+}
+
+async fn download_image(
+    State(state): State<AppState>,
+    Extension(session): Extension<AuthenticatedSession>,
+    Path((space_id, kind)): Path<(CommunitySpaceId, String)>,
+) -> Result<impl IntoResponse, AppError> {
+    let image = state
+        .social_runtime()
+        .download_image(session.user_id, space_id, image_kind(&kind)?)
+        .await
+        .map_err(map_social_error)?;
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_str(&image.media_type)
+            .map_err(|_| AppError::Unavailable("community image"))?,
+    );
+    headers.insert(
+        header::CACHE_CONTROL,
+        HeaderValue::from_static("private, max-age=300"),
+    );
+    Ok((headers, image.bytes))
+}
+
+async fn delete_image(
+    State(state): State<AppState>,
+    Extension(session): Extension<AuthenticatedSession>,
+    Path((space_id, kind)): Path<(CommunitySpaceId, String)>,
+    Query(query): Query<ImageMutationQuery>,
+) -> Result<StatusCode, AppError> {
+    state
+        .social_runtime()
+        .delete_image(
+            session.user_id,
+            space_id,
+            image_kind(&kind)?,
+            query.expected_revision,
+        )
+        .await
+        .map_err(map_social_error)?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+fn image_kind(value: &str) -> Result<CommunityImageKind, AppError> {
+    match value {
+        "avatar" => Ok(CommunityImageKind::Avatar),
+        "cover" => Ok(CommunityImageKind::Cover),
+        _ => Err(AppError::BadRequest(
+            "image kind must be avatar or cover".to_owned(),
+        )),
+    }
 }
 
 async fn update_space(
@@ -539,6 +669,78 @@ async fn create_thread(
         .await
         .map_err(map_social_error)?;
     Ok((StatusCode::CREATED, Json(thread)))
+}
+
+async fn reader_layer(
+    State(state): State<AppState>,
+    Extension(session): Extension<AuthenticatedSession>,
+    Path((space_id, shared_material_id)): Path<(CommunitySpaceId, SharedMaterialId)>,
+) -> Result<Json<SharedReaderLayer>, AppError> {
+    state
+        .social_runtime()
+        .reader_layer(session.user_id, space_id, shared_material_id)
+        .await
+        .map(Json)
+        .map_err(map_social_error)
+}
+
+async fn list_highlights(
+    State(state): State<AppState>,
+    Extension(session): Extension<AuthenticatedSession>,
+    Path((space_id, shared_material_id)): Path<(CommunitySpaceId, SharedMaterialId)>,
+) -> Result<Json<Vec<SharedHighlight>>, AppError> {
+    state
+        .social_runtime()
+        .list_highlights(session.user_id, space_id, shared_material_id)
+        .await
+        .map(Json)
+        .map_err(map_social_error)
+}
+
+async fn publish_highlight(
+    State(state): State<AppState>,
+    Extension(session): Extension<AuthenticatedSession>,
+    Path((space_id, shared_material_id)): Path<(CommunitySpaceId, SharedMaterialId)>,
+    headers: HeaderMap,
+    Json(request): Json<PublishSharedHighlightRequest>,
+) -> Result<(StatusCode, Json<SharedHighlight>), AppError> {
+    let idempotency_key = required_idempotency_key(&headers)?;
+    let highlight = state
+        .social_runtime()
+        .publish_highlight(
+            session.user_id,
+            session.device_id,
+            space_id,
+            shared_material_id,
+            idempotency_key,
+            request,
+        )
+        .await
+        .map_err(map_social_error)?;
+    Ok((StatusCode::CREATED, Json(highlight)))
+}
+
+async fn unpublish_highlight(
+    State(state): State<AppState>,
+    Extension(session): Extension<AuthenticatedSession>,
+    Path((space_id, highlight_id)): Path<(CommunitySpaceId, SharedHighlightId)>,
+    headers: HeaderMap,
+    Json(request): Json<UnpublishSharedHighlightRequest>,
+) -> Result<StatusCode, AppError> {
+    let idempotency_key = required_idempotency_key(&headers)?;
+    state
+        .social_runtime()
+        .unpublish_highlight(
+            session.user_id,
+            session.device_id,
+            space_id,
+            highlight_id,
+            idempotency_key,
+            request,
+        )
+        .await
+        .map_err(map_social_error)?;
+    Ok(StatusCode::NO_CONTENT)
 }
 
 async fn add_comment(

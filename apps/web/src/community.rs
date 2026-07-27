@@ -33,6 +33,7 @@ pub(crate) fn CommunityPage(
     material_sharing_available: bool,
     material_discussions_available: bool,
     community_communications_available: bool,
+    community_images_available: bool,
     on_open_space: EventHandler<Uuid>,
     on_open_list: EventHandler<()>,
 ) -> Element {
@@ -66,6 +67,7 @@ pub(crate) fn CommunityPage(
                 material_sharing_available,
                 material_discussions_available,
                 community_communications_available,
+                community_images_available,
                 on_close: move |_| on_open_list.call(()),
             }
         };
@@ -263,6 +265,7 @@ fn CommunityDetail(
     material_sharing_available: bool,
     material_discussions_available: bool,
     community_communications_available: bool,
+    community_images_available: bool,
     on_close: EventHandler<()>,
 ) -> Element {
     let csrf_token = use_signal(|| csrf_token);
@@ -306,6 +309,20 @@ fn CommunityDetail(
             }
             if let Some(current) = detail_value {
                 header { class: "library-hero compact community-header",
+                    if community_images_available && current.space.cover.is_some() {
+                        img {
+                            class: "community-cover",
+                            src: "{API_BASE}/spaces/{space_id}/images/cover",
+                            alt: "",
+                        }
+                    }
+                    if community_images_available && current.space.avatar.is_some() {
+                        img {
+                            class: "community-avatar",
+                            src: "{API_BASE}/spaces/{space_id}/images/avatar",
+                            alt: "Аватар сообщества {current.space.name}",
+                        }
+                    }
                     div {
                         p { class: "eyebrow", "{role_label(current.membership.role)} · {current.space.member_count} участников" }
                         h1 { "{current.space.name}" }
@@ -316,6 +333,7 @@ fn CommunityDetail(
                     SpaceIdentityEditor {
                         csrf_token: csrf_token(),
                         detail: current.clone(),
+                        community_images_available,
                         on_saved: move |_| generation += 1,
                     }
                 }
@@ -815,8 +833,10 @@ fn SpaceChatMessageView(
 fn SpaceIdentityEditor(
     csrf_token: String,
     detail: CommunitySpaceDetail,
+    community_images_available: bool,
     on_saved: EventHandler<()>,
 ) -> Element {
+    let csrf_token = use_signal(|| csrf_token);
     let mut name = use_signal(|| detail.space.name.clone());
     let mut description = use_signal(|| detail.space.description.clone().unwrap_or_default());
     let mut error = use_signal(String::new);
@@ -832,7 +852,7 @@ fn SpaceIdentityEditor(
             button {
                 r#type: "button",
                 onclick: move |_| {
-                    let csrf = csrf_token.clone();
+                    let csrf = csrf_token.read().clone();
                     let request = UpdateCommunitySpaceRequest {
                         name: name(),
                         description: Some(description()),
@@ -846,6 +866,108 @@ fn SpaceIdentityEditor(
                     });
                 },
                 "Сохранить"
+            }
+            if community_images_available {
+                div { class: "community-image-settings",
+                    label { class: "upload-dropzone compact",
+                        strong { "Аватар" }
+                        small { "PNG/JPEG · до 5 МБ · почти квадратный" }
+                        input {
+                            r#type: "file",
+                            accept: "image/png,image/jpeg",
+                            aria_label: "Новый аватар сообщества",
+                            onchange: move |event| {
+                                let Some(file) = event.files().into_iter().next() else { return; };
+                                let csrf = csrf_token.read().clone();
+                                spawn(async move {
+                                    match file.read_bytes().await {
+                                        Ok(bytes) => match replace_space_image(
+                                            &csrf,
+                                            detail.space.id,
+                                            "avatar",
+                                            detail.space.object_revision,
+                                            bytes.to_vec(),
+                                        ).await {
+                                            Ok(()) => on_saved.call(()),
+                                            Err(upload_error) => error.set(upload_error.to_string()),
+                                        },
+                                        Err(_) => error.set("Не удалось прочитать изображение.".to_owned()),
+                                    }
+                                });
+                            }
+                        }
+                    }
+                    label { class: "upload-dropzone compact",
+                        strong { "Обложка" }
+                        small { "PNG/JPEG · до 5 МБ · широкая" }
+                        input {
+                            r#type: "file",
+                            accept: "image/png,image/jpeg",
+                            aria_label: "Новая обложка сообщества",
+                            onchange: move |event| {
+                                let Some(file) = event.files().into_iter().next() else { return; };
+                                let csrf = csrf_token.read().clone();
+                                spawn(async move {
+                                    match file.read_bytes().await {
+                                        Ok(bytes) => match replace_space_image(
+                                            &csrf,
+                                            detail.space.id,
+                                            "cover",
+                                            detail.space.object_revision,
+                                            bytes.to_vec(),
+                                        ).await {
+                                            Ok(()) => on_saved.call(()),
+                                            Err(upload_error) => error.set(upload_error.to_string()),
+                                        },
+                                        Err(_) => error.set("Не удалось прочитать изображение.".to_owned()),
+                                    }
+                                });
+                            }
+                        }
+                    }
+                    if detail.space.avatar.is_some() {
+                        button {
+                            class: "text-action danger-text",
+                            r#type: "button",
+                            onclick: move |_| {
+                                let csrf = csrf_token.read().clone();
+                                spawn(async move {
+                                    match delete_space_image(
+                                        &csrf,
+                                        detail.space.id,
+                                        "avatar",
+                                        detail.space.object_revision,
+                                    ).await {
+                                        Ok(()) => on_saved.call(()),
+                                        Err(delete_error) => error.set(delete_error.to_string()),
+                                    }
+                                });
+                            },
+                            "Удалить аватар"
+                        }
+                    }
+                    if detail.space.cover.is_some() {
+                        button {
+                            class: "text-action danger-text",
+                            r#type: "button",
+                            onclick: move |_| {
+                                let csrf = csrf_token.read().clone();
+                                spawn(async move {
+                                    match delete_space_image(
+                                        &csrf,
+                                        detail.space.id,
+                                        "cover",
+                                        detail.space.object_revision,
+                                    ).await {
+                                        Ok(()) => on_saved.call(()),
+                                        Err(delete_error) => error.set(delete_error.to_string()),
+                                    }
+                                });
+                            },
+                            "Удалить обложку"
+                        }
+                    }
+                }
             }
             if !error().is_empty() { p { class: "account-error", role: "alert", "{error}" } }
         }
@@ -1661,7 +1783,10 @@ async fn create_shared_thread(
         "POST",
         &format!("/spaces/{space_id}/materials/{shared_material_id}/threads"),
         csrf,
-        &CreateSharedThreadRequest { body_markdown },
+        &CreateSharedThreadRequest {
+            body_markdown,
+            target: Default::default(),
+        },
     )
     .await
 }
@@ -1823,6 +1948,78 @@ async fn update_space(
     request: &UpdateCommunitySpaceRequest,
 ) -> Result<CommunitySpaceDetail, ApiError> {
     api_json_mutation("PATCH", &format!("/spaces/{space_id}"), csrf, request).await
+}
+
+async fn replace_space_image(
+    csrf: &str,
+    space_id: Uuid,
+    kind: &str,
+    expected_revision: u64,
+    bytes: Vec<u8>,
+) -> Result<(), ApiError> {
+    if bytes.is_empty() || bytes.len() > lumi_core::COMMUNITY_IMAGE_MAX_BYTES {
+        return Err(ApiError::Message(
+            "Изображение пустое или превышает лимит 5 МБ.".to_owned(),
+        ));
+    }
+    let media_type = image_media_type(&bytes).ok_or_else(|| {
+        ApiError::Message("Поддерживаются только корректные PNG и JPEG.".to_owned())
+    })?;
+    let response = Request::put(&format!(
+        "{API_BASE}/spaces/{space_id}/images/{kind}?expected_revision={expected_revision}"
+    ))
+    .credentials(RequestCredentials::Include)
+    .header("X-Lumi-CSRF", csrf)
+    .header("Content-Type", media_type)
+    .body(bytes)
+    .map_err(network_error)?
+    .send()
+    .await
+    .map_err(network_error)?;
+    if response.status() == 401 {
+        crate::account::notify_session_expired();
+        return Err(ApiError::Unauthorized);
+    }
+    if response.ok() {
+        Ok(())
+    } else {
+        Err(api_response_error(&response))
+    }
+}
+
+async fn delete_space_image(
+    csrf: &str,
+    space_id: Uuid,
+    kind: &str,
+    expected_revision: u64,
+) -> Result<(), ApiError> {
+    let response = Request::delete(&format!(
+        "{API_BASE}/spaces/{space_id}/images/{kind}?expected_revision={expected_revision}"
+    ))
+    .credentials(RequestCredentials::Include)
+    .header("X-Lumi-CSRF", csrf)
+    .send()
+    .await
+    .map_err(network_error)?;
+    if response.status() == 401 {
+        crate::account::notify_session_expired();
+        return Err(ApiError::Unauthorized);
+    }
+    if response.ok() {
+        Ok(())
+    } else {
+        Err(api_response_error(&response))
+    }
+}
+
+fn image_media_type(bytes: &[u8]) -> Option<&'static str> {
+    if bytes.starts_with(b"\x89PNG\r\n\x1a\n") {
+        Some("image/png")
+    } else if bytes.starts_with(&[0xff, 0xd8, 0xff]) {
+        Some("image/jpeg")
+    } else {
+        None
+    }
 }
 
 async fn preview_link(token: &str) -> Result<CommunityLinkPreview, ApiError> {

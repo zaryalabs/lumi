@@ -3,6 +3,8 @@
 pub(crate) mod api;
 mod communications;
 mod discussion;
+mod fingerprint_worker;
+mod images;
 mod matching;
 mod permissions;
 mod service;

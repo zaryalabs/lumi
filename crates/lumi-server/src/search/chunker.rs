@@ -345,6 +345,55 @@ pub(crate) fn learning_item(
     chunks
 }
 
+/// Extract permission-bearing Community text without private-copy provenance.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "source identity and permission scope remain explicit at the derived-data boundary"
+)]
+pub(crate) fn social_text(
+    source_type: SearchSourceType,
+    source_id: Uuid,
+    source_version: &str,
+    title: &str,
+    text: &str,
+    community_space_id: Uuid,
+    shared_material_id: Option<Uuid>,
+    updated_at: u64,
+) -> Vec<SearchChunk> {
+    if !source_type.is_social() || text.trim().is_empty() {
+        return Vec::new();
+    }
+    let mut chunks = Vec::new();
+    push_text_chunks(
+        &mut chunks,
+        ChunkSeed {
+            source_type,
+            source_id,
+            material_id: None,
+            revision_id: None,
+            source_version,
+            field: if source_type == SearchSourceType::SharedHighlight {
+                SearchField::Quote
+            } else {
+                SearchField::Message
+            },
+            title,
+            heading_path: &[],
+            text,
+            language: None,
+            tags: &[],
+            status: Some("visible"),
+            updated_at: Some(updated_at),
+            anchor: None,
+        },
+    );
+    for chunk in &mut chunks {
+        chunk.community_space_id = Some(community_space_id);
+        chunk.shared_material_id = shared_material_id;
+    }
+    chunks
+}
+
 struct ChunkSeed<'a> {
     source_type: SearchSourceType,
     source_id: Uuid,
@@ -378,6 +427,8 @@ fn push_text_chunks(chunks: &mut Vec<SearchChunk>, seed: ChunkSeed<'_>) {
             source_id: seed.source_id,
             material_id: seed.material_id,
             revision_id: seed.revision_id,
+            community_space_id: None,
+            shared_material_id: None,
             source_version: seed.source_version.to_owned(),
             field: seed.field,
             title: seed.title.to_owned(),

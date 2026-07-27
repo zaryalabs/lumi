@@ -440,9 +440,13 @@ impl AppState {
         .map_err(|error| anyhow::anyhow!(error))?;
         let mcp = Arc::new(mcp::McpRuntime::postgres(accounts.pool().clone()));
         let social = Arc::new(
-            social::SocialRuntime::postgres(accounts.pool().clone(), config.secret_root())
-                .await
-                .map_err(|error| anyhow::anyhow!(error))?,
+            social::SocialRuntime::postgres(
+                accounts.pool().clone(),
+                config.secret_root(),
+                config.blob_root().to_path_buf(),
+            )
+            .await
+            .map_err(|error| anyhow::anyhow!(error))?,
         );
         let learning = Arc::new(learning::LearningRuntime::postgres(accounts.pool().clone()));
         let audio = Some(Arc::new(audio::AudioRuntime::postgres(
@@ -606,6 +610,11 @@ impl AppState {
     /// Run the durable search indexing worker until shutdown.
     pub async fn run_search(self, cancellation: tokio_util::sync::CancellationToken) {
         self.search.run_worker(cancellation).await;
+    }
+
+    /// Run material fingerprinting and automatic Community claim re-evaluation.
+    pub async fn run_social(self, cancellation: tokio_util::sync::CancellationToken) {
+        self.social.run_worker(cancellation).await;
     }
 }
 
@@ -840,6 +849,15 @@ pub(crate) fn service_capabilities(state: &AppState) -> ServiceCapabilities {
         capabilities
             .features
             .push("material-discussions".to_owned());
+    }
+    if state.social_runtime().supports_shared_reading() {
+        capabilities.features.push("shared-reading".to_owned());
+        if state.search.is_query_ready() {
+            capabilities.features.push("social-search-index".to_owned());
+        }
+    }
+    if state.social_runtime().supports_images() {
+        capabilities.features.push("community-images".to_owned());
     }
     if state.social_runtime().supports_communications() {
         capabilities
@@ -2439,7 +2457,7 @@ mod tests {
         let migrations: Vec<SchemaMigration> =
             json_get(build_router(), "/api/v1/schema/migrations").await?;
 
-        assert_eq!(migrations.len(), 31);
+        assert_eq!(migrations.len(), 32);
         assert!(migrations
             .iter()
             .any(|migration| migration.id == "s1-0017-learning-core"));
@@ -2449,6 +2467,9 @@ mod tests {
         assert!(migrations
             .iter()
             .any(|migration| migration.id == "s1-0019-learning-ai"));
+        assert!(migrations
+            .iter()
+            .any(|migration| migration.id == "s1-0029-deferred-social-reading"));
         assert!(migrations
             .iter()
             .any(|migration| migration.id == "s1-0020-learning-voice"));
@@ -3405,6 +3426,7 @@ mod tests {
                 .header("idempotency-key", "discussion-create")
                 .body(json_body(&lumi_core::CreateSharedThreadRequest {
                     body_markdown: "Первая тема без цитаты из личной копии".to_owned(),
+                    target: Default::default(),
                 })?)?,
             &owner,
             StatusCode::CREATED,
@@ -4264,8 +4286,14 @@ mod tests {
         expected_status: StatusCode,
     ) -> Result<T, Box<dyn std::error::Error>> {
         let response = app.oneshot(session.apply(request)).await?;
-        assert_eq!(response.status(), expected_status);
+        let status = response.status();
         let bytes = axum::body::to_bytes(response.into_body(), usize::MAX).await?;
+        assert_eq!(
+            status,
+            expected_status,
+            "unexpected response body: {}",
+            String::from_utf8_lossy(&bytes)
+        );
         Ok(serde_json::from_slice(&bytes)?)
     }
 }

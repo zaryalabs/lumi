@@ -216,8 +216,12 @@ server-side `whisper-1`, editable transcript acceptance, retry и retention.
 material-level threads/replies и moderation без зависимости от `RD-006`.
 `community-communications` покрывает Space chat, append-only activity,
 cursor/polling delivery и MCP parity без доступа к private content.
-Полный `shared-reading` остаётся зависимым от Records v2: shared anchors,
-explicit published highlights и Reader overlay не считаются готовыми.
+После стабилизации Records v2 capability `shared-reading` покрывает shared
+anchors, explicit published highlights и reflowable/PDF Reader overlay.
+`social-search-index` добавляет permission-aware поиск shared comments/chat
+через общий index runtime, а `community-images` — generic blob lifecycle для
+avatar/cover. Границы и rollout этих slices зафиксированы в
+[`ADR 0040`](../adr/0040-shared-reading-social-index-images-and-fingerprint-lifecycle.md).
 
 ## Quality And Spikes
 

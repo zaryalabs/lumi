@@ -68,6 +68,9 @@ plugin, AI, search and account/auth boundaries.
   discussions, author CRUD и moderation tombstones.
 - [`0039`](0039-community-chat-activity-and-mcp.md) — Space chat, append-only
   activity, bounded polling и social MCP parity.
+- [`0040`](0040-shared-reading-social-index-images-and-fingerprint-lifecycle.md)
+  — shared anchors/Reader layers, permission-aware social index, Community
+  images и автоматический fingerprint lifecycle.
 
 ## Template
 
