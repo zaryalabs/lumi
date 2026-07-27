@@ -135,6 +135,8 @@ class OperationsContractTests(unittest.TestCase):
         self.assertIn("s/^LUMI_WEB_ORIGIN=//p", text)
         self.assertIn("*[!A-Za-z0-9.-]*", text)
         self.assertIn('test "$$status" = 200', text)
+        self.assertIn("external_attempt=1", text)
+        self.assertIn('while [ "$$external_attempt" -le 20 ]', text)
         self.assertNotIn("200|401", text)
         self.assertNotRegex(text, r"(?m)^\s*\.\s+.*ENV_FILE")
 
