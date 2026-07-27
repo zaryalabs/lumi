@@ -1,6 +1,6 @@
 # Единый план реализации Lumi 0.2.0–0.5.0
 
-Status: `active`
+Status: `completed`
 
 Последнее обновление: 2026-07-27
 
@@ -34,7 +34,7 @@ Knowledge Base, native full-copy replicas, Obsidian, plugin platform, будущ
 
 ## Сверка фактической готовности
 
-Проверено по repository state и Git history на 2026-07-26.
+Проверено по repository state, executable gates и Git history на 2026-07-27.
 
 Готово:
 
@@ -97,16 +97,20 @@ Knowledge Base, native full-copy replicas, Obsidian, plugin platform, будущ
 - `0.5.0 / E4 independent slice`: Space chat, append-only activity,
   author/moderator tombstones, bounded polling, social MCP registry
   `mcp-tools.v4`, community backup/restore evidence и performance dataset;
+- `0.5.0 / deferred completion`: shared anchors, explicit published
+  highlights, reflowable/PDF Reader overlays, permission-aware social search,
+  generic avatar/cover blobs и durable fingerprint lifecycle; persistent
+  server публикует `shared-reading`, `social-search-index`,
+  `community-images`, а MCP registry — `mcp-tools.v5`;
 - release evidence A1 зафиксирован commit trailer
   `Lumi-Plan-Stage: 0.2.0/A1`.
 
-Ещё не готово:
+В repository scope незавершённых продуктовых эпиков нет.
 
-- завершение совместного чтения (shared anchors/highlights/Reader overlay) и
-  permission-aware social search.
-  Оставшиеся lifecycle-интеграции перечислены в
-  [`0.5.0-deferred-until-0.4.0.md`](0.5.0-deferred-until-0.4.0.md).
-  Внешний staging operator acceptance остаётся gate конкретного окружения.
+Внешний staging operator acceptance остаётся gate конкретного окружения и не
+входит в repository-side реализацию. Закрытие ранее отложенных зависимостей
+зафиксировано в
+[`0.5.0-deferred-until-0.4.0.md`](0.5.0-deferred-until-0.4.0.md).
 
 Persistent server публикует capabilities `ai-provider-openrouter`,
 `ai-provider-byok`, `ai-explicit-context`, `ai-global-chat`, `ai-task-queue`,
@@ -126,7 +130,7 @@ search runtime. Social vertical публикует `community-spaces`,
 `community-link-access`, `material-sharing`, `material-discussions` и
 `community-communications` при готовых prerequisites.
 
-После перехода на новую шкалу выполнено `17/18` продуктовых эпиков. Stage 0,
+После перехода на новую шкалу выполнено `18/18` продуктовых эпиков. Stage 0,
 Contract Freeze 1 и A1 остаются закрытыми prerequisites.
 
 Repository-side gates `make c`, PostgreSQL/compatibility/security/performance,
@@ -139,8 +143,8 @@ operator acceptance остаётся release gate окружения и не м�
 готовность. Поэтому новая шкала начинается с нуля завершённых end-to-end
 эпиков и отдельно сохраняет перечень уже готового foundation выше.
 
-Текущий следующий эпик — завершение `0.5.0/E3`: shared anchors, published
-highlights, Reader social layer и permission-aware social search.
+Текущего следующего эпика нет: roadmap `0.2.0–0.5.0` завершён. Последующие
+направления требуют отдельного канонического scope и нового плана.
 
 ## Последовательность
 
@@ -226,23 +230,23 @@ record-scoped RAG без второго контура данных; workspace �
 2. [x] **E2 — Публикация и сопоставление материалов.** Share flow,
    fingerprints, shared identity, claims, conservative matching и
    import-own-copy.
-3. [ ] **E3 — Совместное чтение.** Независимые material-level discussions и
-   moderation готовы; Shared anchors, explicit published highlights, Reader
-   social layer и unresolved mapping отложены до готовности `0.4.0`.
+3. [x] **E3 — Совместное чтение.** Material-level и anchor-level discussions,
+   explicit published highlights, reflowable/PDF Reader social layer,
+   conservative mapping, honest unresolved state и moderation.
 4. [x] **E4 — Коммуникации и выпуск.** Space chat, activity, social search
    events, MCP parity, polling, backup/restore и multi-account release
-   acceptance. Permission-aware social search events отложены до общего
-   runtime `0.4.0/E3–E5`; независимый release slice не публикует
-   `social-search-index`.
+   acceptance. Permission-aware social search использует общий runtime
+   `0.4.0/E3–E5`, а registry `mcp-tools.v5` добавляет social search tools.
 
-Результат: два аккаунта проходят полный закрытый Community Space flow без
-раскрытия source-файлов и личных записей.
+Результат: два аккаунта проходят полный закрытый Community Space flow,
+совместное чтение и permission-aware social search без раскрытия source-файлов
+и личных записей.
 
 ## Финальная точка текущего roadmap
 
-Roadmap `0.2.0–0.5.0` завершён, когда закрыт `0.5.0/E4`, критерии завершения
-всех четырёх планов выполнены, `make c` и обязательные Web E2E проходят, а
-долгоживущие решения перенесены из `docs/tmp-plans/` в канонические документы.
+Roadmap `0.2.0–0.5.0` завершён: `0.5.0/E4` закрыт, критерии завершения всех
+четырёх планов выполнены, `make c` и обязательные Web E2E проходят, а
+долгоживущие решения перенесены в канонические документы и ADR.
 
 Последующие функции планируются отдельной серией релизов и не считаются
 скрытыми условиями завершения `0.5.0`.

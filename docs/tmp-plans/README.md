@@ -1,6 +1,6 @@
 # TMP Plans
 
-Status: `active`
+Status: `completed roadmap — no active product epic`
 
 `TMP Plans` is a temporary documentation section for intermediate
 implementation plans. These documents turn an already designed product slice
@@ -35,16 +35,19 @@ coordination document.
 - After a slice ships or is superseded, archive, replace or delete its
   temporary plan.
 
-## Current Plans
+## Завершённый roadmap и release evidence
 
 - [`ROADMAP.md`](ROADMAP.md) — 18 крупных продуктовых эпиков от текущего
-  состояния до завершения основного Web roadmap `0.5.0`.
+  состояния до завершения основного Web roadmap `0.5.0`; выполнено `18/18`.
 
 - [`0.2.0-ai-plan.md`](0.2.0-ai-plan.md) — реализация BYOK, глобального
   ИИ-чата, саммари, durable AI task queue и MCP-интеграции для внешних агентов.
+  Repository-side scope завершён; внешний staging smoke остаётся operator gate
+  конкретного окружения.
 
 - [`0.5.0-social-plan.md`](0.5.0-social-plan.md) — Community Spaces,
-  совместное чтение, comments, shared highlights и chat.
+  совместное чтение, comments, shared highlights, social search и chat;
+  repository-side scope завершён.
 
 Допустимые status для планов:
 

@@ -49,6 +49,8 @@ impl PgSocialStore {
         let actor = membership_in_transaction(&mut transaction, user_id, space_id).await?;
         permissions::active(&actor, CommunityAction::View)?;
         ensure_material(&mut transaction, space_id, shared_material_id).await?;
+        let can_read_anchored_content =
+            has_matched_claim(&mut transaction, user_id, space_id, shared_material_id).await?;
         let can_moderate = matches!(actor.role, CommunityRole::Owner | CommunityRole::Admin);
         let (after_time, after_id) =
             cursor.map_or((None, None), |(time, id)| (Some(time), Some(id)));
@@ -64,13 +66,15 @@ impl PgSocialStore {
              WHERE thread.community_space_id = $1 AND thread.shared_material_id = $2
                AND ($3::timestamptz IS NULL
                     OR (thread.updated_at, thread.thread_id) > ($3, $4))
+               AND (thread.scope = 'material' OR $5)
              ORDER BY thread.updated_at, thread.thread_id
-             LIMIT $5",
+             LIMIT $6",
         )
         .bind(space_id)
         .bind(shared_material_id)
         .bind(after_time)
         .bind(after_id)
+        .bind(can_read_anchored_content)
         .bind(i64::from(limit) + 1)
         .fetch_all(&mut *transaction)
         .await
@@ -778,6 +782,10 @@ impl PgSocialStore {
         let actor = membership_in_transaction(&mut transaction, user_id, space_id).await?;
         permissions::active(&actor, CommunityAction::View)?;
         ensure_material(&mut transaction, space_id, shared_material_id).await?;
+        if !has_matched_claim(&mut transaction, user_id, space_id, shared_material_id).await? {
+            transaction.commit().await.map_err(storage)?;
+            return Ok(Vec::new());
+        }
         let rows = sqlx::query(
             "SELECT highlight.highlight_id, highlight.community_space_id,
                     highlight.shared_material_id, highlight.published_by_user_id,
@@ -1077,6 +1085,33 @@ async fn ensure_material(
     } else {
         Err(SocialStoreError::NotFound)
     }
+}
+
+async fn has_matched_claim(
+    transaction: &mut Transaction<'_, Postgres>,
+    user_id: UserId,
+    space_id: CommunitySpaceId,
+    shared_material_id: SharedMaterialId,
+) -> Result<bool, SocialStoreError> {
+    sqlx::query(
+        "SELECT EXISTS(
+             SELECT 1
+               FROM user_material_claims claim
+              WHERE claim.community_space_id = $1
+                AND claim.shared_material_id = $2
+                AND claim.user_id = $3
+                AND claim.match_status = 'matched'
+                AND claim.deleted_at IS NULL
+         ) AS has_matched_claim",
+    )
+    .bind(space_id)
+    .bind(shared_material_id)
+    .bind(user_id)
+    .fetch_one(&mut **transaction)
+    .await
+    .map_err(storage)?
+    .try_get("has_matched_claim")
+    .map_err(storage)
 }
 
 struct ValidatedAnchor {

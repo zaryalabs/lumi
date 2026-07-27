@@ -3344,6 +3344,33 @@ mod tests {
             Some(lumi_core::MaterialMatchBasis::ExactContent)
         );
         let social_store = PgAccountStore::connect(&database_url, HashSet::new()).await?;
+        let package_payload: serde_json::Value = sqlx_core::query::query(
+            "SELECT package.payload
+               FROM materials material
+               JOIN normalized_packages package
+                 ON package.revision_id = material.active_revision_id
+              WHERE material.material_id = $1
+                AND material.owner_user_id = $2",
+        )
+        .bind(owner_material)
+        .bind(owner.user_id)
+        .fetch_one(social_store.pool())
+        .await?
+        .try_get("payload")?;
+        let package: lumi_core::NormalizedContentPackage = serde_json::from_value(package_payload)?;
+        let document = package.reading_document(owner_material);
+        let plan = lumi_core::RenderPlan::from_document(&document);
+        let block = plan
+            .blocks
+            .iter()
+            .find(|block| {
+                block
+                    .text
+                    .as_deref()
+                    .is_some_and(|text| text.chars().count() >= 4)
+            })
+            .ok_or_else(|| std::io::Error::other("social anchor block missing"))?;
+        let anchor = plan.anchor_from_selection(&block.node_path, 0, &block.node_path, 4)?;
         let sync_payloads = sqlx_core::query::query(
             "SELECT change.payload::text AS payload
              FROM sync_changes change
@@ -3432,6 +3459,73 @@ mod tests {
             StatusCode::CREATED,
         )
         .await?;
+        let anchored_thread: lumi_core::SharedCommentThread = request_json_with_session_status(
+            app.clone(),
+            Request::builder()
+                .method("POST")
+                .uri(format!(
+                    "/api/v1/spaces/{}/materials/{}/threads",
+                    created.space.id, owner_shared.identity.id
+                ))
+                .header(header::CONTENT_TYPE, "application/json")
+                .header("idempotency-key", "anchored-discussion-create")
+                .body(json_body(&lumi_core::CreateSharedThreadRequest {
+                    body_markdown: "Тема с цитатой только для подтверждённых копий".to_owned(),
+                    target: lumi_core::SharedThreadTargetDraft::Anchor(Box::new(
+                        lumi_core::SharedAnchorDraft {
+                            anchor: anchor.clone(),
+                            target: lumi_core::AnnotationTarget::TextRange,
+                            provenance_annotation_id: None,
+                            heading_path: Vec::new(),
+                            page_label: None,
+                        },
+                    )),
+                })?)?,
+            &owner,
+            StatusCode::CREATED,
+        )
+        .await?;
+        let annotation: lumi_core::Annotation = request_json_with_session(
+            app.clone(),
+            Request::builder()
+                .method("POST")
+                .uri(format!("/api/v1/materials/{owner_material}/annotations"))
+                .header(header::CONTENT_TYPE, "application/json")
+                .header("idempotency-key", "private-highlight-create")
+                .body(json_body(&lumi_core::CreateAnnotationCommand {
+                    material_id: owner_material,
+                    revision_id: document.revision_id,
+                    anchor: anchor.clone(),
+                    target: lumi_core::AnnotationTarget::TextRange,
+                    kind: lumi_core::AnnotationKind::Highlight {
+                        style: lumi_core::HighlightStyle::Yellow,
+                    },
+                    title: None,
+                    tags: Vec::new(),
+                    status: lumi_core::AnnotationStatus::Active,
+                    related_annotation_id: None,
+                })?)?,
+            &owner,
+        )
+        .await?;
+        let published_highlight: lumi_core::SharedHighlight = request_json_with_session_status(
+            app.clone(),
+            Request::builder()
+                .method("POST")
+                .uri(format!(
+                    "/api/v1/spaces/{}/materials/{}/highlights",
+                    created.space.id, owner_shared.identity.id
+                ))
+                .header(header::CONTENT_TYPE, "application/json")
+                .header("idempotency-key", "shared-highlight-create")
+                .body(json_body(&lumi_core::PublishSharedHighlightRequest {
+                    anchor: lumi_core::SharedAnchorDraft::from_annotation(&annotation),
+                    style: lumi_core::HighlightStyle::Yellow,
+                })?)?,
+            &owner,
+            StatusCode::CREATED,
+        )
+        .await?;
         let reply: lumi_core::SharedComment = request_json_with_session_status(
             app.clone(),
             Request::builder()
@@ -3500,7 +3594,8 @@ mod tests {
         .await?;
         let hidden_reply = discussions
             .threads
-            .first()
+            .iter()
+            .find(|loaded_thread| loaded_thread.id == thread.id)
             .and_then(|loaded_thread| {
                 loaded_thread
                     .comments
@@ -3512,6 +3607,60 @@ mod tests {
             (hidden_reply.state, hidden_reply.body_markdown.as_deref()),
             (lumi_core::SocialContentState::Hidden, None)
         );
+        assert!(discussions
+            .threads
+            .iter()
+            .any(|loaded_thread| loaded_thread.id == anchored_thread.id
+                && matches!(
+                    loaded_thread.placement,
+                    Some(lumi_core::SharedAnchorPlacement::Resolved { .. })
+                )));
+        let matched_highlights: Vec<lumi_core::SharedHighlight> = request_json_with_session(
+            app.clone(),
+            Request::builder()
+                .uri(format!(
+                    "/api/v1/spaces/{}/materials/{}/highlights",
+                    created.space.id, owner_shared.identity.id
+                ))
+                .body(Body::empty())?,
+            &member,
+        )
+        .await?;
+        assert_eq!(
+            matched_highlights
+                .iter()
+                .map(|highlight| highlight.id)
+                .collect::<Vec<_>>(),
+            vec![published_highlight.id]
+        );
+        let reviewer_discussions: lumi_core::SharedDiscussionPage = request_json_with_session(
+            app.clone(),
+            Request::builder()
+                .uri(format!(
+                    "/api/v1/spaces/{}/materials/{}/threads?limit=50",
+                    created.space.id, owner_shared.identity.id
+                ))
+                .body(Body::empty())?,
+            &reviewer,
+        )
+        .await?;
+        assert!(reviewer_discussions.threads.iter().all(|thread| {
+            thread.scope == lumi_core::SharedCommentThreadScope::Material
+                && thread.placement.is_none()
+                && thread.id != anchored_thread.id
+        }));
+        let reviewer_highlights: Vec<lumi_core::SharedHighlight> = request_json_with_session(
+            app.clone(),
+            Request::builder()
+                .uri(format!(
+                    "/api/v1/spaces/{}/materials/{}/highlights",
+                    created.space.id, owner_shared.identity.id
+                ))
+                .body(Body::empty())?,
+            &reviewer,
+        )
+        .await?;
+        assert!(reviewer_highlights.is_empty());
 
         let message: lumi_core::SharedChatMessage = request_json_with_session_status(
             app.clone(),

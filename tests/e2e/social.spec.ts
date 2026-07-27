@@ -49,6 +49,27 @@ async function joinByLink(page: Page, inviteUrl: string) {
   await expect(page).not.toHaveURL(/#join\//);
 }
 
+async function selectReaderText(page: Page) {
+  const source = page
+    .locator("[data-reader-source='true']")
+    .filter({ hasText: /\S/ })
+    .first();
+  await expect(source).toBeVisible();
+  await source.evaluate((element) => {
+    const text = element.firstChild;
+    if (!text || text.nodeType !== Node.TEXT_NODE) {
+      throw new Error("reader source span has no direct text node");
+    }
+    const range = document.createRange();
+    range.setStart(text, 0);
+    range.setEnd(text, Math.min(12, text.textContent?.length ?? 0));
+    const selection = window.getSelection();
+    selection?.removeAllRanges();
+    selection?.addRange(range);
+    element.dispatchEvent(new MouseEvent("mouseup", { bubbles: true }));
+  });
+}
+
 test("two accounts create, preview, join, revoke and remove Community access", async ({
   browser,
 }) => {
@@ -137,7 +158,7 @@ test("two accounts create, preview, join, revoke and remove Community access", a
 test("shares metadata and matches only each participant's own copy", async ({
   browser,
 }) => {
-  test.setTimeout(120_000);
+  test.setTimeout(180_000);
   const ownerContext = await browser.newContext();
   const memberContext = await browser.newContext();
   const reviewerContext = await browser.newContext();
@@ -200,6 +221,103 @@ test("shares metadata and matches only each participant's own copy", async ({
     memberMaterial.getByText("Есть ваша копия", { exact: true }),
   ).toBeVisible();
 
+  await ownerCard.getByRole("button", { name: "Читать" }).click();
+  await selectReaderText(owner);
+  const privateHighlightSaved = owner.waitForResponse(
+    (response) =>
+      response.url().endsWith("/annotations") &&
+      response.request().method() === "POST" &&
+      response.ok(),
+  );
+  await owner.getByRole("button", { name: "Жёлтым" }).click();
+  await privateHighlightSaved;
+
+  await selectReaderText(owner);
+  await owner.getByRole("button", { name: "Заметка", exact: true }).click();
+  await owner
+    .getByLabel("Текст заметки")
+    .fill("Личная заметка не для сообщества");
+  const privateNoteSaved = owner.waitForResponse(
+    (response) =>
+      response.url().endsWith("/annotations") &&
+      response.request().method() === "POST" &&
+      response.ok(),
+  );
+  await owner.getByRole("button", { name: "Сохранить заметку" }).click();
+  await privateNoteSaved;
+
+  await selectReaderText(owner);
+  await owner.getByRole("button", { name: /Сообщество \(1\)/ }).click();
+  const ownerSocialReader = owner.getByRole("complementary", {
+    name: "Совместное чтение",
+  });
+  await ownerSocialReader
+    .getByPlaceholder("Первый комментарий…")
+    .fill("Обсуждаем конкретное место в своей копии.");
+  const anchoredThreadPublished = owner.waitForResponse(
+    (response) =>
+      response.url().endsWith("/threads") &&
+      response.request().method() === "POST" &&
+      response.ok(),
+  );
+  await ownerSocialReader
+    .getByRole("button", { name: "В «Клубная полка»" })
+    .click();
+  await anchoredThreadPublished;
+  await expect(
+    ownerSocialReader.getByText("Обсуждаем конкретное место в своей копии."),
+  ).toBeVisible();
+
+  await ownerSocialReader.getByText("Опубликовать личное выделение").click();
+  const sharedHighlightPublished = owner.waitForResponse(
+    (response) =>
+      response.url().endsWith("/highlights") &&
+      response.request().method() === "POST" &&
+      response.ok(),
+  );
+  await ownerSocialReader
+    .getByRole("button", { name: "Опубликовать", exact: true })
+    .click();
+  await sharedHighlightPublished;
+  await expect(
+    ownerSocialReader.getByText("Общее выделение", { exact: true }),
+  ).toBeVisible();
+  await ownerSocialReader
+    .getByRole("button", { name: "Закрыть совместное чтение" })
+    .click();
+  await owner.getByRole("button", { name: "Вернуться в библиотеку" }).click();
+
+  await member.getByRole("link", { name: "Библиотека", exact: true }).click();
+  const memberCard = member.getByRole("article", {
+    name: "Материал Клубная книга",
+  });
+  await memberCard.getByRole("button", { name: "Читать" }).click();
+  await expect(member.locator(".shared-highlight").first()).toBeVisible();
+  await member.getByRole("button", { name: /Сообщество \(1\)/ }).click();
+  const memberSocialReader = member.getByRole("complementary", {
+    name: "Совместное чтение",
+  });
+  await expect(
+    memberSocialReader.getByText("Обсуждаем конкретное место в своей копии."),
+  ).toBeVisible();
+  await expect(
+    memberSocialReader.getByText("Общее выделение", { exact: true }),
+  ).toBeVisible();
+  await expect(
+    memberSocialReader.getByText("Личная заметка не для сообщества"),
+  ).toHaveCount(0);
+  await memberSocialReader
+    .getByRole("button", { name: "Закрыть совместное чтение" })
+    .click();
+  await member.getByRole("button", { name: "Вернуться в библиотеку" }).click();
+  await member.getByRole("link", { name: "Сообщества" }).click();
+  await member
+    .getByRole("main", { name: "Сообщества Lumi" })
+    .getByRole("article")
+    .filter({ hasText: "Клубная полка" })
+    .getByRole("button", { name: "Открыть" })
+    .click();
+
   await owner.getByRole("link", { name: "Сообщества" }).click();
   await owner
     .getByRole("main", { name: "Сообщества Lumi" })
@@ -237,6 +355,7 @@ test("shares metadata and matches only each participant's own copy", async ({
   ).toBeVisible();
   await memberDiscussion
     .getByRole("article", { name: "Комментарий участника" })
+    .filter({ hasText: "Что изменилось в вашем понимании главы?" })
     .getByRole("button", { name: "Ответить", exact: true })
     .click();
   await memberDiscussion

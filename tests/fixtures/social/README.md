@@ -15,6 +15,7 @@ anchor/quote/private-record полей.
 chat/activity pages; activity не содержит message body или произвольный
 payload.
 
-Расширенный cross-revision backfill, shared highlights и anchor corpus появятся после
-prerequisites, перечисленных в
-`docs/tmp-plans/0.5.0-deferred-until-0.4.0.md`.
+Shared anchors, published highlights, cross-revision mapping, social search,
+Community images и durable fingerprint lifecycle закрыты после prerequisites
+`0.4.0`; executable evidence находится в domain/PostgreSQL/Playwright tests, а
+версионированные MCP additions — в `tests/fixtures/mcp/contracts/v5`.
