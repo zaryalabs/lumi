@@ -33,7 +33,7 @@ test.describe("real local profile", () => {
     ).toBeVisible();
     await expect(page.getByRole("heading", { name: "Lumi" })).toBeVisible();
     await expect(
-      page.getByRole("button", { name: "Сгенерировать recovery phrase" }),
+      page.getByRole("button", { name: "Создать фразу восстановления" }),
     ).toBeVisible();
   });
 });

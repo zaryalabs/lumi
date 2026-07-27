@@ -2,6 +2,16 @@
 
 Status: accepted
 
+Implementation baseline: `s1.2026-07-23.markdown-import-v1`.
+
+Реализован standalone UTF-8 upload `.md`/`.markdown`, reusable
+`compile_markdown`, CommonMark/GFM AST normalization, flat YAML/TOML metadata,
+stable headings/links, source ranges, durable jobs/packages/source download и
+общий web reader. Raw HTML остаётся inert fallback, а rich fences становятся
+typed placeholders. Полный YAML/TOML, inline mark serialization, standalone
+local assets, resolved cross-file wikilinks и round-trip editing пока не входят
+в baseline; граница compiler оставлена пригодной для `lum`.
+
 ## Контекст
 
 Markdown нужен Lumi как переносимый текстовый формат для статей, заметок,

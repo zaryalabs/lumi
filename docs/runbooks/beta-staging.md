@@ -50,8 +50,10 @@ Webhook не является активным staging transport; будущая
 Server и встроенный listener пишут JSON events. Request middleware создаёт и возвращает
 `x-request-id`; events не содержат request/Telegram body или runtime secrets.
 Минимальные vendor-neutral alerts заданы в `deployments/alerts.yaml`: readiness,
-error rate, import failures и stale backup. Перед beta operator должен привязать
-эти signals к конкретному log/metrics backend и проверить тестовый alert.
+error rate, import/AI task failures, отклонённый abridgement recovery,
+устойчивые ошибки Community communications и stale backup. Перед beta operator
+должен привязать эти signals к конкретному log/metrics backend и проверить
+тестовый alert.
 
 ## Backup
 
@@ -95,7 +97,9 @@ make beta
 `beta-local` поднимает PostgreSQL, применяет migrations и запускает обязательные
 PG, compatibility, security, release performance, validator contract,
 `make c` и browser E2E suites. Он доказывает repository mechanics, но не
-принимает закрытую beta.
+принимает закрытую beta. PostgreSQL и blob state создаются в disposable
+Compose project на свободном локальном порту и удаляются после gate; сохранённая
+локальная database не используется и не изменяется.
 
 `beta` дополнительно требует `RESTORE_ATTESTATION` — JSON
 `lumi.restore-attestation.v1`, который ссылается на backup manifest,

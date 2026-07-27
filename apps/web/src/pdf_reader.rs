@@ -1,0 +1,2025 @@
+//! Browser adapter for fixed-layout PDF revisions rendered by PDF.js.
+
+use dioxus::prelude::*;
+use gloo_net::http::Request;
+use lumi_core::{
+    AiContextAttachment, AiSourceScope, Anchor, Annotation, AnnotationKind, AnnotationStatus,
+    AnnotationTarget, CreateAnnotationCommand, CreateSharedThreadRequest, DeleteAnnotationCommand,
+    HighlightStyle, LibraryEntry, MaterialKind, MoveReadingPositionCommand, PageFidelityDocument,
+    PageRect, PdfPage, PdfRect, PdfSourceLocator, PublishSharedHighlightRequest, ReadingProgress,
+    SharedAnchorDraft, SharedAnchorPlacement, SharedReaderSpaceLayer, SharedThreadTargetDraft,
+    SourceLocator, TextRange, UnpublishSharedHighlightRequest, UpdateAnnotationCommand,
+};
+use serde_json::json;
+use uuid::Uuid;
+use wasm_bindgen::{closure::Closure, JsCast, JsValue};
+use wasm_bindgen_futures::JsFuture;
+use web_sys::{CustomEvent, EventTarget, RequestCredentials};
+
+use super::account::API_BASE;
+
+const PDF_CONTAINER_ID: &str = "lumi-pdf-pages";
+
+#[derive(Clone)]
+enum ReaderRouteState {
+    Resolving,
+    Reflowable,
+    Pdf,
+    Failed(String),
+}
+
+#[derive(Clone)]
+enum PdfReaderState {
+    Loading,
+    Ready(Box<PdfReaderData>),
+    Failed(String),
+}
+
+#[derive(Clone, PartialEq)]
+struct PdfReaderData {
+    entry: LibraryEntry,
+    document: PageFidelityDocument,
+}
+
+#[derive(Clone, Debug)]
+struct PdfSelection {
+    page_index: u32,
+    quote: String,
+    rects: Vec<PdfRect>,
+}
+
+/// Resolve the material format before selecting the reflowable or fixed-layout reader.
+#[component]
+pub(crate) fn ReaderRoute(
+    material_id: Uuid,
+    initial_anchor: Option<String>,
+    csrf_token: String,
+    record_rag_enabled: bool,
+    material_sharing_available: bool,
+    shared_reading_available: bool,
+    on_close: EventHandler<()>,
+    on_open_learning_session: EventHandler<Uuid>,
+    on_manage_learning: EventHandler<(Uuid, Uuid)>,
+) -> Element {
+    let mut state = use_signal(|| ReaderRouteState::Resolving);
+    use_effect(move || {
+        state.set(ReaderRouteState::Resolving);
+        spawn(async move {
+            match get_json::<LibraryEntry>(&format!("/materials/{material_id}")).await {
+                Ok(entry) if entry.kind == MaterialKind::Pdf => state.set(ReaderRouteState::Pdf),
+                Ok(_) => state.set(ReaderRouteState::Reflowable),
+                Err(error) => state.set(ReaderRouteState::Failed(error)),
+            }
+        });
+    });
+
+    let snapshot = state.read().clone();
+    match snapshot {
+        ReaderRouteState::Resolving => loading_view("Определяем формат материала…"),
+        ReaderRouteState::Reflowable => rsx! {
+            crate::reader::ReaderApp {
+                material_id,
+                initial_anchor: initial_anchor.clone(),
+                csrf_token,
+                record_rag_enabled,
+                material_sharing_available,
+                shared_reading_available,
+                on_close,
+                on_open_learning_session,
+                on_manage_learning,
+            }
+        },
+        ReaderRouteState::Pdf => rsx! {
+            PdfReaderApp {
+                material_id,
+                initial_anchor,
+                csrf_token,
+                record_rag_enabled,
+                material_sharing_available,
+                shared_reading_available,
+                on_close,
+                on_open_learning_session,
+                on_manage_learning,
+            }
+        },
+        ReaderRouteState::Failed(error) => rsx! {
+            main { id: "main-content", class: "reader-loading", aria_label: "Ошибка чтения",
+                h1 { "Не удалось открыть материал" }
+                p { class: "library-alert", role: "alert", "{error}" }
+                button { class: "secondary-action", r#type: "button", onclick: move |_| on_close.call(()), "Вернуться в библиотеку" }
+            }
+        },
+    }
+}
+
+#[component]
+fn PdfReaderApp(
+    material_id: Uuid,
+    initial_anchor: Option<String>,
+    csrf_token: String,
+    record_rag_enabled: bool,
+    material_sharing_available: bool,
+    shared_reading_available: bool,
+    on_close: EventHandler<()>,
+    on_open_learning_session: EventHandler<Uuid>,
+    on_manage_learning: EventHandler<(Uuid, Uuid)>,
+) -> Element {
+    let mut state = use_signal(|| PdfReaderState::Loading);
+    let mut annotations = use_signal(Vec::<Annotation>::new);
+    let mut current_page = use_signal(|| 0_u32);
+    let mut zoom = use_signal(|| 1.0_f64);
+    let mut selected_anchor = use_signal(|| None::<Anchor>);
+    let mut selected_target = use_signal(|| AnnotationTarget::PageArea {
+        page_index: 0,
+        exact: true,
+    });
+    let mut note_title = use_signal(String::new);
+    let mut note_draft = use_signal(String::new);
+    let mut note_tags = use_signal(String::new);
+    let voice_recording = use_signal(|| false);
+    let voice_recorded = use_signal(|| None::<crate::voice::RecordedAudio>);
+    let voice_preview_url = use_signal(String::new);
+    let voice_uploading = use_signal(|| false);
+    let mut voice_error = use_signal(|| None::<String>);
+    let mut reader_message = use_signal(String::new);
+    let save_message = use_signal(|| "Сохранено".to_owned());
+    let mut mount_config = use_signal(|| None::<String>);
+    let mut shared_layers = use_signal(Vec::<SharedReaderSpaceLayer>::new);
+    let social_thread_draft = use_signal(String::new);
+    let progress_generation = use_signal(|| 0_u64);
+    let csrf = use_signal(|| csrf_token);
+
+    use_effect(move || {
+        let Some(window) = web_sys::window() else {
+            return;
+        };
+        let handler = Closure::<dyn FnMut(web_sys::Event)>::new(move |_| {
+            apply_pdf_ai_reader_target(
+                material_id,
+                state,
+                current_page,
+                selected_anchor,
+                selected_target,
+                reader_message,
+            );
+        });
+        let _ = window.add_event_listener_with_callback(
+            crate::ai::READER_TARGET_EVENT,
+            handler.as_ref().unchecked_ref(),
+        );
+        handler.forget();
+    });
+
+    use_effect(move || {
+        state.set(PdfReaderState::Loading);
+        let initial_anchor = initial_anchor.clone();
+        spawn(async move {
+            match load_pdf_reader(material_id).await {
+                Ok((data, progress, loaded_annotations)) => {
+                    let loaded_shared_layers = if shared_reading_available {
+                        get_json(&format!("/shared-reading/materials/{material_id}"))
+                            .await
+                            .unwrap_or_default()
+                    } else {
+                        Vec::new()
+                    };
+                    let target = crate::ai::take_reader_target(material_id);
+                    let target_anchor = target.as_ref().and_then(|attachment| {
+                        let AiContextAttachment::Source {
+                            revision_id, scope, ..
+                        } = attachment
+                        else {
+                            return None;
+                        };
+                        if *revision_id != data.document.revision_id {
+                            return None;
+                        }
+                        match scope {
+                            AiSourceScope::Selection { anchor, .. } => {
+                                Some(anchor.as_ref().clone())
+                            }
+                            _ => None,
+                        }
+                    });
+                    let target_page = target_anchor.as_ref().and_then(|anchor| {
+                        match anchor.source_locator.as_ref() {
+                            Some(SourceLocator::Pdf(locator)) => Some(locator.page_index),
+                            _ => None,
+                        }
+                    });
+                    let initial_page = target_page
+                        .unwrap_or_else(|| restored_pdf_page(&progress))
+                        .min(data.document.pages.len().saturating_sub(1) as u32);
+                    let config = json!({
+                        "containerId": PDF_CONTAINER_ID,
+                        "sourceUrl": format!("{API_BASE}/materials/{material_id}/source"),
+                        "initialPage": initial_page,
+                        "pages": data.document.pages,
+                        "annotations": annotation_overlays(&loaded_annotations),
+                        "sharedAnnotations": shared_annotation_overlays(&loaded_shared_layers),
+                    })
+                    .to_string();
+                    current_page.set(initial_page);
+                    selected_anchor.set(target_anchor);
+                    annotations.set(loaded_annotations);
+                    shared_layers.set(loaded_shared_layers);
+                    if let Some(page_index) = initial_anchor
+                        .as_deref()
+                        .and_then(|value| value.strip_prefix("page-"))
+                        .and_then(|value| value.parse::<u32>().ok())
+                    {
+                        current_page.set(
+                            page_index.min(data.document.pages.len().saturating_sub(1) as u32),
+                        );
+                    }
+                    state.set(PdfReaderState::Ready(Box::new(data)));
+                    mount_config.set(Some(config));
+                }
+                Err(error) => state.set(PdfReaderState::Failed(error)),
+            }
+        });
+    });
+
+    use_effect(move || {
+        let Some(config) = mount_config.read().clone() else {
+            return;
+        };
+        spawn(async move {
+            browser_delay(30).await;
+            if let Err(error) = mount_pdf(
+                &config,
+                state,
+                annotations,
+                current_page,
+                selected_anchor,
+                selected_target,
+                reader_message,
+                save_message,
+                progress_generation,
+                csrf,
+            )
+            .await
+            {
+                reader_message.set(error);
+            }
+        });
+    });
+
+    let snapshot = state.read().clone();
+    match snapshot {
+        PdfReaderState::Loading => loading_view("Готовим страницы PDF…"),
+        PdfReaderState::Failed(error) => rsx! {
+            main { id: "main-content", class: "reader-loading", aria_label: "Ошибка чтения PDF",
+                p { class: "eyebrow", "PDF недоступен" }
+                h1 { "Не удалось открыть PDF" }
+                p { class: "library-alert", role: "alert", "{error}" }
+                button { class: "secondary-action", r#type: "button", onclick: move |_| on_close.call(()), "Вернуться в библиотеку" }
+            }
+        },
+        PdfReaderState::Ready(data) => {
+            let title = data.document.title.clone();
+            let creator = if data.document.creators.is_empty() {
+                "Автор не указан".to_owned()
+            } else {
+                data.document.creators.join(", ")
+            };
+            let page_count = data.document.pages.len();
+            let page_label = data
+                .document
+                .pages
+                .get(current_page() as usize)
+                .map_or_else(|| "—".to_owned(), |page| page.page_label.clone());
+            let selected = selected_anchor.read().clone();
+            let annotation_items = annotations.read().clone();
+            let margin_data = data.as_ref().clone();
+            let progress_percent = ((current_page() as usize + 1) * 100)
+                .checked_div(page_count)
+                .unwrap_or_default();
+            rsx! {
+                main {
+                    id: "main-content",
+                    class: "reader-workspace pdf-reader-workspace",
+                    aria_label: "Чтение PDF {title}",
+                    style: "--reader-progress: {progress_percent}%;",
+                    header { class: "reader-topbar pdf-reader-topbar",
+                        button { class: "reader-back", r#type: "button", aria_label: "Вернуться в библиотеку", onclick: move |_| {
+                            destroy_pdf();
+                            on_close.call(());
+                        }, "← Библиотека" }
+                        div { class: "reader-title",
+                            h1 { "{title}" }
+                            span { "{creator}" }
+                        }
+                        span { class: "reader-save-state saved", aria_live: "polite", "{save_message}" }
+                        div { class: "reader-tools", aria_label: "Управление PDF",
+                            crate::search_ui::ReaderSearch { material_id, record_rag_enabled }
+                            button { r#type: "button", aria_label: "Предыдущая страница", disabled: current_page() == 0, onclick: move |_| {
+                                let page = current_page().saturating_sub(1);
+                                current_page.set(page);
+                                call_pdf_two("goToPage", JsValue::from_str(PDF_CONTAINER_ID), JsValue::from_f64(f64::from(page)));
+                            }, "←" }
+                            span { class: "pdf-page-indicator", "Стр. {page_label} · {current_page() + 1}/{page_count}" }
+                            button { r#type: "button", aria_label: "Следующая страница", disabled: current_page() as usize + 1 >= page_count, onclick: move |_| {
+                                let page = (current_page() + 1).min(page_count.saturating_sub(1) as u32);
+                                current_page.set(page);
+                                call_pdf_two("goToPage", JsValue::from_str(PDF_CONTAINER_ID), JsValue::from_f64(f64::from(page)));
+                            }, "→" }
+                            button { r#type: "button", aria_label: "Уменьшить масштаб", onclick: move |_| {
+                                let next = (zoom() - 0.1).max(0.5);
+                                zoom.set(next);
+                                call_pdf_two("setZoom", JsValue::from_str(PDF_CONTAINER_ID), JsValue::from_f64(next));
+                            }, "−" }
+                            output { aria_label: "Масштаб", "{(zoom() * 100.0).round()}%" }
+                            button { r#type: "button", aria_label: "Увеличить масштаб", onclick: move |_| {
+                                let next = (zoom() + 0.1).min(3.0);
+                                zoom.set(next);
+                                call_pdf_two("setZoom", JsValue::from_str(PDF_CONTAINER_ID), JsValue::from_f64(next));
+                            }, "+" }
+                            button { r#type: "button", onclick: move |_| {
+                                if let Some(anchor) = anchor_for_page(&margin_data, current_page()) {
+                                    selected_anchor.set(Some(anchor));
+                                    selected_target.set(AnnotationTarget::PageArea {
+                                        page_index: current_page(),
+                                        exact: false,
+                                    });
+                                    note_title.set(String::new());
+                                    note_draft.set(String::new());
+                                    note_tags.set(String::new());
+                                }
+                            }, "Запись на полях" }
+                            crate::ai::SummaryAction {
+                                material_id,
+                                revision_id: data.document.revision_id,
+                                scope_kind: lumi_core::SummaryScopeKind::Material,
+                                scope_ref: "material".to_owned(),
+                                label: "Саммари".to_owned(),
+                                csrf_token: csrf.read().clone(),
+                            }
+                            crate::community::ShareMaterialAction {
+                                material_id,
+                                csrf_token: csrf.read().clone(),
+                                available: material_sharing_available,
+                                label: "Поделиться".to_owned(),
+                            }
+                            a { class: "secondary-action", href: "{API_BASE}/materials/{material_id}/source", download: "{data.entry.source_identity.source_name}", "Скачать PDF" }
+                        }
+                        div { class: "reader-chapter-progress", aria_hidden: "true", span {} }
+                    }
+                    if !reader_message().is_empty() {
+                        p { class: "reader-global-status", role: "alert", "{reader_message}" }
+                    }
+                    div { class: "pdf-reader-layout",
+                        section { class: "pdf-reader-stage", aria_label: "Страницы PDF",
+                            div {
+                                id: PDF_CONTAINER_ID,
+                                class: "pdf-pages",
+                                tabindex: "0",
+                                aria_label: "Прокручиваемые страницы PDF",
+                            }
+                        }
+                        aside { class: "pdf-annotation-panel", aria_label: "Аннотации PDF",
+                            h2 { "Аннотации" }
+                            crate::ai::SummaryAction {
+                                material_id,
+                                revision_id: data.document.revision_id,
+                                scope_kind: lumi_core::SummaryScopeKind::Chapter,
+                                scope_ref: format!("page:{}", current_page()),
+                                label: "Саммари страницы".to_owned(),
+                                csrf_token: csrf.read().clone(),
+                            }
+                            if let Some(anchor) = selected {
+                                div { class: "pdf-selection-card",
+                                    p { class: "eyebrow", "Выбранный фрагмент" }
+                                    blockquote { "{anchor.quote}" }
+                                    PdfAiActions {
+                                        data: data.as_ref().clone(),
+                                        anchor: anchor.clone(),
+                                        reader_message,
+                                    }
+                                    div { class: "dialog-actions",
+                                        button { class: "primary-action", r#type: "button", disabled: !selected_target.read().is_exact_selection(), onclick: move |_| {
+                                            create_pdf_annotation(
+                                                AnnotationKind::Highlight { style: HighlightStyle::Yellow },
+                                                None,
+                                                Vec::new(),
+                                                state,
+                                                selected_anchor,
+                                                selected_target,
+                                                annotations,
+                                                save_message,
+                                                reader_message,
+                                                csrf,
+                                            );
+                                        }, "Жёлтым" }
+                                        button { class: "primary-action", r#type: "button", disabled: !selected_target.read().is_exact_selection(), onclick: move |_| {
+                                            create_pdf_annotation(
+                                                AnnotationKind::Highlight { style: HighlightStyle::Bold },
+                                                None,
+                                                Vec::new(),
+                                                state,
+                                                selected_anchor,
+                                                selected_target,
+                                                annotations,
+                                                save_message,
+                                                reader_message,
+                                                csrf,
+                                            );
+                                        }, "Жирным" }
+                                    }
+                                    div { class: "pdf-voice-note-composer", aria_label: "Голосовая запись PDF",
+                                        if voice_recording() {
+                                            p { role: "status", "Идёт запись…" }
+                                            button { class: "primary-action", r#type: "button", onclick: move |_| {
+                                                finish_pdf_voice_recording(
+                                                    voice_recording,
+                                                    voice_recorded,
+                                                    voice_preview_url,
+                                                    voice_error,
+                                                );
+                                            }, "Остановить запись" }
+                                        } else if !voice_preview_url().is_empty() {
+                                            audio { controls: true, src: "{voice_preview_url}", aria_label: "Предпрослушивание голосовой заметки PDF" }
+                                            div { class: "dialog-actions",
+                                                button { class: "secondary-action", r#type: "button", disabled: voice_uploading(), onclick: move |_| {
+                                                    discard_pdf_voice_recording(
+                                                        voice_recording,
+                                                        voice_recorded,
+                                                        voice_preview_url,
+                                                        voice_error,
+                                                    );
+                                                }, "Удалить запись" }
+                                                button { class: "primary-action", r#type: "button", disabled: voice_uploading(), onclick: move |_| {
+                                                    save_pdf_voice_annotation(
+                                                        state,
+                                                        selected_anchor,
+                                                        selected_target,
+                                                        annotations,
+                                                        voice_recorded,
+                                                        voice_preview_url,
+                                                        voice_uploading,
+                                                        voice_error,
+                                                        save_message,
+                                                        reader_message,
+                                                        csrf,
+                                                    );
+                                                }, if voice_uploading() { "Загружаем…" } else { "Сохранить голосовую заметку" } }
+                                            }
+                                        } else {
+                                            button { class: "secondary-action", r#type: "button", onclick: move |_| {
+                                                begin_pdf_voice_recording(voice_recording, voice_error);
+                                            }, "Записать голос" }
+                                            label { class: "voice-file-fallback",
+                                                "Или выберите аудиофайл"
+                                                input {
+                                                    r#type: "file",
+                                                    accept: ".webm,.ogg,.oga,.m4a,.mp4,.mp3,.wav,audio/webm,audio/ogg,audio/mp4,audio/mpeg,audio/wav",
+                                                    aria_label: "Аудиофайл голосовой заметки PDF",
+                                                    onchange: move |event| {
+                                                        let Some(file) = event.files().into_iter().next() else { return; };
+                                                        spawn(async move {
+                                                            let name = file.name();
+                                                            match file.read_bytes().await {
+                                                                Ok(bytes) => set_pdf_voice_recording(
+                                                                    voice_recording,
+                                                                    voice_recorded,
+                                                                    voice_preview_url,
+                                                                    voice_error,
+                                                                    crate::voice::RecordedAudio::from_file(&name, bytes.to_vec()),
+                                                                ),
+                                                                Err(_) => voice_error.set(Some("Не удалось прочитать аудиофайл.".to_owned())),
+                                                            }
+                                                        });
+                                                    }
+                                                }
+                                            }
+                                        }
+                                        if let Some(error) = voice_error() {
+                                            p { class: "annotation-conflict", role: "alert", "{error}" }
+                                        }
+                                    }
+                                    label { "Заголовок",
+                                        input {
+                                            name: "pdf_note_title",
+                                            maxlength: "240",
+                                            value: "{note_title}",
+                                            placeholder: "Короткое название",
+                                            oninput: move |event| note_title.set(event.value()),
+                                        }
+                                    }
+                                    label { "Заметка",
+                                        textarea {
+                                            name: "pdf_note",
+                                            rows: "3",
+                                            value: "{note_draft}",
+                                            placeholder: "Добавьте мысль…",
+                                            oninput: move |event| note_draft.set(event.value()),
+                                        }
+                                    }
+                                    label { "Теги",
+                                        input {
+                                            name: "pdf_note_tags",
+                                            value: "{note_tags}",
+                                            placeholder: "чтение, идея",
+                                            oninput: move |event| note_tags.set(event.value()),
+                                        }
+                                    }
+                                    button { class: "secondary-action", r#type: "button", disabled: note_draft().trim().is_empty(), onclick: move |_| {
+                                        let body = note_draft().trim().to_owned();
+                                        if !body.is_empty() {
+                                            create_pdf_annotation(
+                                                AnnotationKind::Note { body },
+                                                non_empty(note_title().trim()),
+                                                parse_tags(&note_tags()),
+                                                state,
+                                                selected_anchor,
+                                                selected_target,
+                                                annotations,
+                                                save_message,
+                                                reader_message,
+                                                csrf,
+                                            );
+                                            note_title.set(String::new());
+                                            note_draft.set(String::new());
+                                            note_tags.set(String::new());
+                                        }
+                                    }, "Сохранить заметку" }
+                                }
+                            } else {
+                                p { class: "capability-note", "Выделите текст на странице, чтобы создать подсветку или заметку." }
+                            }
+                            if annotation_items.is_empty() {
+                                p { "Аннотаций пока нет." }
+                            } else {
+                                ol { class: "annotation-list",
+                                    for annotation in annotation_items {
+                                        PdfAnnotationItem {
+                                            annotation,
+                                            annotations,
+                                            current_page,
+                                            save_message,
+                                            reader_message,
+                                            csrf
+                                        }
+                                    }
+                                }
+                            }
+                            if shared_reading_available {
+                                PdfSocialPanel {
+                                    layers: shared_layers,
+                                    annotations,
+                                    selected_anchor,
+                                    selected_target,
+                                    social_thread_draft,
+                                    current_page,
+                                    reader_message,
+                                    csrf,
+                                }
+                            }
+                        }
+                    }
+                    if current_page() as usize + 1 == page_count {
+                        if let Some(locator) = anchor_for_page(&data, current_page()) {
+                            crate::learning::CompletionOffer {
+                                key: "{data.document.revision_id}:material",
+                                progress: MoveReadingPositionCommand {
+                                    material_id: data.entry.id,
+                                    revision_id: data.document.revision_id,
+                                    locator,
+                                    progress_fraction: 1.0,
+                                },
+                                completion: lumi_core::CompleteReadingScopeCommand {
+                                    material_id: data.entry.id,
+                                    revision_id: data.document.revision_id,
+                                    scope_kind: lumi_core::LearningScopeKind::Material,
+                                    content_unit_id: None,
+                                    anchor: None,
+                                    trigger: lumi_core::ReadingCompletionTrigger::ReaderBoundary,
+                                },
+                                csrf_token: csrf.read().clone(),
+                                on_open_session: on_open_learning_session,
+                                on_manage_items: on_manage_learning,
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[component]
+fn PdfAiActions(data: PdfReaderData, anchor: Anchor, reader_message: Signal<String>) -> Element {
+    let ask_anchor = anchor.clone();
+    let explain_anchor = anchor.clone();
+    let summary_anchor = anchor;
+    let ask_data = data.clone();
+    let explain_data = data.clone();
+    rsx! {
+        div { class: "dialog-actions ai-selection-actions",
+            button { class: "primary-action", r#type: "button", onclick: move |_| {
+                dispatch_pdf_ai_handoff(
+                    &ask_data,
+                    ask_anchor.clone(),
+                    "",
+                    false,
+                    reader_message,
+                );
+            }, "Спросить ИИ" }
+            button { class: "secondary-action", r#type: "button", onclick: move |_| {
+                dispatch_pdf_ai_handoff(
+                    &explain_data,
+                    explain_anchor.clone(),
+                    "Объясни выделенный фрагмент простыми словами, не теряя его смысл.",
+                    true,
+                    reader_message,
+                );
+            }, "Объясни проще" }
+            button { class: "secondary-action", r#type: "button", onclick: move |_| {
+                dispatch_pdf_ai_handoff(
+                    &data,
+                    summary_anchor.clone(),
+                    "Кратко перескажи выделенный фрагмент и сохрани ключевые тезисы.",
+                    true,
+                    reader_message,
+                );
+            }, "Кратко перескажи" }
+        }
+    }
+}
+
+#[component]
+fn PdfSocialPanel(
+    layers: Signal<Vec<SharedReaderSpaceLayer>>,
+    annotations: Signal<Vec<Annotation>>,
+    selected_anchor: Signal<Option<Anchor>>,
+    selected_target: Signal<AnnotationTarget>,
+    social_thread_draft: Signal<String>,
+    current_page: Signal<u32>,
+    reader_message: Signal<String>,
+    csrf: Signal<String>,
+) -> Element {
+    let spaces = layers.read().clone();
+    let selected = selected_anchor.read().clone();
+    let private_highlights = annotations
+        .read()
+        .iter()
+        .filter_map(|annotation| match annotation.kind {
+            AnnotationKind::Highlight { style }
+                if annotation.status == AnnotationStatus::Active =>
+            {
+                Some((annotation.clone(), style))
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    rsx! {
+        section { class: "pdf-social-panel", aria_label: "Совместное чтение PDF",
+            h2 { "Сообщество" }
+            if spaces.is_empty() {
+                p { class: "capability-note",
+                    "Для этой копии нет подтверждённого совпадения с материалом сообщества."
+                }
+            } else {
+                if let Some(anchor) = selected {
+                    label { "Обсудить выбранное место"
+                        textarea {
+                            maxlength: "32768",
+                            value: "{social_thread_draft}",
+                            oninput: move |event| social_thread_draft.set(event.value()),
+                        }
+                    }
+                    for space in spaces.clone() {
+                        button {
+                            class: "secondary-action compact-action",
+                            r#type: "button",
+                            disabled: social_thread_draft().trim().is_empty(),
+                            onclick: {
+                                let anchor = anchor.clone();
+                                let target = selected_target.read().clone();
+                                let body = social_thread_draft();
+                                let csrf_token = csrf.read().clone();
+                                move |_| {
+                                    let anchor = anchor.clone();
+                                    let target = target.clone();
+                                    let body = body.clone();
+                                    let csrf_token = csrf_token.clone();
+                                    let space = space.clone();
+                                    spawn(async move {
+                                        let page_label = match anchor.source_locator.as_ref() {
+                                            Some(SourceLocator::Pdf(locator)) => {
+                                                Some(locator.page_label.clone())
+                                            }
+                                            _ => None,
+                                        };
+                                        let request = CreateSharedThreadRequest {
+                                            body_markdown: body,
+                                            target: SharedThreadTargetDraft::Anchor(Box::new(
+                                                SharedAnchorDraft {
+                                                    anchor,
+                                                    target,
+                                                    provenance_annotation_id: None,
+                                                    heading_path: Vec::new(),
+                                                    page_label,
+                                                },
+                                            )),
+                                        };
+                                        match post_pdf_social_json(
+                                            &format!(
+                                                "/spaces/{}/materials/{}/threads",
+                                                space.community_space_id,
+                                                space.shared_material_id
+                                            ),
+                                            &request,
+                                            &csrf_token,
+                                        )
+                                        .await
+                                        {
+                                            Ok(thread) => {
+                                                if let Some(layer) = layers
+                                                    .write()
+                                                    .iter_mut()
+                                                    .find(|layer| {
+                                                        layer.community_space_id
+                                                            == space.community_space_id
+                                                    })
+                                                {
+                                                    layer.layer.threads.push(thread);
+                                                }
+                                                social_thread_draft.set(String::new());
+                                                update_combined_annotation_overlays(
+                                                    &annotations.read(),
+                                                    &layers.read(),
+                                                );
+                                                reader_message.set(format!(
+                                                    "Обсуждение опубликовано в «{}».",
+                                                    space.community_space_name
+                                                ));
+                                            }
+                                            Err(error) => reader_message.set(error),
+                                        }
+                                    });
+                                }
+                            },
+                            "В «{space.community_space_name}»"
+                        }
+                    }
+                } else {
+                    p { class: "capability-note",
+                        "Выделите текст или область страницы, чтобы начать обсуждение."
+                    }
+                }
+                for space in spaces {
+                    PdfSocialSpace {
+                        space,
+                        private_highlights: private_highlights.clone(),
+                        layers,
+                        annotations,
+                        current_page,
+                        reader_message,
+                        csrf,
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[component]
+fn PdfSocialSpace(
+    space: SharedReaderSpaceLayer,
+    private_highlights: Vec<(Annotation, HighlightStyle)>,
+    layers: Signal<Vec<SharedReaderSpaceLayer>>,
+    annotations: Signal<Vec<Annotation>>,
+    current_page: Signal<u32>,
+    reader_message: Signal<String>,
+    csrf: Signal<String>,
+) -> Element {
+    let space_id = space.community_space_id;
+    let shared_material_id = space.shared_material_id;
+    let name = space.community_space_name.clone();
+    let threads = space.layer.threads.clone();
+    let highlights = space.layer.highlights.clone();
+    rsx! {
+        details { class: "pdf-social-space",
+            summary { "{name}" }
+            if !private_highlights.is_empty() {
+                details {
+                    summary { "Опубликовать личное выделение" }
+                    for (annotation, style) in private_highlights {
+                        div { class: "reader-social-item",
+                            span { "{pdf_bounded_preview(&annotation.anchor.quote, 96)}" }
+                            button {
+                                r#type: "button",
+                                onclick: {
+                                    let annotation = annotation.clone();
+                                    let csrf_token = csrf.read().clone();
+                                    move |_| {
+                                        let annotation = annotation.clone();
+                                        let csrf_token = csrf_token.clone();
+                                        spawn(async move {
+                                            let request = PublishSharedHighlightRequest {
+                                                anchor: SharedAnchorDraft::from_annotation(&annotation),
+                                                style,
+                                            };
+                                            match post_pdf_social_json(
+                                                &format!(
+                                                    "/spaces/{space_id}/materials/{shared_material_id}/highlights"
+                                                ),
+                                                &request,
+                                                &csrf_token,
+                                            )
+                                            .await
+                                            {
+                                                Ok(highlight) => {
+                                                    if let Some(layer) = layers
+                                                        .write()
+                                                        .iter_mut()
+                                                        .find(|layer| {
+                                                            layer.community_space_id == space_id
+                                                        })
+                                                    {
+                                                        layer.layer.highlights.push(highlight);
+                                                    }
+                                                    update_combined_annotation_overlays(
+                                                        &annotations.read(),
+                                                        &layers.read(),
+                                                    );
+                                                    reader_message.set(
+                                                        "Выделение опубликовано отдельно; личная запись не изменена.".to_owned(),
+                                                    );
+                                                }
+                                                Err(error) => reader_message.set(error),
+                                            }
+                                        });
+                                    }
+                                },
+                                "Опубликовать"
+                            }
+                        }
+                    }
+                }
+            }
+            for thread in threads {
+                article { class: "reader-social-item",
+                    p { class: "eyebrow", "Обсуждение" }
+                    PdfSharedPlacement {
+                        placement: thread.placement.clone(),
+                        current_page,
+                    }
+                    for comment in thread.comments {
+                        if let Some(body) = comment.body_markdown {
+                            p { "{body}" }
+                        }
+                    }
+                }
+            }
+            for highlight in highlights {
+                article { class: "reader-social-item",
+                    p { class: "eyebrow", "Общее выделение" }
+                    PdfSharedPlacement {
+                        placement: Some(highlight.placement.clone()),
+                        current_page,
+                    }
+                    button {
+                        class: "text-action danger-text",
+                        r#type: "button",
+                        onclick: {
+                            let csrf_token = csrf.read().clone();
+                            move |_| {
+                                let csrf_token = csrf_token.clone();
+                                let highlight = highlight.clone();
+                                spawn(async move {
+                                    match delete_pdf_social_json(
+                                        &format!(
+                                            "/spaces/{space_id}/highlights/{}",
+                                            highlight.id
+                                        ),
+                                        &UnpublishSharedHighlightRequest {
+                                            expected_revision: highlight.object_revision,
+                                        },
+                                        &csrf_token,
+                                    )
+                                    .await
+                                    {
+                                        Ok(()) => {
+                                            if let Some(layer) = layers
+                                                .write()
+                                                .iter_mut()
+                                                .find(|layer| {
+                                                    layer.community_space_id == space_id
+                                                })
+                                            {
+                                                layer.layer.highlights.retain(|item| {
+                                                    item.id != highlight.id
+                                                });
+                                            }
+                                            update_combined_annotation_overlays(
+                                                &annotations.read(),
+                                                &layers.read(),
+                                            );
+                                            reader_message.set(
+                                                "Публикация убрана; личное выделение сохранено.".to_owned(),
+                                            );
+                                        }
+                                        Err(error) => reader_message.set(error),
+                                    }
+                                });
+                            }
+                        },
+                        "Убрать публикацию"
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[component]
+fn PdfSharedPlacement(
+    placement: Option<SharedAnchorPlacement>,
+    current_page: Signal<u32>,
+) -> Element {
+    let Some(placement) = placement else {
+        return rsx! {};
+    };
+    match placement {
+        SharedAnchorPlacement::Resolved { anchor, .. } => {
+            let page = pdf_anchor_page(&anchor);
+            rsx! {
+                blockquote { "{pdf_bounded_preview(&anchor.quote, 160)}" }
+                if let Some(page) = page {
+                    button {
+                        class: "text-action",
+                        r#type: "button",
+                        onclick: move |_| {
+                            current_page.set(page);
+                            call_pdf_two(
+                                "goToPage",
+                                JsValue::from_str(PDF_CONTAINER_ID),
+                                JsValue::from_f64(f64::from(page)),
+                            );
+                        },
+                        "Показать на странице {page + 1}"
+                    }
+                }
+            }
+        }
+        SharedAnchorPlacement::Unresolved { shared_anchor } => rsx! {
+            p { class: "library-alert compact", role: "status",
+                "Место не найдено в текущей версии."
+            }
+            blockquote { "{pdf_bounded_preview(&shared_anchor.quote, 160)}" }
+        },
+    }
+}
+
+fn dispatch_pdf_ai_handoff(
+    data: &PdfReaderData,
+    anchor: Anchor,
+    instruction: &str,
+    auto_submit: bool,
+    mut reader_message: Signal<String>,
+) {
+    let quote = anchor.quote.chars().take(80).collect::<String>();
+    let handoff = crate::ai::ReaderAiHandoff {
+        attachment: AiContextAttachment::Source {
+            kind: "selection".to_owned(),
+            material_id: data.entry.id,
+            revision_id: data.document.revision_id,
+            scope: AiSourceScope::Selection {
+                material_id: data.entry.id,
+                revision_id: data.document.revision_id,
+                anchor: Box::new(anchor),
+            },
+            display_label: format!("{} — «{quote}»", data.entry.display_title()),
+        },
+        instruction: instruction.to_owned(),
+        auto_submit,
+    };
+    match crate::ai::dispatch_reader_handoff(&handoff) {
+        Ok(()) => reader_message.set("Фрагмент прикреплён к AI-чату.".to_owned()),
+        Err(message) => reader_message.set(message),
+    }
+}
+
+fn loading_view(message: &str) -> Element {
+    rsx! {
+        main { id: "main-content", class: "reader-loading", aria_label: "Загрузка материала", aria_live: "polite",
+            span { class: "loading-mark", aria_hidden: "true" }
+            h1 { "{message}" }
+        }
+    }
+}
+
+async fn load_pdf_reader(
+    material_id: Uuid,
+) -> Result<(PdfReaderData, Option<ReadingProgress>, Vec<Annotation>), String> {
+    let entry: LibraryEntry = get_json(&format!("/materials/{material_id}")).await?;
+    let revision_id = entry
+        .active_revision_id
+        .ok_or_else(|| "У материала ещё нет готовой версии для чтения.".to_owned())?;
+    let document = get_json(&format!("/revisions/{revision_id}/page-fidelity-document")).await?;
+    let progress = get_json(&format!("/materials/{material_id}/progress")).await?;
+    let annotations = get_json(&format!("/materials/{material_id}/annotations")).await?;
+    Ok((PdfReaderData { entry, document }, progress, annotations))
+}
+
+async fn get_json<T: for<'de> serde::Deserialize<'de>>(path: &str) -> Result<T, String> {
+    let response = Request::get(&format!("{API_BASE}{path}"))
+        .credentials(RequestCredentials::Include)
+        .send()
+        .await
+        .map_err(|error| format!("Сеть/API недоступны: {error}"))?;
+    if !response.ok() {
+        if response.status() == 401 {
+            super::account::notify_session_expired();
+        }
+        return Err(format!("Lumi API вернул HTTP {}.", response.status()));
+    }
+    response
+        .json()
+        .await
+        .map_err(|error| format!("Некорректный ответ PDF reader API: {error}"))
+}
+
+async fn post_pdf_social_json<T, R>(path: &str, body: &T, csrf: &str) -> Result<R, String>
+where
+    T: serde::Serialize,
+    R: for<'de> serde::Deserialize<'de>,
+{
+    let request = Request::post(&format!("{API_BASE}{path}"))
+        .credentials(RequestCredentials::Include)
+        .header("X-Lumi-CSRF", csrf)
+        .header("Idempotency-Key", &Uuid::now_v7().to_string())
+        .json(body)
+        .map_err(|error| error.to_string())?;
+    let response = request.send().await.map_err(|error| error.to_string())?;
+    if response.status() == 401 {
+        super::account::notify_session_expired();
+    }
+    if !response.ok() {
+        return Err(format!(
+            "Социальный слой отклонил запрос: HTTP {}.",
+            response.status()
+        ));
+    }
+    response.json().await.map_err(|error| error.to_string())
+}
+
+async fn delete_pdf_social_json<T>(path: &str, body: &T, csrf: &str) -> Result<(), String>
+where
+    T: serde::Serialize,
+{
+    let request = Request::delete(&format!("{API_BASE}{path}"))
+        .credentials(RequestCredentials::Include)
+        .header("X-Lumi-CSRF", csrf)
+        .header("Idempotency-Key", &Uuid::now_v7().to_string())
+        .json(body)
+        .map_err(|error| error.to_string())?;
+    let response = request.send().await.map_err(|error| error.to_string())?;
+    if response.status() == 401 {
+        super::account::notify_session_expired();
+    }
+    response
+        .ok()
+        .then_some(())
+        .ok_or_else(|| format!("Не удалось убрать публикацию: HTTP {}.", response.status()))
+}
+
+fn apply_pdf_ai_reader_target(
+    material_id: Uuid,
+    state: Signal<PdfReaderState>,
+    mut current_page: Signal<u32>,
+    mut selected_anchor: Signal<Option<Anchor>>,
+    mut selected_target: Signal<AnnotationTarget>,
+    mut reader_message: Signal<String>,
+) {
+    let Some(target) = crate::ai::take_reader_target(material_id) else {
+        return;
+    };
+    let PdfReaderState::Ready(data) = &*state.read() else {
+        return;
+    };
+    let AiContextAttachment::Source {
+        revision_id, scope, ..
+    } = target
+    else {
+        return;
+    };
+    if revision_id != data.document.revision_id {
+        reader_message.set("Источник ответа относится к другой версии материала.".to_owned());
+        return;
+    }
+    let (page, anchor) = match scope {
+        AiSourceScope::Selection { anchor, .. } => {
+            let page = match anchor.source_locator.as_ref() {
+                Some(SourceLocator::Pdf(locator)) => locator.page_index,
+                _ => {
+                    reader_message.set("Citation не содержит PDF page anchor.".to_owned());
+                    return;
+                }
+            };
+            (page, Some(*anchor))
+        }
+        AiSourceScope::Chapter { scope_ref, .. } => (
+            scope_ref
+                .strip_prefix("page:")
+                .unwrap_or(&scope_ref)
+                .parse()
+                .unwrap_or_default(),
+            None,
+        ),
+        AiSourceScope::Material { .. } => (0, None),
+    };
+    current_page.set(page);
+    if anchor.is_some() {
+        selected_target.set(AnnotationTarget::PageArea {
+            page_index: page,
+            exact: true,
+        });
+    }
+    selected_anchor.set(anchor);
+    call_pdf_two(
+        "goToPage",
+        JsValue::from_str(PDF_CONTAINER_ID),
+        JsValue::from_f64(f64::from(page)),
+    );
+    reader_message.set("Открыт источник ответа AI.".to_owned());
+}
+
+fn restored_pdf_page(progress: &Option<ReadingProgress>) -> u32 {
+    progress
+        .as_ref()
+        .and_then(|progress| progress.locator.source_locator.as_ref())
+        .and_then(|locator| match locator {
+            SourceLocator::Pdf(locator) => Some(locator.page_index),
+            _ => None,
+        })
+        .unwrap_or_default()
+}
+
+fn anchor_for_page(data: &PdfReaderData, page_index: u32) -> Option<Anchor> {
+    let page = data.document.pages.get(page_index as usize)?;
+    Some(pdf_anchor(data, page, String::new(), Vec::new()))
+}
+
+fn anchor_for_selection(data: &PdfReaderData, selection: PdfSelection) -> Option<Anchor> {
+    let page = data.document.pages.get(selection.page_index as usize)?;
+    Some(pdf_anchor(data, page, selection.quote, selection.rects))
+}
+
+fn pdf_anchor(data: &PdfReaderData, page: &PdfPage, quote: String, rects: Vec<PdfRect>) -> Anchor {
+    let path = vec![format!("page-{}", page.page_index)];
+    let normalized_rects = rects
+        .iter()
+        .map(|rect| PdfRect {
+            x: rect.x / page.width_points.max(1.0),
+            y: rect.y / page.height_points.max(1.0),
+            width: rect.width / page.width_points.max(1.0),
+            height: rect.height / page.height_points.max(1.0),
+        })
+        .collect();
+    let locator = SourceLocator::Pdf(PdfSourceLocator {
+        pdf_file_checksum: data.entry.source_identity.source_hash.clone(),
+        page_index: page.page_index,
+        page_label: page.page_label.clone(),
+        page_revision_hash: page.page_hash.clone(),
+        page_rects: rects.clone(),
+        page_quads: Vec::new(),
+        text_layer_revision: Some("pdfjs-selection-v1".to_owned()),
+        text_block_start: None,
+        text_block_end: None,
+        text_char_start: None,
+        text_char_end: None,
+        normalized_rects,
+    });
+    Anchor {
+        revision_id: data.document.revision_id,
+        node_path: path.clone(),
+        end_node_path: path,
+        text_range: (!quote.is_empty()).then(|| TextRange {
+            start: 0,
+            end: quote.chars().count(),
+        }),
+        quote,
+        prefix: String::new(),
+        suffix: String::new(),
+        content_hash: page.page_hash.clone(),
+        source_locator: Some(locator.clone()),
+        end_source_locator: Some(locator),
+        page_rects: rects
+            .iter()
+            .map(|rect| PageRect {
+                page_index: page.page_index,
+                x: rect.x,
+                y: rect.y,
+                width: rect.width,
+                height: rect.height,
+            })
+            .collect(),
+    }
+}
+
+#[expect(
+    clippy::too_many_arguments,
+    reason = "browser event bridge carries the independent reader signals it updates"
+)]
+async fn mount_pdf(
+    config: &str,
+    state: Signal<PdfReaderState>,
+    annotations: Signal<Vec<Annotation>>,
+    mut current_page: Signal<u32>,
+    mut selected_anchor: Signal<Option<Anchor>>,
+    mut selected_target: Signal<AnnotationTarget>,
+    mut reader_message: Signal<String>,
+    save_message: Signal<String>,
+    progress_generation: Signal<u64>,
+    csrf: Signal<String>,
+) -> Result<(), String> {
+    wait_for_pdf_api().await?;
+    let container = web_sys::window()
+        .and_then(|window| window.document())
+        .and_then(|document| document.get_element_by_id(PDF_CONTAINER_ID))
+        .ok_or_else(|| "Контейнер PDF reader недоступен.".to_owned())?;
+    let target: EventTarget = container
+        .dyn_into()
+        .map_err(|_| "Контейнер PDF reader не поддерживает события.".to_owned())?;
+
+    let page_callback = Callback::new(move |event: CustomEvent| {
+        let Some(page_index) = event_detail_u32(&event, "pageIndex") else {
+            return;
+        };
+        current_page.set(page_index);
+        schedule_progress_save(
+            page_index,
+            state,
+            progress_generation,
+            save_message,
+            reader_message,
+            csrf,
+        );
+    });
+    let page_listener =
+        Closure::<dyn FnMut(CustomEvent)>::new(move |event| page_callback.call(event));
+    target
+        .add_event_listener_with_callback("lumi-pdf-page", page_listener.as_ref().unchecked_ref())
+        .map_err(js_error)?;
+    page_listener.forget();
+
+    let selection_callback = Callback::new(move |event: CustomEvent| {
+        match selection_from_event(&event).and_then(|selection| match &*state.read() {
+            PdfReaderState::Ready(data) => anchor_for_selection(data, selection),
+            PdfReaderState::Loading | PdfReaderState::Failed(_) => None,
+        }) {
+            Some(anchor) => {
+                let page_index = match anchor.source_locator.as_ref() {
+                    Some(SourceLocator::Pdf(locator)) => locator.page_index,
+                    _ => 0,
+                };
+                selected_target.set(AnnotationTarget::PageArea {
+                    page_index,
+                    exact: true,
+                });
+                selected_anchor.set(Some(anchor));
+                reader_message.set(String::new());
+            }
+            None => reader_message.set("Не удалось привязать выделение к странице.".to_owned()),
+        }
+    });
+    let selection_listener =
+        Closure::<dyn FnMut(CustomEvent)>::new(move |event| selection_callback.call(event));
+    target
+        .add_event_listener_with_callback(
+            "lumi-pdf-selection",
+            selection_listener.as_ref().unchecked_ref(),
+        )
+        .map_err(js_error)?;
+    selection_listener.forget();
+
+    let error_callback = Callback::new(move |event: CustomEvent| {
+        let message = event_detail_string(&event, "message")
+            .unwrap_or_else(|| "PDF.js не смог отрисовать страницу.".to_owned());
+        reader_message.set(message);
+    });
+    let error_listener =
+        Closure::<dyn FnMut(CustomEvent)>::new(move |event| error_callback.call(event));
+    target
+        .add_event_listener_with_callback("lumi-pdf-error", error_listener.as_ref().unchecked_ref())
+        .map_err(js_error)?;
+    error_listener.forget();
+
+    let result = call_pdf_one("mountJson", JsValue::from_str(config))?;
+    if result.is_instance_of::<js_sys::Promise>() {
+        JsFuture::from(js_sys::Promise::from(result))
+            .await
+            .map_err(js_error)?;
+    }
+    let overlays = serde_json::to_string(&annotation_overlays(&annotations.read()))
+        .map_err(|error| error.to_string())?;
+    call_pdf_two(
+        "setAnnotationsJson",
+        JsValue::from_str(PDF_CONTAINER_ID),
+        JsValue::from_str(&overlays),
+    );
+    Ok(())
+}
+
+fn selection_from_event(event: &CustomEvent) -> Option<PdfSelection> {
+    let page_index = event_detail_u32(event, "pageIndex")?;
+    let quote = event_detail_string(event, "quote")?;
+    let rects_value = js_sys::Reflect::get(&event.detail(), &JsValue::from_str("rects")).ok()?;
+    let rects = js_sys::Array::from(&rects_value)
+        .iter()
+        .filter_map(|value| {
+            Some(PdfRect {
+                x: reflect_number(&value, "x")? as f32,
+                y: reflect_number(&value, "y")? as f32,
+                width: reflect_number(&value, "width")? as f32,
+                height: reflect_number(&value, "height")? as f32,
+            })
+        })
+        .filter(|rect| {
+            rect.x.is_finite()
+                && rect.y.is_finite()
+                && rect.width.is_finite()
+                && rect.height.is_finite()
+                && rect.width > 0.0
+                && rect.height > 0.0
+        })
+        .collect::<Vec<_>>();
+    (!rects.is_empty()).then_some(PdfSelection {
+        page_index,
+        quote,
+        rects,
+    })
+}
+
+fn event_detail_u32(event: &CustomEvent, key: &str) -> Option<u32> {
+    reflect_number(&event.detail(), key).and_then(|value| {
+        (value.is_finite() && value >= 0.0 && value <= f64::from(u32::MAX)).then_some(value as u32)
+    })
+}
+
+fn event_detail_string(event: &CustomEvent, key: &str) -> Option<String> {
+    js_sys::Reflect::get(&event.detail(), &JsValue::from_str(key))
+        .ok()?
+        .as_string()
+}
+
+fn reflect_number(value: &JsValue, key: &str) -> Option<f64> {
+    js_sys::Reflect::get(value, &JsValue::from_str(key))
+        .ok()?
+        .as_f64()
+}
+
+fn schedule_progress_save(
+    page_index: u32,
+    state: Signal<PdfReaderState>,
+    mut generation: Signal<u64>,
+    mut save_message: Signal<String>,
+    mut reader_message: Signal<String>,
+    csrf: Signal<String>,
+) {
+    let next_generation = generation().saturating_add(1);
+    generation.set(next_generation);
+    spawn(async move {
+        browser_delay(450).await;
+        if generation() != next_generation {
+            return;
+        }
+        let command = match &*state.read() {
+            PdfReaderState::Ready(data) => {
+                let Some(locator) = anchor_for_page(data, page_index) else {
+                    return;
+                };
+                MoveReadingPositionCommand {
+                    material_id: data.entry.id,
+                    revision_id: data.document.revision_id,
+                    locator,
+                    progress_fraction: (page_index + 1) as f32
+                        / data.document.pages.len().max(1) as f32,
+                }
+            }
+            PdfReaderState::Loading | PdfReaderState::Failed(_) => return,
+        };
+        save_message.set("Сохраняем позицию…".to_owned());
+        match save_progress(&command, &csrf.read()).await {
+            Ok(()) => save_message.set("Сохранено".to_owned()),
+            Err(error) => {
+                save_message.set("Позиция не сохранена".to_owned());
+                reader_message.set(error);
+            }
+        }
+    });
+}
+
+#[expect(
+    clippy::too_many_arguments,
+    reason = "PDF mutation bridges independent Dioxus signals and Annotation v2 metadata"
+)]
+fn create_pdf_annotation(
+    kind: AnnotationKind,
+    title: Option<String>,
+    tags: Vec<String>,
+    state: Signal<PdfReaderState>,
+    mut selected_anchor: Signal<Option<Anchor>>,
+    selected_target: Signal<AnnotationTarget>,
+    mut annotations: Signal<Vec<Annotation>>,
+    mut save_message: Signal<String>,
+    mut reader_message: Signal<String>,
+    csrf: Signal<String>,
+) {
+    let Some(anchor) = selected_anchor.read().clone() else {
+        return;
+    };
+    let (material_id, revision_id) = match &*state.read() {
+        PdfReaderState::Ready(data) => (data.entry.id, data.document.revision_id),
+        PdfReaderState::Loading | PdfReaderState::Failed(_) => return,
+    };
+    let command = CreateAnnotationCommand {
+        material_id,
+        revision_id,
+        anchor,
+        target: selected_target.read().clone(),
+        kind,
+        title,
+        tags,
+        status: AnnotationStatus::Active,
+        related_annotation_id: None,
+    };
+    save_message.set("Сохраняем аннотацию…".to_owned());
+    spawn(async move {
+        match post_annotation(&command, &csrf.read()).await {
+            Ok(annotation) => {
+                annotations.write().push(annotation);
+                selected_anchor.set(None);
+                save_message.set("Сохранено".to_owned());
+                reader_message.set(String::new());
+                update_annotation_overlays(&annotations.read());
+                clear_browser_selection();
+            }
+            Err(error) => {
+                save_message.set("Аннотация не сохранена".to_owned());
+                reader_message.set(error);
+            }
+        }
+    });
+}
+
+fn begin_pdf_voice_recording(
+    mut voice_recording: Signal<bool>,
+    mut voice_error: Signal<Option<String>>,
+) {
+    voice_error.set(None);
+    spawn(async move {
+        match crate::voice::begin_recording().await {
+            Ok(()) => voice_recording.set(true),
+            Err(error) => voice_error.set(Some(error)),
+        }
+    });
+}
+
+fn finish_pdf_voice_recording(
+    voice_recording: Signal<bool>,
+    voice_recorded: Signal<Option<crate::voice::RecordedAudio>>,
+    voice_preview_url: Signal<String>,
+    voice_error: Signal<Option<String>>,
+) {
+    spawn(async move {
+        let recording = crate::voice::finish_recording().await;
+        set_pdf_voice_recording(
+            voice_recording,
+            voice_recorded,
+            voice_preview_url,
+            voice_error,
+            recording,
+        );
+    });
+}
+
+fn set_pdf_voice_recording(
+    mut voice_recording: Signal<bool>,
+    mut voice_recorded: Signal<Option<crate::voice::RecordedAudio>>,
+    mut voice_preview_url: Signal<String>,
+    mut voice_error: Signal<Option<String>>,
+    recording: Result<crate::voice::RecordedAudio, String>,
+) {
+    voice_recording.set(false);
+    match recording {
+        Ok(recording) => {
+            if !voice_preview_url().is_empty() {
+                crate::voice::revoke_preview(&voice_preview_url());
+            }
+            let preview = crate::voice::preview_url(&recording);
+            voice_recorded.set(Some(recording));
+            voice_preview_url.set(preview);
+            voice_error.set(None);
+        }
+        Err(error) => voice_error.set(Some(error)),
+    }
+}
+
+fn discard_pdf_voice_recording(
+    mut voice_recording: Signal<bool>,
+    mut voice_recorded: Signal<Option<crate::voice::RecordedAudio>>,
+    mut voice_preview_url: Signal<String>,
+    mut voice_error: Signal<Option<String>>,
+) {
+    crate::voice::cancel_recording();
+    crate::voice::revoke_preview(&voice_preview_url());
+    voice_recording.set(false);
+    voice_recorded.set(None);
+    voice_preview_url.set(String::new());
+    voice_error.set(None);
+}
+
+#[expect(
+    clippy::too_many_arguments,
+    reason = "PDF Voice Note upload bridges independent Dioxus signals"
+)]
+fn save_pdf_voice_annotation(
+    state: Signal<PdfReaderState>,
+    selected_anchor: Signal<Option<Anchor>>,
+    selected_target: Signal<AnnotationTarget>,
+    annotations: Signal<Vec<Annotation>>,
+    mut voice_recorded: Signal<Option<crate::voice::RecordedAudio>>,
+    mut voice_preview_url: Signal<String>,
+    mut voice_uploading: Signal<bool>,
+    mut voice_error: Signal<Option<String>>,
+    save_message: Signal<String>,
+    reader_message: Signal<String>,
+    csrf: Signal<String>,
+) {
+    let Some(recording) = voice_recorded.read().clone() else {
+        return;
+    };
+    let csrf_token = csrf.read().clone();
+    voice_uploading.set(true);
+    voice_error.set(None);
+    spawn(async move {
+        match crate::reader::upload_voice_attachment(recording, &csrf_token).await {
+            Ok(attachment) => {
+                crate::voice::revoke_preview(&voice_preview_url());
+                voice_recorded.set(None);
+                voice_preview_url.set(String::new());
+                voice_uploading.set(false);
+                create_pdf_annotation(
+                    AnnotationKind::VoiceNote {
+                        audio_attachment_id: attachment.id,
+                        transcript_artifact_id: None,
+                        waveform_summary: None,
+                    },
+                    None,
+                    Vec::new(),
+                    state,
+                    selected_anchor,
+                    selected_target,
+                    annotations,
+                    save_message,
+                    reader_message,
+                    csrf,
+                );
+            }
+            Err(error) => {
+                voice_uploading.set(false);
+                voice_error.set(Some(error));
+            }
+        }
+    });
+}
+
+#[component]
+fn PdfAnnotationItem(
+    annotation: Annotation,
+    annotations: Signal<Vec<Annotation>>,
+    mut current_page: Signal<u32>,
+    save_message: Signal<String>,
+    reader_message: Signal<String>,
+    csrf: Signal<String>,
+) -> Element {
+    let navigate_value = annotation.clone();
+    let yellow_value = annotation.clone();
+    let bold_value = annotation.clone();
+    let delete_value = annotation.clone();
+    let voice_attachment_id = match &annotation.kind {
+        AnnotationKind::VoiceNote {
+            audio_attachment_id,
+            ..
+        } => Some(*audio_attachment_id),
+        AnnotationKind::Highlight { .. } | AnnotationKind::Note { .. } => None,
+    };
+    let style = match annotation.kind {
+        AnnotationKind::Highlight { style } => Some(style),
+        AnnotationKind::Note { .. } | AnnotationKind::VoiceNote { .. } => None,
+    };
+    rsx! {
+        li {
+            button { r#type: "button", onclick: move |_| {
+                if let Some(page) = pdf_annotation_page(&navigate_value) {
+                    current_page.set(page);
+                    call_pdf_two("goToPage", JsValue::from_str(PDF_CONTAINER_ID), JsValue::from_f64(f64::from(page)));
+                }
+            },
+                strong { "{annotation_kind_label(&annotation.kind)}" }
+                span { "{annotation.anchor.quote}" }
+            }
+            if let Some(title) = annotation.title.clone() { strong { "{title}" } }
+            if !annotation.tags.is_empty() { span { "{annotation.tags.join(\", \")}" } }
+            if let Some(attachment_id) = voice_attachment_id {
+                audio {
+                    controls: true,
+                    preload: "metadata",
+                    src: "{API_BASE}/audio/attachments/{attachment_id}/audio",
+                    aria_label: "Голосовая запись PDF",
+                }
+            }
+            if let Some(style) = style {
+                div { class: "annotation-style-actions",
+                    button { r#type: "button", disabled: style == HighlightStyle::Yellow, onclick: move |_| update_pdf_highlight(yellow_value.clone(), HighlightStyle::Yellow, annotations, save_message, reader_message, csrf), "Жёлтый" }
+                    button { r#type: "button", disabled: style == HighlightStyle::Bold, onclick: move |_| update_pdf_highlight(bold_value.clone(), HighlightStyle::Bold, annotations, save_message, reader_message, csrf), "Жирный" }
+                }
+            }
+            button { class: "danger-link", r#type: "button", onclick: move |_| delete_pdf_annotation(delete_value.clone(), annotations, save_message, reader_message, csrf), "Удалить" }
+        }
+    }
+}
+
+fn update_pdf_highlight(
+    previous: Annotation,
+    style: HighlightStyle,
+    mut annotations: Signal<Vec<Annotation>>,
+    mut save_message: Signal<String>,
+    mut reader_message: Signal<String>,
+    csrf: Signal<String>,
+) {
+    let command = UpdateAnnotationCommand {
+        material_id: previous.material_id,
+        annotation_id: previous.id,
+        expected_revision: previous.revision,
+        target: previous.target,
+        kind: AnnotationKind::Highlight { style },
+        title: previous.title,
+        tags: previous.tags,
+        status: previous.status,
+        related_annotation_id: previous.related_annotation_id,
+    };
+    save_message.set("Сохраняем стиль…".to_owned());
+    spawn(async move {
+        match put_annotation(&command, &csrf.read()).await {
+            Ok(updated) => {
+                if let Some(annotation) = annotations
+                    .write()
+                    .iter_mut()
+                    .find(|annotation| annotation.id == updated.id)
+                {
+                    *annotation = updated;
+                }
+                save_message.set("Сохранено".to_owned());
+                reader_message.set(String::new());
+                update_annotation_overlays(&annotations.read());
+            }
+            Err(error) => {
+                save_message.set("Стиль не сохранён".to_owned());
+                reader_message.set(error);
+            }
+        }
+    });
+}
+
+fn delete_pdf_annotation(
+    annotation: Annotation,
+    mut annotations: Signal<Vec<Annotation>>,
+    mut save_message: Signal<String>,
+    mut reader_message: Signal<String>,
+    csrf: Signal<String>,
+) {
+    let confirmed = web_sys::window()
+        .and_then(|window| window.confirm_with_message("Удалить эту аннотацию?").ok())
+        .unwrap_or(false);
+    if !confirmed {
+        return;
+    }
+    let command = DeleteAnnotationCommand {
+        material_id: annotation.material_id,
+        annotation_id: annotation.id,
+        expected_revision: annotation.revision,
+    };
+    save_message.set("Удаляем аннотацию…".to_owned());
+    spawn(async move {
+        match delete_annotation(&command, &csrf.read()).await {
+            Ok(()) => {
+                annotations
+                    .write()
+                    .retain(|stored| stored.id != command.annotation_id);
+                save_message.set("Сохранено".to_owned());
+                reader_message.set(String::new());
+                update_annotation_overlays(&annotations.read());
+            }
+            Err(error) => {
+                save_message.set("Аннотация не удалена".to_owned());
+                reader_message.set(error);
+            }
+        }
+    });
+}
+
+async fn post_annotation(
+    command: &CreateAnnotationCommand,
+    csrf: &str,
+) -> Result<Annotation, String> {
+    let request = Request::post(&format!(
+        "{API_BASE}/materials/{}/annotations",
+        command.material_id
+    ))
+    .credentials(RequestCredentials::Include)
+    .header("X-Lumi-CSRF", csrf)
+    .header("Idempotency-Key", &Uuid::now_v7().to_string())
+    .json(command)
+    .map_err(|error| error.to_string())?;
+    let response = request.send().await.map_err(|error| error.to_string())?;
+    if response.status() == 401 {
+        super::account::notify_session_expired();
+    }
+    if !response.ok() {
+        return Err(format!(
+            "Аннотация не сохранена: HTTP {}.",
+            response.status()
+        ));
+    }
+    response
+        .json()
+        .await
+        .map_err(|error| format!("Некорректный ответ API: {error}"))
+}
+
+async fn put_annotation(
+    command: &UpdateAnnotationCommand,
+    csrf: &str,
+) -> Result<Annotation, String> {
+    let request = Request::put(&format!(
+        "{API_BASE}/materials/{}/annotations/{}",
+        command.material_id, command.annotation_id
+    ))
+    .credentials(RequestCredentials::Include)
+    .header("X-Lumi-CSRF", csrf)
+    .header("Idempotency-Key", &Uuid::now_v7().to_string())
+    .json(command)
+    .map_err(|error| error.to_string())?;
+    let response = request.send().await.map_err(|error| error.to_string())?;
+    if response.status() == 401 {
+        super::account::notify_session_expired();
+    }
+    if !response.ok() {
+        return Err(format!("Стиль не сохранён: HTTP {}.", response.status()));
+    }
+    response
+        .json()
+        .await
+        .map_err(|error| format!("Некорректный ответ API: {error}"))
+}
+
+async fn delete_annotation(command: &DeleteAnnotationCommand, csrf: &str) -> Result<(), String> {
+    let request = Request::delete(&format!(
+        "{API_BASE}/materials/{}/annotations/{}",
+        command.material_id, command.annotation_id
+    ))
+    .credentials(RequestCredentials::Include)
+    .header("X-Lumi-CSRF", csrf)
+    .header("Idempotency-Key", &Uuid::now_v7().to_string())
+    .json(command)
+    .map_err(|error| error.to_string())?;
+    let response = request.send().await.map_err(|error| error.to_string())?;
+    if response.status() == 401 {
+        super::account::notify_session_expired();
+    }
+    response
+        .ok()
+        .then_some(())
+        .ok_or_else(|| format!("Аннотация не удалена: HTTP {}.", response.status()))
+}
+
+async fn save_progress(command: &MoveReadingPositionCommand, csrf: &str) -> Result<(), String> {
+    let request = Request::put(&format!(
+        "{API_BASE}/materials/{}/progress",
+        command.material_id
+    ))
+    .credentials(RequestCredentials::Include)
+    .header("X-Lumi-CSRF", csrf)
+    .header("Idempotency-Key", &Uuid::now_v7().to_string())
+    .json(command)
+    .map_err(|error| error.to_string())?;
+    let response = request.send().await.map_err(|error| error.to_string())?;
+    if response.status() == 401 {
+        super::account::notify_session_expired();
+    }
+    response
+        .ok()
+        .then_some(())
+        .ok_or_else(|| format!("Позиция не сохранена: HTTP {}.", response.status()))
+}
+
+fn annotation_overlays(annotations: &[Annotation]) -> Vec<serde_json::Value> {
+    annotations
+        .iter()
+        .filter_map(|annotation| {
+            let SourceLocator::Pdf(locator) = annotation.anchor.source_locator.as_ref()? else {
+                return None;
+            };
+            Some(json!({
+                "pageIndex": locator.page_index,
+                "kind": match annotation.kind {
+                    AnnotationKind::Highlight { style: HighlightStyle::Bold } => "highlight-bold",
+                    AnnotationKind::Highlight { style: HighlightStyle::Green } => "highlight-green",
+                    AnnotationKind::Highlight { style: HighlightStyle::Blue } => "highlight-blue",
+                    AnnotationKind::Highlight { style: HighlightStyle::Yellow } => "highlight",
+                    AnnotationKind::Note { .. } => "note",
+                    AnnotationKind::VoiceNote { .. } => "voice",
+                },
+                "rects": locator.page_rects,
+            }))
+        })
+        .collect()
+}
+
+fn shared_annotation_overlays(layers: &[SharedReaderSpaceLayer]) -> Vec<serde_json::Value> {
+    let mut overlays = Vec::new();
+    for layer in layers {
+        for thread in &layer.layer.threads {
+            let Some(SharedAnchorPlacement::Resolved { anchor, .. }) = &thread.placement else {
+                continue;
+            };
+            if let Some(overlay) = shared_pdf_overlay(anchor, "shared-note") {
+                overlays.push(overlay);
+            }
+        }
+        for highlight in &layer.layer.highlights {
+            let SharedAnchorPlacement::Resolved { anchor, .. } = &highlight.placement else {
+                continue;
+            };
+            let kind = match highlight.style {
+                HighlightStyle::Bold => "shared-highlight-bold",
+                HighlightStyle::Green => "shared-highlight-green",
+                HighlightStyle::Blue => "shared-highlight-blue",
+                HighlightStyle::Yellow => "shared-highlight",
+            };
+            if let Some(overlay) = shared_pdf_overlay(anchor, kind) {
+                overlays.push(overlay);
+            }
+        }
+    }
+    overlays
+}
+
+fn shared_pdf_overlay(anchor: &Anchor, kind: &str) -> Option<serde_json::Value> {
+    let SourceLocator::Pdf(locator) = anchor.source_locator.as_ref()? else {
+        return None;
+    };
+    Some(json!({
+        "pageIndex": locator.page_index,
+        "kind": kind,
+        "rects": locator.page_rects,
+    }))
+}
+
+fn update_annotation_overlays(annotations: &[Annotation]) {
+    if let Ok(payload) = serde_json::to_string(&annotation_overlays(annotations)) {
+        call_pdf_two(
+            "setAnnotationsJson",
+            JsValue::from_str(PDF_CONTAINER_ID),
+            JsValue::from_str(&payload),
+        );
+    }
+}
+
+fn update_combined_annotation_overlays(
+    _annotations: &[Annotation],
+    layers: &[SharedReaderSpaceLayer],
+) {
+    if let Ok(payload) = serde_json::to_string(&shared_annotation_overlays(layers)) {
+        call_pdf_two(
+            "setSharedAnnotationsJson",
+            JsValue::from_str(PDF_CONTAINER_ID),
+            JsValue::from_str(&payload),
+        );
+    }
+}
+
+fn pdf_anchor_page(anchor: &Anchor) -> Option<u32> {
+    match anchor.source_locator.as_ref()? {
+        SourceLocator::Pdf(locator) => Some(locator.page_index),
+        _ => None,
+    }
+}
+
+fn pdf_bounded_preview(value: &str, max_chars: usize) -> String {
+    let mut output = value.chars().take(max_chars).collect::<String>();
+    if value.chars().count() > max_chars {
+        output.push('…');
+    }
+    output
+}
+
+fn pdf_annotation_page(annotation: &Annotation) -> Option<u32> {
+    match annotation.anchor.source_locator.as_ref()? {
+        SourceLocator::Pdf(locator) => Some(locator.page_index),
+        _ => None,
+    }
+}
+
+fn annotation_kind_label(kind: &AnnotationKind) -> &'static str {
+    match kind {
+        AnnotationKind::Highlight {
+            style: HighlightStyle::Bold,
+        } => "Жирное выделение",
+        AnnotationKind::Highlight { .. } => "Выделение",
+        AnnotationKind::Note { .. } => "Заметка",
+        AnnotationKind::VoiceNote { .. } => "Голосовая заметка",
+    }
+}
+
+fn parse_tags(value: &str) -> Vec<String> {
+    let mut tags = Vec::new();
+    for candidate in value
+        .split(',')
+        .map(str::trim)
+        .filter(|tag| !tag.is_empty())
+    {
+        let key = candidate.to_lowercase();
+        if !tags.iter().any(|tag: &String| tag.to_lowercase() == key) {
+            tags.push(candidate.to_owned());
+        }
+        if tags.len() == lumi_core::MAX_ANNOTATION_TAGS {
+            break;
+        }
+    }
+    tags
+}
+
+fn non_empty(value: &str) -> Option<String> {
+    (!value.is_empty()).then(|| value.to_owned())
+}
+
+fn pdf_api_function(name: &str) -> Result<(JsValue, js_sys::Function), String> {
+    let window = web_sys::window().ok_or_else(|| "Browser window недоступен.".to_owned())?;
+    let api = js_sys::Reflect::get(window.as_ref(), &JsValue::from_str("LumiPdfReader"))
+        .map_err(js_error)?;
+    if api.is_null() || api.is_undefined() {
+        return Err("PDF.js ещё не загружен.".to_owned());
+    }
+    let function = js_sys::Reflect::get(&api, &JsValue::from_str(name))
+        .map_err(js_error)?
+        .dyn_into::<js_sys::Function>()
+        .map_err(|_| format!("PDF.js API не содержит метод {name}."))?;
+    Ok((api, function))
+}
+
+async fn wait_for_pdf_api() -> Result<(), String> {
+    for _ in 0..100 {
+        if pdf_api_function("mountJson").is_ok() {
+            return Ok(());
+        }
+        browser_delay(50).await;
+    }
+    Err("PDF.js не загрузился за отведённое время.".to_owned())
+}
+
+fn call_pdf_one(name: &str, value: JsValue) -> Result<JsValue, String> {
+    let (api, function) = pdf_api_function(name)?;
+    function.call1(&api, &value).map_err(js_error)
+}
+
+fn call_pdf_two(name: &str, first: JsValue, second: JsValue) {
+    if let Ok((api, function)) = pdf_api_function(name) {
+        let _ = function.call2(&api, &first, &second);
+    }
+}
+
+fn destroy_pdf() {
+    let _ = call_pdf_one("destroy", JsValue::from_str(PDF_CONTAINER_ID));
+}
+
+fn clear_browser_selection() {
+    if let Some(selection) =
+        web_sys::window().and_then(|window| window.get_selection().ok().flatten())
+    {
+        let _ = selection.remove_all_ranges();
+    }
+}
+
+fn js_error(value: JsValue) -> String {
+    value
+        .as_string()
+        .unwrap_or_else(|| "Неизвестная ошибка browser API.".to_owned())
+}
+
+async fn browser_delay(milliseconds: i32) {
+    let promise = js_sys::Promise::new(&mut |resolve, _| {
+        if let Some(window) = web_sys::window() {
+            let _ = window
+                .set_timeout_with_callback_and_timeout_and_arguments_0(&resolve, milliseconds);
+        } else {
+            let _ = resolve.call0(&JsValue::NULL);
+        }
+    });
+    let _ = JsFuture::from(promise).await;
+}

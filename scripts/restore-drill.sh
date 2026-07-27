@@ -17,7 +17,16 @@ cleanup() { rm -rf "$tmp"; dropdb --if-exists "$RESTORE_DATABASE_NAME"; }
 trap cleanup EXIT INT TERM
 pg_restore --exit-on-error --no-owner --no-privileges --dbname="$RESTORE_DATABASE_NAME" "$backup/postgres.dump"
 tar -C "$tmp" -xzf "$backup/blobs.tar.gz"
-PGDATABASE="$RESTORE_DATABASE_NAME" psql -v ON_ERROR_STOP=1 -At -F ' ' -c "SELECT relation, count FROM (SELECT 'accounts' relation, count(*) count FROM accounts UNION ALL SELECT 'materials', count(*) FROM materials WHERE deleted_at IS NULL UNION ALL SELECT 'document_revisions', count(*) FROM document_revisions UNION ALL SELECT 'annotations', count(*) FROM annotations WHERE deleted_at IS NULL UNION ALL SELECT 'reading_progress', count(*) FROM reading_progress WHERE deleted_at IS NULL UNION ALL SELECT 'sync_changes', count(*) FROM sync_changes) counts ORDER BY relation" > "$tmp/row-counts.txt"
+mkdir "$tmp/secrets"
+tar -C "$tmp/secrets" -xzf "$backup/secrets.tar.gz"
+[ -f "$tmp/secrets/secret-store.instance" ] || { echo "missing restored secret store instance" >&2; exit 1; }
+[ -f "$tmp/secrets/secret-store.active" ] || { echo "missing restored secret store active key marker" >&2; exit 1; }
+active_key=$(cat "$tmp/secrets/secret-store.active")
+case "$active_key" in
+  *[!0-9]*|'') echo "invalid restored secret store active key marker" >&2; exit 1 ;;
+esac
+[ -f "$tmp/secrets/secret-store-v${active_key}.key" ] || { echo "missing restored active secret key" >&2; exit 1; }
+PGDATABASE="$RESTORE_DATABASE_NAME" psql -v ON_ERROR_STOP=1 -At -F ' ' -c "SELECT relation, count FROM (SELECT 'accounts' relation, count(*) count FROM accounts UNION ALL SELECT 'materials', count(*) FROM materials WHERE deleted_at IS NULL UNION ALL SELECT 'document_revisions', count(*) FROM document_revisions UNION ALL SELECT 'annotations', count(*) FROM annotations WHERE deleted_at IS NULL UNION ALL SELECT 'reading_progress', count(*) FROM reading_progress WHERE deleted_at IS NULL UNION ALL SELECT 'sync_changes', count(*) FROM sync_changes UNION ALL SELECT 'community_spaces', count(*) FROM community_spaces WHERE deleted_at IS NULL UNION ALL SELECT 'community_memberships', count(*) FROM community_memberships UNION ALL SELECT 'community_access_links', count(*) FROM community_access_links UNION ALL SELECT 'community_revoked_links', count(*) FROM community_access_links WHERE status = 'revoked' UNION ALL SELECT 'shared_material_identities', count(*) FROM shared_material_identities WHERE deleted_at IS NULL UNION ALL SELECT 'shared_comments', count(*) FROM shared_comments UNION ALL SELECT 'shared_chat_messages', count(*) FROM shared_chat_messages UNION ALL SELECT 'shared_activity_events', count(*) FROM shared_activity_events UNION ALL SELECT 'moderation_actions', count(*) FROM moderation_actions) counts ORDER BY relation" > "$tmp/row-counts.txt"
 diff -u "$backup/row-counts.txt" "$tmp/row-counts.txt"
 while read -r hash storage_key byte_length; do
   file="$tmp/$storage_key"

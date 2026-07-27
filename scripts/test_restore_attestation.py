@@ -23,7 +23,12 @@ class RestoreAttestationTests(unittest.TestCase):
             artifacts = {
                 "postgres.dump": b"database",
                 "blobs.tar.gz": b"blobs",
-                "row-counts.txt": b"accounts 1\nmaterials 1\n",
+                "secrets.tar.gz": b"secret-keyring",
+                "row-counts.txt": (
+                    b"accounts 2\ncommunity_access_links 1\n"
+                    b"community_revoked_links 1\ncommunity_spaces 1\n"
+                    b"shared_activity_events 3\nshared_chat_messages 1\n"
+                ),
                 "blob-records.txt": b"a" * 64 + b" sha256/aa/object 6\n",
             }
             for name, content in artifacts.items():
@@ -36,12 +41,13 @@ class RestoreAttestationTests(unittest.TestCase):
                 "\n".join(checksum_lines) + "\n", encoding="utf-8"
             )
             manifest = {
-                "schema": "lumi.backup.v1",
+                "schema": "lumi.backup.v2",
                 "writes_quiesced": True,
                 "destination_encrypted": True,
                 "drill_only": False,
                 "database": "postgres.dump",
                 "blobs": "blobs.tar.gz",
+                "secrets": "secrets.tar.gz",
                 "row_counts": "row-counts.txt",
                 "blob_records": "blob-records.txt",
                 "checksums": "SHA256SUMS",
@@ -72,6 +78,7 @@ class RestoreAttestationTests(unittest.TestCase):
                     "restore_passed": True,
                     "row_counts_match": True,
                     "blob_records_match": True,
+                    "secret_keyring_match": True,
                     "row_counts_sha256": sha256_file(root / "row-counts.txt"),
                     "blob_records_sha256": sha256_file(root / "blob-records.txt"),
                 },

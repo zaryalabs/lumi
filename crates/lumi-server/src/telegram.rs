@@ -1,16 +1,11 @@
-//! Account-scoped Telegram pairing and transport-neutral update handling.
+//! Administrator-owned Telegram identity and transport-neutral update handling.
 
 use std::sync::Arc;
 
-use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
-use lumi_core::{
-    AcceptedImport, TelegramConnectionStatus, TelegramPairingResponse, TelegramReply,
-    TelegramUpdate,
-};
-use rand::{rngs::OsRng, RngCore};
+use lumi_core::{AcceptedImport, TelegramReply, TelegramUpdate};
 use sha2::{Digest, Sha256};
-use sqlx_core::{row::Row, transaction::Transaction};
-use sqlx_postgres::{PgPool, Postgres};
+use sqlx_core::row::Row;
+use sqlx_postgres::PgPool;
 use time::{Duration, OffsetDateTime};
 use uuid::Uuid;
 
@@ -22,8 +17,6 @@ mod sqlx {
     pub(crate) use sqlx_core::query_scalar::query_scalar;
 }
 
-const PAIRING_TTL: Duration = Duration::minutes(10);
-const TOKEN_DOMAIN: &[u8] = b"lumi.telegram.pairing.v1\0";
 #[cfg(not(test))]
 const MEDIA_GROUP_QUIET_WINDOW: std::time::Duration = std::time::Duration::from_secs(2);
 #[cfg(test)]
@@ -36,7 +29,8 @@ pub(crate) struct TelegramService {
     imports: Arc<ImportService>,
     bot_scope: String,
     bot_id: u64,
-    bot_username: Option<String>,
+    owner_user_id: Option<Uuid>,
+    owner_device_id: Option<Uuid>,
 }
 
 impl TelegramService {
@@ -45,141 +39,17 @@ impl TelegramService {
         imports: Arc<ImportService>,
         bot_scope: String,
         bot_id: u64,
-        bot_username: Option<String>,
+        owner_user_id: Option<Uuid>,
+        owner_device_id: Option<Uuid>,
     ) -> Self {
         Self {
             pool,
             imports,
             bot_scope,
             bot_id,
-            bot_username,
+            owner_user_id,
+            owner_device_id,
         }
-    }
-
-    pub(crate) async fn create_pairing(
-        &self,
-        session: &AuthenticatedSession,
-    ) -> Result<TelegramPairingResponse, TelegramServiceError> {
-        let mut token_bytes = [0_u8; 32];
-        OsRng.fill_bytes(&mut token_bytes);
-        let token = URL_SAFE_NO_PAD.encode(token_bytes);
-        let token_hash = pairing_hash(&self.bot_scope, &token);
-        let now = OffsetDateTime::now_utc();
-        let expires_at = now + PAIRING_TTL;
-        let mut tx = self.pool.begin().await.map_err(storage_error)?;
-        sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 2))")
-            .bind(format!("{}:{}", self.bot_scope, session.user_id))
-            .execute(&mut *tx)
-            .await
-            .map_err(storage_error)?;
-        let latest_issued_at: Option<OffsetDateTime> = sqlx::query_scalar(
-            "SELECT max(created_at) FROM telegram_pairing_tokens WHERE bot_scope = $1 AND user_id = $2",
-        )
-        .bind(&self.bot_scope)
-        .bind(session.user_id)
-        .fetch_one(&mut *tx)
-        .await
-        .map_err(storage_error)?;
-        if latest_issued_at.is_some_and(|issued_at| issued_at > now - Duration::seconds(2)) {
-            return Err(TelegramServiceError::PairingConflict);
-        }
-        sqlx::query(
-            "UPDATE telegram_pairing_tokens SET consumed_at = $3 WHERE bot_scope = $1 AND user_id = $2 AND consumed_at IS NULL",
-        )
-        .bind(&self.bot_scope)
-        .bind(session.user_id)
-        .bind(now)
-        .execute(&mut *tx)
-        .await
-        .map_err(storage_error)?;
-        sqlx::query(
-            "DELETE FROM telegram_pairing_tokens WHERE pairing_id IN (SELECT pairing_id FROM telegram_pairing_tokens WHERE consumed_at IS NOT NULL AND consumed_at < now() - interval '1 day' ORDER BY consumed_at LIMIT 100)",
-        )
-        .execute(&mut *tx)
-        .await
-        .map_err(storage_error)?;
-        sqlx::query(
-            "INSERT INTO telegram_pairing_tokens (pairing_id, bot_scope, user_id, device_id, token_hash, expires_at, created_at) VALUES ($1, $2, $3, $4, $5, $6, $7)",
-        )
-        .bind(Uuid::now_v7())
-        .bind(&self.bot_scope)
-        .bind(session.user_id)
-        .bind(session.device_id)
-        .bind(token_hash.as_slice())
-        .bind(expires_at)
-        .bind(now)
-        .execute(&mut *tx)
-        .await
-        .map_err(storage_error)?;
-        tx.commit().await.map_err(storage_error)?;
-        Ok(TelegramPairingResponse {
-            deep_link: self
-                .bot_username
-                .as_ref()
-                .map(|username| format!("https://t.me/{username}?start={token}")),
-            token,
-            expires_at: timestamp_ms(expires_at),
-        })
-    }
-
-    pub(crate) async fn status(
-        &self,
-        user_id: Uuid,
-    ) -> Result<TelegramConnectionStatus, TelegramServiceError> {
-        let identity = sqlx::query(
-            "SELECT telegram_user_id, linked_at FROM telegram_identities WHERE bot_scope = $1 AND user_id = $2 AND unlinked_at IS NULL",
-        )
-        .bind(&self.bot_scope)
-        .bind(user_id)
-        .fetch_optional(&self.pool)
-        .await
-        .map_err(storage_error)?;
-        let pairing_expires_at: Option<OffsetDateTime> = sqlx::query_scalar(
-            "SELECT max(expires_at) FROM telegram_pairing_tokens WHERE bot_scope = $1 AND user_id = $2 AND consumed_at IS NULL AND expires_at > now()",
-        )
-        .bind(&self.bot_scope)
-        .bind(user_id)
-        .fetch_one(&self.pool)
-        .await
-        .map_err(storage_error)?;
-        Ok(match identity {
-            Some(row) => TelegramConnectionStatus {
-                connected: true,
-                telegram_user_id: Some(row.try_get("telegram_user_id").map_err(storage_error)?),
-                linked_at: Some(timestamp_ms(
-                    row.try_get("linked_at").map_err(storage_error)?,
-                )),
-                pairing_expires_at: pairing_expires_at.map(timestamp_ms),
-            },
-            None => TelegramConnectionStatus {
-                connected: false,
-                telegram_user_id: None,
-                linked_at: None,
-                pairing_expires_at: pairing_expires_at.map(timestamp_ms),
-            },
-        })
-    }
-
-    pub(crate) async fn unlink_account(&self, user_id: Uuid) -> Result<(), TelegramServiceError> {
-        let mut tx = self.pool.begin().await.map_err(storage_error)?;
-        sqlx::query(
-            "UPDATE telegram_identities SET unlinked_at = now() WHERE bot_scope = $1 AND user_id = $2 AND unlinked_at IS NULL",
-        )
-        .bind(&self.bot_scope)
-        .bind(user_id)
-        .execute(&mut *tx)
-        .await
-        .map_err(storage_error)?;
-        sqlx::query(
-            "UPDATE telegram_pairing_tokens SET consumed_at = now() WHERE bot_scope = $1 AND user_id = $2 AND consumed_at IS NULL",
-        )
-        .bind(&self.bot_scope)
-        .bind(user_id)
-        .execute(&mut *tx)
-        .await
-        .map_err(storage_error)?;
-        tx.commit().await.map_err(storage_error)?;
-        Ok(())
     }
 
     pub(crate) async fn handle_update(
@@ -190,17 +60,6 @@ impl TelegramService {
         let payload =
             serde_json::to_vec(update).map_err(|_| TelegramServiceError::InvalidUpdate)?;
         let payload_hash = Sha256::digest(&payload);
-        let text = update.text.as_deref().unwrap_or_default().trim();
-        if let Some(token) = text.strip_prefix("/start ").map(str::trim) {
-            return self
-                .handle_pairing_update(update, token, payload_hash.as_slice())
-                .await;
-        }
-        if text == "/unlink" {
-            return self
-                .handle_unlink_update(update, payload_hash.as_slice())
-                .await;
-        }
         let claim_id = match self
             .claim_update(update.update_id, payload_hash.as_slice())
             .await?
@@ -213,13 +72,7 @@ impl TelegramService {
             }
             UpdateClaim::Owned(claim_id) => claim_id,
         };
-        let identity = active_identity(
-            &self.pool,
-            &self.bot_scope,
-            update.telegram_user_id,
-            update.chat_id,
-        )
-        .await?;
+        let identity = self.active_or_link_owner(update).await?;
         let reply = match self.route_update(identity, update).await {
             Ok(reply) => reply,
             Err(error) => {
@@ -247,160 +100,32 @@ impl TelegramService {
         Ok(reply)
     }
 
-    async fn handle_pairing_update(
+    async fn active_or_link_owner(
         &self,
         update: &TelegramUpdate,
-        token: &str,
-        payload_hash: &[u8],
-    ) -> Result<TelegramReply, TelegramServiceError> {
-        let mut tx = self.pool.begin().await.map_err(storage_error)?;
-        sqlx::query(
-            "INSERT INTO telegram_update_log (bot_scope, update_id, payload_hash, claim_id, status) VALUES ($1, $2, $3, $4, 'processing') ON CONFLICT (bot_scope, update_id) DO NOTHING",
-        )
-        .bind(&self.bot_scope)
-        .bind(update.update_id)
-        .bind(payload_hash)
-        .bind(Uuid::now_v7())
-        .execute(&mut *tx)
-        .await
-        .map_err(storage_error)?;
-        let row = sqlx::query(
-            "SELECT payload_hash, outcome FROM telegram_update_log WHERE bot_scope = $1 AND update_id = $2 FOR UPDATE",
-        )
-        .bind(&self.bot_scope)
-        .bind(update.update_id)
-        .fetch_one(&mut *tx)
-        .await
-        .map_err(storage_error)?;
-        let stored_hash: Vec<u8> = row.try_get("payload_hash").map_err(storage_error)?;
-        if stored_hash != payload_hash {
-            return Err(TelegramServiceError::UpdateConflict);
-        }
-        let outcome: Option<serde_json::Value> = row.try_get("outcome").map_err(storage_error)?;
-        if let Some(outcome) = outcome {
-            tx.commit().await.map_err(storage_error)?;
-            return serde_json::from_value(outcome).map_err(|_| TelegramServiceError::Unavailable);
-        }
-        let (reply_text, user_id) = match consume_pairing_tx(
-            &mut tx,
+    ) -> Result<Option<TelegramIdentity>, TelegramServiceError> {
+        if let Some(identity) = active_identity(
+            &self.pool,
             &self.bot_scope,
-            token,
+            update.telegram_user_id,
+            update.chat_id,
+        )
+        .await?
+        {
+            return Ok(Some(identity));
+        }
+        let (Some(user_id), Some(device_id)) = (self.owner_user_id, self.owner_device_id) else {
+            return Ok(None);
+        };
+        link_owner_identity(
+            &self.pool,
+            &self.bot_scope,
+            user_id,
+            device_id,
             update.telegram_user_id,
             update.chat_id,
         )
         .await
-        {
-            Ok(Some(user_id)) => (
-                "Telegram подключён к Lumi. Отправьте или перешлите текст либо обычную web-ссылку.",
-                Some(user_id),
-            ),
-            Ok(None) => (
-                "Токен привязки недействителен или истёк. Создайте новый в Lumi.",
-                None,
-            ),
-            Err(TelegramServiceError::PairingConflict) => (
-                "Токен не может быть привязан к этому Telegram-аккаунту. Создайте новый токен в Lumi.",
-                None,
-            ),
-            Err(error) => return Err(error),
-        };
-        let reply = reply(update.chat_id, reply_text, None);
-        sqlx::query(
-            "UPDATE telegram_update_log SET status = 'completed', user_id = $4, outcome = $5, completed_at = now() WHERE bot_scope = $1 AND update_id = $2 AND payload_hash = $3",
-        )
-        .bind(&self.bot_scope)
-        .bind(update.update_id)
-        .bind(payload_hash)
-        .bind(user_id)
-        .bind(serde_json::to_value(&reply).map_err(|_| TelegramServiceError::Unavailable)?)
-        .execute(&mut *tx)
-        .await
-        .map_err(storage_error)?;
-        tx.commit().await.map_err(storage_error)?;
-        Ok(reply)
-    }
-
-    async fn handle_unlink_update(
-        &self,
-        update: &TelegramUpdate,
-        payload_hash: &[u8],
-    ) -> Result<TelegramReply, TelegramServiceError> {
-        let mut tx = self.pool.begin().await.map_err(storage_error)?;
-        sqlx::query(
-            "INSERT INTO telegram_update_log (bot_scope, update_id, payload_hash, claim_id, status) VALUES ($1, $2, $3, $4, 'processing') ON CONFLICT (bot_scope, update_id) DO NOTHING",
-        )
-        .bind(&self.bot_scope)
-        .bind(update.update_id)
-        .bind(payload_hash)
-        .bind(Uuid::now_v7())
-        .execute(&mut *tx)
-        .await
-        .map_err(storage_error)?;
-        let row = sqlx::query(
-            "SELECT payload_hash, outcome FROM telegram_update_log WHERE bot_scope = $1 AND update_id = $2 FOR UPDATE",
-        )
-        .bind(&self.bot_scope)
-        .bind(update.update_id)
-        .fetch_one(&mut *tx)
-        .await
-        .map_err(storage_error)?;
-        let stored_hash: Vec<u8> = row.try_get("payload_hash").map_err(storage_error)?;
-        if stored_hash != payload_hash {
-            return Err(TelegramServiceError::UpdateConflict);
-        }
-        let outcome: Option<serde_json::Value> = row.try_get("outcome").map_err(storage_error)?;
-        if let Some(outcome) = outcome {
-            tx.commit().await.map_err(storage_error)?;
-            return serde_json::from_value(outcome).map_err(|_| TelegramServiceError::Unavailable);
-        }
-        let identity = sqlx::query(
-            "SELECT identity_id, user_id FROM telegram_identities WHERE bot_scope = $1 AND telegram_user_id = $2 AND private_chat_id = $3 AND unlinked_at IS NULL FOR UPDATE",
-        )
-        .bind(&self.bot_scope)
-        .bind(update.telegram_user_id)
-        .bind(update.chat_id)
-        .fetch_optional(&mut *tx)
-        .await
-        .map_err(storage_error)?;
-        let (reply_text, user_id) = if let Some(identity) = identity {
-            let identity_id: Uuid = identity.try_get("identity_id").map_err(storage_error)?;
-            let user_id: Uuid = identity.try_get("user_id").map_err(storage_error)?;
-            sqlx::query(
-                "UPDATE telegram_identities SET unlinked_at = now() WHERE identity_id = $1 AND unlinked_at IS NULL",
-            )
-            .bind(identity_id)
-            .execute(&mut *tx)
-            .await
-            .map_err(storage_error)?;
-            sqlx::query(
-                "UPDATE telegram_pairing_tokens SET consumed_at = now() WHERE bot_scope = $1 AND user_id = $2 AND consumed_at IS NULL",
-            )
-            .bind(&self.bot_scope)
-            .bind(user_id)
-            .execute(&mut *tx)
-            .await
-            .map_err(storage_error)?;
-            ("Telegram отключён от Lumi.", Some(user_id))
-        } else {
-            (
-                "Telegram уже отключён. Создайте новый токен в Lumi, чтобы подключить его снова.",
-                None,
-            )
-        };
-        let reply = reply(update.chat_id, reply_text, None);
-        sqlx::query(
-            "UPDATE telegram_update_log SET status = 'completed', user_id = $4, outcome = $5, completed_at = now() WHERE bot_scope = $1 AND update_id = $2 AND payload_hash = $3",
-        )
-        .bind(&self.bot_scope)
-        .bind(update.update_id)
-        .bind(payload_hash)
-        .bind(user_id)
-        .bind(serde_json::to_value(&reply).map_err(|_| TelegramServiceError::Unavailable)?)
-        .execute(&mut *tx)
-        .await
-        .map_err(storage_error)?;
-        tx.commit().await.map_err(storage_error)?;
-        Ok(reply)
     }
 
     async fn route_update(
@@ -409,27 +134,27 @@ impl TelegramService {
         update: &TelegramUpdate,
     ) -> Result<TelegramReply, TelegramServiceError> {
         let text = update.text.as_deref().unwrap_or_default().trim();
-        if text == "/start" {
-            return Ok(reply(
-                update.chat_id,
-                "Откройте Lumi, создайте одноразовый токен Telegram и отправьте /start <token>.",
-                None,
-            ));
-        }
         if text == "/help" {
             return Ok(reply(
                 update.chat_id,
-                "Поддерживаются текст, пересылки, Telegram-фото и публичные HTTP(S)-ссылки. Видео, GIF, аудио и файлы пропускаются. /unlink отключает аккаунт.",
+                "Поддерживаются текст, пересылки, Telegram-фото и публичные HTTP(S)-ссылки. Видео, GIF, аудио и файлы пропускаются.",
                 None,
             ));
         }
         let Some(identity) = identity else {
             return Ok(reply(
                 update.chat_id,
-                "Telegram не подключён. Создайте одноразовый токен в Lumi и отправьте /start <token>.",
+                "Этот Telegram-бот уже привязан к другому аккаунту или требует повторной настройки администратором Lumi.",
                 None,
             ));
         };
+        if text == "/start" || text.starts_with("/start ") {
+            return Ok(reply(
+                update.chat_id,
+                "Lumi готов принимать материалы. Отправьте или перешлите текст, фотографию либо публичную web-ссылку.",
+                None,
+            ));
+        }
         if !update.has_importable_content() && update.has_unsupported_payload {
             return Ok(reply(
                 update.chat_id,
@@ -449,6 +174,7 @@ impl TelegramService {
             session_id: Uuid::nil(),
             device_id: identity.device_id,
             csrf_hash: [0; 32],
+            instance_role: lumi_core::InstanceRole::User,
         };
         if update.media_group_id.is_some() {
             self.accumulate_media_group(&identity, update).await?;
@@ -597,6 +323,7 @@ impl TelegramService {
             session_id: Uuid::nil(),
             device_id,
             csrf_hash: [0; 32],
+            instance_role: lumi_core::InstanceRole::User,
         };
         let idempotency_key = format!("telegram:{}:media-group:{group_id}", self.bot_scope);
         let accepted = match self
@@ -851,8 +578,6 @@ pub(crate) enum TelegramServiceError {
     UpdateConflict,
     #[error("Telegram update is still being processed")]
     UpdateInProgress,
-    #[error("Telegram provider data conflicts with an existing link")]
-    PairingConflict,
     #[error("Telegram provider is unavailable")]
     Unavailable,
 }
@@ -881,51 +606,43 @@ async fn active_identity(
     .transpose()
 }
 
-async fn consume_pairing_tx(
-    tx: &mut Transaction<'_, Postgres>,
+async fn link_owner_identity(
+    pool: &PgPool,
     bot_scope: &str,
-    token: &str,
+    user_id: Uuid,
+    device_id: Uuid,
     telegram_user_id: i64,
     chat_id: i64,
-) -> Result<Option<Uuid>, TelegramServiceError> {
-    if token.is_empty() || token.len() > 128 {
-        return Ok(None);
-    }
-    let hash = pairing_hash(bot_scope, token);
-    let row = sqlx::query(
-        "UPDATE telegram_pairing_tokens SET consumed_at = now() WHERE bot_scope = $1 AND token_hash = $2 AND consumed_at IS NULL AND expires_at > now() RETURNING user_id, device_id",
-    )
-    .bind(bot_scope)
-    .bind(hash.as_slice())
-    .fetch_optional(&mut **tx)
-    .await
-    .map_err(storage_error)?;
-    let Some(row) = row else {
-        return Ok(None);
-    };
-    let user_id: Uuid = row.try_get("user_id").map_err(storage_error)?;
-    let device_id: Uuid = row.try_get("device_id").map_err(storage_error)?;
+) -> Result<Option<TelegramIdentity>, TelegramServiceError> {
+    let mut tx = pool.begin().await.map_err(storage_error)?;
+    sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 3))")
+        .bind(bot_scope)
+        .execute(&mut *tx)
+        .await
+        .map_err(storage_error)?;
     let existing_user: Option<Uuid> = sqlx::query_scalar(
         "SELECT user_id FROM telegram_identities WHERE bot_scope = $1 AND telegram_user_id = $2 AND unlinked_at IS NULL FOR UPDATE",
     )
     .bind(bot_scope)
     .bind(telegram_user_id)
-    .fetch_optional(&mut **tx)
+    .fetch_optional(&mut *tx)
     .await
     .map_err(storage_error)?;
     if existing_user.is_some_and(|existing| existing != user_id) {
-        return Err(TelegramServiceError::PairingConflict);
+        tx.commit().await.map_err(storage_error)?;
+        return Ok(None);
     }
     let account_identity: Option<i64> = sqlx::query_scalar(
         "SELECT telegram_user_id FROM telegram_identities WHERE bot_scope = $1 AND user_id = $2 AND unlinked_at IS NULL FOR UPDATE",
     )
     .bind(bot_scope)
     .bind(user_id)
-    .fetch_optional(&mut **tx)
+    .fetch_optional(&mut *tx)
     .await
     .map_err(storage_error)?;
     if account_identity.is_some_and(|existing| existing != telegram_user_id) {
-        return Err(TelegramServiceError::PairingConflict);
+        tx.commit().await.map_err(storage_error)?;
+        return Ok(None);
     }
     sqlx::query(
         "DELETE FROM telegram_identities WHERE bot_scope = $1 AND unlinked_at IS NOT NULL AND (user_id = $2 OR telegram_user_id = $3)",
@@ -933,7 +650,7 @@ async fn consume_pairing_tx(
     .bind(bot_scope)
     .bind(user_id)
     .bind(telegram_user_id)
-    .execute(&mut **tx)
+    .execute(&mut *tx)
     .await
     .map_err(storage_error)?;
     sqlx::query(
@@ -945,19 +662,11 @@ async fn consume_pairing_tx(
     .bind(chat_id)
     .bind(user_id)
     .bind(device_id)
-    .execute(&mut **tx)
+    .execute(&mut *tx)
     .await
     .map_err(storage_error)?;
-    Ok(Some(user_id))
-}
-
-fn pairing_hash(bot_scope: &str, token: &str) -> [u8; 32] {
-    let mut hasher = Sha256::new();
-    hasher.update(TOKEN_DOMAIN);
-    hasher.update(bot_scope.as_bytes());
-    hasher.update(b"\0");
-    hasher.update(token.as_bytes());
-    hasher.finalize().into()
+    tx.commit().await.map_err(storage_error)?;
+    Ok(Some(TelegramIdentity { user_id, device_id }))
 }
 
 fn validate_update(update: &TelegramUpdate) -> Result<(), TelegramServiceError> {
@@ -1014,10 +723,6 @@ fn map_import_error(error: ImportServiceError) -> TelegramServiceError {
 fn storage_error(error: impl std::fmt::Display) -> TelegramServiceError {
     tracing::error!(%error, "Telegram repository operation failed");
     TelegramServiceError::Unavailable
-}
-
-fn timestamp_ms(value: OffsetDateTime) -> u64 {
-    u64::try_from(value.unix_timestamp_nanos() / 1_000_000).unwrap_or(0)
 }
 
 #[cfg(test)]
@@ -1088,13 +793,15 @@ mod tests {
             imports,
             bot_scope: scope.clone(),
             bot_id: 1,
-            bot_username: Some("lumi_stage6_test_bot".to_owned()),
+            owner_user_id: Some(user_id),
+            owner_device_id: Some(device_id),
         };
         let session = AuthenticatedSession {
             user_id,
             session_id: Uuid::now_v7(),
             device_id,
             csrf_hash: [0; 32],
+            instance_role: lumi_core::InstanceRole::User,
         };
         Ok(Some((pool, service, session, scope)))
     }
@@ -1203,13 +910,6 @@ mod tests {
     }
 
     #[test]
-    fn pairing_hash_is_domain_and_scope_separated() {
-        assert_ne!(pairing_hash("one", "token"), pairing_hash("two", "token"));
-        let raw_hash: [u8; 32] = Sha256::digest(b"token").into();
-        assert_ne!(pairing_hash("one", "token"), raw_hash);
-    }
-
-    #[test]
     fn single_url_router_rejects_text_and_credentials() {
         assert!(is_single_web_url("https://example.com/article"));
         assert!(!is_single_web_url("read https://example.com/article"));
@@ -1280,33 +980,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn postgres_pairing_routing_and_update_replay_are_atomic(
+    async fn postgres_admin_auto_link_routing_and_update_replay_are_atomic(
     ) -> Result<(), Box<dyn std::error::Error>> {
         let Some((pool, service, session, scope)) = postgres_service().await? else {
             return Ok(());
         };
         let telegram_user_id = 9_000_000_000_i64 + i64::from(Uuid::now_v7().as_bytes()[0]);
-        let pairing = service.create_pairing(&session).await?;
-        let mut start = fixture_update(
-            include_str!("../../../tests/fixtures/telegram/pairing.json"),
-            70_001,
-            telegram_user_id,
-        )?;
-        start.text = Some(format!("/start {}", pairing.token));
-        let linked = service.handle_update(&start).await?;
-        assert!(linked.text.contains("подключён"));
-        assert_eq!(service.handle_update(&start).await?, linked);
-
-        let reused = service
-            .handle_update(&update(
-                70_002,
-                telegram_user_id,
-                &format!("/start {}", pairing.token),
-            ))
-            .await?;
-        assert!(reused.text.contains("недействителен"));
-        assert!(service.status(session.user_id).await?.connected);
-
         let direct = fixture_update(
             include_str!("../../../tests/fixtures/telegram/direct-text.json"),
             70_003,
@@ -1318,6 +997,9 @@ mod tests {
             .as_ref()
             .ok_or_else(|| std::io::Error::other("direct text was not accepted"))?;
         assert_eq!(service.handle_update(&direct).await?, accepted);
+        let start = update(70_001, telegram_user_id, "/start");
+        let ready = service.handle_update(&start).await?;
+        assert!(ready.text.contains("готов"));
         let direct_document = wait_for_document(&service, session.user_id, direct_import).await?;
         assert_eq!(direct_document.material_id, direct_import.material_id);
         let plan = lumi_core::RenderPlan::from_document(&direct_document);
@@ -1358,9 +1040,14 @@ mod tests {
                     material_id: direct_import.material_id,
                     revision_id: direct_document.revision_id,
                     anchor,
+                    target: lumi_core::AnnotationTarget::TextRange,
                     kind: lumi_core::AnnotationKind::Note {
                         body: "Telegram source shares annotations".to_owned(),
                     },
+                    title: None,
+                    tags: Vec::new(),
+                    status: lumi_core::AnnotationStatus::Active,
+                    related_annotation_id: None,
                 },
                 "telegram-direct-annotation",
             )
@@ -1505,51 +1192,15 @@ mod tests {
         assert!(unsupported_reply.accepted_import.is_none());
         assert!(unsupported_reply.text.contains("не поддерживается"));
 
-        let unlink = update(70_006, telegram_user_id, "/unlink");
-        let unlinked = service.handle_update(&unlink).await?;
-        assert_eq!(service.handle_update(&unlink).await?, unlinked);
-        assert!(!service.status(session.user_id).await?.connected);
+        let other_telegram_user_id = telegram_user_id + 1;
         let unpaired = fixture_update(
             include_str!("../../../tests/fixtures/telegram/unpaired.json"),
             70_007,
-            telegram_user_id,
+            other_telegram_user_id,
         )?;
         let denied = service.handle_update(&unpaired).await?;
         assert!(denied.accepted_import.is_none());
-
-        sqlx::query(
-            "UPDATE telegram_pairing_tokens SET created_at = now() - interval '1 minute' WHERE bot_scope = $1",
-        )
-        .bind(&scope)
-        .execute(&pool)
-        .await?;
-        let relink = service.create_pairing(&session).await?;
-        let relinked = service
-            .handle_update(&update(
-                70_008,
-                telegram_user_id,
-                &format!("/start {}", relink.token),
-            ))
-            .await?;
-        assert!(relinked.text.contains("подключён"));
-
-        let expired_token = "expired-test-token";
-        sqlx::query("INSERT INTO telegram_pairing_tokens (pairing_id, bot_scope, user_id, device_id, token_hash, expires_at, created_at) VALUES ($1, $2, $3, $4, $5, now() - interval '1 second', now() - interval '1 minute')")
-            .bind(Uuid::now_v7())
-            .bind(&scope)
-            .bind(session.user_id)
-            .bind(session.device_id)
-            .bind(pairing_hash(&scope, expired_token).as_slice())
-            .execute(&pool)
-            .await?;
-        let expired = service
-            .handle_update(&update(
-                70_009,
-                telegram_user_id,
-                &format!("/start {expired_token}"),
-            ))
-            .await?;
-        assert!(expired.text.contains("недействителен"));
+        assert!(denied.text.contains("другому аккаунту"));
 
         let private_rejected = TelegramUpdate {
             is_private_chat: false,

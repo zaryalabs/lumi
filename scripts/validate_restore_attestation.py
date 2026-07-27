@@ -132,7 +132,7 @@ def validate_attestation(path: Path) -> None:
     checksums_path, _ = checked_reference(attestation, root, "backup_checksums")
     restore_output_path, _ = checked_reference(attestation, root, "restore_output")
     manifest = load_json(manifest_path, "backup manifest")
-    if manifest.get("schema") != "lumi.backup.v1":
+    if manifest.get("schema") != "lumi.backup.v2":
         raise EvidenceError("unsupported backup manifest schema")
     require_true(manifest, "writes_quiesced")
     require_true(manifest, "destination_encrypted")
@@ -144,7 +144,7 @@ def validate_attestation(path: Path) -> None:
         raise EvidenceError("attested checksum file does not match backup manifest")
     checksums = parse_checksums(checksums_path)
     artifacts: dict[str, Path] = {}
-    for key in ("database", "blobs", "row_counts", "blob_records"):
+    for key in ("database", "blobs", "secrets", "row_counts", "blob_records"):
         artifact = manifest_artifact(manifest_path, manifest, key)
         name = artifact.name
         if checksums.get(name) != sha256_file(artifact):
@@ -154,7 +154,12 @@ def validate_attestation(path: Path) -> None:
     verification = attestation.get("verification")
     if not isinstance(verification, dict):
         raise EvidenceError("verification must be an object")
-    for key in ("restore_passed", "row_counts_match", "blob_records_match"):
+    for key in (
+        "restore_passed",
+        "row_counts_match",
+        "blob_records_match",
+        "secret_keyring_match",
+    ):
         require_true(verification, key)
     if require_digest(verification, "row_counts_sha256") != sha256_file(
         artifacts["row_counts"]

@@ -1,0 +1,15 @@
+{
+  "task_id": "00000000-0000-7000-8000-000000000001",
+  "run_id": "00000000-0000-7000-8000-000000000041",
+  "claim_id": "00000000-0000-7000-8000-000000000050",
+  "fence": 7,
+  "task_revision": 3,
+  "idempotency_key": "fixture-complete-1",
+  "result": {
+    "schema_version": "summary-artifact.v1",
+    "content": "Краткий source-backed результат.",
+    "citation_ids": [
+      "ctx:fixture:1"
+    ]
+  }
+}

@@ -632,6 +632,23 @@ page geometry или OCR/text extraction revision.
   forms остаются read-only?
 - Какой уровень PDF/A, tagged PDF и accessibility validation нужен для v01?
 
+## Реализованный Web baseline
+
+Первый вертикальный срез зафиксирован в
+[ADR 0014](../../adr/0014-pdf-fixed-layout-import-and-web-reader.md).
+Он использует Poppler как server-side inspection adapter и pinned PDF.js как
+browser renderer. Импорт публикует `FixedLayoutContentPackage` и
+`PageFidelityDocument`; progress и annotations используют checksum/page
+hash/canonical point rectangles.
+
+Baseline включает multipart upload, immutable source blob, geometry и native
+text extraction, thumbnail, owner-scoped byte-range source, lazy canvas/text
+rendering, zoom, continuous navigation, восстановление страницы, text
+selection, highlights и notes. OCR, password unlock UI, indexed search,
+page-area selection без текста, spreads/paginated mode и authoritative
+outline/page-label extraction остаются следующими расширениями целевого
+контракта, а не скрытой эмуляцией в reflowable reader.
+
 ## Источники
 
 - [PDFium](https://pdfium.googlesource.com/pdfium/)

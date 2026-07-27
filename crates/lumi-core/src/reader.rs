@@ -67,12 +67,12 @@ impl ReaderSettings {
         }
     }
 
-    /// Return a stable adapter cache fragment for this settings value.
+    /// Return a stable pagination cache fragment for layout-affecting settings.
     #[must_use]
-    pub fn cache_key(self) -> String {
+    pub fn layout_cache_key(self) -> String {
         format!(
-            "{:?}:{}:{}:{:?}",
-            self.theme, self.font_size_px, self.line_height_percent, self.width
+            "{}:{}:{:?}",
+            self.font_size_px, self.line_height_percent, self.width
         )
     }
 }
@@ -799,6 +799,17 @@ mod tests {
 
         assert_eq!(settings.font_size_px, 30);
         assert_eq!(settings.line_height_percent, 135);
+    }
+
+    #[test]
+    fn layout_cache_key_ignores_visual_theme() {
+        let paper = ReaderSettings::default();
+        let night = ReaderSettings {
+            theme: ReaderTheme::Night,
+            ..paper
+        };
+
+        assert_eq!(paper.layout_cache_key(), night.layout_cache_key());
     }
 
     #[test]

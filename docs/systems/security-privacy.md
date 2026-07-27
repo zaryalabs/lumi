@@ -31,7 +31,7 @@ Lumi работает с личной библиотекой, заметками
 | Native private vault | local-only materials, notes, learning history | local by default; future private mode uses encrypted relay only |
 | Account metadata | user id, auth verifier/public material, sessions, devices | plaintext minimized server state |
 | Provider secrets | API keys, OAuth tokens, Telegram links | secret storage only; not ordinary sync plaintext |
-| Social/shared content | shared comments, visible highlights, room activity | visible according to room membership and room policy |
+| Community content | comments, visible highlights, chat, Space activity | visible according to Community Space membership and policy |
 | Public/share content | published cards, explicitly shared notes/quotes | plaintext by user intent |
 | Operational metadata | request/job timings, errors, quotas | redacted; no content bodies in logs |
 
@@ -69,8 +69,12 @@ Native clients can disable cloud replica for private vault:
   with DNS and redirect rechecks.
 - API keys and OAuth tokens stored via secure local/server secret storage, not
   sync plaintext.
-- Plugins and MCP agents use explicit capabilities, scoped tools, audit and
-  approval for writes.
+- MCP agent подключается к аккаунту извне, действует с пользовательскими
+  product permissions через отдельный revocable account token и проходит
+  обычные проверки доступа application commands. Admin, credentials, security
+  control plane, chat runtime и account deletion не открываются. Отдельные
+  сложные audit/versioning подсистемы для первого MCP-среза не требуются; полный
+  contract описан в [`mcp.md`](mcp.md).
 - Public sharing uses preview, quote/source limits and revocation where
   possible.
 - Destructive migrations require backup/snapshot strategy.
@@ -79,9 +83,18 @@ Native clients can disable cloud replica for private vault:
 - Telegram bot token проверяется через provider, хранится как AEAD-шифротекст и
   не возвращается через API; отдельный local master key не хранится в
   PostgreSQL. Встроенный long polling использует durable idempotent handler.
+- Provider и transport secrets используют общий account/purpose-bound
+  `SecretStore`: AES-256-GCM AAD включает instance/account/secret/purpose/key
+  version, fingerprint является keyed HMAC, а versioned key ring хранится вне
+  PostgreSQL. Legacy Telegram envelope мигрирует лениво без повторного показа
+  plaintext; operator procedure описана в
+  [`../runbooks/ai-persistence.md`](../runbooks/ai-persistence.md).
 - Readiness проверяет migration compatibility и bounded blob
   write/rename/read/delete sentinel; backup связывает quiesced PostgreSQL и blob
   artifacts manifest/checksums и проверяется disposable restore drill.
+- Threat review AI/MCP `0.2.0`, включая prompt injection, stale claims,
+  provider SSRF, output limits и log redaction, зафиксирован отдельно в
+  [`ai-threat-review.md`](ai-threat-review.md).
 
 ## Privacy UX
 
@@ -89,10 +102,11 @@ Before these actions, UI must explain what data leaves the device/account and
 who can access it:
 
 - AI task/chat/explain-back;
+- транскрибация аудио через OpenAI Whisper API;
 - Telegram linking/import;
 - web capture/browser extension upload;
 - public share;
-- shared room publish;
+- Community Space material/highlight/comment publish;
 - switching from cloud mode to private/decentralized mode.
 
 ## Открытые вопросы

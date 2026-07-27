@@ -1,0 +1,1040 @@
+//! Typed Axum routes for Community Spaces and revocable access links.
+
+use axum::{
+    body::Bytes,
+    extract::{DefaultBodyLimit, Path, Query, State},
+    http::{header, HeaderMap, HeaderValue, StatusCode},
+    response::IntoResponse,
+    routing::{delete, get, patch, post},
+    Extension, Json, Router,
+};
+use lumi_core::{
+    ClaimSharedMaterialRequest, CommunityAccessLink, CommunityAccessLinkId, CommunityActivityPage,
+    CommunityImageKind, CommunityImageRef, CommunityLinkPreview, CommunityMembership,
+    CommunitySpace, CommunitySpaceDetail, CommunitySpaceId, CreateCommunityAccessLinkRequest,
+    CreateCommunitySpaceRequest, CreateSharedChatMessageRequest, CreateSharedCommentRequest,
+    CreateSharedThreadRequest, CreatedCommunityAccessLink, DeleteSharedChatMessageRequest,
+    DeleteSharedCommentRequest, JoinCommunityLinkRequest, ModerateSocialContentRequest,
+    ModerationAction, PreviewCommunityLinkRequest, PublishSharedHighlightRequest,
+    ShareMaterialRequest, SharedChatMessage, SharedChatMessageId, SharedChatPage, SharedComment,
+    SharedCommentId, SharedCommentThread, SharedCommentThreadId, SharedDiscussionPage,
+    SharedHighlight, SharedHighlightId, SharedMaterial, SharedMaterialId, SharedReaderLayer,
+    SharedReaderSpaceLayer, UnpublishSharedHighlightRequest, UpdateCommunityMemberRequest,
+    UpdateCommunitySpaceRequest, UpdateSharedChatMessageRequest, UpdateSharedCommentRequest,
+    UserId, UserMaterialClaim,
+};
+use serde::Deserialize;
+use uuid::Uuid;
+
+use crate::{account::AuthenticatedSession, required_idempotency_key, AppError, AppState};
+
+use super::SocialStoreError;
+
+pub(crate) fn public_routes() -> Router<AppState> {
+    Router::new()
+        .route("/shares/community-link/preview", post(preview_link))
+        .layer(DefaultBodyLimit::max(8 * 1024))
+}
+
+pub(crate) fn protected_routes() -> Router<AppState> {
+    Router::new()
+        .route("/spaces", get(list_spaces).post(create_space))
+        .route(
+            "/shared-reading/materials/{material_id}",
+            get(reader_layers_for_material),
+        )
+        .route(
+            "/spaces/{space_id}",
+            get(get_space).patch(update_space).delete(delete_space),
+        )
+        .route(
+            "/spaces/{space_id}/images/{kind}",
+            get(download_image)
+                .put(replace_image)
+                .delete(delete_image)
+                .layer(DefaultBodyLimit::max(
+                    lumi_core::COMMUNITY_IMAGE_MAX_BYTES + 1024,
+                )),
+        )
+        .route("/spaces/{space_id}/members", get(list_members))
+        .route(
+            "/spaces/{space_id}/members/{user_id}",
+            patch(update_member).delete(remove_member),
+        )
+        .route("/spaces/{space_id}/leave", post(leave_space))
+        .route(
+            "/spaces/{space_id}/access-links",
+            get(list_links).post(create_link),
+        )
+        .route(
+            "/spaces/{space_id}/access-links/{link_id}",
+            delete(revoke_link),
+        )
+        .route(
+            "/spaces/{space_id}/access-links/{link_id}/rotate",
+            post(rotate_link),
+        )
+        .route("/spaces/{space_id}/materials", get(list_materials))
+        .route("/spaces/{space_id}/materials/share", post(share_material))
+        .route(
+            "/spaces/{space_id}/materials/{shared_material_id}",
+            get(get_material).delete(delete_material),
+        )
+        .route(
+            "/spaces/{space_id}/materials/{shared_material_id}/claim",
+            get(get_claim).post(claim_material),
+        )
+        .route(
+            "/spaces/{space_id}/materials/{shared_material_id}/claim/recheck",
+            post(recheck_material),
+        )
+        .route(
+            "/spaces/{space_id}/materials/{shared_material_id}/threads",
+            get(list_discussions).post(create_thread),
+        )
+        .route(
+            "/spaces/{space_id}/materials/{shared_material_id}/reader-layer",
+            get(reader_layer),
+        )
+        .route(
+            "/spaces/{space_id}/materials/{shared_material_id}/highlights",
+            get(list_highlights).post(publish_highlight),
+        )
+        .route(
+            "/spaces/{space_id}/highlights/{highlight_id}",
+            delete(unpublish_highlight),
+        )
+        .route(
+            "/spaces/{space_id}/threads/{thread_id}/comments",
+            post(add_comment),
+        )
+        .route(
+            "/spaces/{space_id}/comments/{comment_id}",
+            patch(update_comment).delete(delete_comment),
+        )
+        .route(
+            "/spaces/{space_id}/moderation/actions",
+            post(moderate_content),
+        )
+        .route(
+            "/spaces/{space_id}/chat",
+            get(list_chat).post(create_chat_message),
+        )
+        .route(
+            "/spaces/{space_id}/chat/{message_id}",
+            patch(update_chat_message).delete(delete_chat_message),
+        )
+        .route("/spaces/{space_id}/activity", get(list_activity))
+        .route("/shares/community-link/join", post(join_link))
+        .layer(DefaultBodyLimit::max(64 * 1024))
+}
+
+#[derive(Deserialize)]
+struct DiscussionQuery {
+    after: Option<String>,
+    limit: Option<u16>,
+}
+
+type CommunicationsQuery = DiscussionQuery;
+
+#[derive(Deserialize)]
+struct ImageMutationQuery {
+    expected_revision: u64,
+}
+
+async fn preview_link(
+    State(state): State<AppState>,
+    Json(request): Json<PreviewCommunityLinkRequest>,
+) -> Result<Json<CommunityLinkPreview>, AppError> {
+    state
+        .social_runtime()
+        .preview(request)
+        .await
+        .map(Json)
+        .map_err(map_social_error)
+}
+
+async fn list_spaces(
+    State(state): State<AppState>,
+    Extension(session): Extension<AuthenticatedSession>,
+) -> Result<Json<Vec<CommunitySpace>>, AppError> {
+    state
+        .social_runtime()
+        .list(session.user_id)
+        .await
+        .map(Json)
+        .map_err(map_social_error)
+}
+
+async fn reader_layers_for_material(
+    State(state): State<AppState>,
+    Extension(session): Extension<AuthenticatedSession>,
+    Path(material_id): Path<Uuid>,
+) -> Result<Json<Vec<SharedReaderSpaceLayer>>, AppError> {
+    state
+        .social_runtime()
+        .reader_layers_for_material(session.user_id, material_id)
+        .await
+        .map(Json)
+        .map_err(map_social_error)
+}
+
+async fn create_space(
+    State(state): State<AppState>,
+    Extension(session): Extension<AuthenticatedSession>,
+    headers: HeaderMap,
+    Json(request): Json<CreateCommunitySpaceRequest>,
+) -> Result<(StatusCode, Json<CommunitySpaceDetail>), AppError> {
+    let idempotency_key = required_idempotency_key(&headers)?;
+    let detail = state
+        .social_runtime()
+        .create(session.user_id, session.device_id, idempotency_key, request)
+        .await
+        .map_err(map_social_error)?;
+    Ok((StatusCode::CREATED, Json(detail)))
+}
+
+async fn get_space(
+    State(state): State<AppState>,
+    Extension(session): Extension<AuthenticatedSession>,
+    Path(space_id): Path<CommunitySpaceId>,
+) -> Result<Json<CommunitySpaceDetail>, AppError> {
+    state
+        .social_runtime()
+        .detail(session.user_id, space_id)
+        .await
+        .map(Json)
+        .map_err(map_social_error)
+}
+
+async fn replace_image(
+    State(state): State<AppState>,
+    Extension(session): Extension<AuthenticatedSession>,
+    Path((space_id, kind)): Path<(CommunitySpaceId, String)>,
+    Query(query): Query<ImageMutationQuery>,
+    headers: HeaderMap,
+    bytes: Bytes,
+) -> Result<Json<CommunityImageRef>, AppError> {
+    let kind = image_kind(&kind)?;
+    let media_type = headers
+        .get(header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.split(';').next())
+        .map(str::trim)
+        .ok_or_else(|| AppError::BadRequest("image Content-Type is required".to_owned()))?;
+    state
+        .social_runtime()
+        .replace_image(
+            session.user_id,
+            space_id,
+            kind,
+            query.expected_revision,
+            media_type,
+            &bytes,
+        )
+        .await
+        .map(Json)
+        .map_err(map_social_error)
+}
+
+async fn download_image(
+    State(state): State<AppState>,
+    Extension(session): Extension<AuthenticatedSession>,
+    Path((space_id, kind)): Path<(CommunitySpaceId, String)>,
+) -> Result<impl IntoResponse, AppError> {
+    let image = state
+        .social_runtime()
+        .download_image(session.user_id, space_id, image_kind(&kind)?)
+        .await
+        .map_err(map_social_error)?;
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_str(&image.media_type)
+            .map_err(|_| AppError::Unavailable("community image"))?,
+    );
+    headers.insert(
+        header::CACHE_CONTROL,
+        HeaderValue::from_static("private, max-age=300"),
+    );
+    Ok((headers, image.bytes))
+}
+
+async fn delete_image(
+    State(state): State<AppState>,
+    Extension(session): Extension<AuthenticatedSession>,
+    Path((space_id, kind)): Path<(CommunitySpaceId, String)>,
+    Query(query): Query<ImageMutationQuery>,
+) -> Result<StatusCode, AppError> {
+    state
+        .social_runtime()
+        .delete_image(
+            session.user_id,
+            space_id,
+            image_kind(&kind)?,
+            query.expected_revision,
+        )
+        .await
+        .map_err(map_social_error)?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+fn image_kind(value: &str) -> Result<CommunityImageKind, AppError> {
+    match value {
+        "avatar" => Ok(CommunityImageKind::Avatar),
+        "cover" => Ok(CommunityImageKind::Cover),
+        _ => Err(AppError::BadRequest(
+            "image kind must be avatar or cover".to_owned(),
+        )),
+    }
+}
+
+async fn update_space(
+    State(state): State<AppState>,
+    Extension(session): Extension<AuthenticatedSession>,
+    Path(space_id): Path<CommunitySpaceId>,
+    headers: HeaderMap,
+    Json(request): Json<UpdateCommunitySpaceRequest>,
+) -> Result<Json<CommunitySpaceDetail>, AppError> {
+    let idempotency_key = required_idempotency_key(&headers)?;
+    state
+        .social_runtime()
+        .update(
+            session.user_id,
+            session.device_id,
+            space_id,
+            idempotency_key,
+            request,
+        )
+        .await
+        .map(Json)
+        .map_err(map_social_error)
+}
+
+async fn delete_space(
+    State(state): State<AppState>,
+    Extension(session): Extension<AuthenticatedSession>,
+    Path(space_id): Path<CommunitySpaceId>,
+    headers: HeaderMap,
+) -> Result<StatusCode, AppError> {
+    let idempotency_key = required_idempotency_key(&headers)?;
+    state
+        .social_runtime()
+        .delete(
+            session.user_id,
+            session.device_id,
+            space_id,
+            idempotency_key,
+        )
+        .await
+        .map_err(map_social_error)?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn list_members(
+    State(state): State<AppState>,
+    Extension(session): Extension<AuthenticatedSession>,
+    Path(space_id): Path<CommunitySpaceId>,
+) -> Result<Json<Vec<CommunityMembership>>, AppError> {
+    state
+        .social_runtime()
+        .members(session.user_id, space_id)
+        .await
+        .map(Json)
+        .map_err(map_social_error)
+}
+
+async fn update_member(
+    State(state): State<AppState>,
+    Extension(session): Extension<AuthenticatedSession>,
+    Path((space_id, user_id)): Path<(CommunitySpaceId, UserId)>,
+    headers: HeaderMap,
+    Json(request): Json<UpdateCommunityMemberRequest>,
+) -> Result<Json<CommunityMembership>, AppError> {
+    let idempotency_key = required_idempotency_key(&headers)?;
+    state
+        .social_runtime()
+        .update_member(
+            session.user_id,
+            session.device_id,
+            space_id,
+            user_id,
+            idempotency_key,
+            request,
+        )
+        .await
+        .map(Json)
+        .map_err(map_social_error)
+}
+
+async fn remove_member(
+    State(state): State<AppState>,
+    Extension(session): Extension<AuthenticatedSession>,
+    Path((space_id, user_id)): Path<(CommunitySpaceId, UserId)>,
+    headers: HeaderMap,
+) -> Result<StatusCode, AppError> {
+    let idempotency_key = required_idempotency_key(&headers)?;
+    state
+        .social_runtime()
+        .remove_member(
+            session.user_id,
+            session.device_id,
+            space_id,
+            user_id,
+            idempotency_key,
+        )
+        .await
+        .map_err(map_social_error)?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn leave_space(
+    State(state): State<AppState>,
+    Extension(session): Extension<AuthenticatedSession>,
+    Path(space_id): Path<CommunitySpaceId>,
+    headers: HeaderMap,
+) -> Result<StatusCode, AppError> {
+    let idempotency_key = required_idempotency_key(&headers)?;
+    state
+        .social_runtime()
+        .leave(
+            session.user_id,
+            session.device_id,
+            space_id,
+            idempotency_key,
+        )
+        .await
+        .map_err(map_social_error)?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn list_links(
+    State(state): State<AppState>,
+    Extension(session): Extension<AuthenticatedSession>,
+    Path(space_id): Path<CommunitySpaceId>,
+) -> Result<Json<Vec<CommunityAccessLink>>, AppError> {
+    state
+        .social_runtime()
+        .links(session.user_id, space_id)
+        .await
+        .map(Json)
+        .map_err(map_social_error)
+}
+
+async fn create_link(
+    State(state): State<AppState>,
+    Extension(session): Extension<AuthenticatedSession>,
+    Path(space_id): Path<CommunitySpaceId>,
+    headers: HeaderMap,
+    Json(request): Json<CreateCommunityAccessLinkRequest>,
+) -> Result<(StatusCode, Json<CreatedCommunityAccessLink>), AppError> {
+    let idempotency_key = required_idempotency_key(&headers)?;
+    let link = state
+        .social_runtime()
+        .create_link(
+            session.user_id,
+            session.device_id,
+            space_id,
+            idempotency_key,
+            request,
+        )
+        .await
+        .map_err(map_social_error)?;
+    Ok((StatusCode::CREATED, Json(link)))
+}
+
+async fn revoke_link(
+    State(state): State<AppState>,
+    Extension(session): Extension<AuthenticatedSession>,
+    Path((space_id, link_id)): Path<(CommunitySpaceId, CommunityAccessLinkId)>,
+    headers: HeaderMap,
+) -> Result<StatusCode, AppError> {
+    let idempotency_key = required_idempotency_key(&headers)?;
+    state
+        .social_runtime()
+        .revoke_link(
+            session.user_id,
+            session.device_id,
+            space_id,
+            link_id,
+            idempotency_key,
+        )
+        .await
+        .map_err(map_social_error)?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn rotate_link(
+    State(state): State<AppState>,
+    Extension(session): Extension<AuthenticatedSession>,
+    Path((space_id, link_id)): Path<(CommunitySpaceId, CommunityAccessLinkId)>,
+    headers: HeaderMap,
+) -> Result<Json<CreatedCommunityAccessLink>, AppError> {
+    let idempotency_key = required_idempotency_key(&headers)?;
+    state
+        .social_runtime()
+        .rotate_link(
+            session.user_id,
+            session.device_id,
+            space_id,
+            link_id,
+            idempotency_key,
+        )
+        .await
+        .map(Json)
+        .map_err(map_social_error)
+}
+
+async fn join_link(
+    State(state): State<AppState>,
+    Extension(session): Extension<AuthenticatedSession>,
+    headers: HeaderMap,
+    Json(request): Json<JoinCommunityLinkRequest>,
+) -> Result<Json<CommunitySpaceDetail>, AppError> {
+    let idempotency_key = required_idempotency_key(&headers)?;
+    state
+        .social_runtime()
+        .join(session.user_id, session.device_id, idempotency_key, request)
+        .await
+        .map(Json)
+        .map_err(map_social_error)
+}
+
+async fn list_materials(
+    State(state): State<AppState>,
+    Extension(session): Extension<AuthenticatedSession>,
+    Path(space_id): Path<CommunitySpaceId>,
+) -> Result<Json<Vec<SharedMaterial>>, AppError> {
+    state
+        .social_runtime()
+        .list_materials(session.user_id, space_id)
+        .await
+        .map(Json)
+        .map_err(map_social_error)
+}
+
+async fn share_material(
+    State(state): State<AppState>,
+    Extension(session): Extension<AuthenticatedSession>,
+    Path(space_id): Path<CommunitySpaceId>,
+    headers: HeaderMap,
+    Json(request): Json<ShareMaterialRequest>,
+) -> Result<Json<SharedMaterial>, AppError> {
+    let idempotency_key = required_idempotency_key(&headers)?;
+    state
+        .social_runtime()
+        .share_material(
+            session.user_id,
+            session.device_id,
+            space_id,
+            idempotency_key,
+            request,
+        )
+        .await
+        .map(Json)
+        .map_err(map_social_error)
+}
+
+async fn get_material(
+    State(state): State<AppState>,
+    Extension(session): Extension<AuthenticatedSession>,
+    Path((space_id, shared_material_id)): Path<(CommunitySpaceId, SharedMaterialId)>,
+) -> Result<Json<SharedMaterial>, AppError> {
+    state
+        .social_runtime()
+        .material(session.user_id, space_id, shared_material_id)
+        .await
+        .map(Json)
+        .map_err(map_social_error)
+}
+
+async fn delete_material(
+    State(state): State<AppState>,
+    Extension(session): Extension<AuthenticatedSession>,
+    Path((space_id, shared_material_id)): Path<(CommunitySpaceId, SharedMaterialId)>,
+    headers: HeaderMap,
+) -> Result<StatusCode, AppError> {
+    let idempotency_key = required_idempotency_key(&headers)?;
+    state
+        .social_runtime()
+        .delete_material(
+            session.user_id,
+            session.device_id,
+            space_id,
+            shared_material_id,
+            idempotency_key,
+        )
+        .await
+        .map_err(map_social_error)?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn get_claim(
+    State(state): State<AppState>,
+    Extension(session): Extension<AuthenticatedSession>,
+    Path((space_id, shared_material_id)): Path<(CommunitySpaceId, SharedMaterialId)>,
+) -> Result<Json<UserMaterialClaim>, AppError> {
+    state
+        .social_runtime()
+        .material(session.user_id, space_id, shared_material_id)
+        .await
+        .map_err(map_social_error)?
+        .claim
+        .map(Json)
+        .ok_or(AppError::NotFound("material claim"))
+}
+
+async fn claim_material(
+    State(state): State<AppState>,
+    Extension(session): Extension<AuthenticatedSession>,
+    Path((space_id, shared_material_id)): Path<(CommunitySpaceId, SharedMaterialId)>,
+    headers: HeaderMap,
+    Json(request): Json<ClaimSharedMaterialRequest>,
+) -> Result<Json<SharedMaterial>, AppError> {
+    let idempotency_key = required_idempotency_key(&headers)?;
+    state
+        .social_runtime()
+        .claim_material(
+            session.user_id,
+            session.device_id,
+            space_id,
+            shared_material_id,
+            idempotency_key,
+            request,
+        )
+        .await
+        .map(Json)
+        .map_err(map_social_error)
+}
+
+async fn recheck_material(
+    State(state): State<AppState>,
+    Extension(session): Extension<AuthenticatedSession>,
+    Path((space_id, shared_material_id)): Path<(CommunitySpaceId, SharedMaterialId)>,
+    headers: HeaderMap,
+) -> Result<Json<SharedMaterial>, AppError> {
+    let idempotency_key = required_idempotency_key(&headers)?;
+    state
+        .social_runtime()
+        .recheck_material(
+            session.user_id,
+            session.device_id,
+            space_id,
+            shared_material_id,
+            idempotency_key,
+        )
+        .await
+        .map(Json)
+        .map_err(map_social_error)
+}
+
+async fn list_discussions(
+    State(state): State<AppState>,
+    Extension(session): Extension<AuthenticatedSession>,
+    Path((space_id, shared_material_id)): Path<(CommunitySpaceId, SharedMaterialId)>,
+    Query(query): Query<DiscussionQuery>,
+) -> Result<Json<SharedDiscussionPage>, AppError> {
+    state
+        .social_runtime()
+        .list_discussions(
+            session.user_id,
+            space_id,
+            shared_material_id,
+            query.after.as_deref(),
+            query.limit.unwrap_or(50),
+        )
+        .await
+        .map(Json)
+        .map_err(map_social_error)
+}
+
+async fn create_thread(
+    State(state): State<AppState>,
+    Extension(session): Extension<AuthenticatedSession>,
+    Path((space_id, shared_material_id)): Path<(CommunitySpaceId, SharedMaterialId)>,
+    headers: HeaderMap,
+    Json(request): Json<CreateSharedThreadRequest>,
+) -> Result<(StatusCode, Json<SharedCommentThread>), AppError> {
+    let idempotency_key = required_idempotency_key(&headers)?;
+    let thread = state
+        .social_runtime()
+        .create_thread(
+            session.user_id,
+            session.device_id,
+            space_id,
+            shared_material_id,
+            idempotency_key,
+            request,
+        )
+        .await
+        .map_err(map_social_error)?;
+    Ok((StatusCode::CREATED, Json(thread)))
+}
+
+async fn reader_layer(
+    State(state): State<AppState>,
+    Extension(session): Extension<AuthenticatedSession>,
+    Path((space_id, shared_material_id)): Path<(CommunitySpaceId, SharedMaterialId)>,
+) -> Result<Json<SharedReaderLayer>, AppError> {
+    state
+        .social_runtime()
+        .reader_layer(session.user_id, space_id, shared_material_id)
+        .await
+        .map(Json)
+        .map_err(map_social_error)
+}
+
+async fn list_highlights(
+    State(state): State<AppState>,
+    Extension(session): Extension<AuthenticatedSession>,
+    Path((space_id, shared_material_id)): Path<(CommunitySpaceId, SharedMaterialId)>,
+) -> Result<Json<Vec<SharedHighlight>>, AppError> {
+    state
+        .social_runtime()
+        .list_highlights(session.user_id, space_id, shared_material_id)
+        .await
+        .map(Json)
+        .map_err(map_social_error)
+}
+
+async fn publish_highlight(
+    State(state): State<AppState>,
+    Extension(session): Extension<AuthenticatedSession>,
+    Path((space_id, shared_material_id)): Path<(CommunitySpaceId, SharedMaterialId)>,
+    headers: HeaderMap,
+    Json(request): Json<PublishSharedHighlightRequest>,
+) -> Result<(StatusCode, Json<SharedHighlight>), AppError> {
+    let idempotency_key = required_idempotency_key(&headers)?;
+    let highlight = state
+        .social_runtime()
+        .publish_highlight(
+            session.user_id,
+            session.device_id,
+            space_id,
+            shared_material_id,
+            idempotency_key,
+            request,
+        )
+        .await
+        .map_err(map_social_error)?;
+    Ok((StatusCode::CREATED, Json(highlight)))
+}
+
+async fn unpublish_highlight(
+    State(state): State<AppState>,
+    Extension(session): Extension<AuthenticatedSession>,
+    Path((space_id, highlight_id)): Path<(CommunitySpaceId, SharedHighlightId)>,
+    headers: HeaderMap,
+    Json(request): Json<UnpublishSharedHighlightRequest>,
+) -> Result<StatusCode, AppError> {
+    let idempotency_key = required_idempotency_key(&headers)?;
+    state
+        .social_runtime()
+        .unpublish_highlight(
+            session.user_id,
+            session.device_id,
+            space_id,
+            highlight_id,
+            idempotency_key,
+            request,
+        )
+        .await
+        .map_err(map_social_error)?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn add_comment(
+    State(state): State<AppState>,
+    Extension(session): Extension<AuthenticatedSession>,
+    Path((space_id, thread_id)): Path<(CommunitySpaceId, SharedCommentThreadId)>,
+    headers: HeaderMap,
+    Json(request): Json<CreateSharedCommentRequest>,
+) -> Result<(StatusCode, Json<SharedComment>), AppError> {
+    let idempotency_key = required_idempotency_key(&headers)?;
+    let comment = state
+        .social_runtime()
+        .add_comment(
+            session.user_id,
+            session.device_id,
+            space_id,
+            thread_id,
+            idempotency_key,
+            request,
+        )
+        .await
+        .map_err(map_social_error)?;
+    Ok((StatusCode::CREATED, Json(comment)))
+}
+
+async fn update_comment(
+    State(state): State<AppState>,
+    Extension(session): Extension<AuthenticatedSession>,
+    Path((space_id, comment_id)): Path<(CommunitySpaceId, SharedCommentId)>,
+    headers: HeaderMap,
+    Json(request): Json<UpdateSharedCommentRequest>,
+) -> Result<Json<SharedComment>, AppError> {
+    let idempotency_key = required_idempotency_key(&headers)?;
+    state
+        .social_runtime()
+        .update_comment(
+            session.user_id,
+            session.device_id,
+            space_id,
+            comment_id,
+            idempotency_key,
+            request,
+        )
+        .await
+        .map(Json)
+        .map_err(map_social_error)
+}
+
+async fn delete_comment(
+    State(state): State<AppState>,
+    Extension(session): Extension<AuthenticatedSession>,
+    Path((space_id, comment_id)): Path<(CommunitySpaceId, SharedCommentId)>,
+    headers: HeaderMap,
+    Json(request): Json<DeleteSharedCommentRequest>,
+) -> Result<Json<SharedComment>, AppError> {
+    let idempotency_key = required_idempotency_key(&headers)?;
+    state
+        .social_runtime()
+        .delete_comment(
+            session.user_id,
+            session.device_id,
+            space_id,
+            comment_id,
+            idempotency_key,
+            request,
+        )
+        .await
+        .map(Json)
+        .map_err(map_social_error)
+}
+
+async fn moderate_content(
+    State(state): State<AppState>,
+    Extension(session): Extension<AuthenticatedSession>,
+    Path(space_id): Path<CommunitySpaceId>,
+    headers: HeaderMap,
+    Json(request): Json<ModerateSocialContentRequest>,
+) -> Result<Json<ModerationAction>, AppError> {
+    let idempotency_key = required_idempotency_key(&headers)?;
+    state
+        .social_runtime()
+        .moderate_content(
+            session.user_id,
+            session.device_id,
+            space_id,
+            idempotency_key,
+            request,
+        )
+        .await
+        .map(Json)
+        .map_err(map_social_error)
+}
+
+async fn list_chat(
+    State(state): State<AppState>,
+    Extension(session): Extension<AuthenticatedSession>,
+    Path(space_id): Path<CommunitySpaceId>,
+    Query(query): Query<CommunicationsQuery>,
+) -> Result<Json<SharedChatPage>, AppError> {
+    let result = state
+        .social_runtime()
+        .list_chat(
+            session.user_id,
+            space_id,
+            query.after.as_deref(),
+            query.limit.unwrap_or(50),
+        )
+        .await;
+    if let Err(error) = &result {
+        trace_communications_error(
+            "community.chat.list",
+            session.user_id,
+            space_id,
+            None,
+            error,
+        );
+    }
+    result.map(Json).map_err(map_social_error)
+}
+
+async fn create_chat_message(
+    State(state): State<AppState>,
+    Extension(session): Extension<AuthenticatedSession>,
+    Path(space_id): Path<CommunitySpaceId>,
+    headers: HeaderMap,
+    Json(request): Json<CreateSharedChatMessageRequest>,
+) -> Result<(StatusCode, Json<SharedChatMessage>), AppError> {
+    let idempotency_key = required_idempotency_key(&headers)?;
+    let result = state
+        .social_runtime()
+        .create_chat_message(
+            session.user_id,
+            session.device_id,
+            space_id,
+            idempotency_key,
+            request,
+        )
+        .await;
+    if let Err(error) = &result {
+        trace_communications_error(
+            "community.chat.create",
+            session.user_id,
+            space_id,
+            None,
+            error,
+        );
+    }
+    let message = result.map_err(map_social_error)?;
+    tracing::info!(
+        operation = "community.chat.create",
+        actor_user_id = %session.user_id,
+        %space_id,
+        chat_message_id = %message.id,
+        result = "created",
+        "Community chat command completed"
+    );
+    Ok((StatusCode::CREATED, Json(message)))
+}
+
+async fn update_chat_message(
+    State(state): State<AppState>,
+    Extension(session): Extension<AuthenticatedSession>,
+    Path((space_id, message_id)): Path<(CommunitySpaceId, SharedChatMessageId)>,
+    headers: HeaderMap,
+    Json(request): Json<UpdateSharedChatMessageRequest>,
+) -> Result<Json<SharedChatMessage>, AppError> {
+    let idempotency_key = required_idempotency_key(&headers)?;
+    let result = state
+        .social_runtime()
+        .update_chat_message(
+            session.user_id,
+            session.device_id,
+            space_id,
+            message_id,
+            idempotency_key,
+            request,
+        )
+        .await;
+    if let Err(error) = &result {
+        trace_communications_error(
+            "community.chat.update",
+            session.user_id,
+            space_id,
+            Some(message_id),
+            error,
+        );
+    }
+    let message = result.map_err(map_social_error)?;
+    tracing::info!(
+        operation = "community.chat.update",
+        actor_user_id = %session.user_id,
+        %space_id,
+        %message_id,
+        result = "updated",
+        "Community chat command completed"
+    );
+    Ok(Json(message))
+}
+
+async fn delete_chat_message(
+    State(state): State<AppState>,
+    Extension(session): Extension<AuthenticatedSession>,
+    Path((space_id, message_id)): Path<(CommunitySpaceId, SharedChatMessageId)>,
+    headers: HeaderMap,
+    Json(request): Json<DeleteSharedChatMessageRequest>,
+) -> Result<Json<SharedChatMessage>, AppError> {
+    let idempotency_key = required_idempotency_key(&headers)?;
+    let result = state
+        .social_runtime()
+        .delete_chat_message(
+            session.user_id,
+            session.device_id,
+            space_id,
+            message_id,
+            idempotency_key,
+            request,
+        )
+        .await;
+    if let Err(error) = &result {
+        trace_communications_error(
+            "community.chat.delete",
+            session.user_id,
+            space_id,
+            Some(message_id),
+            error,
+        );
+    }
+    let message = result.map_err(map_social_error)?;
+    tracing::info!(
+        operation = "community.chat.delete",
+        actor_user_id = %session.user_id,
+        %space_id,
+        %message_id,
+        result = "deleted",
+        "Community chat command completed"
+    );
+    Ok(Json(message))
+}
+
+async fn list_activity(
+    State(state): State<AppState>,
+    Extension(session): Extension<AuthenticatedSession>,
+    Path(space_id): Path<CommunitySpaceId>,
+    Query(query): Query<CommunicationsQuery>,
+) -> Result<Json<CommunityActivityPage>, AppError> {
+    let result = state
+        .social_runtime()
+        .list_activity(
+            session.user_id,
+            space_id,
+            query.after.as_deref(),
+            query.limit.unwrap_or(50),
+        )
+        .await;
+    if let Err(error) = &result {
+        trace_communications_error(
+            "community.activity.list",
+            session.user_id,
+            space_id,
+            None,
+            error,
+        );
+    }
+    result.map(Json).map_err(map_social_error)
+}
+
+fn trace_communications_error(
+    operation: &'static str,
+    actor_user_id: UserId,
+    space_id: CommunitySpaceId,
+    object_id: Option<uuid::Uuid>,
+    error: &SocialStoreError,
+) {
+    tracing::warn!(
+        operation,
+        %actor_user_id,
+        %space_id,
+        ?object_id,
+        result = error.code(),
+        "Community communications request failed"
+    );
+}
+
+fn map_social_error(error: SocialStoreError) -> AppError {
+    match error {
+        SocialStoreError::NotFound => AppError::NotFound("community object"),
+        SocialStoreError::Forbidden => AppError::Forbidden("community action is forbidden"),
+        SocialStoreError::Conflict => {
+            AppError::Conflict("community command conflicts with current state".to_owned())
+        }
+        SocialStoreError::Invalid(detail) => AppError::Unprocessable(detail),
+        SocialStoreError::RateLimited => {
+            AppError::TooManyRequests("community request rate exceeded")
+        }
+        SocialStoreError::Unavailable => AppError::Unavailable("community repository"),
+    }
+}

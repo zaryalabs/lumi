@@ -2,6 +2,18 @@
 
 Status: accepted
 
+Importer baseline: `s1.2026-07-23.lum-import-v1`. Текущий общий domain marker
+после AI Contract Freeze 1 — `s1.2026-07-25.ai-contract-v1`; формат `.lum`
+этим не изменен.
+
+Реализован первый portable profile: Web/API upload `.lum`, constrained ZIP,
+строгий `lum.toml` версии `0.1`, multi-chapter spine через общий
+`compile_markdown`, chapter TOC, cross-file Markdown links, локальные
+JPEG/PNG/GIF/WebP resources, `LumSourceLocator`, durable jobs/source download и
+общий reader. Source-folder build/CLI, generated book graph, semantic roles и
+исполняемые interactive blocks пока остаются следующими additive slices;
+`lum:*` сохраняются как безопасные typed placeholders.
+
 ## Контекст
 
 `lum` - собственный формат Lumi для материалов, которые должны вести себя как
@@ -61,6 +73,9 @@ Package, reader строит единый `ReadingDocument`, `PageMap` и пок
   привязкой к главе, блоку или фрагменту.
 - Lumi использует `lum` metadata для поиска, базы знаний, обучения и ИИ-задач,
   не смешивая исходный контент с личными заметками пользователя.
+- ИИ может создать сокращенную версию существующего материала как отдельный
+  производный `.lum`-материал со своим spine и ссылками на source
+  material/revision/anchors.
 
 ## Функциональные требования
 
@@ -637,7 +652,13 @@ Examples:
 - **Search.** Index строится по compiled `ReadingDocument`, plus manifest
   metadata, concepts, glossary and headings.
 - **ИИ.** Manifest/chapter metadata can provide AI context and permissions, но
-  ИИ-задачи запускаются reader/AI layer, not importer.
+  ИИ-задачи запускаются reader/AI layer, not importer. Abridgement workflow из
+  [`../ai-summaries.md`](../ai-summaries.md) собирает новый `.lum` package и
+  передает его в обычный validation/import pipeline как отдельный derived
+  material. Portable provenance такого package хранится в
+  `META-INF/lumi/provenance.json`; `lum.toml` strict profile `0.1` не
+  расширяется. Authoritative relation и atomic publication закреплены в
+  [ADR 0024](../../adr/0024-derived-material-provenance.md).
 - **Sync.** Синхронизируются package/source identity, `DocumentRevision`,
   resources metadata, progress, annotations and exercise answers. Сам source
   package может sync-иться как blob/content-addressed asset.

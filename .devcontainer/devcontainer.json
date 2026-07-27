@@ -1,0 +1,17 @@
+{
+  "name": "Lumi autonomous Codex",
+  "dockerComposeFile": "docker-compose.yml",
+  "service": "workspace",
+  "workspaceFolder": "/workspaces/lumi",
+  "remoteUser": "vscode",
+  "shutdownAction": "none",
+  "postCreateCommand": "bash .devcontainer/post-create.sh",
+  "customizations": {
+    "vscode": {
+      "extensions": [
+        "rust-lang.rust-analyzer",
+        "tamasfe.even-better-toml"
+      ]
+    }
+  }
+}

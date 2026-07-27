@@ -5,21 +5,50 @@
 //! the server and web adapter one shared model for materials, revisions,
 //! normalized content, reading documents, anchors, annotations and jobs.
 
+mod ai;
+mod annotations;
 mod auth;
+mod desk;
 mod epub;
+mod fingerprints;
 mod fixtures;
+mod learning;
+mod links;
+#[cfg(feature = "markdown-import")]
+mod lum;
+#[cfg(feature = "markdown-import")]
+mod markdown;
+mod mcp;
 mod models;
+mod pdf;
 mod reader;
+mod search;
+mod social;
 mod sources;
 
+pub use ai::*;
+pub use annotations::*;
 pub use auth::*;
+pub use desk::*;
 pub use epub::*;
+pub use fingerprints::*;
 pub use fixtures::{
-    import_epub_fixture, rich_epub_fixture, sample_fixture_highlight, simple_epub_fixture,
-    EpubFixture, EpubFixtureResource, EpubFixtureSection, ImportError, ImportedFixture,
+    import_epub_fixture, rich_epub_fixture, sample_fixture_highlight, sample_learning_fixture,
+    simple_epub_fixture, EpubFixture, EpubFixtureResource, EpubFixtureSection, ImportError,
+    ImportedFixture, LearningFixture, LearningFixtureItem,
 };
+pub use learning::*;
+pub use links::*;
+#[cfg(feature = "markdown-import")]
+pub use lum::*;
+#[cfg(feature = "markdown-import")]
+pub use markdown::*;
+pub use mcp::*;
 pub use models::*;
+pub use pdf::*;
 pub use reader::*;
+pub use search::*;
+pub use social::*;
 pub use sources::*;
 
 use serde::{Deserialize, Serialize};
@@ -27,11 +56,14 @@ use serde::{Deserialize, Serialize};
 /// Current public API version used by the local Axum scaffold.
 pub const API_VERSION: &str = "v1";
 
-/// Current domain schema marker for the S1 contracts.
-pub const DOMAIN_SCHEMA_VERSION: &str = "s1.2026-07-22.telegram-composite-v1";
+/// Current domain schema marker for the frozen `0.2.0` AI contracts.
+pub const DOMAIN_SCHEMA_VERSION: &str = "s1.2026-07-27.shared-reading-v1";
 
 /// Current normalized content package marker for reflowable S1 documents.
 pub const NORMALIZED_PACKAGE_VERSION: &str = "normalized.reflowable.s1";
+
+/// Current normalized package marker for PDF and fixed-layout revisions.
+pub const FIXED_LAYOUT_PACKAGE_VERSION: &str = "normalized.fixed-layout.v1";
 
 const S0_DOMAIN_SCHEMA_VERSION: &str = "s0.2026-06-21";
 const S0_NORMALIZED_PACKAGE_VERSION: &str = "normalized.reflowable.s0";
@@ -47,6 +79,12 @@ pub const EPUB_IMPORTER_ID: &str = "lumi.epub";
 
 /// Version of the deterministic real EPUB importer.
 pub const EPUB_IMPORTER_VERSION: &str = "s1.3";
+
+/// Importer id used by the fixed-layout PDF pipeline.
+pub const PDF_IMPORTER_ID: &str = "lumi.pdf";
+
+/// Version of the fixed-layout PDF importer.
+pub const PDF_IMPORTER_VERSION: &str = "v1.0";
 
 /// Importer id used by the baseline raw web snapshot pipeline.
 pub const WEB_IMPORTER_ID: &str = "lumi.web.raw-snapshot";
@@ -65,6 +103,27 @@ pub const TELEGRAM_COMPOSITE_IMPORTER_ID: &str = "lumi.telegram.composite";
 
 /// Version of the deterministic composite Telegram normalizer.
 pub const TELEGRAM_COMPOSITE_IMPORTER_VERSION: &str = "s1.0";
+
+/// Importer id used by the standalone Markdown pipeline.
+pub const MARKDOWN_IMPORTER_ID: &str = "lumi.markdown";
+
+/// Version of the deterministic standalone Markdown importer.
+pub const MARKDOWN_IMPORTER_VERSION: &str = "v1.0";
+
+/// Maximum standalone Markdown source size accepted by the initial web boundary.
+pub const MARKDOWN_WEB_SOURCE_BYTES: u64 = 10 * 1024 * 1024;
+
+/// Importer id used by the portable LUM book pipeline.
+pub const LUM_IMPORTER_ID: &str = "lumi.lum";
+
+/// Version of the deterministic portable LUM importer.
+pub const LUM_IMPORTER_VERSION: &str = "v0.1";
+
+/// Media type of a portable `.lum` ZIP package.
+pub const LUM_SOURCE_MEDIA_TYPE: &str = "application/vnd.lumi.lum+zip";
+
+/// Maximum portable LUM package size accepted by the initial web boundary.
+pub const LUM_WEB_SOURCE_BYTES: u64 = 100 * 1024 * 1024;
 
 /// Health state for Lumi services.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -172,6 +231,11 @@ impl ServiceCapabilities {
                 "sync-ready-postgresql".to_owned(),
                 "content-addressed-local-dev-blobs".to_owned(),
                 "real-epub-importer".to_owned(),
+                "markdown-import".to_owned(),
+                "lum-import".to_owned(),
+                "pdf-fixed-layout-import".to_owned(),
+                "pdf-page-fidelity-reader".to_owned(),
+                "pdf-native-text-layer".to_owned(),
                 "durable-import-jobs".to_owned(),
                 "api-backed-library".to_owned(),
                 "durable-library-lifecycle".to_owned(),
@@ -182,14 +246,19 @@ impl ServiceCapabilities {
                 "anchor-backed-annotations".to_owned(),
                 "annotation-crud".to_owned(),
                 "annotation-export".to_owned(),
+                "records-v2".to_owned(),
+                "annotation-targets".to_owned(),
+                "rich-highlights".to_owned(),
+                "margin-notes".to_owned(),
+                "annotation-tags-status".to_owned(),
                 "library-archive-delete".to_owned(),
-                "source-epub-download".to_owned(),
+                "source-document-download".to_owned(),
                 "import-diagnostics".to_owned(),
                 "public-web-url-import".to_owned(),
                 "telegram-text-import".to_owned(),
                 "telegram-composite-import".to_owned(),
                 "telegram-media-group-import".to_owned(),
-                "telegram-one-time-pairing".to_owned(),
+                "telegram-admin-auto-link".to_owned(),
             ],
         }
     }

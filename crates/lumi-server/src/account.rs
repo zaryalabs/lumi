@@ -1,14 +1,14 @@
 //! Persistent account, challenge, session and device repositories.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use ed25519_dalek::{Signature, VerifyingKey};
 use lumi_core::{
     decode_auth_bytes, AccountStatus, AccountSummary, AuthChallenge, ChallengeResponse,
-    CompleteLoginRequest, DeviceSummary, RegisterAccountRequest, SessionBootstrap,
-    UpdateAccountProfileRequest, UserId, AUTH_ALGORITHM,
+    CompleteLoginRequest, DeviceSummary, InstanceRole, LookupId, RegisterAccountRequest,
+    SessionBootstrap, UpdateAccountProfileRequest, UserId, AUTH_ALGORITHM,
 };
 use rand::{rngs::OsRng, RngCore};
 use serde_json::json;
@@ -56,6 +56,7 @@ pub(crate) struct AuthenticatedSession {
     pub(crate) session_id: Uuid,
     pub(crate) device_id: Uuid,
     pub(crate) csrf_hash: [u8; 32],
+    pub(crate) instance_role: InstanceRole,
 }
 
 #[derive(Clone, Debug)]
@@ -110,20 +111,57 @@ pub(crate) trait AccountStore: Send + Sync {
 #[derive(Clone)]
 pub(crate) struct PgAccountStore {
     pool: PgPool,
+    admin_lookup_ids: Arc<HashSet<LookupId>>,
 }
 
 impl PgAccountStore {
-    pub(crate) async fn connect(database_url: &str) -> Result<Self, AccountStoreError> {
+    pub(crate) async fn connect(
+        database_url: &str,
+        admin_lookup_ids: HashSet<LookupId>,
+    ) -> Result<Self, AccountStoreError> {
         let pool = PgPoolOptions::new()
             .max_connections(10)
             .connect(database_url)
             .await
             .map_err(log_storage_error)?;
-        Ok(Self { pool })
+        Ok(Self {
+            pool,
+            admin_lookup_ids: Arc::new(admin_lookup_ids),
+        })
     }
 
     pub(crate) fn pool(&self) -> &PgPool {
         &self.pool
+    }
+
+    fn role_for_lookup(&self, lookup_id: &LookupId) -> InstanceRole {
+        if self.admin_lookup_ids.contains(lookup_id) {
+            InstanceRole::Admin
+        } else {
+            InstanceRole::User
+        }
+    }
+
+    async fn role_for_user(&self, user_id: UserId) -> Result<InstanceRole, AccountStoreError> {
+        if self.admin_lookup_ids.is_empty() {
+            return Ok(InstanceRole::User);
+        }
+        let lookup_ids = sqlx::query_scalar::<_, Vec<u8>>(
+            "SELECT lookup_id FROM auth_identities WHERE user_id = $1 AND revoked_at IS NULL",
+        )
+        .bind(user_id)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(log_storage_error)?;
+        let is_admin = lookup_ids
+            .iter()
+            .filter_map(|lookup_id| lookup_id.as_slice().try_into().ok())
+            .any(|lookup_id: LookupId| self.admin_lookup_ids.contains(&lookup_id));
+        if is_admin {
+            Ok(InstanceRole::Admin)
+        } else {
+            Ok(InstanceRole::User)
+        }
     }
 }
 
@@ -226,7 +264,13 @@ impl AccountStore for PgAccountStore {
         tx.commit().await.map_err(log_storage_error)?;
 
         Ok(created_session(
-            account_summary(user_id, request.nickname.clone(), 1, now),
+            account_summary(
+                user_id,
+                request.nickname.clone(),
+                self.role_for_lookup(&lookup_id),
+                1,
+                now,
+            ),
             device_summary(device_id, &request.device_name, now),
             session_id,
             token,
@@ -322,7 +366,8 @@ impl AccountStore for PgAccountStore {
             .execute(&mut *tx)
             .await
             .map_err(log_storage_error)?;
-        let account = load_account(&mut tx, user_id).await?;
+        let mut account = load_account(&mut tx, user_id).await?;
+        account.instance_role = self.role_for_lookup(&lookup_id);
         let device_id = Uuid::now_v7();
         let session_id = Uuid::now_v7();
         let token = random_token();
@@ -371,14 +416,20 @@ impl AccountStore for PgAccountStore {
         .await
         .map_err(log_storage_error)?
         .ok_or(AccountStoreError::NotFound)?;
+        let user_id = row.try_get("user_id").map_err(log_storage_error)?;
+        let session_id = row.try_get("session_id").map_err(log_storage_error)?;
+        let device_id = row.try_get("device_id").map_err(log_storage_error)?;
+        let csrf_hash = fixed_bytes(
+            row.try_get::<Vec<u8>, _>("csrf_hash")
+                .map_err(log_storage_error)?,
+        )?;
+        let instance_role = self.role_for_user(user_id).await?;
         Ok(AuthenticatedSession {
-            user_id: row.try_get("user_id").map_err(log_storage_error)?,
-            session_id: row.try_get("session_id").map_err(log_storage_error)?,
-            device_id: row.try_get("device_id").map_err(log_storage_error)?,
-            csrf_hash: fixed_bytes(
-                row.try_get::<Vec<u8>, _>("csrf_hash")
-                    .map_err(log_storage_error)?,
-            )?,
+            user_id,
+            session_id,
+            device_id,
+            csrf_hash,
+            instance_role,
         })
     }
 
@@ -572,14 +623,20 @@ impl MemoryAccountStore {
         }
     }
 
-    pub(crate) fn seeded(user_id: UserId) -> Self {
+    pub(crate) fn seeded(user_id: UserId, instance_role: InstanceRole) -> Self {
         let store = Self::empty();
         let now = OffsetDateTime::now_utc();
         let device_id = Uuid::now_v7();
         if let Ok(mut state) = store.state.lock() {
             state.accounts.insert(
                 user_id,
-                account_summary(user_id, Some("Local reader".to_owned()), 1, now),
+                account_summary(
+                    user_id,
+                    Some("Local reader".to_owned()),
+                    instance_role,
+                    1,
+                    now,
+                ),
             );
             state.devices.insert(
                 device_id,
@@ -629,7 +686,13 @@ impl AccountStore for MemoryAccountStore {
         let session_id = Uuid::now_v7();
         let token = random_token();
         let csrf_token = random_token();
-        let account = account_summary(user_id, request.nickname.clone(), 1, now);
+        let account = account_summary(
+            user_id,
+            request.nickname.clone(),
+            InstanceRole::User,
+            1,
+            now,
+        );
         let device = device_summary(device_id, &request.device_name, now);
         let expires_at = now + Duration::days(SESSION_TTL_DAYS);
         state.accounts.insert(user_id, account.clone());
@@ -741,11 +804,17 @@ impl AccountStore for MemoryAccountStore {
                 !session.revoked && session.expires_at > OffsetDateTime::now_utc().unix_timestamp()
             })
             .ok_or(AccountStoreError::NotFound)?;
+        let instance_role = state
+            .accounts
+            .get(&session.user_id)
+            .map(|account| account.instance_role)
+            .ok_or(AccountStoreError::NotFound)?;
         Ok(AuthenticatedSession {
             user_id: session.user_id,
             session_id: session.session_id,
             device_id: session.device_id,
             csrf_hash: session.csrf_hash,
+            instance_role,
         })
     }
 
@@ -929,12 +998,14 @@ fn created_session(
 fn account_summary(
     user_id: UserId,
     nickname: Option<String>,
+    instance_role: InstanceRole,
     profile_revision: i64,
     created_at: OffsetDateTime,
 ) -> AccountSummary {
     AccountSummary {
         user_id,
         nickname: normalize_nickname(nickname.as_deref()),
+        instance_role,
         status: AccountStatus::Active,
         profile_revision,
         created_at: time_to_millis(created_at),
@@ -1041,6 +1112,7 @@ fn account_from_row(row: &sqlx::postgres::PgRow) -> Result<AccountSummary, Accou
     Ok(AccountSummary {
         user_id: row.try_get("user_id").map_err(log_storage_error)?,
         nickname: row.try_get("nickname").map_err(log_storage_error)?,
+        instance_role: InstanceRole::User,
         status: parse_status(&status)?,
         profile_revision: row.try_get("object_revision").map_err(log_storage_error)?,
         created_at: time_to_millis(row.try_get("created_at").map_err(log_storage_error)?),

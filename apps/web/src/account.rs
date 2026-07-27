@@ -4,13 +4,13 @@ use bip39::{Language, Mnemonic};
 use dioxus::prelude::*;
 use gloo_net::http::Request;
 use lumi_core::{
-    decode_auth_bytes, encode_auth_bytes, AcceptedImport, AccountSummary, AuthChallenge,
+    decode_auth_bytes, encode_auth_bytes, AcceptedImport, AccountSummary, AiPage, AuthChallenge,
     ChallengeResponse, CompleteLoginRequest, ContinueReadingEntry, CreateChallengeRequest,
-    DerivedAuthMaterial, ImportWebUrlRequest, Job, JobStatus, LibraryEntry, LibraryState,
-    MaterialImportStatus, MaterialKind, ReadingProgress, RegisterAccountRequest,
-    ServiceCapabilities, SessionBootstrap, TelegramBotRuntimeStatus, TelegramBotSettings,
-    TelegramConnectionStatus, TelegramPairingResponse, UpdateLibraryStateCommand,
-    UpdateTelegramBotTokenRequest,
+    CreateMcpConnectionRequest, DerivedAuthMaterial, ImportWebUrlRequest, InstanceRole, Job,
+    JobStatus, LibraryEntry, LibraryState, MaterialImportStatus, MaterialKind, McpConnection,
+    McpConnectionStatus, McpConnectionTokenResponse, ReadingProgress, RegisterAccountRequest,
+    RevokeMcpConnectionRequest, ServiceCapabilities, SessionBootstrap, TelegramBotRuntimeStatus,
+    TelegramBotSettings, UpdateLibraryStateCommand, UpdateTelegramBotTokenRequest,
 };
 use uuid::Uuid;
 use wasm_bindgen::closure::Closure;
@@ -18,41 +18,22 @@ use wasm_bindgen::JsCast;
 use wasm_bindgen_futures::JsFuture;
 use web_sys::RequestCredentials;
 
+use crate::routing::{
+    browser_requests_system_settings, initial_route, set_browser_route, AppRoute, DeskRoute,
+    SearchRoute,
+};
+
 pub(crate) const API_BASE: &str = match option_env!("LUMI_API_BASE") {
     Some(value) => value,
     None => "/api/v1",
 };
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum AppRoute {
-    Library,
-    Settings,
-    Reader(Uuid),
-}
-
-fn initial_route() -> AppRoute {
-    let hash = web_sys::window()
+fn community_join_token() -> Option<String> {
+    web_sys::window()
         .and_then(|window| window.location().hash().ok())
-        .unwrap_or_default();
-    if hash == "#settings" {
-        return AppRoute::Settings;
-    }
-    hash.strip_prefix("#reader/")
-        .and_then(|id| Uuid::parse_str(id).ok())
-        .map_or(AppRoute::Library, AppRoute::Reader)
+        .and_then(|hash| hash.strip_prefix("#join/").map(str::to_owned))
+        .filter(|token| !token.is_empty())
 }
-
-fn set_browser_route(route: AppRoute) {
-    let hash = match route {
-        AppRoute::Library => "library".to_owned(),
-        AppRoute::Settings => "settings".to_owned(),
-        AppRoute::Reader(material_id) => format!("reader/{material_id}"),
-    };
-    if let Some(window) = web_sys::window() {
-        let _ = window.location().set_hash(&hash);
-    }
-}
-
 #[derive(Clone)]
 enum AccountState {
     Loading,
@@ -79,7 +60,15 @@ pub(crate) fn AccountGate() -> Element {
     let mut state = use_signal(|| AccountState::Loading);
     let mut route = use_signal(initial_route);
     let mut csrf = use_signal(String::new);
+    let mut service_capabilities = use_signal(|| Option::<ServiceCapabilities>::None);
     let mut bootstrap_generation = use_signal(|| 0_u64);
+    let mut community_available = use_signal(|| false);
+    let mut material_sharing_available = use_signal(|| false);
+    let mut material_discussions_available = use_signal(|| false);
+    let mut community_communications_available = use_signal(|| false);
+    let mut shared_reading_available = use_signal(|| false);
+    let mut community_images_available = use_signal(|| false);
+    let mut capability_error = use_signal(String::new);
     use_effect(move || {
         let Some(window) = web_sys::window() else {
             return;
@@ -87,6 +76,7 @@ pub(crate) fn AccountGate() -> Element {
         let handler = Closure::<dyn FnMut(web_sys::Event)>::new(move |_| {
             clear_csrf_cookie();
             csrf.set(String::new());
+            service_capabilities.set(None);
             route.set(AppRoute::Library);
             state.set(AccountState::Expired);
         });
@@ -97,20 +87,133 @@ pub(crate) fn AccountGate() -> Element {
         handler.forget();
     });
     use_effect(move || {
+        let Some(window) = web_sys::window() else {
+            return;
+        };
+        let handler = Closure::<dyn FnMut(web_sys::Event)>::new(move |_| {
+            route.set(initial_route());
+        });
+        let _ =
+            window.add_event_listener_with_callback("hashchange", handler.as_ref().unchecked_ref());
+        handler.forget();
+    });
+    use_effect(move || {
+        let title = match route() {
+            AppRoute::Library => "Библиотека — Lumi",
+            AppRoute::Community => "Сообщества — Lumi",
+            AppRoute::CommunitySpace(_) => "Сообщество — Lumi",
+            AppRoute::CommunityJoin => "Вступление в сообщество — Lumi",
+            AppRoute::Challenges => "Челленджи — Lumi",
+            AppRoute::AiQueue => "AI-задачи — Lumi",
+            AppRoute::Connections => "Подключения — Lumi",
+            AppRoute::Settings => "Администрирование — Lumi",
+            AppRoute::Reader(_, _, _) => "Чтение — Lumi",
+            AppRoute::LearningSession(_) => "Самопроверка — Lumi",
+            AppRoute::MaterialLearning(_, _) => "Обучение — Lumi",
+            AppRoute::Desk(_) => "Desk — Lumi",
+            AppRoute::Search(_) => "Поиск — Lumi",
+        };
+        if let Some(document) = web_sys::window().and_then(|window| window.document()) {
+            document.set_title(title);
+        }
+    });
+    use_effect(move || {
+        let needs_record_capability = matches!(
+            route(),
+            AppRoute::Reader(_, _, _) | AppRoute::Desk(_) | AppRoute::Search(_)
+        );
+        let signed_in = matches!(&*state.read(), AccountState::SignedIn(_));
+        if signed_in && needs_record_capability {
+            spawn(async move {
+                service_capabilities.set(load_capabilities().await.ok());
+            });
+        }
+    });
+    use_effect(move || {
         let _ = bootstrap_generation();
         spawn(async move {
             match load_account().await {
                 Ok(account) => {
                     csrf.set(read_cookie("lumi_csrf").unwrap_or_default());
+                    match load_capabilities().await {
+                        Ok(capabilities) => {
+                            community_available.set(
+                                capabilities
+                                    .features
+                                    .iter()
+                                    .any(|feature| feature == "community-spaces"),
+                            );
+                            material_sharing_available.set(
+                                capabilities
+                                    .features
+                                    .iter()
+                                    .any(|feature| feature == "material-sharing"),
+                            );
+                            material_discussions_available.set(
+                                capabilities
+                                    .features
+                                    .iter()
+                                    .any(|feature| feature == "material-discussions"),
+                            );
+                            community_communications_available.set(
+                                capabilities
+                                    .features
+                                    .iter()
+                                    .any(|feature| feature == "community-communications"),
+                            );
+                            shared_reading_available.set(
+                                capabilities
+                                    .features
+                                    .iter()
+                                    .any(|feature| feature == "shared-reading"),
+                            );
+                            community_images_available.set(
+                                capabilities
+                                    .features
+                                    .iter()
+                                    .any(|feature| feature == "community-images"),
+                            );
+                            capability_error.set(String::new());
+                        }
+                        Err(api_error) => {
+                            community_available.set(false);
+                            material_sharing_available.set(false);
+                            material_discussions_available.set(false);
+                            community_communications_available.set(false);
+                            shared_reading_available.set(false);
+                            community_images_available.set(false);
+                            capability_error.set(format!(
+                                "Не удалось проверить возможности сервера: {api_error}"
+                            ));
+                        }
+                    }
+                    if account.instance_role != InstanceRole::Admin
+                        && (route() == AppRoute::Settings || browser_requests_system_settings())
+                    {
+                        set_browser_route(&AppRoute::Library);
+                        route.set(AppRoute::Library);
+                    }
                     state.set(AccountState::SignedIn(account));
                 }
-                Err(ApiError::Unauthorized) => state.set(AccountState::SignedOut),
+                Err(ApiError::Unauthorized) => {
+                    service_capabilities.set(None);
+                    state.set(AccountState::SignedOut);
+                }
                 Err(error) => state.set(AccountState::Failed(error.to_string())),
             }
         });
     });
 
     let account_state = state.read().clone();
+    let record_rag_enabled = service_capabilities
+        .read()
+        .as_ref()
+        .is_some_and(|capabilities| {
+            capabilities
+                .features
+                .iter()
+                .any(|feature| feature == "record-rag")
+        });
     match account_state {
         AccountState::Loading => rsx! {
             main { class: "account-screen", aria_label: "Загрузка аккаунта",
@@ -122,6 +225,66 @@ pub(crate) fn AccountGate() -> Element {
             AccountEntry {
                 on_authenticated: move |session: SessionBootstrap| {
                     csrf.set(session.csrf_token.clone());
+                    spawn(async move {
+                        match load_capabilities().await {
+                            Ok(capabilities) => {
+                                community_available.set(
+                                    capabilities
+                                        .features
+                                        .iter()
+                                        .any(|feature| feature == "community-spaces"),
+                                );
+                                material_sharing_available.set(
+                                    capabilities
+                                        .features
+                                        .iter()
+                                        .any(|feature| feature == "material-sharing"),
+                                );
+                                material_discussions_available.set(
+                                    capabilities
+                                        .features
+                                        .iter()
+                                        .any(|feature| feature == "material-discussions"),
+                                );
+                                community_communications_available.set(
+                                    capabilities
+                                        .features
+                                        .iter()
+                                        .any(|feature| feature == "community-communications"),
+                                );
+                                shared_reading_available.set(
+                                    capabilities
+                                        .features
+                                        .iter()
+                                        .any(|feature| feature == "shared-reading"),
+                                );
+                                community_images_available.set(
+                                    capabilities
+                                        .features
+                                        .iter()
+                                        .any(|feature| feature == "community-images"),
+                                );
+                                capability_error.set(String::new());
+                            }
+                            Err(api_error) => {
+                                community_available.set(false);
+                                material_sharing_available.set(false);
+                                material_discussions_available.set(false);
+                                community_communications_available.set(false);
+                                shared_reading_available.set(false);
+                                community_images_available.set(false);
+                                capability_error.set(format!(
+                                    "Не удалось проверить возможности сервера: {api_error}"
+                                ));
+                            }
+                        }
+                    });
+                    if session.account.instance_role != InstanceRole::Admin
+                        && (route() == AppRoute::Settings || browser_requests_system_settings())
+                    {
+                        set_browser_route(&AppRoute::Library);
+                        route.set(AppRoute::Library);
+                    }
                     state.set(AccountState::SignedIn(session.account));
                 }
             }
@@ -137,6 +300,7 @@ pub(crate) fn AccountGate() -> Element {
             }
         },
         AccountState::SignedIn(account) => {
+            let is_admin = account.instance_role == InstanceRole::Admin;
             let csrf_for_logout = csrf.read().clone();
             let account_label = account
                 .nickname
@@ -146,10 +310,10 @@ pub(crate) fn AccountGate() -> Element {
             rsx! {
                 div { class: "library-app",
                     a { class: "skip-link", href: "#main-content", "Перейти к содержанию" }
-                    if !matches!(route(), AppRoute::Reader(_)) {
+                    if !matches!(route(), AppRoute::Reader(_, _, _) | AppRoute::LearningSession(_)) {
                     header { class: "library-topbar",
                         a { class: "library-brand", href: "#library", aria_label: "Lumi — библиотека", onclick: move |_| {
-                            set_browser_route(AppRoute::Library);
+                            set_browser_route(&AppRoute::Library);
                             route.set(AppRoute::Library);
                         },
                             span { class: "brand-mark", aria_hidden: "true", "L" }
@@ -157,13 +321,43 @@ pub(crate) fn AccountGate() -> Element {
                         }
                         nav { aria_label: "Основная навигация",
                             a { href: "#library", aria_current: if route() == AppRoute::Library { "page" } else { "false" }, onclick: move |_| {
-                                set_browser_route(AppRoute::Library);
+                                set_browser_route(&AppRoute::Library);
                                 route.set(AppRoute::Library);
                             }, "Библиотека" }
-                            a { href: "#settings", aria_current: if route() == AppRoute::Settings { "page" } else { "false" }, onclick: move |_| {
-                                set_browser_route(AppRoute::Settings);
-                                route.set(AppRoute::Settings);
-                            }, "Настройки" }
+                            a { href: "#desk", aria_current: if matches!(route(), AppRoute::Desk(_)) { "page" } else { "false" }, onclick: move |_| {
+                                let next = AppRoute::Desk(DeskRoute::default());
+                                set_browser_route(&next);
+                                route.set(next);
+                            }, "Desk" }
+                            a { href: "#search", aria_current: if matches!(route(), AppRoute::Search(_)) { "page" } else { "false" }, onclick: move |_| {
+                                let next = AppRoute::Search(SearchRoute::default());
+                                set_browser_route(&next);
+                                route.set(next);
+                            }, "Поиск" }
+                            if community_available() {
+                                a { href: "#communities", aria_current: if matches!(route(), AppRoute::Community | AppRoute::CommunitySpace(_) | AppRoute::CommunityJoin) { "page" } else { "false" }, onclick: move |_| {
+                                    set_browser_route(&AppRoute::Community);
+                                    route.set(AppRoute::Community);
+                                }, "Сообщества" }
+                            }
+                            a { href: "#challenges", aria_current: if route() == AppRoute::Challenges { "page" } else { "false" }, onclick: move |_| {
+                                set_browser_route(&AppRoute::Challenges);
+                                route.set(AppRoute::Challenges);
+                            }, "Челленджи" }
+                            a { href: "#ai-queue", aria_current: if route() == AppRoute::AiQueue { "page" } else { "false" }, onclick: move |_| {
+                                set_browser_route(&AppRoute::AiQueue);
+                                route.set(AppRoute::AiQueue);
+                            }, "AI-задачи" }
+                            a { href: "#connections", aria_current: if route() == AppRoute::Connections { "page" } else { "false" }, onclick: move |_| {
+                                set_browser_route(&AppRoute::Connections);
+                                route.set(AppRoute::Connections);
+                            }, "Подключения" }
+                            if is_admin {
+                                a { href: "#settings", aria_current: if route() == AppRoute::Settings { "page" } else { "false" }, onclick: move |_| {
+                                    set_browser_route(&AppRoute::Settings);
+                                    route.set(AppRoute::Settings);
+                                }, "Администрирование" }
+                            }
                         }
                         div { class: "account-session-bar", role: "region", aria_label: "Активная сессия",
                             span { "{account_label}" }
@@ -175,6 +369,7 @@ pub(crate) fn AccountGate() -> Element {
                                         if logout(&csrf_token).await.is_ok() {
                                             state.set(AccountState::SignedOut);
                                             csrf.set(String::new());
+                                            service_capabilities.set(None);
                                         }
                                     });
                                 },
@@ -183,27 +378,184 @@ pub(crate) fn AccountGate() -> Element {
                         }
                     }
                     }
-                    if let AppRoute::Reader(material_id) = route() {
-                        crate::reader::ReaderApp {
-                            material_id,
-                            csrf_token: csrf.read().clone(),
-                            on_close: move |_| {
-                                set_browser_route(AppRoute::Library);
-                                route.set(AppRoute::Library);
-                            }
+                    if !capability_error().is_empty() {
+                        div { class: "library-alert", role: "alert",
+                            span { "{capability_error}" }
+                            button { r#type: "button", onclick: move |_| {
+                                capability_error.set(String::new());
+                                spawn(async move {
+                                    match load_capabilities().await {
+                                        Ok(capabilities) => {
+                                            community_available.set(
+                                                capabilities
+                                                    .features
+                                                    .iter()
+                                                    .any(|feature| feature == "community-spaces"),
+                                            );
+                                            material_sharing_available.set(
+                                                capabilities
+                                                    .features
+                                                    .iter()
+                                                    .any(|feature| feature == "material-sharing"),
+                                            );
+                                            material_discussions_available.set(
+                                                capabilities
+                                                    .features
+                                                    .iter()
+                                                    .any(|feature| feature == "material-discussions"),
+                                            );
+                                            community_communications_available.set(
+                                                capabilities
+                                                    .features
+                                                    .iter()
+                                                    .any(|feature| feature == "community-communications"),
+                                            );
+                                            shared_reading_available.set(
+                                                capabilities
+                                                    .features
+                                                    .iter()
+                                                    .any(|feature| feature == "shared-reading"),
+                                            );
+                                            community_images_available.set(
+                                                capabilities
+                                                    .features
+                                                    .iter()
+                                                    .any(|feature| feature == "community-images"),
+                                            );
+                                        }
+                                        Err(api_error) => capability_error.set(format!(
+                                            "Не удалось проверить возможности сервера: {api_error}"
+                                        )),
+                                    }
+                                });
+                            }, "Повторить" }
                         }
-                    } else if route() == AppRoute::Settings {
+                    }
+                    if let AppRoute::Reader(material_id, return_to, anchor) = route() {
+                        crate::pdf_reader::ReaderRoute {
+                            material_id,
+                            initial_anchor: anchor,
+                            csrf_token: csrf.read().clone(),
+                            record_rag_enabled,
+                            material_sharing_available: material_sharing_available(),
+                            shared_reading_available: shared_reading_available(),
+                            on_close: move |_| {
+                                let next = return_to.map_or(AppRoute::Library, AppRoute::LearningSession);
+                                set_browser_route(&next);
+                                route.set(next);
+                            },
+                            on_open_learning_session: move |session_id| {
+                                let next = AppRoute::LearningSession(session_id);
+                                set_browser_route(&next);
+                                route.set(next);
+                            },
+                            on_manage_learning: move |(material_id, source_id)| {
+                                let next = AppRoute::MaterialLearning(material_id, Some(source_id));
+                                set_browser_route(&next);
+                                route.set(next);
+                            },
+                        }
+                    } else if let AppRoute::LearningSession(session_id) = route() {
+                        crate::learning::LearningSessionPage {
+                            session_id,
+                            csrf_token: csrf.read().clone(),
+                            on_open_source: move |(material_id, session_id)| {
+                                let next = AppRoute::Reader(material_id, Some(session_id), None);
+                                set_browser_route(&next);
+                                route.set(next);
+                            },
+                            on_close: move |_| {
+                                set_browser_route(&AppRoute::Library);
+                                route.set(AppRoute::Library);
+                            },
+                        }
+                    } else if let AppRoute::MaterialLearning(material_id, source_id) = route() {
+                        crate::learning::MaterialLearningPage {
+                            material_id,
+                            source_id,
+                            csrf_token: csrf.read().clone(),
+                            on_open_session: move |session_id| {
+                                let next = AppRoute::LearningSession(session_id);
+                                set_browser_route(&next);
+                                route.set(next);
+                            },
+                        }
+                    } else if route() == AppRoute::Connections {
+                        ConnectionsApp { csrf_token: csrf.read().clone() }
+                    } else if matches!(route(), AppRoute::Community | AppRoute::CommunitySpace(_) | AppRoute::CommunityJoin) {
+                        crate::community::CommunityPage {
+                            current_user_id: account.user_id,
+                            csrf_token: csrf.read().clone(),
+                            space_id: if let AppRoute::CommunitySpace(space_id) = route() { Some(space_id) } else { None },
+                            join_token: if route() == AppRoute::CommunityJoin { community_join_token() } else { None },
+                            available: community_available(),
+                            material_sharing_available: material_sharing_available(),
+                            material_discussions_available: material_discussions_available(),
+                            community_communications_available: community_communications_available(),
+                            community_images_available: community_images_available(),
+                            on_open_space: move |space_id| {
+                                let next = AppRoute::CommunitySpace(space_id);
+                                set_browser_route(&next);
+                                route.set(next);
+                            },
+                            on_open_list: move |_| {
+                                set_browser_route(&AppRoute::Community);
+                                route.set(AppRoute::Community);
+                            },
+                        }
+                    } else if route() == AppRoute::Challenges {
+                        crate::learning::ChallengesPage {
+                            csrf_token: csrf.read().clone(),
+                            on_open_session: move |session_id| {
+                                let next = AppRoute::LearningSession(session_id);
+                                set_browser_route(&next);
+                                route.set(next);
+                            },
+                        }
+                    } else if route() == AppRoute::AiQueue {
+                        crate::ai::AiQueuePage { csrf_token: csrf.read().clone() }
+                    } else if let AppRoute::Desk(desk_route) = route() {
+                        crate::desk::DeskPage {
+                            route: desk_route,
+                            csrf_token: csrf.read().clone(),
+                            record_rag_enabled,
+                            on_route: move |next| {
+                                set_browser_route(&next);
+                                route.set(next);
+                            },
+                        }
+                    } else if let AppRoute::Search(search_route) = route() {
+                        crate::search_ui::GlobalSearchPage {
+                            route: search_route,
+                            record_rag_enabled,
+                            on_open: move |target| crate::search_ui::open_search_target(&target),
+                        }
+                    } else if route() == AppRoute::Settings && is_admin {
                         SettingsApp { csrf_token: csrf.read().clone() }
                     } else {
                         LibraryApp {
                             csrf_token: csrf.read().clone(),
                             on_open_reader: move |material_id| {
-                                let next = AppRoute::Reader(material_id);
-                                set_browser_route(next);
+                                let next = AppRoute::Reader(material_id, None, None);
+                                set_browser_route(&next);
                                 route.set(next);
-                            }
+                            },
+                            on_open_learning: move |material_id| {
+                                let next = AppRoute::MaterialLearning(material_id, None);
+                                set_browser_route(&next);
+                                route.set(next);
+                            },
+                            on_search: move |query| {
+                                let next = AppRoute::Search(SearchRoute {
+                                    query,
+                                    ..SearchRoute::default()
+                                });
+                                set_browser_route(&next);
+                                route.set(next);
+                            },
                         }
                     }
+                    crate::ai::GlobalAiChat { csrf_token: csrf.read().clone() }
                 }
             }
         }
@@ -230,6 +582,7 @@ fn SettingsApp(csrf_token: String) -> Element {
     let mut token = use_signal(String::new);
     let mut error = use_signal(String::new);
     let mut busy = use_signal(|| false);
+    let mut disconnect_open = use_signal(|| false);
 
     use_effect(move || {
         spawn(async move {
@@ -238,6 +591,11 @@ fn SettingsApp(csrf_token: String) -> Element {
                 Err(load_error) => error.set(load_error.to_string()),
             }
         });
+    });
+    use_effect(move || {
+        if disconnect_open() {
+            defer_account_dialog("disconnect-telegram-bot-dialog");
+        }
     });
 
     let settings_snapshot = settings.read().clone();
@@ -271,8 +629,8 @@ fn SettingsApp(csrf_token: String) -> Element {
             header { class: "library-hero",
                 div {
                     p { class: "eyebrow", "Конфигурация" }
-                    h1 { "Настройки" }
-                    p { class: "library-lead", "Подключения и параметры этого экземпляра Lumi." }
+                    h1 { "Системные настройки" }
+                    p { class: "library-lead", "Подключения и параметры этого экземпляра Lumi, доступные администратору." }
                 }
             }
 
@@ -294,7 +652,7 @@ fn SettingsApp(csrf_token: String) -> Element {
                 }
 
                 p { class: "settings-notice", role: "note",
-                    "Это глобальная настройка сервера. Пока в Lumi нет ролей, любой вошедший пользователь может заменить токен бота."
+                    "Это глобальная настройка сервера. Изменения применяются ко всем пользователям экземпляра Lumi."
                 }
 
                 if let Some(current) = settings_snapshot.as_ref() {
@@ -303,6 +661,18 @@ fn SettingsApp(csrf_token: String) -> Element {
                             div { dt { "Бот" } dd { "{bot_label}" } }
                             div { dt { "Bot ID" } dd { "{bot_id_label}" } }
                             div { dt { "Токен" } dd { "{fingerprint_label}" } }
+                        }
+                        p { class: "capability-note",
+                            "Отдельное подтверждение не требуется: откройте бота и сразу отправьте материал. Первый личный чат привяжется к этому аккаунту администратора автоматически."
+                        }
+                        if let Some(username) = current.bot_username.as_ref() {
+                            a {
+                                class: "secondary-action",
+                                href: "https://t.me/{username}",
+                                target: "_blank",
+                                rel: "noopener noreferrer",
+                                "Открыть Telegram"
+                            }
                         }
                     }
                     if let Some(runtime_error) = current.last_error.as_ref() {
@@ -361,21 +731,313 @@ fn SettingsApp(csrf_token: String) -> Element {
                     }, if busy() { "Проверяем…" } else if configured { "Заменить токен" } else { "Подключить бота" } }
 
                     if configured {
-                        button { class: "danger-action", r#type: "button", disabled: busy(), onclick: move |_| {
-                            let csrf = delete_csrf.clone();
-                            busy.set(true);
+                        button {
+                            id: "disconnect-telegram-bot",
+                            class: "danger-action",
+                            r#type: "button",
+                            disabled: busy(),
+                            onclick: move |_| disconnect_open.set(true),
+                            "Отключить бота"
+                        }
+                    }
+                }
+            }
+        }
+
+        if disconnect_open() {
+            dialog {
+                id: "disconnect-telegram-bot-dialog",
+                class: "library-dialog confirm-dialog",
+                open: true,
+                tabindex: "-1",
+                aria_modal: "true",
+                aria_label: "Отключение Telegram-бота",
+                oncancel: move |event| {
+                    event.prevent_default();
+                    disconnect_open.set(false);
+                    defer_account_focus("disconnect-telegram-bot");
+                },
+                p { class: "eyebrow danger-text", "Для всего сервера" }
+                h2 { "Отключить Telegram-бота?" }
+                p { "Пользователи больше не смогут отправлять материалы через Telegram, пока администратор не подключит бота снова." }
+                div { class: "dialog-actions",
+                    button { class: "secondary-action", r#type: "button", onclick: move |_| {
+                        disconnect_open.set(false);
+                        defer_account_focus("disconnect-telegram-bot");
+                    }, "Отмена" }
+                    button { class: "danger-action", r#type: "button", disabled: busy(), onclick: move |_| {
+                        let csrf = delete_csrf.clone();
+                        busy.set(true);
+                        error.set(String::new());
+                        spawn(async move {
+                            match delete_telegram_bot_token(&csrf).await {
+                                Ok(value) => {
+                                    token.set(String::new());
+                                    settings.set(Some(value));
+                                    disconnect_open.set(false);
+                                }
+                                Err(delete_error) => error.set(delete_error.to_string()),
+                            }
+                            busy.set(false);
+                        });
+                    }, if busy() { "Отключаем…" } else { "Отключить" } }
+                }
+            }
+        }
+    }
+}
+
+#[component]
+fn ConnectionsApp(csrf_token: String) -> Element {
+    let mut error = use_signal(String::new);
+    let mut capabilities = use_signal(|| Option::<ServiceCapabilities>::None);
+    let mut mcp_connections = use_signal(|| Option::<AiPage<McpConnection>>::None);
+    let mut connection_name = use_signal(String::new);
+    let mut one_time_token = use_signal(|| Option::<McpConnectionTokenResponse>::None);
+    let mut busy = use_signal(|| false);
+
+    use_effect(move || {
+        spawn(async move {
+            match load_capabilities().await {
+                Ok(value) => capabilities.set(Some(value)),
+                Err(api_error) => error.set(format!(
+                    "Не удалось проверить возможности сервера: {api_error}"
+                )),
+            }
+            match load_mcp_connections().await {
+                Ok(value) => mcp_connections.set(Some(value)),
+                Err(api_error) => {
+                    error.set(format!("Не удалось загрузить MCP-подключения: {api_error}"))
+                }
+            }
+        });
+    });
+    let capabilities_loaded = capabilities.read().is_some();
+    let telegram_enabled = capabilities.read().as_ref().is_some_and(|value| {
+        value
+            .features
+            .iter()
+            .any(|feature| feature == "telegram-text-import")
+            && value
+                .features
+                .iter()
+                .any(|feature| feature == "telegram-admin-auto-link")
+    });
+    let mcp_enabled = capabilities.read().as_ref().is_some_and(|value| {
+        value
+            .features
+            .iter()
+            .any(|feature| feature == "mcp-account-agent")
+    });
+    let connections = mcp_connections
+        .read()
+        .as_ref()
+        .map(|page| page.items.clone())
+        .unwrap_or_default();
+    let create_csrf = csrf_token.clone();
+
+    rsx! {
+        main { id: "main-content", class: "library-view connections-view", aria_label: "Личные подключения",
+            header { class: "library-hero compact",
+                div {
+                    p { class: "eyebrow", "Личный аккаунт" }
+                    h1 { "Подключения" }
+                    p { class: "library-lead", "Здесь находятся внешние сервисы, связанные только с вашим аккаунтом Lumi." }
+                }
+            }
+
+            section { class: "library-section telegram-connection", aria_label: "Подключение Telegram",
+                div { class: "section-heading",
+                    div {
+                        p { class: "eyebrow", "Источник материалов" }
+                        h2 { "Telegram" }
+                    }
+                    span {
+                        if !capabilities_loaded {
+                            "Проверяем…"
+                        } else if !telegram_enabled {
+                            "Недоступен"
+                        } else {
+                            "Без отдельной привязки"
+                        }
+                    }
+                }
+
+                if !capabilities_loaded {
+                    p { class: "capability-note", role: "status", "Проверяем поддержку Telegram…" }
+                } else if telegram_enabled {
+                    p { "Если администратор добавил Telegram-бота, отдельный код подключения не нужен. Откройте бота и сразу отправьте или перешлите текст, фотографию либо публичную ссылку. Первый личный чат будет привязан автоматически." }
+                } else {
+                    p { class: "capability-note", role: "status", "Импорт из Telegram не включён на этом сервере. Обратитесь к администратору Lumi." }
+                }
+
+                if !error().is_empty() {
+                    div { class: "library-alert", role: "alert",
+                        span { "{error}" }
+                        button { r#type: "button", onclick: move |_| {
                             error.set(String::new());
                             spawn(async move {
-                                match delete_telegram_bot_token(&csrf).await {
-                                    Ok(value) => {
-                                        token.set(String::new());
-                                        settings.set(Some(value));
-                                    }
-                                    Err(delete_error) => error.set(delete_error.to_string()),
+                                match load_capabilities().await {
+                                    Ok(value) => capabilities.set(Some(value)),
+                                    Err(api_error) => error.set(format!("Не удалось проверить возможности сервера: {api_error}")),
                                 }
-                                busy.set(false);
                             });
-                        }, "Отключить бота" }
+                        }, "Повторить" }
+                    }
+                }
+            }
+
+            section { class: "library-section", aria_label: "Подключения внешних агентов MCP",
+                div { class: "section-heading",
+                    div {
+                        p { class: "eyebrow", "Внешние агенты" }
+                        h2 { "MCP" }
+                    }
+                    span {
+                        if !capabilities_loaded {
+                            "Проверяем…"
+                        } else if mcp_enabled {
+                            "{connections.iter().filter(|item| item.status == McpConnectionStatus::Active).count()} активно"
+                        } else {
+                            "Недоступен"
+                        }
+                    }
+                }
+                p { "Создайте отдельный отзываемый токен для Codex или другого MCP-клиента. Агент получит доступ только к продуктовым данным этого аккаунта — без ключей провайдера, администрирования и внутреннего чата." }
+
+                if let Some(created) = one_time_token.read().as_ref() {
+                    div { class: "library-alert", role: "status", aria_label: "Новый MCP-токен",
+                        div {
+                            strong { "Скопируйте токен сейчас — повторно он не показывается." }
+                            p { "Endpoint: {created.endpoint}" }
+                            code { "{created.token}" }
+                        }
+                        button { r#type: "button", onclick: move |_| one_time_token.set(None), "Скрыть" }
+                    }
+                }
+
+                if mcp_enabled {
+                    div { class: "material-actions",
+                        label { class: "account-field",
+                            span { "Название подключения" }
+                            input {
+                                r#type: "text",
+                                name: "mcp_connection_name",
+                                maxlength: "120",
+                                placeholder: "Например, Codex на ноутбуке",
+                                value: "{connection_name}",
+                                oninput: move |event| connection_name.set(event.value()),
+                            }
+                        }
+                        button {
+                            class: "primary-action",
+                            r#type: "button",
+                            disabled: busy() || connection_name().trim().is_empty(),
+                            onclick: move |_| {
+                                let name = connection_name.read().clone();
+                                let csrf = create_csrf.clone();
+                                busy.set(true);
+                                error.set(String::new());
+                                spawn(async move {
+                                    match create_mcp_connection(&csrf, &name).await {
+                                        Ok(created) => {
+                                            one_time_token.set(Some(created));
+                                            connection_name.set(String::new());
+                                            match load_mcp_connections().await {
+                                                Ok(value) => mcp_connections.set(Some(value)),
+                                                Err(api_error) => error.set(api_error.to_string()),
+                                            }
+                                        }
+                                        Err(api_error) => error.set(api_error.to_string()),
+                                    }
+                                    busy.set(false);
+                                });
+                            },
+                            if busy() { "Создаём…" } else { "Создать подключение" }
+                        }
+                    }
+                }
+
+                if mcp_connections.read().is_none() {
+                    p { class: "capability-note", role: "status", "Загружаем подключения…" }
+                } else if connections.is_empty() {
+                    p { class: "capability-note", "MCP-подключений пока нет." }
+                } else {
+                    div { class: "material-grid", aria_label: "Список MCP-подключений",
+                        for connection in connections {
+                            article { class: "material-card", key: "{connection.id}",
+                                div { class: "material-card-body",
+                                    p { class: "format-label", "MCP · {connection.token_fingerprint}" }
+                                    h3 { "{connection.name}" }
+                                    p {
+                                        if connection.status == McpConnectionStatus::Active {
+                                            "Активно"
+                                        } else {
+                                            "Отозвано"
+                                        }
+                                    }
+                                }
+                                div { class: "material-actions",
+                                    button {
+                                        class: "secondary-action",
+                                        r#type: "button",
+                                        disabled: busy(),
+                                        onclick: {
+                                            let csrf = csrf_token.clone();
+                                            let connection = connection.clone();
+                                            move |_| {
+                                                let csrf = csrf.clone();
+                                                let connection = connection.clone();
+                                                busy.set(true);
+                                                error.set(String::new());
+                                                spawn(async move {
+                                                    match rotate_mcp_connection(&csrf, &connection).await {
+                                                        Ok(created) => {
+                                                            one_time_token.set(Some(created));
+                                                            if let Ok(value) = load_mcp_connections().await {
+                                                                mcp_connections.set(Some(value));
+                                                            }
+                                                        }
+                                                        Err(api_error) => error.set(api_error.to_string()),
+                                                    }
+                                                    busy.set(false);
+                                                });
+                                            }
+                                        },
+                                        "Ротировать токен"
+                                    }
+                                    if connection.status == McpConnectionStatus::Active {
+                                        button {
+                                            class: "danger-action",
+                                            r#type: "button",
+                                            disabled: busy(),
+                                            onclick: {
+                                                let csrf = csrf_token.clone();
+                                                let connection = connection.clone();
+                                                move |_| {
+                                                    let csrf = csrf.clone();
+                                                    let connection = connection.clone();
+                                                    busy.set(true);
+                                                    error.set(String::new());
+                                                    spawn(async move {
+                                                        match revoke_mcp_connection(&csrf, &connection).await {
+                                                            Ok(()) => {
+                                                                if let Ok(value) = load_mcp_connections().await {
+                                                                    mcp_connections.set(Some(value));
+                                                                }
+                                                            }
+                                                            Err(api_error) => error.set(api_error.to_string()),
+                                                        }
+                                                        busy.set(false);
+                                                    });
+                                                }
+                                            },
+                                            "Отозвать"
+                                        }
+                                    }
+                                }
+                            }
+                        }
                     }
                 }
             }
@@ -384,16 +1046,17 @@ fn SettingsApp(csrf_token: String) -> Element {
 }
 
 #[component]
-fn LibraryApp(csrf_token: String, on_open_reader: EventHandler<Uuid>) -> Element {
+fn LibraryApp(
+    csrf_token: String,
+    on_open_reader: EventHandler<Uuid>,
+    on_open_learning: EventHandler<Uuid>,
+    on_search: EventHandler<String>,
+) -> Element {
     let entries = use_signal(|| Option::<Vec<LibraryEntry>>::None);
     let mut error = use_signal(String::new);
     let mut add_open = use_signal(|| false);
     let mut details = use_signal(|| Option::<LibraryEntry>::None);
     let mut delete_candidate = use_signal(|| Option::<LibraryEntry>::None);
-    let mut telegram_status = use_signal(|| Option::<TelegramConnectionStatus>::None);
-    let mut telegram_pairing = use_signal(|| Option::<TelegramPairingResponse>::None);
-    let mut telegram_error = use_signal(String::new);
-    let mut telegram_busy = use_signal(|| false);
     let mut capabilities = use_signal(|| Option::<ServiceCapabilities>::None);
     let continue_reading = use_signal(|| Option::<(LibraryEntry, ReadingProgress)>::None);
     let refresh_generation = use_signal(|| 0_u64);
@@ -422,24 +1085,6 @@ fn LibraryApp(csrf_token: String, on_open_reader: EventHandler<Uuid>) -> Element
             }
         });
     });
-    use_effect(move || {
-        let telegram_available = capabilities.read().as_ref().is_some_and(|value| {
-            value
-                .features
-                .iter()
-                .any(|feature| feature == "telegram-one-time-pairing")
-        });
-        if !telegram_available {
-            return;
-        }
-        spawn(async move {
-            match load_telegram_status().await {
-                Ok(status) => telegram_status.set(Some(status)),
-                Err(api_error) => telegram_error.set(api_error.to_string()),
-            }
-        });
-    });
-
     let snapshot = entries.read().clone().unwrap_or_default();
     let loaded = entries.read().is_some();
     let active_entries = snapshot
@@ -452,8 +1097,6 @@ fn LibraryApp(csrf_token: String, on_open_reader: EventHandler<Uuid>) -> Element
         .filter(|entry| entry.library_state == LibraryState::Archived)
         .cloned()
         .collect::<Vec<_>>();
-    let telegram_unlink_csrf = csrf_token.clone();
-    let telegram_pairing_csrf = csrf_token.clone();
     let capabilities_loaded = capabilities.read().is_some();
     let web_import_enabled = capabilities.read().as_ref().is_some_and(|value| {
         value
@@ -461,24 +1104,41 @@ fn LibraryApp(csrf_token: String, on_open_reader: EventHandler<Uuid>) -> Element
             .iter()
             .any(|feature| feature == "public-web-url-import")
     });
-    let telegram_enabled = capabilities.read().as_ref().is_some_and(|value| {
+    let pdf_import_enabled = capabilities.read().as_ref().is_some_and(|value| {
         value
             .features
             .iter()
-            .any(|feature| feature == "telegram-text-import")
-            && value
-                .features
-                .iter()
-                .any(|feature| feature == "telegram-one-time-pairing")
+            .any(|feature| feature == "pdf-fixed-layout-import")
     });
-
+    let markdown_import_enabled = capabilities.read().as_ref().is_some_and(|value| {
+        value
+            .features
+            .iter()
+            .any(|feature| feature == "markdown-import")
+    });
+    let lum_import_enabled = capabilities
+        .read()
+        .as_ref()
+        .is_some_and(|value| value.features.iter().any(|feature| feature == "lum-import"));
+    let abridgement_enabled = capabilities.read().as_ref().is_some_and(|value| {
+        value
+            .features
+            .iter()
+            .any(|feature| feature == "ai-abridged-lum")
+    });
+    let material_sharing_enabled = capabilities.read().as_ref().is_some_and(|value| {
+        value
+            .features
+            .iter()
+            .any(|feature| feature == "material-sharing")
+    });
     rsx! {
         main { id: "main-content", class: "library-view", aria_label: "Библиотека Lumi",
-            header { class: "library-hero",
+            header { class: if loaded { "library-hero compact" } else { "library-hero" },
                 div {
                     p { class: "eyebrow", "Личное пространство" }
                     h1 { "Ваша библиотека" }
-                    p { class: "library-lead", "EPUB, web-статьи и составные материалы из Telegram в вашей облачной библиотеке." }
+                    p { class: "library-lead", "Книги, документы и статьи — в одном месте, с сохранённой позицией чтения." }
                 }
                 button {
                     id: "add-material-button",
@@ -488,6 +1148,7 @@ fn LibraryApp(csrf_token: String, on_open_reader: EventHandler<Uuid>) -> Element
                     "＋ Добавить материал"
                 }
             }
+            crate::search_ui::LibrarySearch { on_submit: on_search }
 
             if !error().is_empty() {
                 div { class: "library-alert", role: "alert",
@@ -501,13 +1162,6 @@ fn LibraryApp(csrf_token: String, on_open_reader: EventHandler<Uuid>) -> Element
                             match load_capabilities().await {
                                 Ok(value) => capabilities.set(Some(value)),
                                 Err(api_error) => error.set(format!("Не удалось проверить возможности сервера: {api_error}")),
-                            }
-                            match load_telegram_status().await {
-                                Ok(status) => {
-                                    telegram_status.set(Some(status));
-                                    telegram_error.set(String::new());
-                                }
-                                Err(api_error) => telegram_error.set(api_error.to_string()),
                             }
                         });
                     }, "Повторить" }
@@ -529,7 +1183,7 @@ fn LibraryApp(csrf_token: String, on_open_reader: EventHandler<Uuid>) -> Element
                     div { class: "empty-glyph", aria_hidden: "true", "L" }
                     p { class: "eyebrow", "Первый материал" }
                     h2 { "Здесь пока тихо" }
-                    p { "Добавьте DRM-free EPUB или публичную web-статью — Lumi сохранит исходник и покажет честное состояние импорта." }
+                    p { "Добавьте EPUB без защиты, LUM, Markdown, PDF или публичную статью по ссылке." }
                     button { class: "primary-action", r#type: "button", onclick: move |_| add_open.set(true), "Добавить материал" }
                 }
             } else {
@@ -537,15 +1191,15 @@ fn LibraryApp(csrf_token: String, on_open_reader: EventHandler<Uuid>) -> Element
                     section { class: "continue-section", aria_label: "Продолжить чтение",
                         div { class: "section-heading",
                             div { p { class: "eyebrow", "Продолжить" } h2 { "Вернуться к чтению" } }
-                            span { "{(progress.progress_fraction * 100.0).round() as u32}%" }
+                            span { "{reading_progress_label(progress.progress_fraction)}" }
                         }
                         article { class: "continue-card",
                             div { class: "material-cover", aria_hidden: "true", span { "{material_format_short(&entry.kind)}" } strong { "{cover_monogram(entry.display_title())}" } }
                             div { class: "continue-copy",
                                 p { class: "format-label", "{material_format_label(&entry.kind)}" }
                                 h3 { "{entry.display_title()}" }
-                                p { "Lumi откроет сохранённую позицию в общей версии материала." }
-                                progress { max: "100", value: "{progress.progress_fraction * 100.0}", aria_label: "Прочитано {(progress.progress_fraction * 100.0).round() as u32}%" }
+                                p { "Откроем материал на последней сохранённой позиции." }
+                                progress { max: "100", value: "{progress.progress_fraction * 100.0}", aria_label: "Прочитано {reading_progress_label(progress.progress_fraction)}" }
                                 button { class: "primary-action", r#type: "button", onclick: move |_| on_open_reader.call(entry.id), "Продолжить чтение" }
                             }
                         }
@@ -554,8 +1208,8 @@ fn LibraryApp(csrf_token: String, on_open_reader: EventHandler<Uuid>) -> Element
                 section { class: "library-section", aria_label: "Активные материалы",
                     div { class: "section-heading",
                         div {
-                            p { class: "eyebrow", "Все материалы" }
-                            h2 { "Недавнее" }
+                            p { class: "eyebrow", "Библиотека" }
+                            h2 { "Все материалы" }
                         }
                         span { "{active_entries.len()} в библиотеке" }
                     }
@@ -565,6 +1219,7 @@ fn LibraryApp(csrf_token: String, on_open_reader: EventHandler<Uuid>) -> Element
                                 key: "{entry.id}",
                                 entry,
                                 csrf_token: csrf_token.clone(),
+                                material_sharing_enabled,
                                 on_changed: move |_| {
                                     spawn(async move {
                                         match refresh_library(entries, continue_reading, refresh_generation).await {
@@ -576,119 +1231,12 @@ fn LibraryApp(csrf_token: String, on_open_reader: EventHandler<Uuid>) -> Element
                                 on_details: move |entry| details.set(Some(entry)),
                                 on_delete: move |entry| delete_candidate.set(Some(entry)),
                                 on_open_reader,
+                                on_open_learning,
                                 on_error: move |message| error.set(message),
                             }
                         }
                     }
                 }
-            }
-
-            section { class: "library-section telegram-connection", aria_label: "Подключение Telegram",
-                div { class: "section-heading",
-                    div {
-                        p { class: "eyebrow", "Источник" }
-                        h2 { "Telegram" }
-                    }
-                    span {
-                        if telegram_status.read().as_ref().is_some_and(|status| status.connected) {
-                            "Подключён"
-                        } else if telegram_status.read().is_none() && telegram_error().is_empty() {
-                            "Проверяем…"
-                        } else {
-                            "Не подключён"
-                        }
-                    }
-                }
-                if !capabilities_loaded {
-                    p { class: "capability-note", role: "status", "Проверяем поддержку Telegram…" }
-                } else if telegram_enabled {
-                    p { "Привяжите личный чат, чтобы отправлять в Lumi текст, пересылки, Telegram-фото и публичные web-ссылки. Альбом собирается в один материал; видео, GIF, аудио и файлы пропускаются." }
-                } else {
-                    p { class: "capability-note", role: "status", "Этот сервер пока не поддерживает импорт из Telegram." }
-                }
-                if !telegram_error().is_empty() {
-                    p { class: "account-error", role: "status", "{telegram_error}" }
-                }
-                if let Some(pairing) = telegram_pairing.read().as_ref() {
-                    div { class: "library-alert", role: "status",
-                        p { "Одноразовый токен действует 10 минут:" }
-                        code { "{pairing.token}" }
-                        if let Some(link) = pairing.deep_link.as_ref() {
-                            a { class: "secondary-action", href: "{link}", target: "_blank", rel: "noopener noreferrer", "Открыть Telegram" }
-                        }
-                    }
-                }
-                if telegram_enabled { div { class: "material-actions",
-                    if telegram_status.read().as_ref().is_some_and(|status| status.connected) {
-                        button { class: "secondary-action", r#type: "button", disabled: telegram_busy(), onclick: move |_| {
-                            let csrf = telegram_unlink_csrf.clone();
-                            telegram_busy.set(true);
-                            telegram_error.set(String::new());
-                            spawn(async move {
-                                match unlink_telegram(&csrf).await {
-                                    Ok(()) => {
-                                        telegram_pairing.set(None);
-                                        telegram_status.set(Some(TelegramConnectionStatus {
-                                            connected: false,
-                                            telegram_user_id: None,
-                                            linked_at: None,
-                                            pairing_expires_at: None,
-                                        }));
-                                        match load_telegram_status().await {
-                                            Ok(status) => telegram_status.set(Some(status)),
-                                            Err(api_error) => telegram_error.set(api_error.to_string()),
-                                        }
-                                    }
-                                    Err(api_error) => telegram_error.set(api_error.to_string()),
-                                }
-                                telegram_busy.set(false);
-                            });
-                        }, if telegram_busy() { "Отключаем…" } else { "Отключить Telegram" } }
-                    } else {
-                        button { class: "secondary-action", r#type: "button", disabled: telegram_busy() || telegram_pairing.read().is_some(), onclick: move |_| {
-                            let csrf = telegram_pairing_csrf.clone();
-                            telegram_busy.set(true);
-                            telegram_error.set(String::new());
-                            telegram_pairing.set(None);
-                            spawn(async move {
-                                match create_telegram_pairing(&csrf).await {
-                                    Ok(pairing) => {
-                                        let expires_at = pairing.expires_at;
-                                        telegram_pairing.set(Some(pairing));
-                                        telegram_busy.set(false);
-                                        loop {
-                                            browser_delay(2_000).await;
-                                            if js_sys::Date::now() as u64 >= expires_at {
-                                                telegram_pairing.set(None);
-                                                telegram_error.set("Одноразовый токен истёк. Создайте новый.".to_owned());
-                                                break;
-                                            }
-                                            match load_telegram_status().await {
-                                                Ok(status) if status.connected => {
-                                                    telegram_status.set(Some(status));
-                                                    telegram_pairing.set(None);
-                                                    telegram_error.set(String::new());
-                                                    break;
-                                                }
-                                                Ok(status) => {
-                                                    telegram_status.set(Some(status));
-                                                    telegram_error.set(String::new());
-                                                }
-                                                Err(api_error) => {
-                                                    telegram_error.set(format!("{} Повторяем проверку…", api_error));
-                                                }
-                                            }
-                                        }
-                                    }
-                                    Err(api_error) => {
-                                        telegram_error.set(api_error.to_string());
-                                        telegram_busy.set(false);
-                                    }
-                                }
-                            });
-                        }, if telegram_busy() { "Создаём токен…" } else if telegram_pairing.read().is_some() { "Ожидаем Telegram…" } else { "Подключить Telegram" } }
-                    }
-                } }
             }
 
             if !archived_entries.is_empty() {
@@ -706,6 +1254,7 @@ fn LibraryApp(csrf_token: String, on_open_reader: EventHandler<Uuid>) -> Element
                                 key: "archived-{entry.id}",
                                 entry,
                                 csrf_token: csrf_token.clone(),
+                                material_sharing_enabled,
                                 on_changed: move |_| {
                                     spawn(async move {
                                         let _ = refresh_library(entries, continue_reading, refresh_generation).await;
@@ -714,6 +1263,7 @@ fn LibraryApp(csrf_token: String, on_open_reader: EventHandler<Uuid>) -> Element
                                 on_details: move |entry| details.set(Some(entry)),
                                 on_delete: move |entry| delete_candidate.set(Some(entry)),
                                 on_open_reader,
+                                on_open_learning,
                                 on_error: move |message| error.set(message),
                             }
                         }
@@ -726,6 +1276,9 @@ fn LibraryApp(csrf_token: String, on_open_reader: EventHandler<Uuid>) -> Element
             AddMaterialDialog {
                 csrf_token: csrf_token.clone(),
                 web_import_enabled,
+                pdf_import_enabled,
+                markdown_import_enabled,
+                lum_import_enabled,
                 capabilities_loaded,
                 on_close: move |_| {
                     add_open.set(false);
@@ -742,7 +1295,7 @@ fn LibraryApp(csrf_token: String, on_open_reader: EventHandler<Uuid>) -> Element
         }
 
         if let Some(entry) = details.read().clone() {
-            MaterialDetailsDialog { entry: entry.clone(), on_close: move |_| {
+            MaterialDetailsDialog { entry: entry.clone(), csrf_token: csrf_token.clone(), abridgement_enabled, material_sharing_enabled, on_close: move |_| {
                 details.set(None);
                 defer_account_focus(&format!("details-{}", entry.id));
             } }
@@ -755,9 +1308,9 @@ fn LibraryApp(csrf_token: String, on_open_reader: EventHandler<Uuid>) -> Element
                 delete_candidate.set(None);
                 defer_account_focus(&target);
             },
-                p { class: "eyebrow danger-text", "Необратимо в интерфейсе" }
+                p { class: "eyebrow danger-text", "Удаление" }
                 h2 { "Удалить «{entry.display_title()}»?" }
-                p { "Материал исчезнет из библиотеки. Сервер сохранит sync tombstone для согласованности реплик." }
+                p { "Материал исчезнет из библиотеки на всех ваших устройствах. Это действие нельзя отменить." }
                 div { class: "dialog-actions",
                     button { class: "secondary-action", r#type: "button", onclick: move |_| {
                         let target = format!("delete-{}", entry.id);
@@ -787,10 +1340,12 @@ fn LibraryApp(csrf_token: String, on_open_reader: EventHandler<Uuid>) -> Element
 fn MaterialCard(
     entry: LibraryEntry,
     csrf_token: String,
+    material_sharing_enabled: bool,
     on_changed: EventHandler<()>,
     on_details: EventHandler<LibraryEntry>,
     on_delete: EventHandler<LibraryEntry>,
     on_open_reader: EventHandler<Uuid>,
+    on_open_learning: EventHandler<Uuid>,
     on_error: EventHandler<String>,
 ) -> Element {
     let status_label = material_status_label(entry.import_status);
@@ -806,7 +1361,8 @@ fn MaterialCard(
     let delete_entry = entry.clone();
     let state_csrf = csrf_token.clone();
     let cancel_job_csrf = csrf_token.clone();
-    let retry_job_csrf = csrf_token;
+    let retry_job_csrf = csrf_token.clone();
+    let share_csrf = csrf_token;
     let state_changed = on_changed;
     let job_changed = on_changed;
     let state_error = on_error;
@@ -822,6 +1378,9 @@ fn MaterialCard(
                 div { class: "material-card-heading",
                     div {
                         span { class: "format-label", "{format_label}" }
+                        if entry.derivation.is_some() {
+                            span { class: "status-pill ready", "Производный материал" }
+                        }
                         h3 { "{title}" }
                     }
                     span { class: "status-pill {status_class}", "{status_label}" }
@@ -843,49 +1402,67 @@ fn MaterialCard(
                 div { class: "material-actions",
                     if entry.import_status == MaterialImportStatus::Ready && !archived {
                         button { class: "read-action", r#type: "button", onclick: move |_| on_open_reader.call(material_id), "Читать" }
+                        button { class: "secondary-action", r#type: "button", onclick: move |_| on_open_learning.call(material_id), "Учиться" }
                     }
-                    button { id: "details-{material_id}", class: "text-action", r#type: "button", onclick: move |_| on_details.call(details_entry.clone()), "Сведения" }
-                    a { class: "text-action", href: "{API_BASE}/materials/{material_id}/source", "{source_download_label}" }
-                    if matches!(entry.latest_job.status, JobStatus::Queued | JobStatus::Running) {
-                        button { class: "text-action", r#type: "button", onclick: move |_| {
-                            let csrf = cancel_job_csrf.clone();
-                            spawn(async move {
-                                match mutate_job(job_id, "cancel", &csrf).await {
-                                    Ok(job) => {
-                                        let _ = wait_for_job(job).await;
-                                        job_changed.call(());
-                                    }
-                                    Err(error) => job_error.call(error.to_string()),
+                    details { class: "material-more",
+                        summary {
+                            role: "button",
+                            aria_label: "Дополнительные действия с материалом",
+                            "Ещё"
+                        }
+                        div { class: "material-menu-actions",
+                            button { id: "details-{material_id}", class: "text-action", r#type: "button", onclick: move |_| on_details.call(details_entry.clone()), "Сведения" }
+                            a { class: "text-action", href: "{API_BASE}/materials/{material_id}/source", "{source_download_label}" }
+                            if entry.import_status == MaterialImportStatus::Ready {
+                                crate::community::ShareMaterialAction {
+                                    material_id,
+                                    csrf_token: share_csrf.clone(),
+                                    available: material_sharing_enabled,
+                                    label: "Поделиться в сообществе".to_owned(),
                                 }
-                            });
-                        }, "Отменить" }
-                    }
-                    if matches!(entry.latest_job.status, JobStatus::Failed | JobStatus::Cancelled) {
-                        button { class: "text-action", r#type: "button", onclick: move |_| {
-                            let csrf = retry_job_csrf.clone();
-                            spawn(async move {
-                                match mutate_job(job_id, "retry", &csrf).await {
-                                    Ok(job) => {
-                                        job_changed.call(());
-                                        let _ = wait_for_job(job).await;
-                                        job_changed.call(());
-                                    }
-                                    Err(error) => job_error.call(error.to_string()),
-                                }
-                            });
-                        }, "Повторить" }
-                    }
-                    button { class: "text-action", r#type: "button", onclick: move |_| {
-                        let csrf = state_csrf.clone();
-                        let target = if archived { LibraryState::Active } else { LibraryState::Archived };
-                        spawn(async move {
-                            match change_library_state(material_id, target, &csrf).await {
-                                Ok(_) => state_changed.call(()),
-                                Err(error) => state_error.call(error.to_string()),
                             }
-                        });
-                    }, if archived { "Вернуть" } else { "В архив" } }
-                    button { id: "delete-{material_id}", class: "text-action danger-text", r#type: "button", onclick: move |_| on_delete.call(delete_entry.clone()), "Удалить" }
+                            if matches!(entry.latest_job.status, JobStatus::Queued | JobStatus::Running) {
+                                button { class: "text-action", r#type: "button", onclick: move |_| {
+                                    let csrf = cancel_job_csrf.clone();
+                                    spawn(async move {
+                                        match mutate_job(job_id, "cancel", &csrf).await {
+                                            Ok(job) => {
+                                                let _ = wait_for_job(job).await;
+                                                job_changed.call(());
+                                            }
+                                            Err(error) => job_error.call(error.to_string()),
+                                        }
+                                    });
+                                }, "Отменить импорт" }
+                            }
+                            if matches!(entry.latest_job.status, JobStatus::Failed | JobStatus::Cancelled) {
+                                button { class: "text-action", r#type: "button", onclick: move |_| {
+                                    let csrf = retry_job_csrf.clone();
+                                    spawn(async move {
+                                        match mutate_job(job_id, "retry", &csrf).await {
+                                            Ok(job) => {
+                                                job_changed.call(());
+                                                let _ = wait_for_job(job).await;
+                                                job_changed.call(());
+                                            }
+                                            Err(error) => job_error.call(error.to_string()),
+                                        }
+                                    });
+                                }, "Повторить импорт" }
+                            }
+                            button { class: "text-action", r#type: "button", onclick: move |_| {
+                                let csrf = state_csrf.clone();
+                                let target = if archived { LibraryState::Active } else { LibraryState::Archived };
+                                spawn(async move {
+                                    match change_library_state(material_id, target, &csrf).await {
+                                        Ok(_) => state_changed.call(()),
+                                        Err(error) => state_error.call(error.to_string()),
+                                    }
+                                });
+                            }, if archived { "Вернуть в библиотеку" } else { "Переместить в архив" } }
+                            button { id: "delete-{material_id}", class: "text-action danger-text", r#type: "button", onclick: move |_| on_delete.call(delete_entry.clone()), "Удалить" }
+                        }
+                    }
                 }
             }
         }
@@ -893,7 +1470,7 @@ fn MaterialCard(
 }
 
 #[derive(Clone)]
-struct SelectedEpub {
+struct SelectedUpload {
     name: String,
     bytes: Vec<u8>,
 }
@@ -901,6 +1478,9 @@ struct SelectedEpub {
 #[derive(Clone, Copy, Eq, PartialEq)]
 enum AddSourceMode {
     Epub,
+    Lum,
+    Markdown,
+    Pdf,
     Web,
 }
 
@@ -908,12 +1488,15 @@ enum AddSourceMode {
 fn AddMaterialDialog(
     csrf_token: String,
     web_import_enabled: bool,
+    pdf_import_enabled: bool,
+    markdown_import_enabled: bool,
+    lum_import_enabled: bool,
     capabilities_loaded: bool,
     on_close: EventHandler<()>,
     on_accepted: EventHandler<AcceptedImport>,
 ) -> Element {
     let mut mode = use_signal(|| AddSourceMode::Epub);
-    let mut selected = use_signal(|| Option::<SelectedEpub>::None);
+    let mut selected = use_signal(|| Option::<SelectedUpload>::None);
     let mut url = use_signal(String::new);
     let mut busy = use_signal(|| false);
     let mut error = use_signal(String::new);
@@ -931,19 +1514,22 @@ fn AddMaterialDialog(
                 button { class: "icon-action", r#type: "button", aria_label: "Закрыть загрузку", disabled: busy(), onclick: move |_| on_close.call(()), "×" }
             }
             div { class: "source-tabs", role: "tablist", aria_label: "Тип источника",
-                button { id: "source-tab-epub", class: "secondary-action", r#type: "button", role: "tab", aria_selected: mode() == AddSourceMode::Epub, aria_controls: "source-panel-epub", tabindex: if mode() == AddSourceMode::Epub { "0" } else { "-1" }, onclick: move |_| mode.set(AddSourceMode::Epub), onkeydown: move |event| if matches!(event.key(), Key::ArrowRight | Key::ArrowLeft) && web_import_enabled { event.prevent_default(); mode.set(AddSourceMode::Web); focus_account_node("source-tab-web"); }, "EPUB" }
-                button { id: "source-tab-web", class: "secondary-action", r#type: "button", role: "tab", aria_selected: mode() == AddSourceMode::Web, aria_controls: "source-panel-web", aria_disabled: !web_import_enabled, disabled: !web_import_enabled, tabindex: if mode() == AddSourceMode::Web { "0" } else { "-1" }, onclick: move |_| mode.set(AddSourceMode::Web), onkeydown: move |event| if matches!(event.key(), Key::ArrowRight | Key::ArrowLeft) { event.prevent_default(); mode.set(AddSourceMode::Epub); focus_account_node("source-tab-epub"); }, "Web-ссылка" }
+                button { id: "source-tab-epub", class: "secondary-action", r#type: "button", role: "tab", aria_selected: mode() == AddSourceMode::Epub, aria_controls: "source-panel-epub", tabindex: if mode() == AddSourceMode::Epub { "0" } else { "-1" }, onclick: move |_| { mode.set(AddSourceMode::Epub); selected.set(None); }, onkeydown: move |event| if event.key() == Key::ArrowRight && lum_import_enabled { event.prevent_default(); mode.set(AddSourceMode::Lum); selected.set(None); defer_account_focus("source-tab-lum"); }, "EPUB" }
+                button { id: "source-tab-lum", class: "secondary-action", r#type: "button", role: "tab", aria_selected: mode() == AddSourceMode::Lum, aria_controls: "source-panel-lum", aria_disabled: !lum_import_enabled, disabled: !lum_import_enabled, tabindex: if mode() == AddSourceMode::Lum { "0" } else { "-1" }, onclick: move |_| { mode.set(AddSourceMode::Lum); selected.set(None); }, onkeydown: move |event| if event.key() == Key::ArrowLeft { event.prevent_default(); mode.set(AddSourceMode::Epub); selected.set(None); defer_account_focus("source-tab-epub"); } else if event.key() == Key::ArrowRight && markdown_import_enabled { event.prevent_default(); mode.set(AddSourceMode::Markdown); selected.set(None); defer_account_focus("source-tab-markdown"); }, "LUM" }
+                button { id: "source-tab-markdown", class: "secondary-action", r#type: "button", role: "tab", aria_selected: mode() == AddSourceMode::Markdown, aria_controls: "source-panel-markdown", aria_disabled: !markdown_import_enabled, disabled: !markdown_import_enabled, tabindex: if mode() == AddSourceMode::Markdown { "0" } else { "-1" }, onclick: move |_| { mode.set(AddSourceMode::Markdown); selected.set(None); }, onkeydown: move |event| if event.key() == Key::ArrowLeft && lum_import_enabled { event.prevent_default(); mode.set(AddSourceMode::Lum); selected.set(None); defer_account_focus("source-tab-lum"); } else if event.key() == Key::ArrowRight && pdf_import_enabled { event.prevent_default(); mode.set(AddSourceMode::Pdf); selected.set(None); defer_account_focus("source-tab-pdf"); }, "Markdown" }
+                button { id: "source-tab-pdf", class: "secondary-action", r#type: "button", role: "tab", aria_selected: mode() == AddSourceMode::Pdf, aria_controls: "source-panel-pdf", aria_disabled: !pdf_import_enabled, disabled: !pdf_import_enabled, tabindex: if mode() == AddSourceMode::Pdf { "0" } else { "-1" }, onclick: move |_| { mode.set(AddSourceMode::Pdf); selected.set(None); }, onkeydown: move |event| if event.key() == Key::ArrowLeft && markdown_import_enabled { event.prevent_default(); mode.set(AddSourceMode::Markdown); selected.set(None); defer_account_focus("source-tab-markdown"); } else if event.key() == Key::ArrowRight && web_import_enabled { event.prevent_default(); mode.set(AddSourceMode::Web); selected.set(None); defer_account_focus("source-tab-web"); }, "PDF" }
+                button { id: "source-tab-web", class: "secondary-action", r#type: "button", role: "tab", aria_selected: mode() == AddSourceMode::Web, aria_controls: "source-panel-web", aria_disabled: !web_import_enabled, disabled: !web_import_enabled, tabindex: if mode() == AddSourceMode::Web { "0" } else { "-1" }, onclick: move |_| { mode.set(AddSourceMode::Web); selected.set(None); }, onkeydown: move |event| if event.key() == Key::ArrowLeft && pdf_import_enabled { event.prevent_default(); mode.set(AddSourceMode::Pdf); defer_account_focus("source-tab-pdf"); } else if event.key() == Key::ArrowRight { event.prevent_default(); mode.set(AddSourceMode::Epub); defer_account_focus("source-tab-epub"); }, "Web-ссылка" }
             }
             if !capabilities_loaded {
                 p { class: "capability-note", role: "status", "Проверяем поддержку импорта по URL…" }
             }
             if mode() == AddSourceMode::Epub {
                 div { id: "source-panel-epub", role: "tabpanel", aria_labelledby: "source-tab-epub",
-                p { "DRM-free reflowable EPUB до 100 MiB. Исходник сохраняется до запуска безопасного импортера." }
+                p { "Книга EPUB без DRM, до 100 МБ. Lumi подготовит её для удобного чтения на любом экране." }
                 label { class: "upload-dropzone",
                     span { class: "upload-icon", aria_hidden: "true", "＋" }
                     strong { if let Some(upload) = selected.read().as_ref() { "{upload.name}" } else { "Выберите файл EPUB" } }
-                    small { if let Some(upload) = selected.read().as_ref() { "{upload.bytes.len()} байт" } else { ".epub · до 100 MiB" } }
+                    small { if let Some(upload) = selected.read().as_ref() { "{upload.bytes.len()} байт" } else { ".epub · до 100 МБ" } }
                     input {
                         r#type: "file",
                         name: "epub_file",
@@ -955,7 +1541,7 @@ fn AddMaterialDialog(
                             spawn(async move {
                                 let name = file.name();
                                 match file.read_bytes().await {
-                                    Ok(bytes) => selected.set(Some(SelectedEpub { name, bytes: bytes.to_vec() })),
+                                    Ok(bytes) => selected.set(Some(SelectedUpload { name, bytes: bytes.to_vec() })),
                                     Err(_) => error.set("Не удалось прочитать выбранный EPUB.".to_owned()),
                                 }
                             });
@@ -963,9 +1549,101 @@ fn AddMaterialDialog(
                     }
                 }
                 }
+            } else if mode() == AddSourceMode::Lum {
+                div { id: "source-panel-lum", role: "tabpanel", aria_labelledby: "source-tab-lum",
+                    p { "Переносимая книга LUM до 100 МБ: главы, ссылки и локальные изображения в одном файле." }
+                    label { class: "upload-dropzone",
+                        span { class: "upload-icon", aria_hidden: "true", "＋" }
+                        strong { if let Some(upload) = selected.read().as_ref() { "{upload.name}" } else { "Выберите файл LUM" } }
+                        small { if let Some(upload) = selected.read().as_ref() { "{upload.bytes.len()} байт" } else { ".lum · до 100 МБ" } }
+                        input {
+                            r#type: "file",
+                            name: "lum_file",
+                            accept: ".lum,application/vnd.lumi.lum+zip",
+                            disabled: busy(),
+                            aria_label: "Файл LUM",
+                            onchange: move |event| {
+                                let Some(file) = event.files().into_iter().next() else { return; };
+                                spawn(async move {
+                                    let name = file.name();
+                                    match file.read_bytes().await {
+                                        Ok(bytes) if bytes.len() <= lumi_core::LUM_WEB_SOURCE_BYTES as usize => {
+                                            error.set(String::new());
+                                            selected.set(Some(SelectedUpload { name, bytes: bytes.to_vec() }));
+                                        }
+                                        Ok(_) => {
+                                            selected.set(None);
+                                            error.set("LUM превышает лимит 100 МБ.".to_owned());
+                                        }
+                                        Err(_) => error.set("Не удалось прочитать выбранный LUM.".to_owned()),
+                                    }
+                                });
+                            },
+                        }
+                    }
+                }
+            } else if mode() == AddSourceMode::Markdown {
+                div { id: "source-panel-markdown", role: "tabpanel", aria_labelledby: "source-tab-markdown",
+                    p { "Документ Markdown до 10 МБ. Поддерживаются заголовки, ссылки, таблицы и списки задач." }
+                    label { class: "upload-dropzone",
+                        span { class: "upload-icon", aria_hidden: "true", "＋" }
+                        strong { if let Some(upload) = selected.read().as_ref() { "{upload.name}" } else { "Выберите файл Markdown" } }
+                        small { if let Some(upload) = selected.read().as_ref() { "{upload.bytes.len()} байт" } else { ".md, .markdown · до 10 МБ" } }
+                        input {
+                            r#type: "file",
+                            name: "markdown_file",
+                            accept: ".md,.markdown,text/markdown,text/x-markdown",
+                            disabled: busy(),
+                            aria_label: "Файл Markdown",
+                            onchange: move |event| {
+                                let Some(file) = event.files().into_iter().next() else { return; };
+                                spawn(async move {
+                                    let name = file.name();
+                                    match file.read_bytes().await {
+                                        Ok(bytes) if bytes.len() <= lumi_core::MARKDOWN_WEB_SOURCE_BYTES as usize => {
+                                            error.set(String::new());
+                                            selected.set(Some(SelectedUpload { name, bytes: bytes.to_vec() }));
+                                        }
+                                        Ok(_) => {
+                                            selected.set(None);
+                                            error.set("Markdown превышает лимит 10 МБ.".to_owned());
+                                        }
+                                        Err(_) => error.set("Не удалось прочитать выбранный Markdown.".to_owned()),
+                                    }
+                                });
+                            },
+                        }
+                    }
+                }
+            } else if mode() == AddSourceMode::Pdf {
+                div { id: "source-panel-pdf", role: "tabpanel", aria_labelledby: "source-tab-pdf",
+                    p { "PDF до 200 МБ. Lumi сохранит исходный вид страниц и доступный текст." }
+                    label { class: "upload-dropzone",
+                        span { class: "upload-icon", aria_hidden: "true", "＋" }
+                        strong { if let Some(upload) = selected.read().as_ref() { "{upload.name}" } else { "Выберите файл PDF" } }
+                        small { if let Some(upload) = selected.read().as_ref() { "{upload.bytes.len()} байт" } else { ".pdf · до 200 МБ" } }
+                        input {
+                            r#type: "file",
+                            name: "pdf_file",
+                            accept: ".pdf,application/pdf",
+                            disabled: busy(),
+                            aria_label: "Файл PDF",
+                            onchange: move |event| {
+                                let Some(file) = event.files().into_iter().next() else { return; };
+                                spawn(async move {
+                                    let name = file.name();
+                                    match file.read_bytes().await {
+                                        Ok(bytes) => selected.set(Some(SelectedUpload { name, bytes: bytes.to_vec() })),
+                                        Err(_) => error.set("Не удалось прочитать выбранный PDF.".to_owned()),
+                                    }
+                                });
+                            },
+                        }
+                    }
+                }
             } else {
                 div { id: "source-panel-web", role: "tabpanel", aria_labelledby: "source-tab-web",
-                p { "Укажите публичный HTTP(S) URL статьи. Lumi ограниченно загрузит HTML, сохранит snapshot и извлечёт основной текст." }
+                p { "Вставьте публичную ссылку на статью. Lumi сохранит её содержание и выделит основной текст." }
                 label { class: "account-field",
                     span { "URL статьи" }
                     input {
@@ -985,7 +1663,7 @@ fn AddMaterialDialog(
             }
             div { class: "dialog-actions",
                 button { class: "secondary-action", r#type: "button", disabled: busy(), onclick: move |_| on_close.call(()), "Отмена" }
-                button { class: "primary-action", r#type: "button", disabled: busy() || (mode() == AddSourceMode::Epub && selected.read().is_none()) || (mode() == AddSourceMode::Web && url().trim().is_empty()), onclick: move |_| {
+                button { class: "primary-action", r#type: "button", disabled: busy() || (matches!(mode(), AddSourceMode::Epub | AddSourceMode::Lum | AddSourceMode::Markdown | AddSourceMode::Pdf) && selected.read().is_none()) || (mode() == AddSourceMode::Web && url().trim().is_empty()), onclick: move |_| {
                     let selected_upload = selected.read().clone();
                     let source_url = url();
                     let source_mode = mode();
@@ -995,7 +1673,19 @@ fn AddMaterialDialog(
                     spawn(async move {
                         let result = match source_mode {
                             AddSourceMode::Epub => match selected_upload.as_ref() {
-                                Some(upload) => upload_epub(&csrf, upload).await,
+                                Some(upload) => upload_document(&csrf, upload).await,
+                                None => return,
+                            },
+                            AddSourceMode::Lum => match selected_upload.as_ref() {
+                                Some(upload) => upload_document(&csrf, upload).await,
+                                None => return,
+                            },
+                            AddSourceMode::Pdf => match selected_upload.as_ref() {
+                                Some(upload) => upload_document(&csrf, upload).await,
+                                None => return,
+                            },
+                            AddSourceMode::Markdown => match selected_upload.as_ref() {
+                                Some(upload) => upload_document(&csrf, upload).await,
                                 None => return,
                             },
                             AddSourceMode::Web => import_web_url(&csrf, source_url.trim()).await,
@@ -1018,7 +1708,13 @@ fn AddMaterialDialog(
 }
 
 #[component]
-fn MaterialDetailsDialog(entry: LibraryEntry, on_close: EventHandler<()>) -> Element {
+fn MaterialDetailsDialog(
+    entry: LibraryEntry,
+    csrf_token: String,
+    abridgement_enabled: bool,
+    material_sharing_enabled: bool,
+    on_close: EventHandler<()>,
+) -> Element {
     let revision = entry
         .active_revision_id
         .map(|id| id.to_string())
@@ -1040,6 +1736,12 @@ fn MaterialDetailsDialog(entry: LibraryEntry, on_close: EventHandler<()>) -> Ele
                 div { dt { "Материал" } dd { "{entry.id}" } }
                 div { dt { "Ревизия" } dd { "{revision}" } }
                 div { dt { "SHA-256" } dd { "{entry.source_identity.source_hash}" } }
+                if let Some(derivation) = entry.derivation.as_ref() {
+                    div { dt { "Происхождение" } dd {
+                        "Сокращение ревизии {derivation.source_revision_id}"
+                        if derivation.source_changed { " · оригинал обновлён" }
+                    } }
+                }
             }
             if !entry.latest_job.diagnostics.is_empty() {
                 section { class: "details-diagnostics", aria_label: "Диагностика импорта",
@@ -1049,8 +1751,51 @@ fn MaterialDetailsDialog(entry: LibraryEntry, on_close: EventHandler<()>) -> Ele
                     }
                 }
             }
+            if let Some(derivation) = entry.derivation.as_ref() {
+                nav { class: "summary-citations", aria_label: "Источники сокращённого материала",
+                    for (index, citation) in derivation.source_refs.iter().take(8).enumerate() {
+                        button {
+                            class: "text-action",
+                            r#type: "button",
+                            onclick: {
+                                let citation = citation.clone();
+                                move |_| crate::ai::open_derived_source(&citation)
+                            },
+                            "Открыть источник {index + 1}"
+                        }
+                    }
+                }
+            }
             div { class: "dialog-actions",
                 a { class: "secondary-action", href: "{API_BASE}/materials/{entry.id}/source", "{download_label}" }
+                if entry.import_status == MaterialImportStatus::Ready {
+                    crate::community::ShareMaterialAction {
+                        material_id: entry.id,
+                        csrf_token: csrf_token.clone(),
+                        available: material_sharing_enabled,
+                        label: "Поделиться".to_owned(),
+                    }
+                }
+                if let Some(revision_id) = entry.active_revision_id {
+                    crate::ai::SummaryAction {
+                        material_id: entry.id,
+                        revision_id,
+                        scope_kind: lumi_core::SummaryScopeKind::Material,
+                        scope_ref: "material".to_owned(),
+                        label: "Саммари материала".to_owned(),
+                        csrf_token: csrf_token.clone(),
+                    }
+                    if abridgement_enabled && entry.derivation.is_none() {
+                        crate::ai::AbridgementAction {
+                            material_id: entry.id,
+                            revision_id,
+                            csrf_token: csrf_token.clone(),
+                        }
+                    }
+                }
+                if let Some(derivation) = entry.derivation.as_ref() {
+                    a { class: "secondary-action", href: "#reader/{derivation.source_material_id}", "Открыть оригинал" }
+                }
                 button { class: "primary-action", r#type: "button", onclick: move |_| on_close.call(()), "Готово" }
             }
         }
@@ -1065,13 +1810,15 @@ fn AccountEntry(on_authenticated: EventHandler<SessionBootstrap>) -> Element {
     let mut confirmed = use_signal(|| false);
     let mut busy = use_signal(|| false);
     let mut error = use_signal(String::new);
+    let phrase_word_count = phrase().split_whitespace().count();
+    let phrase_is_complete = phrase_word_count == 24;
 
     rsx! {
         main { id: "main-content", class: "account-screen", aria_label: "Lumi — регистрация и вход",
             section { class: "account-card",
-                p { class: "eyebrow", "Persistent account" }
+                p { class: "eyebrow", "Защищённый аккаунт" }
                 h1 { "Lumi" }
-                p { "Seed phrase остаётся в браузере. Сервер хранит только публичный ключ и отзывную сессию." }
+                p { "Фраза восстановления остаётся у вас. Сервер хранит только данные, необходимые для безопасного входа." }
                 div { class: "account-tabs", role: "tablist", aria_label: "Действие с аккаунтом",
                     button { id: "account-tab-register", r#type: "button", role: "tab", aria_selected: tab() == "register", aria_controls: "account-panel-register", tabindex: if tab() == "register" { "0" } else { "-1" }, onclick: move |_| tab.set("register".to_owned()), onkeydown: move |event| if matches!(event.key(), Key::ArrowRight | Key::ArrowLeft) { event.prevent_default(); tab.set("login".to_owned()); focus_account_node("account-tab-login"); }, "Создать аккаунт" }
                     button { id: "account-tab-login", r#type: "button", role: "tab", aria_selected: tab() == "login", aria_controls: "account-panel-login", tabindex: if tab() == "login" { "0" } else { "-1" }, onclick: move |_| tab.set("login".to_owned()), onkeydown: move |event| if matches!(event.key(), Key::ArrowRight | Key::ArrowLeft) { event.prevent_default(); tab.set("register".to_owned()); focus_account_node("account-tab-register"); }, "Войти / восстановить" }
@@ -1086,9 +1833,9 @@ fn AccountEntry(on_authenticated: EventHandler<SessionBootstrap>) -> Element {
                         button { class: "primary-action", r#type: "button", onclick: move |_| match Mnemonic::generate_in(Language::English, 24) {
                             Ok(mnemonic) => phrase.set(mnemonic.to_string()),
                             Err(generate_error) => error.set(generate_error.to_string()),
-                        }, "Сгенерировать recovery phrase" }
+                        }, "Создать фразу восстановления" }
                     } else {
-                        div { class: "seed-phrase", aria_label: "Recovery phrase", code { "{phrase}" } }
+                        div { class: "seed-phrase", aria_label: "Фраза восстановления", code { "{phrase}" } }
                         label { class: "account-confirm",
                             input { r#type: "checkbox", checked: confirmed(), onchange: move |event| confirmed.set(event.checked()) }
                             span { "Я сохранил(а) все 24 слова. Без них доступ нельзя восстановить." }
@@ -1111,10 +1858,17 @@ fn AccountEntry(on_authenticated: EventHandler<SessionBootstrap>) -> Element {
                 } else {
                     div { id: "account-panel-login", role: "tabpanel", aria_labelledby: "account-tab-login",
                     label { class: "account-field",
-                        span { "Recovery phrase (24 слова)" }
+                        span { "Фраза восстановления (24 слова)" }
                         textarea { name: "recovery_phrase", rows: "5", value: "{phrase}", autocomplete: "off", spellcheck: "false", placeholder: "Введите 24 слова…", oninput: move |event| phrase.set(event.value()) }
                     }
-                    button { class: "primary-action", r#type: "button", disabled: busy() || phrase().trim().is_empty(), onclick: move |_| {
+                    p { class: if phrase().is_empty() || phrase_is_complete { "field-hint" } else { "field-hint field-hint-warning" }, aria_live: "polite",
+                        if phrase().is_empty() {
+                            "Введите слова через пробел."
+                        } else {
+                            "{phrase_word_count} из 24 слов"
+                        }
+                    }
+                    button { class: "primary-action", r#type: "button", disabled: busy() || !phrase_is_complete, onclick: move |_| {
                         let seed_phrase = phrase.read().clone();
                         busy.set(true);
                         error.set(String::new());
@@ -1135,7 +1889,7 @@ fn AccountEntry(on_authenticated: EventHandler<SessionBootstrap>) -> Element {
 }
 
 #[derive(Debug)]
-enum ApiError {
+pub(crate) enum ApiError {
     Unauthorized,
     Message(String),
 }
@@ -1214,6 +1968,68 @@ async fn load_capabilities() -> Result<ServiceCapabilities, ApiError> {
     parse_json(response).await
 }
 
+async fn load_mcp_connections() -> Result<AiPage<McpConnection>, ApiError> {
+    let response = Request::get(&format!("{API_BASE}/mcp/connections"))
+        .credentials(RequestCredentials::Include)
+        .send()
+        .await
+        .map_err(network_error)?;
+    parse_json(response).await
+}
+
+async fn create_mcp_connection(
+    csrf: &str,
+    name: &str,
+) -> Result<McpConnectionTokenResponse, ApiError> {
+    let request = CreateMcpConnectionRequest {
+        name: name.trim().to_owned(),
+        idempotency_key: Uuid::now_v7().to_string(),
+    };
+    let request = Request::post(&format!("{API_BASE}/mcp/connections"))
+        .credentials(RequestCredentials::Include)
+        .header("X-Lumi-CSRF", csrf)
+        .json(&request)
+        .map_err(network_error)?;
+    parse_json(request.send().await.map_err(network_error)?).await
+}
+
+async fn rotate_mcp_connection(
+    csrf: &str,
+    connection: &McpConnection,
+) -> Result<McpConnectionTokenResponse, ApiError> {
+    let request = RevokeMcpConnectionRequest {
+        expected_revision: connection.object_revision,
+        idempotency_key: Uuid::now_v7().to_string(),
+    };
+    let request = Request::post(&format!(
+        "{API_BASE}/mcp/connections/{}/rotate",
+        connection.id
+    ))
+    .credentials(RequestCredentials::Include)
+    .header("X-Lumi-CSRF", csrf)
+    .json(&request)
+    .map_err(network_error)?;
+    parse_json(request.send().await.map_err(network_error)?).await
+}
+
+async fn revoke_mcp_connection(csrf: &str, connection: &McpConnection) -> Result<(), ApiError> {
+    let request = RevokeMcpConnectionRequest {
+        expected_revision: connection.object_revision,
+        idempotency_key: Uuid::now_v7().to_string(),
+    };
+    let request = Request::delete(&format!("{API_BASE}/mcp/connections/{}", connection.id))
+        .credentials(RequestCredentials::Include)
+        .header("X-Lumi-CSRF", csrf)
+        .json(&request)
+        .map_err(network_error)?;
+    let response = request.send().await.map_err(network_error)?;
+    if response.ok() {
+        Ok(())
+    } else {
+        Err(api_response_error(&response))
+    }
+}
+
 async fn register(phrase: &str, nickname: &str) -> Result<SessionBootstrap, ApiError> {
     let material = derive_material(phrase)?;
     let request = RegisterAccountRequest {
@@ -1280,16 +2096,16 @@ async fn logout(csrf: &str) -> Result<(), ApiError> {
     }
 }
 
-async fn upload_epub(csrf: &str, upload: &SelectedEpub) -> Result<AcceptedImport, ApiError> {
+async fn upload_document(csrf: &str, upload: &SelectedUpload) -> Result<AcceptedImport, ApiError> {
     let bytes = js_sys::Uint8Array::from(upload.bytes.as_slice());
     let parts = js_sys::Array::new();
     parts.push(&bytes);
     let blob = web_sys::Blob::new_with_u8_array_sequence(&parts)
-        .map_err(|_| ApiError::Message("Не удалось подготовить EPUB к отправке.".to_owned()))?;
+        .map_err(|_| ApiError::Message("Не удалось подготовить документ к отправке.".to_owned()))?;
     let form = web_sys::FormData::new()
         .map_err(|_| ApiError::Message("Browser FormData недоступен.".to_owned()))?;
     form.append_with_blob_and_filename("file", &blob, &upload.name)
-        .map_err(|_| ApiError::Message("Не удалось добавить EPUB в форму.".to_owned()))?;
+        .map_err(|_| ApiError::Message("Не удалось добавить документ в форму.".to_owned()))?;
     let request = Request::post(&format!("{API_BASE}/imports"))
         .credentials(RequestCredentials::Include)
         .header("X-Lumi-CSRF", csrf)
@@ -1310,15 +2126,6 @@ async fn import_web_url(csrf: &str, url: &str) -> Result<AcceptedImport, ApiErro
         })
         .map_err(network_error)?;
     parse_json(request.send().await.map_err(network_error)?).await
-}
-
-async fn load_telegram_status() -> Result<TelegramConnectionStatus, ApiError> {
-    let response = Request::get(&format!("{API_BASE}/providers/telegram/connection"))
-        .credentials(RequestCredentials::Include)
-        .send()
-        .await
-        .map_err(network_error)?;
-    parse_json(response).await
 }
 
 async fn load_telegram_bot_settings() -> Result<TelegramBotSettings, ApiError> {
@@ -1352,30 +2159,6 @@ async fn delete_telegram_bot_token(csrf: &str) -> Result<TelegramBotSettings, Ap
         .await
         .map_err(network_error)?;
     parse_json(response).await
-}
-
-async fn create_telegram_pairing(csrf: &str) -> Result<TelegramPairingResponse, ApiError> {
-    let response = Request::post(&format!("{API_BASE}/providers/telegram/pairing"))
-        .credentials(RequestCredentials::Include)
-        .header("X-Lumi-CSRF", csrf)
-        .send()
-        .await
-        .map_err(network_error)?;
-    parse_json(response).await
-}
-
-async fn unlink_telegram(csrf: &str) -> Result<(), ApiError> {
-    let response = Request::delete(&format!("{API_BASE}/providers/telegram/connection"))
-        .credentials(RequestCredentials::Include)
-        .header("X-Lumi-CSRF", csrf)
-        .send()
-        .await
-        .map_err(network_error)?;
-    if response.ok() {
-        Ok(())
-    } else {
-        Err(api_response_error(&response))
-    }
 }
 
 async fn change_library_state(
@@ -1465,6 +2248,15 @@ fn material_status_label(status: MaterialImportStatus) -> &'static str {
     }
 }
 
+fn reading_progress_label(progress_fraction: f32) -> String {
+    let percent = (progress_fraction.clamp(0.0, 1.0) * 100.0).round() as u32;
+    if progress_fraction > 0.0 && percent == 0 {
+        "<1%".to_owned()
+    } else {
+        format!("{percent}%")
+    }
+}
+
 fn material_status_class(status: MaterialImportStatus) -> &'static str {
     match status {
         MaterialImportStatus::Ready => "success",
@@ -1477,11 +2269,12 @@ fn job_stage_label(stage: lumi_core::JobStage) -> &'static str {
     match stage {
         lumi_core::JobStage::SourceAccepted => "Исходник сохранён",
         lumi_core::JobStage::FetchingSource => "Загружаем страницу",
-        lumi_core::JobStage::CapturingSnapshot => "Сохраняем snapshot",
+        lumi_core::JobStage::CapturingSnapshot => "Сохраняем копию страницы",
         lumi_core::JobStage::CapturingTelegramMedia => "Сохраняем фото из Telegram",
         lumi_core::JobStage::FetchingLinkedSources => "Загружаем связанные страницы",
         lumi_core::JobStage::ExtractingContent => "Извлекаем основной текст",
         lumi_core::JobStage::ValidatingContainer => "Проверяем контейнер",
+        lumi_core::JobStage::InspectingDocument => "Проверяем PDF",
         lumi_core::JobStage::Normalizing => "Нормализуем главы",
         lumi_core::JobStage::Persisting => "Публикуем результат",
         lumi_core::JobStage::ReaderDocumentBuilt => "Готовим документ чтения",
@@ -1492,24 +2285,33 @@ fn job_stage_label(stage: lumi_core::JobStage) -> &'static str {
 fn material_format_short(kind: &MaterialKind) -> &'static str {
     match kind {
         MaterialKind::Epub => "EPUB",
+        MaterialKind::Pdf => "PDF",
         MaterialKind::WebPage => "WEB",
         MaterialKind::Telegram => "TG",
+        MaterialKind::Markdown => "MD",
+        MaterialKind::Lum => "LUM",
     }
 }
 
 fn material_format_label(kind: &MaterialKind) -> &'static str {
     match kind {
         MaterialKind::Epub => "EPUB · книга",
+        MaterialKind::Pdf => "PDF · документ",
         MaterialKind::WebPage => "Web · статья",
         MaterialKind::Telegram => "Telegram · составной материал",
+        MaterialKind::Markdown => "Markdown · документ",
+        MaterialKind::Lum => "LUM · книга",
     }
 }
 
 fn material_source_download_label(kind: &MaterialKind) -> &'static str {
     match kind {
         MaterialKind::Epub => "Скачать исходник",
-        MaterialKind::WebPage => "Скачать snapshot",
+        MaterialKind::Pdf => "Скачать исходный PDF",
+        MaterialKind::WebPage => "Скачать сохранённую страницу",
         MaterialKind::Telegram => "Скачать исходное Telegram-сообщение",
+        MaterialKind::Markdown => "Скачать исходный Markdown",
+        MaterialKind::Lum => "Скачать исходный LUM",
     }
 }
 
@@ -1535,7 +2337,7 @@ where
     parse_json(response).await
 }
 
-async fn parse_json<T>(response: gloo_net::http::Response) -> Result<T, ApiError>
+pub(crate) async fn parse_json<T>(response: gloo_net::http::Response) -> Result<T, ApiError>
 where
     T: for<'de> serde::Deserialize<'de>,
 {
@@ -1545,7 +2347,7 @@ where
     response.json().await.map_err(network_error)
 }
 
-fn api_response_error(response: &gloo_net::http::Response) -> ApiError {
+pub(crate) fn api_response_error(response: &gloo_net::http::Response) -> ApiError {
     if response.status() == 401 {
         notify_session_expired();
         ApiError::Unauthorized
@@ -1561,13 +2363,12 @@ fn derive_material(phrase: &str) -> Result<DerivedAuthMaterial, ApiError> {
         })?;
     if mnemonic.word_count() != 24 {
         return Err(ApiError::Message(
-            "Recovery phrase должна содержать ровно 24 слова.".to_owned(),
+            "Фраза восстановления должна содержать ровно 24 слова.".to_owned(),
         ));
     }
-    let entropy: [u8; 32] = mnemonic
-        .to_entropy()
-        .try_into()
-        .map_err(|_| ApiError::Message("Recovery phrase должна кодировать 256 бит.".to_owned()))?;
+    let entropy: [u8; 32] = mnemonic.to_entropy().try_into().map_err(|_| {
+        ApiError::Message("Фраза восстановления должна кодировать 256 бит.".to_owned())
+    })?;
     DerivedAuthMaterial::derive(&entropy).map_err(contract_error)
 }
 
@@ -1647,7 +2448,7 @@ fn defer_account_dialog(id: &str) {
     });
 }
 
-fn network_error(error: impl std::fmt::Display) -> ApiError {
+pub(crate) fn network_error(error: impl std::fmt::Display) -> ApiError {
     ApiError::Message(format!("Сеть/API недоступны: {error}"))
 }
 

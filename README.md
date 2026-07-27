@@ -18,11 +18,11 @@ Lumi — open-source приложение для вдумчивого чтени
 - Playwright E2E coverage в `tests/e2e`;
 - цели `make` и pre-commit hooks для локальных quality gates.
 
-Текущая цель реализации — срез S1 Web Reader из
-[docs/early-slices.md](docs/early-slices.md). EPUB остаётся полным эталонным
+Текущая реализованная основа — S1 Web Reader. EPUB остаётся полным эталонным
 импортёром, а публичные web URL и приём текста/ссылок через Telegram-бота входят
 как намеренно узкие baseline-источники. Реализованы постоянные аккаунты,
-durable-импорт реальных EPUB, полностью API-backed библиотека, рабочий
+durable-импорт реальных EPUB, Markdown и portable `.lum` packages, полностью
+API-backed библиотека, рабочий
 browser-measured пагинированный reader, durable-аннотации, progress UX и общий
 baseline приёма источников из Web/Telegram. Web-библиотека и reader используют
 reader-first визуальную систему paper/sage на desktop и touch layouts, включая
@@ -38,6 +38,152 @@ Repository-side production contract и main-only self-hosted CI/CD описан�
 [docs/runbooks/production-deploy.md](docs/runbooks/production-deploy.md). Его
 наличие не означает, что server bootstrap, DNS или первый production deploy уже
 выполнены.
+
+Для `0.2.0` реализованы foundation A1 и все продуктовые эпики E1–E4:
+owner-scoped explicit source context, зашифрованный OpenRouter BYOK,
+глобальный durable streaming AI-чат, Reader selection handoff и рабочие
+source citations, а также durable AI queue, внутренний worker, сохранённые
+chapter/material summaries и manual-edit candidate policy. Revocable
+account-scoped MCP Streamable HTTP предоставляет product tools и fenced
+external AI worker поверх тех же application services. Сокращение публикуется
+как отдельный portable `.lum`: сервер собирает и повторно импортирует package,
+атомарно добавляет готовый производный материал в библиотеку и сохраняет точные
+ссылки на immutable revision оригинала. Операционные
+контракты описаны в
+[docs/runbooks/ai-persistence.md](docs/runbooks/ai-persistence.md) и
+[docs/runbooks/personal-ai-assistant.md](docs/runbooks/personal-ai-assistant.md),
+[docs/runbooks/ai-task-queue.md](docs/runbooks/ai-task-queue.md) и
+[docs/runbooks/derived-materials.md](docs/runbooks/derived-materials.md).
+Настройка внешнего агента описана в
+[`docs/runbooks/mcp-external-agents.md`](docs/runbooks/mcp-external-agents.md).
+
+Для `0.3.0/E1` реализован первый deterministic learning vertical без
+обязательного AI provider: durable completion после сохранения reading progress,
+одно необязательное предложение в Reader, ручные versioned questions,
+детерминированная проверка закрытых ответов и explicit self-check открытых,
+immutable session snapshots, durable attempts, source jump и продолжение после
+reload. В карточке материала доступен ручной вход в learning, а сервер публикует
+capability `learning-core`. Контракт описан в
+[`docs/adr/0026-learning-completion-items-sessions.md`](docs/adr/0026-learning-completion-items-sessions.md).
+
+Для `0.3.0/E2` реализованы ordered hints/source assistance evidence,
+versioned FSRS scheduling, атомарное обновление attempt + schedule и bounded
+экран `Челленджи` с `Сегодня`/`Закрепить сейчас`. Global scheduling,
+manual-only, material pause/resume и session snooze сохраняют историю и не
+создают штрафной backlog. Persistent server публикует capability
+`learning-scheduling`; контракт и проверка описаны в
+[`ADR 0027`](docs/adr/0027-fsrs-scheduling-challenges.md) и
+[`learning runbook`](docs/runbooks/learning.md).
+
+Для `0.3.0/E3` реализованы source-backed AI generation и open-answer
+evaluation поверх общей очереди/provider/context contracts `0.2.0`. Generated
+items проходят строгую schema/citation validation и появляются только как
+редактируемые черновики. Text explain-back использует durable learning session
+и последовательные immutable evaluation artifacts с
+`understood`/`partial`/`needs_review`/`not_evaluated`; при отсутствии provider
+остаётся честная self-check ветка. Решение описано в
+[`ADR 0028`](docs/adr/0028-learning-ai-evaluation-explain-back.md).
+
+Для `0.3.0/E4` реализован сквозной голосовой ответ: Web запрашивает микрофон
+только по действию пользователя, даёт прослушать и удалить локальную запись,
+загружает её как owner-scoped `AudioAttachment` и отправляет server-side в
+OpenAI Audio Transcriptions API (`whisper-1`) с отдельным зашифрованным BYOK.
+Транскрипт можно исправить и нужно явно подтвердить до оценки; повтор
+транскрибации использует тот же attachment, а retention удаляет исходное аудио
+после acceptance. Обычный текстовый ответ всегда доступен.
+
+Для `0.3.0/E5` реализован platform/release slice: account-scoped MCP tools
+`list_learning_items`, `create_flashcard_task` и `submit_learning_answer`
+используют те же learning application services, AI queue, authorization и
+idempotency, что HTTP/Web. Добавлены capability filtering, frozen MCP schema
+`mcp-tools.v2`, typed limits/errors, owner/parity fixtures, payload-free
+операционные traces и process/account limits для AI/transcription. Изолированный
+release gate подтверждает fresh migrations, PostgreSQL/compatibility/security/
+performance suites, `make c`, Web E2E и staging image smoke. Workspace и Web
+package имеют версию `0.3.0`; внешний staging operator acceptance остаётся
+отдельным gate окружения.
+
+Для `0.4.0/E1` реализованы Records v2 и Rich Reader: прежние annotations
+совместимо декодируются и мигрируются в единый контракт с explicit targets,
+title/tags/status и relation seam. Reflowable и PDF Reader поддерживают
+yellow/bold highlights, изменение стиля, selection notes и keyboard-доступные
+записи на полях, durable CRUD/navigation и portable
+`lumi.annotations.v2` export. Решение и ручная проверка описаны в
+[`ADR 0030`](docs/adr/0030-annotation-v2-rich-reader.md) и
+[`durable annotations runbook`](docs/runbooks/durable-annotations.md).
+
+Для `0.4.0/E2` реализованы Voice Notes и внутренние связи: Reader переиспользует
+общий browser recorder и owner-scoped audio attachment lifecycle, поддерживает
+preview/file fallback, durable playback, safe delete/refcount и manifest-only
+export. Markdown-заметки получают stable `LinkTarget`, wikilink suggestions,
+unresolved/ambiguous resolution и backlinks без зависимости от Obsidian.
+Решения описаны в [`ADR 0031`](docs/adr/0031-voice-note-audio-lifecycle.md),
+[`ADR 0032`](docs/adr/0032-stable-record-links-backlinks.md) и
+[`runbook`](docs/runbooks/voice-notes-and-links.md).
+
+Для `0.4.0/E3` реализовано поисковое ядро: versioned source-aware chunks для
+normalized materials/PDF, Annotation v2, accepted AI artifacts и active
+learning items; Tantivy BM25 с проверяемым fastText rerank; транзакционные
+`search_index` jobs, incremental replace/delete, restart recovery и full
+rebuild. Owner-filtered `/search`, `/search/retrieve`, `/search/status` и
+`/search/rebuild` возвращают plain snippets, exact open targets и compatible
+citations. Model/checksum failure явно отключает query capabilities без
+BM25-only деградации. Решение и эксплуатация описаны в
+[`ADR 0033`](docs/adr/0033-search-chunks-tantivy-fasttext.md) и
+[`search runbook`](docs/runbooks/search-index.md).
+
+Для `0.4.0/E4` реализованы Desk и единые поисковые поверхности. Rebuildable
+owner-scoped projection собирает material counters, Annotation v2, learning
+state и accepted AI artifacts без копирования primary payload. Web получил
+top-level Desk, material/cross-material views, inline edit через общий
+annotation command, типизированные direct routes и Global/Library/Reader/Desk
+search поверх одного query service. MCP registry `mcp-tools.v3` добавляет Desk,
+global/material/records search и bounded context tools с теми же permissions,
+cursors и open targets. Решение и эксплуатация описаны в
+[`ADR 0034`](docs/adr/0034-desk-projection-and-search-surfaces.md) и
+[`Desk runbook`](docs/runbooks/desk-projection.md).
+
+Для `0.4.0/E5` реализован record-scoped RAG без второго AI-контура:
+Search/Desk/Reader передают видимый `RecordSearchScope` в существующий
+durable global chat, server выполняет owner-filtered retrieval, сохраняет
+exact chunk ids/hashes и возвращает citations с едиными open targets.
+Слабый retrieval не вызывает provider, а найденный текст считается
+недоверенными данными. Workspace и Web package имеют версию `0.4.0`.
+Решение, эксплуатация и rollback описаны в
+[`ADR 0035`](docs/adr/0035-record-scoped-rag-global-chat.md),
+[`runbook`](docs/runbooks/record-rag.md) и
+[`release notes`](docs/releases/0.4.0.md).
+
+Для `0.5.0/E1` реализован Community Spaces vertical: отдельные product/sync
+identities, owner/admin/member permission matrix, scoped memberships,
+отзывные и ротируемые link invitations, safe preview и explicit join.
+Community Web shell поддерживает создание и настройку Space, управление
+ролями, ссылками и выходом; capability flags публикуются только для готового
+контура. В `0.5.0/E2` добавлена публикация material identity без source blob:
+сервер сам строит versioned privacy-protected fingerprint текущей личной
+копии, дедуплицирует identity внутри Space и создаёт personal claim с
+консервативными состояниями `matched`, `manual_review` или `rejected`.
+Карточка, сведения и оба Reader предоставляют явный Share flow, а участник
+может подключить только материал из собственной библиотеки. Persistent server
+публикует capability `material-sharing`. После закрытия зависимостей `0.4.0`
+также реализованы shared anchors и Reader overlays, permission-aware social
+search, generic avatar/cover blobs и автоматический fingerprint lifecycle;
+release evidence сохранён в
+[`docs/tmp-plans/0.5.0-deferred-until-0.4.0.md`](docs/tmp-plans/0.5.0-deferred-until-0.4.0.md)
+и [`ADR 0040`](docs/adr/0040-shared-reading-social-index-images-and-fingerprint-lifecycle.md).
+Для независимой части `0.5.0/E3` реализованы material-level threads/replies,
+author edit/delete, moderation tombstones, cursor API и Community discussion
+surface. Persistent server публикует capabilities `material-discussions` и
+`shared-reading`: anchor comments, published highlights и Reader overlay
+переиспользуют общий Records v2 target/provenance contract.
+Для независимой части `0.5.0/E4` добавлены отдельные Space chat и append-only
+activity, author CRUD/moderation tombstones, bounded cursor/polling delivery и
+account-scoped social tools в registry `mcp-tools.v4` поверх общих application
+services. Backup/restore evidence включает community state и revoked links,
+performance gate проверяет 50 000 сообщений и 100 000 событий. Workspace и Web
+package имеют версию `0.5.0`. Общий search runtime индексирует разрешённые
+shared comments/chat/highlights, а MCP registry `mcp-tools.v5` предоставляет
+permission-aware social search.
 
 ## Локальный запуск
 
@@ -80,6 +226,11 @@ make web-e2e
 ```
 
 Подробности — в [docs/runbooks/local-dev.md](docs/runbooks/local-dev.md).
+
+Единый Web roadmap теперь сгруппирован в 18 крупных продуктовых эпиков:
+четыре для `0.2.0`, по пять для `0.3.0` и `0.4.0`, четыре для `0.5.0`.
+Изолированный последовательный запуск эпиков через Codex CLI описан в
+[docs/runbooks/codex-plan-runner.md](docs/runbooks/codex-plan-runner.md).
 
 ## Работа с документацией
 

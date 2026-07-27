@@ -43,9 +43,16 @@ services:
   blob-init:
     image: ${LUMI_BLOB_INIT_IMAGE:?set LUMI_BLOB_INIT_IMAGE}
     container_name: lumi-blob-init
-    command: ["sh", "-c", "chown -R 65532:65532 /var/lib/lumi/blobs"]
+    command:
+      [
+        "sh",
+        "-c",
+        "chown -R 65532:65532 /var/lib/lumi/blobs /var/lib/lumi/secrets /var/lib/lumi/search",
+      ]
     volumes:
       - ./volumes/blobs:/var/lib/lumi/blobs
+      - ./volumes/secrets:/var/lib/lumi/secrets
+      - ./volumes/search:/var/lib/lumi/search
     restart: "no"
     networks:
       - lumi
@@ -64,6 +71,12 @@ services:
       LUMI_SECURE_COOKIE: "1"
       LUMI_DEPLOYMENT_MODE: production
       LUMI_BLOB_ROOT: /var/lib/lumi/blobs
+      LUMI_SECRET_ROOT: /var/lib/lumi/secrets
+      LUMI_SEARCH_ROOT: /var/lib/lumi/search
+      LUMI_FASTTEXT_MODEL: ${LUMI_FASTTEXT_MODEL:-}
+      LUMI_FASTTEXT_MODEL_SHA256: ${LUMI_FASTTEXT_MODEL_SHA256:-}
+      LUMI_FASTTEXT_MODEL_VERSION: ${LUMI_FASTTEXT_MODEL_VERSION:-cc.ru.300.fasttext.v1}
+      LUMI_ADMIN_LOOKUP_IDS: ${LUMI_ADMIN_LOOKUP_IDS:-}
       LUMI_TELEGRAM_BOT_SCOPE: ${LUMI_TELEGRAM_BOT_SCOPE:-lumi-production}
       LUMI_TELEGRAM_BOT_USERNAME: ${LUMI_TELEGRAM_BOT_USERNAME:-}
       LUMI_TELEGRAM_WEBHOOK_SECRET: ${LUMI_TELEGRAM_WEBHOOK_SECRET:-}
@@ -81,6 +94,9 @@ services:
       start_period: 5s
     volumes:
       - ./volumes/blobs:/var/lib/lumi/blobs
+      - ./volumes/secrets:/var/lib/lumi/secrets
+      - ./volumes/search:/var/lib/lumi/search
+      - ./volumes/models:/var/lib/lumi/models:ro
     read_only: true
     tmpfs:
       - /tmp:rw,noexec,nosuid,nodev,size=64m
@@ -160,14 +176,17 @@ services:
       PGUSER: lumi
       PGPASSWORD: ${LUMI_POSTGRES_PASSWORD:?set LUMI_POSTGRES_PASSWORD}
       LUMI_BLOB_ROOT: /var/lib/lumi/blobs
+      LUMI_SECRET_ROOT: /var/lib/lumi/secrets
       LUMI_BACKUP_WRITES_QUIESCED: ${LUMI_BACKUP_WRITES_QUIESCED:-0}
       LUMI_BACKUP_DESTINATION_ENCRYPTED: ${LUMI_BACKUP_DESTINATION_ENCRYPTED:-0}
+      LUMI_BACKUP_DRILL_MODE: ${LUMI_BACKUP_DRILL_MODE:-0}
       LUMI_BACKUP_REQUIRE_SEEDED: ${LUMI_BACKUP_REQUIRE_SEEDED:-1}
     depends_on:
       postgres:
         condition: service_healthy
     volumes:
       - ./volumes/blobs:/var/lib/lumi/blobs:ro
+      - ./volumes/secrets:/var/lib/lumi/secrets:ro
       - ./backups:/var/lib/lumi/backups
       - ./scripts:/opt/lumi/scripts:ro
     restart: "no"

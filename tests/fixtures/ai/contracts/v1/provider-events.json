@@ -1,0 +1,25 @@
+[
+  {
+    "type": "response_started",
+    "generation_id": "generation-fixture"
+  },
+  {
+    "type": "text_delta",
+    "sequence": 1,
+    "text": "При"
+  },
+  {
+    "type": "text_delta",
+    "sequence": 2,
+    "text": "вет"
+  },
+  {
+    "type": "usage",
+    "input_tokens": 10,
+    "output_tokens": 2
+  },
+  {
+    "type": "response_completed",
+    "finish_reason": "stop"
+  }
+]

@@ -16,6 +16,11 @@ outbox/sync and offline indexes. Веб-аккаунт дает identity, sessio
 других клиентов. Пользователь при этом должен иметь полный доступ к своим
 материалам: открыть, скачать, сохранить и экспортировать.
 
+Продуктово аккаунту соответствует один `UserSpace`: персональная страница и
+весь пользовательский опыт Lumi. `UserSpace` не является `SyncSpace` или
+отдельным разделом приложения; он использует account identity и связывает
+пользователя с Community Spaces.
+
 Базовая формулировка: **web is a cloud-backed application, while native clients
 are future full-copy replicas**.
 
@@ -29,6 +34,8 @@ are future full-copy replicas**.
   time-ordered версии UUID.
 - Пользователь может добавить nickname для социальных подписи и отображения, но
   nickname не является логином, паролем или стабильным идентификатором доступа.
+- Пользователь видит в User Space блок `Community` со ссылками на Community
+  Spaces, в которых состоит.
 - Пользователь импортирует EPUB/PDF/FB2/Markdown/web article в web. Материал
   сохраняется в облачной реплике аккаунта и затем синхронизируется на другие
   клиенты.
@@ -58,7 +65,7 @@ are future full-copy replicas**.
 - Из seed phrase выводятся:
   - Ed25519 signing key для challenge-response входа;
   - отдельный account lookup key для поиска auth identity при login;
-  - в будущем - encryption keys для E2EE personal space, если это решение будет
+  - в будущем - encryption keys для E2EE personal `SyncSpace`, если это решение будет
     принято.
 - Сервер хранит только verifier/public auth material, session records и
   account metadata.
@@ -70,13 +77,18 @@ are future full-copy replicas**.
 
 - Каждый вход создает `WebSession` и `SyncDevice`.
 - Session token хранится отдельно от seed phrase и может быть отозван.
+- Server вычисляет отдельную instance-wide роль `user | admin` по deployment
+  policy. Она не заменяет scoped roles внутри sync/Community Spaces.
+- Admin bootstrap использует только публичный auth `lookup_id`; raw seed phrase
+  не передаётся server и не хранится в environment.
 - Device list нужен для sync status, revocation и диагностики.
 - Desktop/mobile могут подключаться через seed phrase login или future device
   pairing flow из уже авторизованного клиента.
-- Telegram pairing token создается только из авторизованного аккаунта и связан
-  с `user_id`.
+- Telegram identity автоматически связывается с `user_id` и `device_id`
+  администратора, сохранившего глобальную настройку бота; отдельный pairing
+  token не создаётся.
 
-### Account profile
+### Account profile и User Space identity
 
 - `AccountProfile` хранит пользовательские display-поля:
   - nickname;
@@ -87,10 +99,13 @@ are future full-copy replicas**.
   nickname.
 - Nickname может быть неуникальным или иметь отдельный display discriminator;
   это не должно влиять на login.
+- Один `WebAccount` имеет один primary `UserSpace`. Его display identity
+  проецируется из `AccountProfile`; membership в Community Spaces показывается
+  отдельной permission-aware projection.
 
 ### Cloud-backed web state
 
-- Для web-клиента сервер является authoritative store personal space:
+- Для web-клиента сервер является authoritative store personal `SyncSpace`:
   материалы, metadata, normalized packages, blobs, заметки, прогресс, KB,
   generated artifacts, jobs, search indexes, sync log and blob manifests.
 - Browser storage не является authoritative replica. Его можно использовать
@@ -112,7 +127,7 @@ are future full-copy replicas**.
   highlights, learning history, private AI artifacts, search indexes or source
   files.
 - Сервер может хранить account record, auth verifier/public material, device
-  registry, encrypted key envelopes, relay metadata, shared-room membership and
+  registry, encrypted key envelopes, relay metadata, Community Space membership and
   explicitly shared/public objects.
 - Seed phrase генерируется и хранится пользователем; raw seed phrase никогда не
   хранится в облаке.
@@ -151,7 +166,7 @@ are future full-copy replicas**.
   - mobile WebView capture/regeneration jobs;
   - future provider imports.
 - Import worker создает обычные `Material`, `DocumentRevision`, resources и
-  sync changes в personal space аккаунта.
+  sync changes в personal `SyncSpace` аккаунта.
 - Для пользователя материал должен выглядеть одинаково независимо от источника:
   web upload, Telegram bot или desktop import.
 - Если browser session закрыта, server-side импорт продолжает выполняться и
@@ -188,10 +203,11 @@ are future full-copy replicas**.
 ```text
 WebAccount
   -> AccountProfile
+  -> UserSpace
   -> AuthIdentity[]
   -> WebSession[]
   -> SyncDevice[]
-  -> Cloud Personal Space
+  -> Cloud Personal SyncSpace
   -> ImportInbox
   -> BlobStore
 ```
@@ -199,6 +215,7 @@ WebAccount
 Основные сущности:
 
 - `WebAccount` - server-side account record with stable `user_id`.
+- `UserSpace` - продуктовая персональная страница, связанная с account 1:1.
 - `AuthIdentity` - verifier/public key material derived from seed phrase.
 - `AccountProfile` - nickname and display metadata.
 - `WebSession` - active browser session.
@@ -219,6 +236,12 @@ WebAccount {
   primary_space_id
   created_at
   status: active | suspended | deletion_pending | deleted
+}
+
+UserSpace {
+  id // WebAccount.primary_space_id
+  user_id
+  profile_ref
 }
 
 AuthIdentity {
@@ -259,8 +282,8 @@ ImportJob {
 2. Client derives auth material from seed phrase.
 3. Client requests account creation with `lookup_id` and public key; unique
    `lookup_id` prevents a second account for the same seed identity.
-4. Server creates `user_id` as UUIDv7+, `WebAccount`, personal `SyncSpace` and
-   first `SyncDevice`.
+4. Server creates `user_id` as UUIDv7+, `WebAccount`, primary `UserSpace`,
+   personal `SyncSpace` and first `SyncDevice`.
 5. Server stores auth verifier/public material, not seed phrase.
 6. Client receives session token and bootstraps from cloud account state.
 
@@ -284,7 +307,7 @@ private/derived keys не покидают client.
 Server modules:
 
 - `accounts` - users, auth identities, sessions, profile.
-- `sync` - spaces, devices, change log, snapshots.
+- `sync` - `SyncSpace` records, devices, change log, snapshots.
 - `imports` - inbox/jobs, Telegram/web upload/web URL processing.
 - `blobs` - content-addressed object abstraction.
 - `exports` - account export bundles.
@@ -310,7 +333,7 @@ desktop/mobile replica/export exists, web data is gone.
 
 ## Интеграции и зависимости
 
-- **Синхронизация.** Web account owns cloud personal space and registered
+- **Синхронизация.** Web account owns cloud personal `SyncSpace` and registered
   devices. Native clients sync from/to this cloud state or, later, use private
   encrypted relay mode without cloud replica.
 - **Telegram.** Bot links to `user_id`; incoming materials land in
@@ -320,10 +343,14 @@ desktop/mobile replica/export exists, web data is gone.
   jobs when they need server-side processing or cloud-backed storage.
 - **Reader.** Web reader opens materials through API/object storage and writes
   annotations/progress/notes through server-side commands.
+- **Social.** User Space использует `AccountProfile` как display identity,
+  показывает memberships и ведет к Community Spaces.
 - **Поиск.** Web uses serious server-side search over cloud account state.
   Desktop/mobile later keep local indexes for offline/full-copy modes.
-- **ИИ.** BYOK secrets for web sessions need secure storage policy. Server-side
-  AI/subscription mode can use cloud replica only with explicit context policy.
+- **ИИ.** В первом web AI-срезе BYOK secrets хранятся в защищенном server-side
+  secret storage. Будущий native mode может хранить ключ только на клиенте.
+  Server-side AI может использовать cloud replica только по явной context
+  policy; встроенная подписка остается вне текущего scope.
 - **Социальные функции.** Social ACL uses `user_id`; nickname is display-only.
 - **Плагины.** Web plugins cannot assume filesystem/process access and must use
   account-scoped capabilities.
@@ -347,7 +374,7 @@ desktop/mobile replica/export exists, web data is gone.
 - `revisit`: Postgres-only blob storage. Может быть достаточно для раннего
   прототипа с лимитами, но production web с большими файлами почти наверняка
   потребует S3-compatible backend.
-- `revisit`: E2EE personal space. Важно для приватности, но усложняет web
+- `revisit`: E2EE personal `SyncSpace`. Важно для приватности, но усложняет web
   search, AI, Telegram import и recovery.
 - `revisit`: private/decentralized native mode. Это долгосрочная цель после
   mature desktop/mobile clients; ее нельзя обещать как свойство первого web

@@ -24,7 +24,7 @@ jobs:
       - name: Install pinned Rust toolchain
         uses: dtolnay/rust-toolchain@fa04a1451ff1842e2626ccb99004d0195b455a88
         with:
-          toolchain: stable
+          toolchain: 1.93.1
           targets: wasm32-unknown-unknown
           components: clippy, rustfmt
 
@@ -61,8 +61,14 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Build and publish immutable release
-        run: make build push DOCKER="docker --config ${RUNNER_TEMP}/docker-config" GIT_SHA="${GITHUB_SHA}"
+      - name: Build immutable release
+        run: make build DOCKER="docker --config ${RUNNER_TEMP}/docker-config" GIT_SHA="${GITHUB_SHA}"
+
+      - name: Smoke production topology
+        run: make production-compose-smoke DOCKER="docker --config ${RUNNER_TEMP}/docker-config" GIT_SHA="${GITHUB_SHA}"
+
+      - name: Publish immutable release
+        run: make push DOCKER="docker --config ${RUNNER_TEMP}/docker-config" GIT_SHA="${GITHUB_SHA}"
 
       - name: Preserve release manifest as workflow evidence
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2

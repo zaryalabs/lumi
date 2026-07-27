@@ -5,6 +5,9 @@
 Этот runbook описывает основной Docker-first запуск полного локального стека и
 расширенный host-native workflow для разработки Rust, Dioxus и Playwright.
 
+Изолированный автономный запуск этапов плана через Codex CLI описан отдельно в
+[`codex-plan-runner.md`](codex-plan-runner.md).
+
 ## Основной Docker-first запуск
 
 Для обычного запуска нужен только Docker с Compose:
@@ -46,7 +49,8 @@ blob-данные; используйте его только когда нуж�
 
 Host-native запуск удобен при активной разработке. Для него нужны:
 
-- Rust 1.88+ с `cargo`, `rustfmt` и `clippy`;
+- Rust `1.93.1` с `cargo`, `rustfmt` и `clippy`; версия и компоненты
+  зафиксированы в корневом `rust-toolchain.toml`;
 - target `wasm32-unknown-unknown`;
 - Dioxus CLI `dx` версии, совместимой с Dioxus 0.7;
 - Node.js и npm для Playwright;
@@ -85,8 +89,15 @@ make db-migrate
 
 Подробности — в [persistent-account.md](persistent-account.md).
 
+AI persistence, reusable secret envelopes и общий Job Runtime описаны в
+[ai-persistence.md](ai-persistence.md). Их наличие после migration не включает
+пользовательские AI/MCP capabilities.
+
 Настройка real EPUB import, blob root и restart recovery описана в
 [real-epub-import.md](real-epub-import.md).
+
+PDF import, Poppler и подготовка PDF.js assets описаны в
+[pdf-import.md](pdf-import.md).
 
 Проверка API-backed библиотеки, lifecycle-команд и source download описана в
 [api-backed-library.md](api-backed-library.md).
@@ -154,6 +165,12 @@ make web-e2e
 ```sh
 make web-e2e
 ```
+
+Команда использует отдельный disposable Compose project, выбирает свободные
+локальные порты и после завершения удаляет тестовые PostgreSQL/blob volumes.
+PDF flow не требует host-установки Poppler: `pdfinfo`, `pdftotext` и
+`pdftoppm` запускаются через изолированный E2E image. Docker остаётся
+обязательной зависимостью полного browser gate.
 
 Реальный локальный профиль для host-native процессов:
 

@@ -18,6 +18,13 @@ backlinks, вложения, обратные ссылки на материал
 заимствованная из Obsidian идея - graph: пользователь должен видеть связи
 между заметками, материалами, понятиями и generated artifacts.
 
+База знаний не заменяет
+[`Desk`](desk.md). Desk организован
+вокруг материалов и истории работы с ними; KB организована вокруг идей и
+cross-source связей. Reader note может оставаться только в Desk, а после
+преобразования в `KbNote` появиться в обеих поверхностях через source refs без
+физического дублирования.
+
 ## Пользовательские сценарии
 
 - Пользователь создает заметку в базе знаний как обычный Markdown документ.
@@ -69,6 +76,10 @@ KB editor не должен исполнять raw HTML/JS. Unsupported content 
 placeholder или escaped text, как в Markdown importer.
 
 ### Links and graph
+
+KB расширяет общий stable `LinkTarget`, уже используемый для material,
+annotation и anchor links. Тип `kb_note` добавляется поверх этого контракта;
+KB не вводит второй несовместимый resolver или формат stable target.
 
 Поддерживаемые связи:
 
@@ -309,8 +320,12 @@ quotes, links и source metadata.
 
 - **Reader.** Reader creates source refs and annotations that can become KB
   notes.
+- **Desk.** Показывает reader-derived и source-linked KB notes вокруг
+  материалов. KB note с несколькими source refs может быть видима в
+  представлениях нескольких материалов в Desk как одна сущность.
 - **Синхронизация.** KB notes are sync objects with revision/conflict handling.
-- **Obsidian.** Obsidian integration reads/writes Markdown projection of KB.
+- **Obsidian.** Поздняя Desktop-интеграция сможет читать и писать Markdown
+  projection KB. Внутренние wikilinks, backlinks и graph работают без нее.
 - **Поиск.** KB notes, source refs, tags and graph edges are indexed in unified
   search.
 - **Learning.** Flashcards/questions can link to KB notes; mastered concepts

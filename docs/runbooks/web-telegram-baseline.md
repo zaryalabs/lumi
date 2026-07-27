@@ -35,24 +35,23 @@ URL `https://fixtures.lumi.test/article` тогда не обращается к
 polling listener на `teloxide-core`; отдельный процесс и env для Telegram не
 нужны.
 
-Настройка глобальна для экземпляра Lumi. На текущем прототипном этапе её может
-изменить любой авторизованный пользователь. Токен не возвращается в browser,
-PostgreSQL содержит только шифротекст, а master key лежит в persistent secret
-root. При замене токена тем же bot id пользовательские привязки сохраняются;
-другой bot id требует нового pairing.
+Настройка глобальна для экземпляра Lumi и доступна только администратору. Токен
+не возвращается в browser, PostgreSQL содержит только шифротекст, а master key
+лежит в persistent secret root. При замене токена тем же bot id существующая
+Telegram identity сохраняется.
 
 PostgreSQL advisory lock защищает от случайного запуска двух listeners для
 одного bot id. Webhook сохранён только как будущее направление в
 [ADR 0012](../adr/0012-embedded-telegram-bot-settings.md).
 
-В UI plaintext pairing token показывается один раз, исчезает после connection
-или expiry и не кэшируется response. `/start <token>`, `/help`, `/unlink`,
-direct/forwarded text, caption, Telegram-фото, альбомы и публичные web URL
-поддерживаются. Один пост/альбом создаёт один материал: сначала Telegram-текст и
-фото, затем отдельные web-секции. Видео, GIF, audio/voice, documents/files и
-stickers не скачиваются; их caption всё равно импортируется. Text и
-ограниченная forward attribution сохраняются как личный cloud content. Unlink
-запрещает новые imports, но не удаляет материалы.
+После сохранения BotFather token отдельное подтверждение не требуется. Первый
+private chat автоматически привязывается к администратору, который настроил
+бота, и первое содержательное сообщение сразу импортируется. `/start` и
+`/help`, direct/forwarded text, caption, Telegram-фото, альбомы и публичные web
+URL поддерживаются. Один пост/альбом создаёт один материал: сначала
+Telegram-текст и фото, затем отдельные web-секции. Видео, GIF, audio/voice,
+documents/files и stickers не скачиваются; их caption всё равно импортируется.
+Text и ограниченная forward attribution сохраняются как личный cloud content.
 
 ## Limits и проверка
 

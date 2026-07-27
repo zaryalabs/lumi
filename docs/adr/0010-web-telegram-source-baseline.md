@@ -2,6 +2,9 @@
 
 Status: accepted
 
+Pairing-часть решения заменена автопривязкой из
+[ADR 0017](0017-telegram-admin-auto-link.md).
+
 ## Контекст
 
 EPUB уже публиковал `DocumentRevision`, Normalized Content Package и

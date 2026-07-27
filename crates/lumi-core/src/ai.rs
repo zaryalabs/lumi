@@ -1,0 +1,2414 @@
+//! Versioned, platform-independent AI contracts.
+//!
+//! This module is the Contract Freeze 1 boundary shared by the AI platform,
+//! Web chat and MCP agent tracks. Persistence and provider-specific wire
+//! formats intentionally remain outside `lumi-core`.
+
+use serde::{Deserialize, Serialize};
+use serde_json::{json, Value};
+use thiserror::Error;
+use uuid::Uuid;
+use zeroize::Zeroize;
+
+use crate::{
+    Anchor, DocumentRevisionId, MaterialId, SearchOpenTarget, SearchSourceType, SearchUpdatedRange,
+    TimestampMs, UserId,
+};
+
+/// Version of the frozen AI task and API contract.
+pub const AI_CONTRACT_VERSION: &str = "ai.contract.v1";
+/// Version of immutable explicit-context packs.
+pub const AI_CONTEXT_PACK_SCHEMA_VERSION: &str = "ai-context-pack.v1";
+/// Version of source citations.
+pub const SOURCE_CITATION_SCHEMA_VERSION: &str = "source-citation.v1";
+/// Version of the explicit-context limit policy.
+pub const EXPLICIT_CONTEXT_LIMITS_VERSION: &str = "explicit-context-limits.v1";
+/// Version of record-scoped retrieval and packing.
+pub const RECORD_RETRIEVAL_VERSION: &str = "record-retrieval.v1";
+/// Version of the fixed prompt policy for untrusted personal records.
+pub const RECORD_RAG_PROMPT_VERSION: &str = "record-rag.prompt.v1";
+/// Version of the first summary artifact payload.
+pub const SUMMARY_ARTIFACT_SCHEMA_VERSION: &str = "summary-artifact.v1";
+/// Version of the generated abridgement artifact payload.
+pub const ABRIDGEMENT_ARTIFACT_SCHEMA_VERSION: &str = "abridgement-artifact.v1";
+/// Version of one internal chapter abridgement result.
+pub const ABRIDGEMENT_CHAPTER_SCHEMA_VERSION: &str = "abridgement-chapter.v1";
+/// Version of the material abridgement prompt.
+pub const ABRIDGEMENT_MATERIAL_PROMPT_VERSION: &str = "abridgement.material.v1";
+/// Version of the source-backed learning item generation prompt.
+pub const LEARNING_ITEMS_PROMPT_VERSION: &str = "learning.items.v1";
+/// Version of the rubric-based open-answer evaluation prompt.
+pub const LEARNING_OPEN_ANSWER_PROMPT_VERSION: &str = "learning.open-answer.v1";
+/// Version of generated question-set artifacts.
+pub const QUESTION_SET_ARTIFACT_SCHEMA_VERSION: &str = "question-set-artifact.v1";
+/// Version of rubric-based open-answer evaluation artifacts.
+pub const OPEN_ANSWER_EVALUATION_SCHEMA_VERSION: &str = "open-answer-evaluation.v1";
+/// Version of the chapter brief summary prompt.
+pub const SUMMARY_CHAPTER_BRIEF_PROMPT_VERSION: &str = "summary.chapter.brief.v1";
+/// Version of the chapter outline summary prompt.
+pub const SUMMARY_CHAPTER_OUTLINE_PROMPT_VERSION: &str = "summary.chapter.outline.v1";
+/// Version of the material brief summary prompt.
+pub const SUMMARY_MATERIAL_BRIEF_PROMPT_VERSION: &str = "summary.material.brief.v1";
+/// Version of the material outline summary prompt.
+pub const SUMMARY_MATERIAL_OUTLINE_PROMPT_VERSION: &str = "summary.material.outline.v1";
+
+/// Stable AI task identifier.
+pub type AiTaskId = Uuid;
+/// Stable AI execution attempt identifier.
+pub type AiRunId = Uuid;
+/// Stable immutable context-pack identifier.
+pub type AiContextPackId = Uuid;
+/// Stable AI artifact identifier.
+pub type AiArtifactId = Uuid;
+/// Stable conversation identifier.
+pub type AiConversationId = Uuid;
+/// Stable chat message identifier.
+pub type AiMessageId = Uuid;
+/// Stable provider generation identifier.
+pub type AiGenerationId = Uuid;
+/// Stable opaque claim identifier.
+pub type AiClaimId = Uuid;
+
+/// Validation failure at a frozen AI contract boundary.
+#[derive(Clone, Debug, Eq, Error, PartialEq)]
+pub enum AiContractError {
+    /// A required string field is empty.
+    #[error("field `{0}` must not be empty")]
+    EmptyField(&'static str),
+    /// A string field exceeds its contract limit.
+    #[error("field `{field}` exceeds the {max_bytes} byte limit")]
+    FieldTooLarge {
+        /// Field name.
+        field: &'static str,
+        /// Maximum encoded UTF-8 byte length.
+        max_bytes: usize,
+    },
+    /// A state transition is not part of the frozen state machine.
+    #[error("invalid AI task transition from {from:?} to {to:?}")]
+    InvalidTaskTransition {
+        /// Current task state.
+        from: AiTaskStatus,
+        /// Requested task state.
+        to: AiTaskStatus,
+    },
+    /// A contract or schema version is unsupported.
+    #[error("unsupported contract version `{0}`")]
+    UnsupportedVersion(String),
+    /// A source scope is internally inconsistent.
+    #[error("invalid source scope: {0}")]
+    InvalidSourceScope(&'static str),
+    /// A context pack violates a size, hash or citation invariant.
+    #[error("invalid context pack: {0}")]
+    InvalidContextPack(&'static str),
+    /// A structured output does not match its declared schema.
+    #[error("invalid structured output: {0}")]
+    InvalidStructuredOutput(&'static str),
+}
+
+/// User-visible lifecycle of a durable AI task.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AiTaskStatus {
+    /// Waiting for an executor.
+    Queued,
+    /// Owned by an active execution attempt.
+    Running,
+    /// Waiting for explicit user input or configuration.
+    NeedsInput,
+    /// Completed with a published typed result.
+    Succeeded,
+    /// Exhausted or explicitly stopped after a typed failure.
+    Failed,
+    /// Cancelled by the user or policy.
+    Cancelled,
+}
+
+impl AiTaskStatus {
+    /// Return whether the transition belongs to the frozen task state machine.
+    #[must_use]
+    pub fn can_transition_to(self, next: Self) -> bool {
+        matches!(
+            (self, next),
+            (Self::Queued, Self::Running | Self::Cancelled)
+                | (
+                    Self::Running,
+                    Self::Queued
+                        | Self::NeedsInput
+                        | Self::Succeeded
+                        | Self::Failed
+                        | Self::Cancelled
+                )
+                | (Self::NeedsInput, Self::Queued | Self::Cancelled)
+                | (Self::Failed, Self::Queued)
+        ) || self == next
+    }
+
+    /// Validate a requested task transition.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AiContractError::InvalidTaskTransition`] for an unsupported
+    /// transition.
+    pub fn validate_transition(self, next: Self) -> Result<(), AiContractError> {
+        if self.can_transition_to(next) {
+            Ok(())
+        } else {
+            Err(AiContractError::InvalidTaskTransition {
+                from: self,
+                to: next,
+            })
+        }
+    }
+}
+
+/// Lifecycle of one AI execution attempt.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AiRunStatus {
+    /// Attempt was created but has not started.
+    Pending,
+    /// Attempt owns the current claim.
+    Running,
+    /// Attempt completed and published a result.
+    Succeeded,
+    /// Attempt failed without a published result.
+    Failed,
+    /// Attempt was cancelled.
+    Cancelled,
+    /// Claim expired or was explicitly released.
+    Released,
+}
+
+/// Executor class for a task attempt.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AiExecutorKind {
+    /// Lumi's internal provider worker.
+    InternalProvider,
+    /// An authenticated external MCP agent.
+    McpAgent,
+}
+
+/// Lifecycle of a published typed artifact.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AiArtifactStatus {
+    /// Newly generated result awaiting acceptance.
+    Candidate,
+    /// Result selected as the current value for its slot.
+    Active,
+    /// Candidate explicitly rejected by the user.
+    Rejected,
+    /// Former active result replaced by a newer revision.
+    Superseded,
+}
+
+/// Author of an immutable artifact revision.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AiArtifactAuthor {
+    /// Generated by an AI executor.
+    Ai,
+    /// Edited or authored by the account user.
+    User,
+}
+
+/// Summary scope supported by the first release.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SummaryScopeKind {
+    /// One normalized content unit.
+    Chapter,
+    /// The full immutable material revision.
+    Material,
+}
+
+/// Summary presentation supported by the first release.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SummaryForm {
+    /// Compact prose summary.
+    Brief,
+    /// Structured outline.
+    Outline,
+}
+
+/// Explicit, revision-bound source scope.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum AiSourceScope {
+    /// Exact user selection plus bounded neighbouring blocks.
+    Selection {
+        /// Source material.
+        material_id: MaterialId,
+        /// Immutable source revision.
+        revision_id: DocumentRevisionId,
+        /// Source-backed exact selection.
+        anchor: Box<Anchor>,
+    },
+    /// One normalized content unit.
+    Chapter {
+        /// Source material.
+        material_id: MaterialId,
+        /// Immutable source revision.
+        revision_id: DocumentRevisionId,
+        /// Stable unit identifier.
+        scope_ref: String,
+    },
+    /// Full immutable material revision, processed in bounded sections.
+    Material {
+        /// Source material.
+        material_id: MaterialId,
+        /// Immutable source revision.
+        revision_id: DocumentRevisionId,
+    },
+}
+
+impl AiSourceScope {
+    /// Source material identifier.
+    #[must_use]
+    pub fn material_id(&self) -> MaterialId {
+        match self {
+            Self::Selection { material_id, .. }
+            | Self::Chapter { material_id, .. }
+            | Self::Material { material_id, .. } => *material_id,
+        }
+    }
+
+    /// Immutable source revision identifier.
+    #[must_use]
+    pub fn revision_id(&self) -> DocumentRevisionId {
+        match self {
+            Self::Selection { revision_id, .. }
+            | Self::Chapter { revision_id, .. }
+            | Self::Material { revision_id, .. } => *revision_id,
+        }
+    }
+
+    /// Validate the source-specific invariants.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for empty chapter identifiers, revision-mismatched
+    /// selection anchors or empty selection quotes.
+    pub fn validate(&self) -> Result<(), AiContractError> {
+        match self {
+            Self::Selection {
+                revision_id,
+                anchor,
+                ..
+            } if anchor.revision_id != *revision_id => Err(AiContractError::InvalidSourceScope(
+                "selection anchor revision mismatch",
+            )),
+            Self::Selection { anchor, .. } if anchor.quote.trim().is_empty() => Err(
+                AiContractError::InvalidSourceScope("selection quote must not be empty"),
+            ),
+            Self::Chapter { scope_ref, .. } if scope_ref.trim().is_empty() => {
+                Err(AiContractError::EmptyField("scope_ref"))
+            }
+            _ => Ok(()),
+        }
+    }
+}
+
+/// Frozen durable task projection.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct AiTask {
+    /// Contract version used by this task.
+    pub contract_version: String,
+    /// Task identifier.
+    #[serde(rename = "task_id")]
+    pub id: AiTaskId,
+    /// Owning account.
+    pub owner_id: UserId,
+    /// Extensible task kind validated against capabilities.
+    pub kind: String,
+    /// Expected typed result kind.
+    pub result_kind: String,
+    /// Explicit source scope.
+    pub source_scope: AiSourceScope,
+    /// Canonical, versioned task parameters.
+    pub parameters: Value,
+    /// Prompt template version.
+    pub prompt_version: String,
+    /// Structured output schema version.
+    pub output_schema_version: String,
+    /// User-visible lifecycle.
+    pub status: AiTaskStatus,
+    /// Versioned active-task deduplication key.
+    pub dedupe_key: String,
+    /// Optimistic concurrency revision.
+    pub object_revision: u64,
+}
+
+impl AiTask {
+    /// Validate the frozen task projection.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed error when a version, required field, source scope or
+    /// schema reference violates Contract Freeze 1.
+    pub fn validate(&self) -> Result<(), AiContractError> {
+        require_version(&self.contract_version, AI_CONTRACT_VERSION)?;
+        require_non_empty("kind", &self.kind, 64)?;
+        require_non_empty("result_kind", &self.result_kind, 64)?;
+        require_non_empty("dedupe_key", &self.dedupe_key, 256)?;
+        self.source_scope.validate()?;
+        prompt_by_id(&self.prompt_version)
+            .ok_or_else(|| AiContractError::UnsupportedVersion(self.prompt_version.clone()))?;
+        output_schema_by_id(&self.output_schema_version).ok_or_else(|| {
+            AiContractError::UnsupportedVersion(self.output_schema_version.clone())
+        })?;
+        if self.object_revision == 0 {
+            return Err(AiContractError::InvalidStructuredOutput(
+                "object_revision must be positive",
+            ));
+        }
+        Ok(())
+    }
+}
+
+/// Frozen projection of one technical AI execution attempt.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct AiRun {
+    /// Attempt identifier.
+    pub id: AiRunId,
+    /// Parent durable task.
+    pub task_id: AiTaskId,
+    /// Executor class.
+    pub executor_kind: AiExecutorKind,
+    /// Non-secret executor reference.
+    pub executor_ref: Option<String>,
+    /// Attempt lifecycle.
+    pub status: AiRunStatus,
+    /// Current opaque claim, when running.
+    pub claim_id: Option<AiClaimId>,
+    /// Current monotonic fencing token.
+    pub fence: Option<u64>,
+    /// RFC 3339 lease expiry, when claimed.
+    pub lease_expires_at: Option<String>,
+    /// One-based attempt number.
+    pub attempt: u32,
+    /// Prompt template version.
+    pub prompt_version: String,
+    /// Expected output schema version.
+    pub output_schema_version: String,
+    /// Immutable context pack used by this attempt.
+    pub context_pack_id: AiContextPackId,
+    /// Provider kind used by an internal executor.
+    pub provider_kind: Option<String>,
+    /// Model used by an internal executor.
+    pub model: Option<String>,
+    /// Final provider usage.
+    pub usage: Option<AiTokenUsage>,
+    /// Normalized progress in the inclusive `0..=1` range.
+    pub progress: f32,
+    /// Redacted public error code.
+    pub error_code: Option<String>,
+    /// Start timestamp.
+    pub started_at: TimestampMs,
+    /// Finish timestamp.
+    pub finished_at: Option<TimestampMs>,
+}
+
+/// Command used by HTTP, Web and MCP adapters to create one durable AI task.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct CreateAiTaskCommand {
+    /// Extensible task kind.
+    pub kind: String,
+    /// Explicit revision-bound source scope.
+    pub source_scope: AiSourceScope,
+    /// User instruction, treated as data by structured workflows.
+    pub instruction: String,
+    /// Canonical task parameters.
+    pub parameters: Value,
+    /// Prompt template version.
+    pub prompt_version: String,
+    /// Expected output schema version.
+    pub output_schema_version: String,
+    /// Request-level idempotency key.
+    pub idempotency_key: String,
+}
+
+impl CreateAiTaskCommand {
+    /// Maximum accepted instruction size.
+    pub const MAX_INSTRUCTION_BYTES: usize = 32 * 1024;
+
+    /// Validate the create command.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed contract error when a required field, scope or schema
+    /// version is invalid.
+    pub fn validate(&self) -> Result<(), AiContractError> {
+        require_non_empty("kind", &self.kind, 64)?;
+        require_non_empty(
+            "instruction",
+            &self.instruction,
+            Self::MAX_INSTRUCTION_BYTES,
+        )?;
+        require_non_empty("idempotency_key", &self.idempotency_key, 256)?;
+        self.source_scope.validate()?;
+        prompt_by_id(&self.prompt_version)
+            .ok_or_else(|| AiContractError::UnsupportedVersion(self.prompt_version.clone()))?;
+        output_schema_by_id(&self.output_schema_version).ok_or_else(|| {
+            AiContractError::UnsupportedVersion(self.output_schema_version.clone())
+        })?;
+        Ok(())
+    }
+}
+
+/// Progress update accepted from either executor class.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct UpdateAiTaskProgressCommand {
+    /// Task receiving the update.
+    pub task_id: AiTaskId,
+    /// Attempt receiving the update.
+    pub run_id: AiRunId,
+    /// Opaque current claim.
+    pub claim_id: AiClaimId,
+    /// Monotonic fencing token.
+    pub fence: u64,
+    /// Task revision observed at claim time.
+    pub task_revision: u64,
+    /// Normalized progress in the inclusive `0..=1` range.
+    pub fraction: f32,
+    /// Optional bounded stage label.
+    pub stage: Option<String>,
+}
+
+/// Permission decision captured for audit in an immutable context pack.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AiPermissionDecision {
+    /// Actor was allowed to read the selected revision during pack creation.
+    Allowed,
+    /// Actor was denied; such a pack must never be issued to an executor.
+    Denied,
+}
+
+/// Audit-only authorization snapshot.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct AiPermissionSnapshot {
+    /// Actor checked while the pack was built.
+    pub actor_id: UserId,
+    /// Decision recorded at build time.
+    pub decision: AiPermissionDecision,
+    /// Version of the authorization policy.
+    pub policy_version: String,
+}
+
+/// Format-specific citation locator independent of UI technology.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "format", rename_all = "snake_case")]
+pub enum AiSourceLocator {
+    /// EPUB source range.
+    Epub {
+        /// Canonical package-relative href.
+        href: String,
+        /// Optional UTF-8 byte start.
+        byte_start: Option<usize>,
+        /// Optional UTF-8 byte end.
+        byte_end: Option<usize>,
+    },
+    /// Markdown source range.
+    Markdown {
+        /// Package-relative source path.
+        file_path: String,
+        /// UTF-8 byte start.
+        byte_start: usize,
+        /// UTF-8 byte end.
+        byte_end: usize,
+    },
+    /// Portable `.lum` source range.
+    Lum {
+        /// Package-relative source path.
+        file_path: String,
+        /// UTF-8 byte start.
+        byte_start: usize,
+        /// UTF-8 byte end.
+        byte_end: usize,
+    },
+    /// PDF page/text-layer range.
+    Pdf {
+        /// Zero-based physical page index.
+        page_index: u32,
+        /// User-visible page label.
+        page_label: String,
+        /// Optional first text block.
+        text_block_start: Option<u32>,
+        /// Optional last text block.
+        text_block_end: Option<u32>,
+    },
+    /// Web snapshot locator.
+    Web {
+        /// Canonical source URL.
+        canonical_url: String,
+        /// Optional normalized block identifier.
+        block_id: Option<String>,
+    },
+    /// Telegram message locator.
+    Telegram {
+        /// Stable source chat identifier encoded as text.
+        chat_id: String,
+        /// Source message identifier.
+        message_id: i64,
+    },
+}
+
+/// One bounded, ordered context fragment.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct AiContextFragment {
+    /// Citation identifier used by generated output.
+    pub citation_id: String,
+    /// Stable normalized unit identifier.
+    pub unit_id: String,
+    /// Stable normalized block identifier.
+    pub block_id: String,
+    /// Optional reader-facing label.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
+    /// Exact bounded UTF-8 content sent to the executor.
+    pub text: String,
+    /// Hash of exact fragment text.
+    pub text_hash: String,
+    /// Format-specific location in the immutable source.
+    pub source_locator: AiSourceLocator,
+}
+
+/// Source-backed citation that a reader can reopen.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct SourceCitation {
+    /// Citation contract version.
+    pub schema_version: String,
+    /// Opaque citation identifier unique within a context pack.
+    pub citation_id: String,
+    /// Source material.
+    pub material_id: MaterialId,
+    /// Immutable source revision.
+    pub revision_id: DocumentRevisionId,
+    /// Stable normalized unit identifier.
+    pub unit_id: String,
+    /// Stable normalized block identifier.
+    pub block_id: String,
+    /// Format-specific source location.
+    pub source_locator: AiSourceLocator,
+    /// Optional full source-backed reader anchor for exact navigation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub anchor: Option<Box<Anchor>>,
+    /// Hash of the quoted text.
+    pub quote_hash: String,
+    /// Start byte within the corresponding context fragment.
+    pub fragment_byte_start: usize,
+    /// End byte within the corresponding context fragment.
+    pub fragment_byte_end: usize,
+}
+
+/// Immutable explicit source context sent to an executor.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct AiContextPack {
+    /// Context-pack schema version.
+    pub schema_version: String,
+    /// Pack identifier.
+    pub context_pack_id: AiContextPackId,
+    /// Owning account.
+    pub owner_id: UserId,
+    /// Durable task using this pack.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub task_id: Option<AiTaskId>,
+    /// Chat message using this pack.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message_id: Option<AiMessageId>,
+    /// Explicit source scope.
+    pub scope: AiSourceScope,
+    /// Optional record-only retrieval scope that produced this pack.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub record_scope: Option<RecordSearchScope>,
+    /// Authorization audit snapshot.
+    pub permission_snapshot: AiPermissionSnapshot,
+    /// Applied limit profile.
+    pub limits_version: String,
+    /// Ordered exact fragments issued to the executor.
+    pub fragments: Vec<AiContextFragment>,
+    /// Optional expanded citation projections.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub citations: Vec<SourceCitation>,
+    /// Exact record chunks disclosed to the user and issued to the provider.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub record_context: Vec<RecordContextSource>,
+    /// Fixed record-RAG prompt policy version.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prompt_version: Option<String>,
+    /// Hash of the canonical pack content.
+    pub pack_hash: String,
+}
+
+impl AiContextPack {
+    /// Hard ceiling for exact fragment text in one pack.
+    pub const MAX_TEXT_BYTES: usize = 256 * 1024;
+    /// Hard ceiling for one exact fragment.
+    pub const MAX_FRAGMENT_BYTES: usize = 16 * 1024;
+    /// Hard ceiling for fragment count.
+    pub const MAX_FRAGMENTS: usize = 128;
+
+    /// Validate pack identity, permissions, bounds and citation references.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed error if the pack is not safe to issue.
+    pub fn validate(&self) -> Result<(), AiContractError> {
+        require_version(&self.schema_version, AI_CONTEXT_PACK_SCHEMA_VERSION)?;
+        require_version(&self.limits_version, EXPLICIT_CONTEXT_LIMITS_VERSION)?;
+        self.scope.validate()?;
+        if let Some(scope) = &self.record_scope {
+            scope.validate()?;
+            require_version(
+                self.prompt_version.as_deref().unwrap_or_default(),
+                RECORD_RAG_PROMPT_VERSION,
+            )?;
+            if self.record_context.is_empty() || self.record_context.len() != self.fragments.len() {
+                return Err(AiContractError::InvalidContextPack(
+                    "record context must describe every issued fragment",
+                ));
+            }
+        } else if !self.record_context.is_empty() || self.prompt_version.is_some() {
+            return Err(AiContractError::InvalidContextPack(
+                "record metadata requires a record scope",
+            ));
+        }
+        if self.task_id.is_some() == self.message_id.is_some() {
+            return Err(AiContractError::InvalidContextPack(
+                "exactly one task_id or message_id is required",
+            ));
+        }
+        if self.permission_snapshot.decision != AiPermissionDecision::Allowed
+            || self.permission_snapshot.actor_id != self.owner_id
+        {
+            return Err(AiContractError::InvalidContextPack(
+                "permission snapshot does not authorize owner",
+            ));
+        }
+        if self.fragments.is_empty() || self.fragments.len() > Self::MAX_FRAGMENTS {
+            return Err(AiContractError::InvalidContextPack(
+                "fragment count is outside allowed bounds",
+            ));
+        }
+        let mut total_bytes = 0usize;
+        let mut citation_ids = std::collections::HashSet::new();
+        for fragment in &self.fragments {
+            require_non_empty("citation_id", &fragment.citation_id, 256)?;
+            require_non_empty("unit_id", &fragment.unit_id, 512)?;
+            require_non_empty("block_id", &fragment.block_id, 512)?;
+            require_non_empty("text_hash", &fragment.text_hash, 256)?;
+            if fragment.text.is_empty() || fragment.text.len() > Self::MAX_FRAGMENT_BYTES {
+                return Err(AiContractError::InvalidContextPack(
+                    "fragment text is empty or oversized",
+                ));
+            }
+            total_bytes = total_bytes.saturating_add(fragment.text.len());
+            if !citation_ids.insert(fragment.citation_id.as_str()) {
+                return Err(AiContractError::InvalidContextPack(
+                    "duplicate citation identifier",
+                ));
+            }
+        }
+        if total_bytes > Self::MAX_TEXT_BYTES {
+            return Err(AiContractError::InvalidContextPack(
+                "total text exceeds hard ceiling",
+            ));
+        }
+        for citation in &self.citations {
+            require_version(&citation.schema_version, SOURCE_CITATION_SCHEMA_VERSION)?;
+            if !citation_ids.contains(citation.citation_id.as_str()) {
+                return Err(AiContractError::InvalidContextPack(
+                    "citation does not reference a fragment",
+                ));
+            }
+            if self.record_scope.is_none()
+                && (citation.revision_id != self.scope.revision_id()
+                    || citation.material_id != self.scope.material_id())
+            {
+                return Err(AiContractError::InvalidContextPack(
+                    "citation source does not match pack scope",
+                ));
+            }
+        }
+        for source in &self.record_context {
+            require_non_empty("chunk_id", &source.chunk_id, 256)?;
+            require_non_empty("text_hash", &source.text_hash, 256)?;
+            require_non_empty("citation_id", &source.citation_id, 256)?;
+            if !citation_ids.contains(source.citation_id.as_str()) {
+                return Err(AiContractError::InvalidContextPack(
+                    "record source does not reference a fragment",
+                ));
+            }
+            if !source.source_type.is_record() {
+                return Err(AiContractError::InvalidContextPack(
+                    "material text is not allowed in record-only context",
+                ));
+            }
+        }
+        require_non_empty("pack_hash", &self.pack_hash, 256)
+    }
+}
+
+/// Provider credential state visible to a client.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AiCredentialState {
+    /// No credential has been stored.
+    Missing,
+    /// Credential exists but has not been validated.
+    Unvalidated,
+    /// Last bounded validation succeeded.
+    Valid,
+    /// Last bounded validation failed.
+    Invalid,
+}
+
+/// Provider capability projection without provider secrets.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct AiProviderDescriptor {
+    /// Extensible provider kind.
+    pub provider_kind: String,
+    /// Reader-facing provider name.
+    pub display_name: String,
+    /// Enabled provider features.
+    pub capabilities: Vec<String>,
+    /// Server-approved models.
+    pub allowed_models: Vec<String>,
+    /// Credential lifecycle state.
+    pub credential_state: AiCredentialState,
+    /// Non-secret key fingerprint when configured.
+    pub credential_fingerprint: Option<String>,
+}
+
+/// Write-only provider credential request.
+#[derive(Serialize, Deserialize)]
+pub struct PutProviderCredentialRequest {
+    /// Plaintext provider credential accepted only on the authenticated write.
+    pub credential: String,
+    /// Model used for the bounded validation call.
+    pub validation_model: String,
+    /// Request-level idempotency key.
+    pub idempotency_key: String,
+}
+
+impl std::fmt::Debug for PutProviderCredentialRequest {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("PutProviderCredentialRequest")
+            .field("credential", &"[REDACTED]")
+            .field("validation_model", &self.validation_model)
+            .field("idempotency_key", &self.idempotency_key)
+            .finish()
+    }
+}
+
+impl Drop for PutProviderCredentialRequest {
+    fn drop(&mut self) {
+        self.credential.zeroize();
+    }
+}
+
+/// Non-secret account preferences for one provider.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct ProviderPreferences {
+    /// Default model selected for new operations.
+    pub default_model: String,
+    /// Optimistic concurrency revision.
+    pub object_revision: u64,
+}
+
+/// Revision-checked provider preference update.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct UpdateProviderPreferencesRequest {
+    /// New default model.
+    pub default_model: String,
+    /// Expected preference revision.
+    pub expected_revision: u64,
+    /// Request idempotency key.
+    pub idempotency_key: String,
+}
+
+/// Bounded provider credential/model validation request.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct ValidateProviderRequest {
+    /// Model to validate against.
+    pub model: String,
+}
+
+/// Safe result of a bounded provider validation call.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct ProviderValidationResult {
+    /// Whether authentication/model validation succeeded.
+    pub valid: bool,
+    /// Stable public result/error code.
+    pub code: String,
+    /// Validation timestamp.
+    pub validated_at: TimestampMs,
+}
+
+/// Safe credential state returned by provider write/delete/validation routes.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct ProviderCredentialState {
+    /// Provider kind.
+    pub provider_kind: String,
+    /// Current safe lifecycle state.
+    pub credential_state: AiCredentialState,
+    /// Non-secret fingerprint, when configured.
+    pub credential_fingerprint: Option<String>,
+    /// Last validation timestamp, when attempted.
+    pub last_validated_at: Option<TimestampMs>,
+}
+
+/// Provider-neutral chat request.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct AiProviderChatRequest {
+    /// Generation identifier used for event reconciliation.
+    pub generation_id: AiGenerationId,
+    /// Provider-neutral model identifier.
+    pub model: String,
+    /// Ordered messages.
+    pub messages: Vec<AiProviderMessage>,
+    /// Explicit context pack, if attached.
+    pub context_pack: Option<AiContextPack>,
+    /// Maximum generated token count.
+    pub max_output_tokens: u32,
+    /// Strictly validated provider-specific options.
+    #[serde(default)]
+    pub provider_options: Value,
+}
+
+/// One provider-neutral message.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct AiProviderMessage {
+    /// Message role.
+    pub role: AiMessageRole,
+    /// Plain UTF-8 message content.
+    pub content: String,
+}
+
+/// Chat message role.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AiMessageRole {
+    /// System policy supplied by Lumi.
+    System,
+    /// Account user input.
+    User,
+    /// Provider-generated response.
+    Assistant,
+}
+
+/// Normalized finish reason.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AiFinishReason {
+    /// Provider reached a natural stop.
+    Stop,
+    /// Configured output bound was reached.
+    Length,
+    /// Generation was cancelled.
+    Cancelled,
+    /// Provider policy refused the request.
+    ContentFilter,
+}
+
+/// Normalized provider usage.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct AiTokenUsage {
+    /// Tokens sent to the provider.
+    pub input_tokens: u64,
+    /// Tokens generated by the provider.
+    pub output_tokens: u64,
+}
+
+/// Provider-neutral streaming event.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum AiProviderEvent {
+    /// Provider accepted the request.
+    ResponseStarted {
+        /// Stable generation identifier.
+        generation_id: String,
+    },
+    /// Ordered generated text fragment.
+    TextDelta {
+        /// Monotonic event sequence.
+        sequence: u64,
+        /// UTF-8 text fragment.
+        text: String,
+    },
+    /// Provider usage update.
+    Usage {
+        /// Input tokens.
+        input_tokens: u64,
+        /// Output tokens.
+        output_tokens: u64,
+    },
+    /// Successful terminal event.
+    ResponseCompleted {
+        /// Normalized finish reason.
+        finish_reason: AiFinishReason,
+    },
+    /// Typed terminal failure.
+    ResponseFailed {
+        /// Stable public error code.
+        code: String,
+        /// Redacted user-safe message.
+        message: String,
+        /// Whether a later attempt may succeed.
+        retryable: bool,
+    },
+}
+
+/// Frozen summary artifact projection.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct SummaryArtifact {
+    /// Structured payload schema.
+    pub schema_version: String,
+    /// Artifact identifier.
+    pub artifact_id: AiArtifactId,
+    /// Originating task.
+    pub task_id: AiTaskId,
+    /// Originating attempt.
+    pub run_id: AiRunId,
+    /// Frozen artifact kind.
+    pub kind: String,
+    /// Artifact lifecycle.
+    pub status: AiArtifactStatus,
+    /// Immutable source revision.
+    pub source_revision_id: DocumentRevisionId,
+    /// Summary scope.
+    pub scope_kind: SummaryScopeKind,
+    /// Stable source scope reference.
+    pub scope_ref: String,
+    /// Summary presentation.
+    pub form: SummaryForm,
+    /// Validated summary content.
+    pub content: String,
+    /// Citations from the attempt's immutable context pack.
+    pub citation_ids: Vec<String>,
+    /// Artifact revision author.
+    pub authored_by: AiArtifactAuthor,
+    /// Immutable artifact revision number.
+    pub artifact_revision: u64,
+}
+
+impl SummaryArtifact {
+    /// Validate the first summary artifact schema.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for wrong versions/kinds or an incomplete source-backed
+    /// result.
+    pub fn validate(&self) -> Result<(), AiContractError> {
+        require_version(&self.schema_version, SUMMARY_ARTIFACT_SCHEMA_VERSION)?;
+        if self.kind != "summary_artifact" {
+            return Err(AiContractError::InvalidStructuredOutput(
+                "summary kind must be summary_artifact",
+            ));
+        }
+        require_non_empty("scope_ref", &self.scope_ref, 512)?;
+        require_non_empty("content", &self.content, 256 * 1024)?;
+        if self.citation_ids.is_empty() {
+            return Err(AiContractError::InvalidStructuredOutput(
+                "source-backed summary requires citations",
+            ));
+        }
+        if self.artifact_revision == 0 {
+            return Err(AiContractError::InvalidStructuredOutput(
+                "artifact_revision must be positive",
+            ));
+        }
+        Ok(())
+    }
+}
+
+/// Conversation lifecycle projection.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct AiConversation {
+    /// Conversation identifier.
+    pub id: AiConversationId,
+    /// Owning account.
+    pub owner_id: UserId,
+    /// User-visible title.
+    pub title: String,
+    /// Active model selection.
+    pub active_model: String,
+    /// Optimistic concurrency revision.
+    pub object_revision: u64,
+    /// Creation timestamp.
+    pub created_at: TimestampMs,
+    /// Last update timestamp.
+    pub updated_at: TimestampMs,
+    /// Soft deletion timestamp.
+    pub deleted_at: Option<TimestampMs>,
+}
+
+/// Create a durable conversation without starting a generation.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct CreateConversationRequest {
+    /// Initial user-visible title.
+    pub title: String,
+    /// Initial provider-neutral model.
+    pub active_model: String,
+    /// Request idempotency key.
+    pub idempotency_key: String,
+}
+
+/// Revision-checked conversation metadata update.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct UpdateConversationRequest {
+    /// New title, when changed.
+    pub title: Option<String>,
+    /// New active model, when changed.
+    pub active_model: Option<String>,
+    /// Expected conversation revision.
+    pub expected_revision: u64,
+    /// Request idempotency key.
+    pub idempotency_key: String,
+}
+
+/// Message persistence state.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AiMessageStatus {
+    /// User message is durably stored.
+    Committed,
+    /// Assistant response is being generated.
+    Streaming,
+    /// Assistant response is complete.
+    Completed,
+    /// Assistant response ended with a normalized error.
+    Failed,
+    /// Assistant response was stopped.
+    Cancelled,
+}
+
+/// Durable chat message projection.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct AiMessage {
+    /// Message identifier.
+    pub id: AiMessageId,
+    /// Parent conversation.
+    pub conversation_id: AiConversationId,
+    /// Message role.
+    pub role: AiMessageRole,
+    /// Plain UTF-8 content.
+    pub content: String,
+    /// Explicit context attachments.
+    pub attachments: Vec<AiContextAttachment>,
+    /// Persistence/generation state.
+    pub status: AiMessageStatus,
+    /// Deterministic conversation-local sequence.
+    pub sequence: u64,
+    /// Creation timestamp.
+    pub created_at: TimestampMs,
+}
+
+/// Create one user message and its separate generation attempt.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct CreateMessageRequest {
+    /// User-authored plain text.
+    pub content: String,
+    /// Explicit context attachments visible before send.
+    pub attachments: Vec<AiContextAttachment>,
+    /// Expected parent conversation revision.
+    pub expected_conversation_revision: u64,
+    /// Request idempotency key.
+    pub idempotency_key: String,
+}
+
+/// Durable result of message/generation creation.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct CreateMessageResponse {
+    /// Committed user message.
+    pub message: AiMessage,
+    /// New generation attempt.
+    pub generation: AiGeneration,
+}
+
+/// One conversation page with its ordered durable message history.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ConversationDetail {
+    /// Conversation metadata.
+    pub conversation: AiConversation,
+    /// Ordered first/selected page of messages.
+    pub messages: AiPage<AiMessage>,
+    /// Current non-terminal generation, when present.
+    pub active_generation: Option<AiGeneration>,
+}
+
+/// Explicit record-only retrieval scope attached to one chat message.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct RecordSearchScope {
+    /// Optional retrieval query; the user message is used when absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub query: Option<String>,
+    /// Optional parent-material allowlist.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub material_ids: Vec<MaterialId>,
+    /// Record source families admitted to retrieval.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub record_types: Vec<SearchSourceType>,
+    /// Normalized tag allowlist.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tags: Vec<String>,
+    /// Record lifecycle allowlist.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub statuses: Vec<String>,
+    /// Optional inclusive update range.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub updated_range: Option<SearchUpdatedRange>,
+    /// Retrieval contract version.
+    pub retrieval_version: String,
+}
+
+impl RecordSearchScope {
+    /// Validate bounds and record-only source families.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed error when the scope is oversized, unsupported or
+    /// admits normalized material text.
+    pub fn validate(&self) -> Result<(), AiContractError> {
+        require_version(&self.retrieval_version, RECORD_RETRIEVAL_VERSION)?;
+        if self
+            .query
+            .as_deref()
+            .is_some_and(|query| query.trim().is_empty() || query.len() > 2_048)
+            || self.material_ids.len() > 128
+            || self.record_types.len() > 16
+            || self.tags.len() > 64
+            || self.statuses.len() > 16
+            || self.record_types.iter().any(|kind| !kind.is_record())
+            || self.updated_range.is_some_and(|range| {
+                range
+                    .from
+                    .is_some_and(|from| range.to.is_some_and(|to| from > to))
+            })
+        {
+            return Err(AiContractError::InvalidSourceScope(
+                "record search scope is outside policy",
+            ));
+        }
+        Ok(())
+    }
+}
+
+/// One exact retrieved record disclosed before and after generation.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct RecordContextSource {
+    /// Stable indexed chunk identifier.
+    pub chunk_id: String,
+    /// Hash of exact untrusted text issued to the provider.
+    pub text_hash: String,
+    /// Citation identifier used in the generated answer.
+    pub citation_id: String,
+    /// Record source family.
+    pub source_type: SearchSourceType,
+    /// Stable primary object identifier.
+    pub source_id: Uuid,
+    /// Reader-facing source title.
+    pub title: String,
+    /// Structural source path.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub heading_path: Vec<String>,
+    /// Exact Desk/Reader target.
+    pub open_target: SearchOpenTarget,
+}
+
+/// Explicit chat attachment preview.
+///
+/// The untagged source variant preserves the `0.2.0` JSON shape. Record
+/// attachments carry no synthetic material or revision identifier.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum AiContextAttachment {
+    /// One explicit immutable material scope.
+    Source {
+        /// Attachment kind such as `selection`, `chapter` or `material`.
+        kind: String,
+        /// Source material.
+        material_id: MaterialId,
+        /// Immutable source revision.
+        revision_id: DocumentRevisionId,
+        /// Explicit scope.
+        scope: AiSourceScope,
+        /// Reader-facing label.
+        display_label: String,
+    },
+    /// Permission-aware personal record retrieval scope.
+    Records {
+        /// Stable attachment kind; must be `record_search`.
+        kind: String,
+        /// Record-only filters visible before send.
+        record_scope: RecordSearchScope,
+        /// Reader-facing label.
+        display_label: String,
+        /// Exact included context populated by the server.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        included_context: Vec<RecordContextSource>,
+    },
+}
+
+impl AiContextAttachment {
+    /// Reader-facing attachment label.
+    #[must_use]
+    pub fn display_label(&self) -> &str {
+        match self {
+            Self::Source { display_label, .. } | Self::Records { display_label, .. } => {
+                display_label
+            }
+        }
+    }
+
+    /// Return an explicit immutable source scope when present.
+    #[must_use]
+    pub fn source_scope(&self) -> Option<&AiSourceScope> {
+        match self {
+            Self::Source { scope, .. } => Some(scope),
+            Self::Records { .. } => None,
+        }
+    }
+
+    /// Return a record-only retrieval scope when present.
+    #[must_use]
+    pub fn record_scope(&self) -> Option<&RecordSearchScope> {
+        match self {
+            Self::Records { record_scope, .. } => Some(record_scope),
+            Self::Source { .. } => None,
+        }
+    }
+
+    /// Return exact server-resolved record disclosure.
+    #[must_use]
+    pub fn included_context(&self) -> &[RecordContextSource] {
+        match self {
+            Self::Records {
+                included_context, ..
+            } => included_context,
+            Self::Source { .. } => &[],
+        }
+    }
+}
+
+/// Chat generation lifecycle.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AiGenerationStatus {
+    /// Generation is queued behind the conversation's active attempt.
+    Pending,
+    /// Provider events are being relayed.
+    Streaming,
+    /// Generation completed.
+    Completed,
+    /// Generation failed.
+    Failed,
+    /// Generation was stopped.
+    Cancelled,
+}
+
+/// One durable chat generation attempt.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct AiGeneration {
+    /// Generation identifier.
+    pub id: AiGenerationId,
+    /// Parent conversation.
+    pub conversation_id: AiConversationId,
+    /// Triggering user message.
+    pub user_message_id: AiMessageId,
+    /// Generated assistant message.
+    pub assistant_message_id: AiMessageId,
+    /// Attempt state.
+    pub status: AiGenerationStatus,
+    /// Provider kind.
+    pub provider_kind: String,
+    /// Model identifier.
+    pub model: String,
+    /// Final usage, when available.
+    pub usage: Option<AiTokenUsage>,
+    /// Redacted normalized error code.
+    pub error_code: Option<String>,
+    /// Start timestamp.
+    pub started_at: TimestampMs,
+    /// Finish timestamp.
+    pub finished_at: Option<TimestampMs>,
+}
+
+/// Idempotent generation stop/retry/regenerate command.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct GenerationMutationRequest {
+    /// Expected generation status revision.
+    pub expected_revision: u64,
+    /// Request idempotency key.
+    pub idempotency_key: String,
+}
+
+/// Generic immutable artifact envelope.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct AiArtifact {
+    /// Artifact identifier.
+    pub id: AiArtifactId,
+    /// Originating task.
+    pub task_id: AiTaskId,
+    /// Originating run.
+    pub run_id: AiRunId,
+    /// Extensible artifact kind.
+    pub kind: String,
+    /// Payload schema version.
+    pub schema_version: String,
+    /// Validated typed payload.
+    pub payload: Value,
+    /// Artifact lifecycle.
+    pub status: AiArtifactStatus,
+    /// Optimistic concurrency revision.
+    pub object_revision: u64,
+    /// Creation timestamp.
+    pub created_at: TimestampMs,
+    /// Last update timestamp.
+    pub updated_at: TimestampMs,
+}
+
+/// Revision-checked task execute/cancel/retry command.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct TaskMutationRequest {
+    /// Expected task revision.
+    pub expected_revision: u64,
+    /// Request idempotency key.
+    pub idempotency_key: String,
+}
+
+/// Bulk execute command with deterministic per-task results.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct BulkExecuteTasksRequest {
+    /// Ordered tasks to execute.
+    pub task_ids: Vec<AiTaskId>,
+    /// Request idempotency key.
+    pub idempotency_key: String,
+}
+
+/// One deterministic result within a bulk task command.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct BulkTaskItemResult {
+    /// Target task.
+    pub task_id: AiTaskId,
+    /// Stable success/error outcome code.
+    pub outcome: String,
+    /// Resulting task revision, when changed.
+    pub object_revision: Option<u64>,
+}
+
+/// Deterministic response for a bulk task command.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct BulkTaskResult {
+    /// Results in the same order as requested task ids.
+    pub results: Vec<BulkTaskItemResult>,
+}
+
+/// Revision-checked artifact accept/reject command.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct ArtifactMutationRequest {
+    /// Expected artifact revision.
+    pub expected_revision: u64,
+    /// Request idempotency key.
+    pub idempotency_key: String,
+}
+
+/// Execution preference for summary/abridgement task creation.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AiExecutionMode {
+    /// Leave the task for any eligible internal or MCP executor.
+    Enqueue,
+    /// Atomically hand the same durable task to the internal worker.
+    ExecuteNow,
+}
+
+/// Material-scoped summary task request.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct CreateSummaryTaskRequest {
+    /// Immutable source revision.
+    pub source_revision_id: DocumentRevisionId,
+    /// Chapter or material scope.
+    pub scope_kind: SummaryScopeKind,
+    /// Stable unit id for chapter scope; `material` for material scope.
+    pub scope_ref: String,
+    /// Brief prose or outline.
+    pub form: SummaryForm,
+    /// Queue or immediate internal execution.
+    pub execution_mode: AiExecutionMode,
+    /// Request idempotency key.
+    pub idempotency_key: String,
+}
+
+/// Revision-checked immutable user edit of a summary.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct UpdateSummaryRequest {
+    /// New user-authored summary content.
+    pub content: String,
+    /// Expected artifact revision.
+    pub expected_revision: u64,
+    /// Request idempotency key.
+    pub idempotency_key: String,
+}
+
+/// Material-scoped abridgement task request.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct CreateAbridgementTaskRequest {
+    /// Immutable source revision.
+    pub source_revision_id: DocumentRevisionId,
+    /// Target compression profile.
+    pub profile: String,
+    /// Queue or immediate internal execution.
+    pub execution_mode: AiExecutionMode,
+    /// Request idempotency key.
+    pub idempotency_key: String,
+}
+
+/// One source-backed chapter in a generated abridgement.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct AbridgementChapter {
+    /// Stable executor-provided chapter label; Lumi assigns package paths.
+    pub title: String,
+    /// Generated Lumi Markdown body.
+    pub content: String,
+    /// Citation identifiers issued in the immutable context pack.
+    pub citation_ids: Vec<String>,
+}
+
+/// Typed executor result from which Lumi assembles a portable `.lum` package.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct AbridgementArtifactPayload {
+    /// Structured payload schema.
+    pub schema_version: String,
+    /// Reader-facing derived material title.
+    pub title: String,
+    /// Compression profile requested by the account.
+    pub profile: String,
+    /// Ordered generated chapters.
+    pub chapters: Vec<AbridgementChapter>,
+    /// De-duplicated union of chapter citation identifiers.
+    pub citation_ids: Vec<String>,
+}
+
+/// One source-backed generated learning item awaiting user review.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct GeneratedLearningItem {
+    /// Exercise family accepted by the learning domain.
+    pub kind: String,
+    /// User-visible question.
+    pub prompt: String,
+    /// Typed [`crate::LearningAnswerSpec`] JSON.
+    pub answer_spec: Value,
+    /// Feedback shown after recall.
+    pub explanation: String,
+    /// Exact citation identifiers supporting the item.
+    pub citation_ids: Vec<String>,
+}
+
+/// Typed output of a learning item generation task.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct QuestionSetArtifactPayload {
+    /// Structured payload schema.
+    pub schema_version: String,
+    /// Generated draft items.
+    pub items: Vec<GeneratedLearningItem>,
+}
+
+impl QuestionSetArtifactPayload {
+    /// Maximum items accepted from one provider result.
+    pub const MAX_ITEMS: usize = 32;
+
+    /// Validate bounds, answer shapes and source grounding.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed error when any generated draft is incomplete, unsafe or
+    /// unsupported by a citation.
+    pub fn validate(&self) -> Result<(), AiContractError> {
+        require_version(&self.schema_version, QUESTION_SET_ARTIFACT_SCHEMA_VERSION)?;
+        if self.items.is_empty() || self.items.len() > Self::MAX_ITEMS {
+            return Err(AiContractError::InvalidStructuredOutput(
+                "question set item count is outside bounds",
+            ));
+        }
+        let mut prompts = std::collections::HashSet::new();
+        for item in &self.items {
+            require_non_empty("item.kind", &item.kind, 64)?;
+            require_non_empty("item.prompt", &item.prompt, 8 * 1024)?;
+            require_non_empty("item.explanation", &item.explanation, 32 * 1024)?;
+            if item.citation_ids.is_empty()
+                || item.citation_ids.iter().any(|id| id.trim().is_empty())
+                || !prompts.insert(item.prompt.trim().to_lowercase())
+            {
+                return Err(AiContractError::InvalidStructuredOutput(
+                    "generated item is duplicated or lacks citations",
+                ));
+            }
+            let answer: crate::LearningAnswerSpec =
+                serde_json::from_value(item.answer_spec.clone()).map_err(|_| {
+                    AiContractError::InvalidStructuredOutput(
+                        "generated item answer_spec is invalid",
+                    )
+                })?;
+            answer.validate().map_err(|_| {
+                AiContractError::InvalidStructuredOutput("generated item answer_spec is invalid")
+            })?;
+        }
+        Ok(())
+    }
+}
+
+/// Rubric-based outcome for an open answer or explain-back turn.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OpenAnswerEvaluationOutcome {
+    /// The expected concepts are explained without material distortion.
+    Understood,
+    /// The answer is useful but misses one or more expected concepts.
+    Partial,
+    /// The answer contains a material misconception or needs rereading.
+    NeedsReview,
+    /// Available source context cannot support a reliable judgment.
+    NotEvaluated,
+}
+
+/// Typed output of an open-answer evaluation task.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct OpenAnswerEvaluationPayload {
+    /// Structured payload schema.
+    pub schema_version: String,
+    /// Source-backed outcome; never interpreted as a numeric grade.
+    pub outcome: OpenAnswerEvaluationOutcome,
+    /// Correct concepts already present in the answer.
+    pub correct: Vec<String>,
+    /// Expected concepts absent from the answer.
+    pub missing: Vec<String>,
+    /// Material distortions or misconceptions.
+    pub distorted: Vec<String>,
+    /// Citation identifiers supporting factual feedback.
+    pub citation_ids: Vec<String>,
+    /// Optional next prompt for another explain-back turn.
+    pub next_prompt: Option<String>,
+}
+
+impl OpenAnswerEvaluationPayload {
+    /// Validate feedback grounding and bounded text.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed error for ungrounded factual feedback, oversized text or
+    /// contradictory `not_evaluated` output.
+    pub fn validate(&self) -> Result<(), AiContractError> {
+        require_version(&self.schema_version, OPEN_ANSWER_EVALUATION_SCHEMA_VERSION)?;
+        let sections = [&self.correct, &self.missing, &self.distorted];
+        if sections
+            .into_iter()
+            .flatten()
+            .any(|value| value.trim().is_empty() || value.len() > 8 * 1024)
+            || self
+                .next_prompt
+                .as_deref()
+                .is_some_and(|value| value.trim().is_empty() || value.len() > 8 * 1024)
+        {
+            return Err(AiContractError::InvalidStructuredOutput(
+                "evaluation feedback is empty or oversized",
+            ));
+        }
+        let has_feedback =
+            !self.correct.is_empty() || !self.missing.is_empty() || !self.distorted.is_empty();
+        if self.outcome == OpenAnswerEvaluationOutcome::NotEvaluated {
+            if has_feedback || !self.citation_ids.is_empty() {
+                return Err(AiContractError::InvalidStructuredOutput(
+                    "not_evaluated must not assert source facts",
+                ));
+            }
+        } else if !has_feedback
+            || self.citation_ids.is_empty()
+            || self.citation_ids.iter().any(|id| id.trim().is_empty())
+        {
+            return Err(AiContractError::InvalidStructuredOutput(
+                "evaluated feedback requires content and citations",
+            ));
+        }
+        Ok(())
+    }
+}
+
+impl AbridgementArtifactPayload {
+    /// Maximum generated chapter count accepted at the executor boundary.
+    pub const MAX_CHAPTERS: usize = 128;
+    /// Maximum generated Markdown bytes accepted across all chapters.
+    pub const MAX_CONTENT_BYTES: usize = 2 * 1024 * 1024;
+
+    /// Validate the bounded, source-backed abridgement payload.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed error for invalid versions, bounds, empty content or
+    /// inconsistent citation unions.
+    pub fn validate(&self) -> Result<(), AiContractError> {
+        require_version(&self.schema_version, ABRIDGEMENT_ARTIFACT_SCHEMA_VERSION)?;
+        require_non_empty("title", &self.title, 512)?;
+        require_non_empty("profile", &self.profile, 64)?;
+        if self.chapters.is_empty() || self.chapters.len() > Self::MAX_CHAPTERS {
+            return Err(AiContractError::InvalidStructuredOutput(
+                "abridgement chapter count is outside bounds",
+            ));
+        }
+        let mut total_bytes = 0usize;
+        let mut chapter_citations = std::collections::HashSet::new();
+        for chapter in &self.chapters {
+            require_non_empty("chapter.title", &chapter.title, 512)?;
+            require_non_empty("chapter.content", &chapter.content, 256 * 1024)?;
+            total_bytes = total_bytes.saturating_add(chapter.content.len());
+            if chapter.citation_ids.is_empty() {
+                return Err(AiContractError::InvalidStructuredOutput(
+                    "every abridgement chapter requires citations",
+                ));
+            }
+            for citation_id in &chapter.citation_ids {
+                require_non_empty("chapter.citation_id", citation_id, 256)?;
+                chapter_citations.insert(citation_id.as_str());
+            }
+        }
+        if total_bytes > Self::MAX_CONTENT_BYTES {
+            return Err(AiContractError::InvalidStructuredOutput(
+                "abridgement content exceeds schema limit",
+            ));
+        }
+        let mut declared = std::collections::HashSet::new();
+        if self.citation_ids.is_empty()
+            || self
+                .citation_ids
+                .iter()
+                .any(|citation_id| !declared.insert(citation_id.as_str()))
+            || declared != chapter_citations
+        {
+            return Err(AiContractError::InvalidStructuredOutput(
+                "abridgement citation union is incomplete or duplicated",
+            ));
+        }
+        Ok(())
+    }
+}
+
+/// Cursor-based page shared by AI list routes.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct AiPage<T> {
+    /// Deterministically ordered items.
+    pub items: Vec<T>,
+    /// Opaque cursor for the next page.
+    pub next_cursor: Option<String>,
+}
+
+/// HTTP route metadata frozen for independent route-module implementation.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct AiHttpRouteContract {
+    /// HTTP method.
+    pub method: &'static str,
+    /// Versioned API path.
+    pub path: &'static str,
+    /// Stable request contract name, if a body exists.
+    pub request: Option<&'static str>,
+    /// Stable response contract name.
+    pub response: &'static str,
+}
+
+/// Return the complete Contract Freeze 1 AI/MCP-management HTTP surface.
+#[must_use]
+pub fn ai_http_route_contracts() -> &'static [AiHttpRouteContract] {
+    &AI_HTTP_ROUTES
+}
+
+/// Versioned prompt descriptor.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct AiPromptDescriptor {
+    /// Stable prompt version identifier.
+    pub version: &'static str,
+    /// Task kind using the prompt.
+    pub task_kind: &'static str,
+    /// Supported source scope.
+    pub scope: SummaryScopeKind,
+    /// Supported summary presentation.
+    pub form: SummaryForm,
+}
+
+/// Versioned structured-output schema descriptor.
+#[derive(Clone, Debug, PartialEq)]
+pub struct AiOutputSchemaDescriptor {
+    /// Stable output schema version.
+    pub version: &'static str,
+    /// Stable artifact kind produced by the schema.
+    pub artifact_kind: &'static str,
+    /// Strict JSON Schema supplied to compatible providers.
+    pub schema: Value,
+    /// Maximum canonical serialized payload size.
+    pub max_payload_bytes: usize,
+}
+
+/// Return the frozen prompt registry.
+#[must_use]
+pub fn ai_prompt_registry() -> &'static [AiPromptDescriptor] {
+    &PROMPT_REGISTRY
+}
+
+/// Return the frozen structured-output registry.
+#[must_use]
+pub fn ai_output_schema_registry() -> Vec<AiOutputSchemaDescriptor> {
+    vec![
+        AiOutputSchemaDescriptor {
+            version: SUMMARY_ARTIFACT_SCHEMA_VERSION,
+            artifact_kind: "summary_artifact",
+            schema: json!({
+                "$id": SUMMARY_ARTIFACT_SCHEMA_VERSION,
+                "type": "object",
+                "required": ["schema_version", "content", "citation_ids"],
+                "properties": {
+                    "schema_version": {"const": SUMMARY_ARTIFACT_SCHEMA_VERSION},
+                    "content": {"type": "string", "minLength": 1},
+                    "citation_ids": {
+                        "type": "array",
+                        "minItems": 1,
+                        "items": {"type": "string", "minLength": 1}
+                    }
+                },
+                "additionalProperties": false
+            }),
+            max_payload_bytes: 256 * 1024,
+        },
+        AiOutputSchemaDescriptor {
+            version: ABRIDGEMENT_ARTIFACT_SCHEMA_VERSION,
+            artifact_kind: "abridgement_artifact",
+            schema: json!({
+                "$id": ABRIDGEMENT_ARTIFACT_SCHEMA_VERSION,
+                "type": "object",
+                "required": ["schema_version", "title", "profile", "chapters", "citation_ids"],
+                "properties": {
+                    "schema_version": {"const": ABRIDGEMENT_ARTIFACT_SCHEMA_VERSION},
+                    "title": {"type": "string", "minLength": 1, "maxLength": 512},
+                    "profile": {"type": "string", "minLength": 1, "maxLength": 64},
+                    "chapters": {
+                        "type": "array",
+                        "minItems": 1,
+                        "maxItems": AbridgementArtifactPayload::MAX_CHAPTERS,
+                        "items": {
+                            "type": "object",
+                            "required": ["title", "content", "citation_ids"],
+                            "properties": {
+                                "title": {"type": "string", "minLength": 1, "maxLength": 512},
+                                "content": {"type": "string", "minLength": 1},
+                                "citation_ids": {
+                                    "type": "array",
+                                    "minItems": 1,
+                                    "items": {"type": "string", "minLength": 1}
+                                }
+                            },
+                            "additionalProperties": false
+                        }
+                    },
+                    "citation_ids": {
+                        "type": "array",
+                        "minItems": 1,
+                        "items": {"type": "string", "minLength": 1}
+                    }
+                },
+                "additionalProperties": false
+            }),
+            max_payload_bytes: AbridgementArtifactPayload::MAX_CONTENT_BYTES + 256 * 1024,
+        },
+        AiOutputSchemaDescriptor {
+            version: QUESTION_SET_ARTIFACT_SCHEMA_VERSION,
+            artifact_kind: "question_set_artifact",
+            schema: json!({
+                "$id": QUESTION_SET_ARTIFACT_SCHEMA_VERSION,
+                "type": "object",
+                "required": ["schema_version", "items"],
+                "properties": {
+                    "schema_version": {"const": QUESTION_SET_ARTIFACT_SCHEMA_VERSION},
+                    "items": {
+                        "type": "array",
+                        "minItems": 1,
+                        "maxItems": QuestionSetArtifactPayload::MAX_ITEMS
+                    }
+                },
+                "additionalProperties": false
+            }),
+            max_payload_bytes: 512 * 1024,
+        },
+        AiOutputSchemaDescriptor {
+            version: OPEN_ANSWER_EVALUATION_SCHEMA_VERSION,
+            artifact_kind: "open_answer_evaluation",
+            schema: json!({
+                "$id": OPEN_ANSWER_EVALUATION_SCHEMA_VERSION,
+                "type": "object",
+                "required": ["schema_version", "outcome", "correct", "missing", "distorted", "citation_ids", "next_prompt"],
+                "properties": {
+                    "schema_version": {"const": OPEN_ANSWER_EVALUATION_SCHEMA_VERSION}
+                },
+                "additionalProperties": true
+            }),
+            max_payload_bytes: 128 * 1024,
+        },
+    ]
+}
+
+/// Validate a provider/MCP structured result against a frozen output schema.
+///
+/// # Errors
+///
+/// Returns a typed error when the schema version is unknown, the serialized
+/// payload is oversized or the required shape is invalid.
+pub fn validate_ai_output(schema_version: &str, payload: &Value) -> Result<(), AiContractError> {
+    let descriptor = output_schema_by_id(schema_version)
+        .ok_or_else(|| AiContractError::UnsupportedVersion(schema_version.to_owned()))?;
+    let encoded = serde_json::to_vec(payload)
+        .map_err(|_| AiContractError::InvalidStructuredOutput("payload is not JSON"))?;
+    if encoded.len() > descriptor.max_payload_bytes {
+        return Err(AiContractError::InvalidStructuredOutput(
+            "payload exceeds schema limit",
+        ));
+    }
+    if schema_version == ABRIDGEMENT_ARTIFACT_SCHEMA_VERSION {
+        let abridgement: AbridgementArtifactPayload = serde_json::from_value(payload.clone())
+            .map_err(|_| {
+                AiContractError::InvalidStructuredOutput(
+                    "payload does not match abridgement-artifact.v1",
+                )
+            })?;
+        let object = payload
+            .as_object()
+            .ok_or(AiContractError::InvalidStructuredOutput(
+                "payload must be an object",
+            ))?;
+        if object.len() != 5
+            || object
+                .get("chapters")
+                .and_then(Value::as_array)
+                .is_none_or(|chapters| {
+                    chapters
+                        .iter()
+                        .any(|chapter| chapter.as_object().map(serde_json::Map::len) != Some(3))
+                })
+        {
+            return Err(AiContractError::InvalidStructuredOutput(
+                "payload does not match abridgement-artifact.v1",
+            ));
+        }
+        return abridgement.validate();
+    }
+    if schema_version == QUESTION_SET_ARTIFACT_SCHEMA_VERSION {
+        let artifact: QuestionSetArtifactPayload = serde_json::from_value(payload.clone())
+            .map_err(|_| {
+                AiContractError::InvalidStructuredOutput(
+                    "payload does not match question-set-artifact.v1",
+                )
+            })?;
+        return artifact.validate();
+    }
+    if schema_version == OPEN_ANSWER_EVALUATION_SCHEMA_VERSION {
+        let artifact: OpenAnswerEvaluationPayload = serde_json::from_value(payload.clone())
+            .map_err(|_| {
+                AiContractError::InvalidStructuredOutput(
+                    "payload does not match open-answer-evaluation.v1",
+                )
+            })?;
+        return artifact.validate();
+    }
+    let object = payload
+        .as_object()
+        .ok_or(AiContractError::InvalidStructuredOutput(
+            "payload must be an object",
+        ))?;
+    if schema_version != SUMMARY_ARTIFACT_SCHEMA_VERSION
+        || object.len() != 3
+        || object.get("schema_version").and_then(Value::as_str)
+            != Some(SUMMARY_ARTIFACT_SCHEMA_VERSION)
+        || object
+            .get("content")
+            .and_then(Value::as_str)
+            .is_none_or(|content| content.trim().is_empty())
+        || object
+            .get("citation_ids")
+            .and_then(Value::as_array)
+            .is_none_or(|citations| {
+                citations.is_empty()
+                    || citations
+                        .iter()
+                        .any(|citation| citation.as_str().is_none_or(str::is_empty))
+            })
+    {
+        return Err(AiContractError::InvalidStructuredOutput(
+            "payload does not match summary-artifact.v1",
+        ));
+    }
+    Ok(())
+}
+
+fn prompt_by_id(version: &str) -> Option<&'static AiPromptDescriptor> {
+    PROMPT_REGISTRY
+        .iter()
+        .find(|descriptor| descriptor.version == version)
+}
+
+fn output_schema_by_id(version: &str) -> Option<AiOutputSchemaDescriptor> {
+    ai_output_schema_registry()
+        .into_iter()
+        .find(|descriptor| descriptor.version == version)
+}
+
+fn require_version(actual: &str, expected: &str) -> Result<(), AiContractError> {
+    if actual == expected {
+        Ok(())
+    } else {
+        Err(AiContractError::UnsupportedVersion(actual.to_owned()))
+    }
+}
+
+fn require_non_empty(
+    field: &'static str,
+    value: &str,
+    max_bytes: usize,
+) -> Result<(), AiContractError> {
+    if value.trim().is_empty() {
+        Err(AiContractError::EmptyField(field))
+    } else if value.len() > max_bytes {
+        Err(AiContractError::FieldTooLarge { field, max_bytes })
+    } else {
+        Ok(())
+    }
+}
+
+const PROMPT_REGISTRY: [AiPromptDescriptor; 7] = [
+    AiPromptDescriptor {
+        version: SUMMARY_CHAPTER_BRIEF_PROMPT_VERSION,
+        task_kind: "summary",
+        scope: SummaryScopeKind::Chapter,
+        form: SummaryForm::Brief,
+    },
+    AiPromptDescriptor {
+        version: SUMMARY_CHAPTER_OUTLINE_PROMPT_VERSION,
+        task_kind: "summary",
+        scope: SummaryScopeKind::Chapter,
+        form: SummaryForm::Outline,
+    },
+    AiPromptDescriptor {
+        version: SUMMARY_MATERIAL_BRIEF_PROMPT_VERSION,
+        task_kind: "summary",
+        scope: SummaryScopeKind::Material,
+        form: SummaryForm::Brief,
+    },
+    AiPromptDescriptor {
+        version: SUMMARY_MATERIAL_OUTLINE_PROMPT_VERSION,
+        task_kind: "summary",
+        scope: SummaryScopeKind::Material,
+        form: SummaryForm::Outline,
+    },
+    AiPromptDescriptor {
+        version: ABRIDGEMENT_MATERIAL_PROMPT_VERSION,
+        task_kind: "abridgement",
+        scope: SummaryScopeKind::Material,
+        form: SummaryForm::Outline,
+    },
+    AiPromptDescriptor {
+        version: LEARNING_ITEMS_PROMPT_VERSION,
+        task_kind: "generate_learning_items",
+        scope: SummaryScopeKind::Material,
+        form: SummaryForm::Outline,
+    },
+    AiPromptDescriptor {
+        version: LEARNING_OPEN_ANSWER_PROMPT_VERSION,
+        task_kind: "evaluate_open_answer",
+        scope: SummaryScopeKind::Material,
+        form: SummaryForm::Brief,
+    },
+];
+
+const AI_HTTP_ROUTES: [AiHttpRouteContract; 31] = [
+    AiHttpRouteContract {
+        method: "GET",
+        path: "/api/v1/providers",
+        request: None,
+        response: "AiPage<AiProviderDescriptor>",
+    },
+    AiHttpRouteContract {
+        method: "GET",
+        path: "/api/v1/providers/openrouter",
+        request: None,
+        response: "AiProviderDescriptor",
+    },
+    AiHttpRouteContract {
+        method: "PUT",
+        path: "/api/v1/providers/openrouter/credential",
+        request: Some("PutProviderCredentialRequest"),
+        response: "ProviderCredentialState",
+    },
+    AiHttpRouteContract {
+        method: "DELETE",
+        path: "/api/v1/providers/openrouter/credential",
+        request: None,
+        response: "NoContent",
+    },
+    AiHttpRouteContract {
+        method: "PATCH",
+        path: "/api/v1/providers/openrouter/preferences",
+        request: Some("UpdateProviderPreferencesRequest"),
+        response: "ProviderPreferences",
+    },
+    AiHttpRouteContract {
+        method: "POST",
+        path: "/api/v1/providers/openrouter/validate",
+        request: Some("ValidateProviderRequest"),
+        response: "ProviderValidationResult",
+    },
+    AiHttpRouteContract {
+        method: "GET",
+        path: "/api/v1/ai/conversations",
+        request: None,
+        response: "AiPage<AiConversation>",
+    },
+    AiHttpRouteContract {
+        method: "POST",
+        path: "/api/v1/ai/conversations",
+        request: Some("CreateConversationRequest"),
+        response: "AiConversation",
+    },
+    AiHttpRouteContract {
+        method: "GET",
+        path: "/api/v1/ai/conversations/{conversation_id}",
+        request: None,
+        response: "ConversationDetail",
+    },
+    AiHttpRouteContract {
+        method: "PATCH",
+        path: "/api/v1/ai/conversations/{conversation_id}",
+        request: Some("UpdateConversationRequest"),
+        response: "AiConversation",
+    },
+    AiHttpRouteContract {
+        method: "DELETE",
+        path: "/api/v1/ai/conversations/{conversation_id}",
+        request: None,
+        response: "NoContent",
+    },
+    AiHttpRouteContract {
+        method: "POST",
+        path: "/api/v1/ai/conversations/{conversation_id}/messages",
+        request: Some("CreateMessageRequest"),
+        response: "CreateMessageResponse",
+    },
+    AiHttpRouteContract {
+        method: "GET",
+        path: "/api/v1/ai/generations/{generation_id}/events",
+        request: None,
+        response: "AiProviderEventStream",
+    },
+    AiHttpRouteContract {
+        method: "POST",
+        path: "/api/v1/ai/generations/{generation_id}/stop",
+        request: Some("GenerationMutationRequest"),
+        response: "AiGeneration",
+    },
+    AiHttpRouteContract {
+        method: "POST",
+        path: "/api/v1/ai/generations/{generation_id}/retry",
+        request: Some("GenerationMutationRequest"),
+        response: "AiGeneration",
+    },
+    AiHttpRouteContract {
+        method: "POST",
+        path: "/api/v1/ai/generations/{generation_id}/regenerate",
+        request: Some("GenerationMutationRequest"),
+        response: "AiGeneration",
+    },
+    AiHttpRouteContract {
+        method: "GET",
+        path: "/api/v1/ai/tasks",
+        request: None,
+        response: "AiPage<AiTask>",
+    },
+    AiHttpRouteContract {
+        method: "POST",
+        path: "/api/v1/ai/tasks",
+        request: Some("CreateAiTaskCommand"),
+        response: "AiTask",
+    },
+    AiHttpRouteContract {
+        method: "GET",
+        path: "/api/v1/ai/tasks/{task_id}",
+        request: None,
+        response: "AiTask",
+    },
+    AiHttpRouteContract {
+        method: "POST",
+        path: "/api/v1/ai/tasks/{task_id}/execute",
+        request: Some("TaskMutationRequest"),
+        response: "AiTask",
+    },
+    AiHttpRouteContract {
+        method: "POST",
+        path: "/api/v1/ai/tasks/{task_id}/cancel",
+        request: Some("TaskMutationRequest"),
+        response: "AiTask",
+    },
+    AiHttpRouteContract {
+        method: "POST",
+        path: "/api/v1/ai/tasks/{task_id}/retry",
+        request: Some("TaskMutationRequest"),
+        response: "AiTask",
+    },
+    AiHttpRouteContract {
+        method: "POST",
+        path: "/api/v1/ai/tasks/bulk-execute",
+        request: Some("BulkExecuteTasksRequest"),
+        response: "BulkTaskResult",
+    },
+    AiHttpRouteContract {
+        method: "GET",
+        path: "/api/v1/ai/artifacts/{artifact_id}",
+        request: None,
+        response: "AiArtifact",
+    },
+    AiHttpRouteContract {
+        method: "POST",
+        path: "/api/v1/ai/artifacts/{artifact_id}/accept",
+        request: Some("ArtifactMutationRequest"),
+        response: "AiArtifact",
+    },
+    AiHttpRouteContract {
+        method: "POST",
+        path: "/api/v1/ai/artifacts/{artifact_id}/reject",
+        request: Some("ArtifactMutationRequest"),
+        response: "AiArtifact",
+    },
+    AiHttpRouteContract {
+        method: "GET",
+        path: "/api/v1/materials/{material_id}/summaries",
+        request: None,
+        response: "AiPage<SummaryArtifact>",
+    },
+    AiHttpRouteContract {
+        method: "POST",
+        path: "/api/v1/materials/{material_id}/summary-tasks",
+        request: Some("CreateSummaryTaskRequest"),
+        response: "AiTask",
+    },
+    AiHttpRouteContract {
+        method: "PATCH",
+        path: "/api/v1/ai/summaries/{summary_id}",
+        request: Some("UpdateSummaryRequest"),
+        response: "SummaryArtifact",
+    },
+    AiHttpRouteContract {
+        method: "DELETE",
+        path: "/api/v1/ai/summaries/{summary_id}",
+        request: None,
+        response: "NoContent",
+    },
+    AiHttpRouteContract {
+        method: "POST",
+        path: "/api/v1/materials/{material_id}/abridgement-tasks",
+        request: Some("CreateAbridgementTaskRequest"),
+        response: "AiTask",
+    },
+];
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn fixture_scope() -> AiSourceScope {
+        AiSourceScope::Chapter {
+            material_id: MaterialId::now_v7(),
+            revision_id: DocumentRevisionId::now_v7(),
+            scope_ref: "chapter-1".to_owned(),
+        }
+    }
+
+    #[test]
+    fn task_state_machine_rejects_terminal_transition() {
+        assert!(matches!(
+            AiTaskStatus::Succeeded.validate_transition(AiTaskStatus::Running),
+            Err(AiContractError::InvalidTaskTransition { .. })
+        ));
+    }
+
+    #[test]
+    fn create_task_rejects_unknown_schema_version() {
+        let command = CreateAiTaskCommand {
+            kind: "summary".to_owned(),
+            source_scope: fixture_scope(),
+            instruction: "Сделай краткое резюме.".to_owned(),
+            parameters: json!({"form": "brief"}),
+            prompt_version: SUMMARY_CHAPTER_BRIEF_PROMPT_VERSION.to_owned(),
+            output_schema_version: "summary-artifact.v999".to_owned(),
+            idempotency_key: "fixture-create".to_owned(),
+        };
+
+        assert!(matches!(
+            command.validate(),
+            Err(AiContractError::UnsupportedVersion(_))
+        ));
+    }
+
+    #[test]
+    fn output_validator_rejects_unreferenced_shape() {
+        let payload = json!({
+            "schema_version": SUMMARY_ARTIFACT_SCHEMA_VERSION,
+            "content": "Без ссылок",
+            "citation_ids": []
+        });
+
+        assert!(matches!(
+            validate_ai_output(SUMMARY_ARTIFACT_SCHEMA_VERSION, &payload),
+            Err(AiContractError::InvalidStructuredOutput(_))
+        ));
+    }
+
+    #[test]
+    fn question_set_rejects_duplicate_prompts() {
+        let item = GeneratedLearningItem {
+            kind: "open_question".to_owned(),
+            prompt: "Почему это важно?".to_owned(),
+            answer_spec: json!({"type": "open_self_check", "sample_answer": "Потому что."}),
+            explanation: "Проверяем причинную связь.".to_owned(),
+            citation_ids: vec!["ctx:1".to_owned()],
+        };
+        let payload = QuestionSetArtifactPayload {
+            schema_version: QUESTION_SET_ARTIFACT_SCHEMA_VERSION.to_owned(),
+            items: vec![item.clone(), item],
+        };
+
+        assert!(matches!(
+            payload.validate(),
+            Err(AiContractError::InvalidStructuredOutput(_))
+        ));
+    }
+
+    #[test]
+    fn not_evaluated_rejects_factual_feedback() {
+        let payload = OpenAnswerEvaluationPayload {
+            schema_version: OPEN_ANSWER_EVALUATION_SCHEMA_VERSION.to_owned(),
+            outcome: OpenAnswerEvaluationOutcome::NotEvaluated,
+            correct: vec!["Указана причина.".to_owned()],
+            missing: Vec::new(),
+            distorted: Vec::new(),
+            citation_ids: vec!["ctx:1".to_owned()],
+            next_prompt: None,
+        };
+
+        assert!(matches!(
+            payload.validate(),
+            Err(AiContractError::InvalidStructuredOutput(_))
+        ));
+    }
+
+    #[test]
+    fn registries_have_unique_version_ids() {
+        let prompt_versions = ai_prompt_registry()
+            .iter()
+            .map(|descriptor| descriptor.version)
+            .collect::<std::collections::HashSet<_>>();
+        let output_versions = ai_output_schema_registry()
+            .iter()
+            .map(|descriptor| descriptor.version)
+            .collect::<std::collections::HashSet<_>>();
+
+        assert_eq!(prompt_versions.len(), ai_prompt_registry().len());
+        assert_eq!(output_versions.len(), ai_output_schema_registry().len());
+    }
+
+    #[test]
+    fn http_contracts_do_not_duplicate_method_and_path() {
+        let unique = ai_http_route_contracts()
+            .iter()
+            .map(|route| (route.method, route.path))
+            .collect::<std::collections::HashSet<_>>();
+
+        assert_eq!(unique.len(), ai_http_route_contracts().len());
+    }
+
+    #[test]
+    fn frozen_ai_json_fixtures_parse_and_validate() -> Result<(), Box<dyn std::error::Error>> {
+        let task: AiTask = serde_json::from_str(include_str!(
+            "../../../tests/fixtures/ai/contracts/v1/ai-task.json"
+        ))?;
+        let context: AiContextPack = serde_json::from_str(include_str!(
+            "../../../tests/fixtures/ai/contracts/v1/context-pack.json"
+        ))?;
+        let events: Vec<AiProviderEvent> = serde_json::from_str(include_str!(
+            "../../../tests/fixtures/ai/contracts/v1/provider-events.json"
+        ))?;
+        let summary: SummaryArtifact = serde_json::from_str(include_str!(
+            "../../../tests/fixtures/ai/contracts/v1/summary-artifact.json"
+        ))?;
+
+        task.validate()?;
+        context.validate()?;
+        summary.validate()?;
+        assert_eq!(events.len(), 5);
+        Ok(())
+    }
+
+    #[test]
+    fn frozen_registry_and_http_snapshots_match_rust_catalogs(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let registry: Value = serde_json::from_str(include_str!(
+            "../../../tests/fixtures/ai/contracts/v1/schema-registry.json"
+        ))?;
+        let routes: Value = serde_json::from_str(include_str!(
+            "../../../tests/fixtures/ai/contracts/v1/http-routes.json"
+        ))?;
+        let prompt_versions = registry["prompts"]
+            .as_array()
+            .ok_or_else(|| std::io::Error::other("prompt registry must be an array"))?
+            .iter()
+            .filter_map(|entry| entry["version"].as_str())
+            .collect::<Vec<_>>();
+        let output_versions = registry["outputs"]
+            .as_array()
+            .ok_or_else(|| std::io::Error::other("output registry must be an array"))?
+            .iter()
+            .filter_map(|entry| entry["version"].as_str())
+            .collect::<Vec<_>>();
+        let route_specs = routes["routes"]
+            .as_array()
+            .ok_or_else(|| std::io::Error::other("route registry must be an array"))?
+            .iter()
+            .filter_map(|entry| {
+                Some((
+                    entry["method"].as_str()?,
+                    entry["path"].as_str()?,
+                    entry["request"].as_str(),
+                    entry["response"].as_str()?,
+                ))
+            })
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            prompt_versions,
+            ai_prompt_registry()
+                .iter()
+                .map(|entry| entry.version)
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(
+            output_versions,
+            ai_output_schema_registry()
+                .iter()
+                .map(|entry| entry.version)
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(
+            route_specs,
+            ai_http_route_contracts()
+                .iter()
+                .map(|entry| (entry.method, entry.path, entry.request, entry.response))
+                .collect::<Vec<_>>()
+        );
+        Ok(())
+    }
+}

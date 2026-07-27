@@ -181,12 +181,26 @@ pub struct AccountSummary {
     pub user_id: UserId,
     /// Optional display nickname, never a login identifier.
     pub nickname: Option<String>,
+    /// Instance-wide access level, independent from personal or shared-space roles.
+    #[serde(default)]
+    pub instance_role: InstanceRole,
     /// Account lifecycle state.
     pub status: AccountStatus,
     /// Optimistic profile revision.
     pub profile_revision: i64,
     /// Account creation time.
     pub created_at: TimestampMs,
+}
+
+/// Instance-wide access level assigned by the server deployment policy.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum InstanceRole {
+    /// Regular account with access to personal and explicitly shared data.
+    #[default]
+    User,
+    /// Instance administrator allowed to manage system-wide settings.
+    Admin,
 }
 
 /// Public registered-device fields.
@@ -315,6 +329,28 @@ mod tests {
         let value = [0x42; 32];
 
         assert_eq!(decode_auth_bytes::<32>(&encode_auth_bytes(&value))?, value);
+        Ok(())
+    }
+
+    #[test]
+    fn account_summary_defaults_missing_instance_role_to_user(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let mut value = serde_json::to_value(AccountSummary {
+            user_id: Uuid::now_v7(),
+            nickname: None,
+            instance_role: InstanceRole::Admin,
+            status: AccountStatus::Active,
+            profile_revision: 1,
+            created_at: 0,
+        })?;
+        value
+            .as_object_mut()
+            .ok_or_else(|| std::io::Error::other("account summary must serialize as an object"))?
+            .remove("instance_role");
+
+        let account: AccountSummary = serde_json::from_value(value)?;
+
+        assert_eq!(account.instance_role, InstanceRole::User);
         Ok(())
     }
 }

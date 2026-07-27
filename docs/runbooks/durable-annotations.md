@@ -2,8 +2,9 @@
 
 ## Назначение
 
-Runbook описывает локальную проверку Этапа 5 S1: browser Selection → полный
-source-backed anchor → durable highlight/note → overlay/panel/export.
+Runbook описывает локальную проверку Records v2 и Rich Reader:
+browser Selection или margin action → полный source-backed target/anchor →
+durable highlight/note → overlay/panel/export.
 
 ## Запуск
 
@@ -19,18 +20,23 @@ make web-r
 
 ## Ручная проверка
 
-1. Выделите фрагмент мышью, клавиатурой или touch selection и создайте
-   highlight.
-2. Создайте note, откройте панель «Заметки», перейдите к цитате и отредактируйте
-   текст.
-3. Измените тему, размер и ширину: overlay должен остаться на той же цитате, а
+1. Выделите фрагмент мышью, клавиатурой или touch selection и создайте жёлтый
+   highlight. В панели смените стиль на жирный: границы страницы не должны
+   измениться.
+2. Создайте note с title/tags, откройте панель «Заметки», перейдите к цитате,
+   отредактируйте текст и проверьте фильтры `Все`/`Заметки`/`Выделения`.
+3. Без выделения нажмите `Запись на полях`, создайте заметку только
+   клавиатурой и проверьте block target в reflowable reader и page target в
+   PDF.
+4. Измените тему, размер и ширину: overlay должен остаться на той же цитате, а
    позиция — на том же Unicode scalar boundary.
-4. Перезагрузите browser и server: position, highlight и note должны остаться.
-5. Откройте тот же note в двух окнах. После stale edit UI должен показать
+5. Перезагрузите browser и server: position, highlight и note должны остаться.
+6. Откройте тот же note в двух окнах. После stale edit UI должен показать
    conflict, загрузить server revision и сохранить локальный draft отдельно.
-6. Скачайте export: `lumi-annotations-<material-id>.json` содержит schema marker,
-   provenance, quote, note body, timestamps и полный anchor.
-7. Удалите annotation. Она исчезает из panel/export, но остаётся PostgreSQL
+7. Скачайте export: `lumi-annotations-<material-id>.json` содержит marker
+   `lumi.annotations.v2`, provenance, target/type, title/tags/status, payload,
+   timestamps и полный anchor.
+8. Удалите annotation. Она исчезает из panel/export, но остаётся PostgreSQL
    tombstone и `delete` change.
 
 ## Диагностика

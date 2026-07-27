@@ -48,6 +48,20 @@ Required fixture families:
 - Telegram: text, forwarded posts, files, batches, media captions.
 - X: single post, thread, long post, article, partial/deleted/protected cases.
 - Markdown/`lum`: wikilinks, callouts, rich blocks, resources, broken links.
+- Records: Cyrillic/English legacy v1 и Annotation v2 payloads, target/status/
+  tags backfill, Voice Note audio manifest, repeated/unresolved/ambiguous
+  wikilinks, backlinks и portable export marker.
+
+Для `0.4.0/E1` committed fixture
+`tests/fixtures/records/v1-v2-annotations.json` проверяет совместимое
+декодирование. Browser E2E отдельно покрывает yellow/bold overlays, изменение
+стиля, selection/margin notes, keyboard-only создание записи на полях и оба
+reflowable/PDF path.
+
+Для `0.4.0/E2` domain tests фиксируют безопасный wikilink parser, alias/heading
+и repeated tokens; audio tests проверяют signature spoofing и byte ranges.
+Browser E2E использует deterministic MediaRecorder без реального микрофона и
+проходит record/preview/upload/playback, wikilink suggestion и backlink.
 
 ## Performance budgets
 
@@ -73,6 +87,32 @@ Initial budgets are design targets for spikes, not final SLA:
   SQL statement и менее чем за 300 ms;
 - budgets запускаются `make performance`; setup fixtures не входит в измерение.
 
+Для `0.4.0/E3` search budget фиксируется отдельно:
+
+- dataset: 10 000 materials / 500 000 source-aware chunks;
+- после построения index первая owner-scoped global page (BM25 top 500 +
+  fastText rerank) — p95 менее 750 ms в `--release`;
+- incremental replace одной note projection — менее 250 ms без учёта
+  пользовательской network latency;
+- deterministic golden corpus требует, чтобы relevant result находился в top 5
+  и опережал paired irrelevant result для каждого Cyrillic/English case;
+- dataset запускается `make search-performance`; model cold start/RSS
+  фиксируются оператором рядом с точным model checksum и не входят в query p95.
+
+Ослабление threshold или уменьшение 500k dataset требует обновления ADR и
+причины; отсутствие fastText model не считается успешным benchmark fallback.
+
+Для `0.2.0` дополнительно проверяются AI/MCP regression targets:
+
+- owner-scoped первая страница очереди для 1 000 задач — p95 менее 300 ms;
+- конкурентный fenced claim — p95 менее 200 ms без duplicate publication;
+- structured AI/MCP body остаётся внутри route limits, а generated `.lum`
+  повторно проходит обычный importer и compatibility corpus;
+- startup recovery идемпотентно завершает публикацию валидного abridgement и
+  не делает partial material видимым;
+- логи и метрики содержат IDs, stage и redacted error code, но не provider
+  credential, context body, текст summary или главы сокращения.
+
 Это regression budgets, а не публичный SLA. Изменение dataset/threshold требует
 обновления fixture, причины и ADR/runbook evidence.
 
@@ -89,9 +129,13 @@ Initial budgets are design targets for spikes, not final SLA:
   audio permissions, deep links.
 - Security tests: sanitizer bypass corpus, SSRF, ZIP/XML/PDF fuzzing,
   malicious plugin/MCP schemas.
+- AI/MCP integration: owner isolation, claim fencing, schema/citation
+  validation, revoke/rotate, body limits и Web/internal/MCP parity.
+- Derived content: generated `.lum` fixture, provenance/checksum corruption,
+  recovery между artifact completion и library publication, source-changed и
+  export/import round-trip.
 
 ## Открытые вопросы
 
-- Exact benchmark datasets and thresholds for serious search.
 - Which fixtures can be committed under open licenses.
 - CI cadence for expensive compatibility/performance suites.

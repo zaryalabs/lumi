@@ -22,8 +22,8 @@ Markdown и `lum`. Reader, поиск, обучение, ИИ, социальн�
   версию материала и пытается перенести anchors без потери старых заметок.
 - Пользователь экспортирует материал и заметки. Экспорт содержит source
   provenance, quote, anchor и readable metadata.
-- Участники shared room используют разные копии одной книги. Lumi сопоставляет
-  версии через fingerprints и пытается перенести shared anchors.
+- Участники Community Space используют разные копии одной книги. Lumi
+  сопоставляет версии через fingerprints и пытается перенести shared anchors.
 
 ## Функциональные требования
 
@@ -147,7 +147,7 @@ Resolver проходит ступени:
 - importer id/version;
 - source URL/message id/file name/API response id where applicable;
 - normalized package hash;
-- content fingerprints for matching and shared rooms;
+- content fingerprints for matching and Community Spaces;
 - structured import diagnostics.
 
 Diagnostics являются частью revision audit trail, но не пользовательским
@@ -210,7 +210,7 @@ Material
 - `ResourceManifest` - content-addressed local/cloud resources.
 - `SourceMap` - mapping from normalized blocks to source locators.
 - `ImportDiagnostic` - structured warning/error/info.
-- `ContentFingerprint` - matching signal for versions and social rooms.
+- `ContentFingerprint` - matching signal for versions and Community Spaces.
 
 ## Реализация
 
@@ -226,6 +226,32 @@ Schema versions:
 - fingerprint version.
 
 Any breaking change must include compatibility fixtures and migration strategy.
+
+### Явный source context без поискового индекса
+
+Normalized Content Package должен поддерживать детерминированное извлечение
+ограниченного контекста для ИИ и Learning до появления полнотекстового индекса.
+`SourceContextResolver` принимает явный scope (`material`, `revision`,
+`content unit`, `block` или anchor) и возвращает упорядоченные source-backed
+фрагменты с:
+
+- stable block/unit ids и revision id;
+- source refs и цитатами, пригодными для перехода к исходному месту;
+- явными лимитами размера и правилами соседнего context window;
+- diagnostics для unresolved anchor, отсутствующего text layer или превышения
+  лимита.
+
+Этот resolver не выполняет library-wide поиск, ranking, BM25 или semantic
+retrieval. Индексированный retrieval строится поверх того же chunk/citation
+contract позднее и остаётся отдельной ответственностью search subsystem.
+
+Для `0.2.0` scope сужен до `selection | chapter | material` и всегда содержит
+exact `material_id + revision_id`. Immutable `AiContextPack` хранит фактически
+переданные fragments, hashes, permission snapshot и citation ids; permission
+повторно проверяется при чтении и публикации. Hard ceiling pack — 256 KiB UTF-8,
+одного fragment — 16 KiB. Default selection/chapter/material profiles и exact
+citation DTO закреплены в
+[ADR 0022](../adr/0022-explicit-source-context.md).
 
 ## Интеграции и зависимости
 
@@ -255,5 +281,8 @@ Any breaking change must include compatibility fixtures and migration strategy.
 
 - Exact serialization format for `units.jsonl`, `blocks.jsonl` and source maps.
 - Retention policy for old `DocumentRevision` packages after anchor migration.
-- Which fingerprints are safe enough for social matching without leaking too
-  much source text.
+
+Формат безопасного social matching принят в
+[`ADR 0037`](../adr/0037-material-fingerprints-and-community-claims.md):
+canonical hashes и HMAC-protected MinHash остаются server-internal, API
+возвращает только status/basis/bounded score.

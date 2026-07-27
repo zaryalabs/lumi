@@ -39,7 +39,9 @@ review. До merge автор или reviewer запускает `make prepare` 
    `ci`, `deploy`, членство в группе `docker` и узкий non-interactive sudo
    contract только для Lumi deploy wrapper.
 
-`main.yml` автоматически выполняет `make prepare`, `make build` и `make push`.
+`main.yml` автоматически выполняет `make prepare`, `make build`,
+`make production-compose-smoke` и только после успешного production topology
+smoke — `make push`.
 `deploy.yml` запускается только вручную из `main`, проверяет полный SHA,
 принадлежность commit ветке `main` и наличие успешного main workflow run. Затем
 он скачивает release manifest именно из artifact этого run; digest не
@@ -64,6 +66,11 @@ ops/sudoers.example      -> /etc/sudoers.d/lumi-ci
 Создать server-owned `.env` по `ops/.env.example`, не копируя secrets в Git.
 Production third-party images должны быть digest-pinned. Проверить сеть
 `platform`, DNS `lumi.zrya.io` и возможность Traefik получить TLS certificate.
+Создать persistent directories `volumes/postgres-data`, `volumes/blobs`,
+`volumes/secrets`, `volumes/search` и `volumes/models`. Secret key ring является
+primary restore material и резервируется вместе с PostgreSQL и blobs; search
+index является derived state. FastText model хранится в `volumes/models`,
+проверяется по checksum и не входит в repository/image.
 Deploy workflow создаёт job-scoped GHCR login. Root wrapper проверяет его
 строгую JSON-форму, копирует только opaque `ghcr.io` auth в root-owned runtime
 directory и удаляет после deploy; долгоживущий root PAT не требуется.
@@ -89,7 +96,7 @@ Manifest проверяется как данные со строгим набо
 - internal `/api/v1/ready` отвечает успешно;
 - external `https://lumi.zrya.io` отвечает `200` без внешнего Basic Auth;
 - registration/login, EPUB import, reader, progress и annotations проходят;
-- restart `server` не теряет PostgreSQL или blob state;
+- restart `server` не теряет PostgreSQL, blob, secret key ring или search state;
 - logs `lumi-server`, `lumi-web` и `lumi-postgres` видны в Loki/Grafana;
 - Telegram webhook регистрируется только после основного smoke;
 - encrypted backup и disposable restore drill подтверждены до допуска beta users.
@@ -107,4 +114,4 @@ make rollback RELEASE=<previous-release-id>
 
 Image rollback безопасен только при backward-compatible schema. Для
 несовместимой migration требуется quiesce writes и согласованное восстановление
-PostgreSQL и blobs.
+PostgreSQL, blobs и secret key ring. Search index после restore перестраивается.

@@ -1,0 +1,65 @@
+{
+  "contract_version": "mcp-tools.v2",
+  "protocol_version": "2025-06-18",
+  "tools": [
+    {"name":"get_lumi_capabilities","input_schema":"get-lumi-capabilities.input.v1","output_schema":"get-lumi-capabilities.output.v1"},
+    {"name":"list_materials","input_schema":"list-materials.input.v1","output_schema":"material-page.output.v1"},
+    {"name":"get_material","input_schema":"material-id.input.v1","output_schema":"material.output.v1"},
+    {"name":"get_material_toc","input_schema":"material-revision.input.v1","output_schema":"material-toc.output.v1"},
+    {"name":"read_material_chunks","input_schema":"read-material-chunks.input.v1","output_schema":"material-chunk-page.output.v1"},
+    {"name":"get_source_context","input_schema":"source-scope.input.v1","output_schema":"ai-context-pack.v1"},
+    {"name":"import_file","input_schema":"bounded-upload-ref.input.v1","output_schema":"import-job.output.v1"},
+    {"name":"import_url","input_schema":"import-url.input.v1","output_schema":"import-job.output.v1"},
+    {"name":"import_text","input_schema":"import-text.input.v1","output_schema":"import-job.output.v1"},
+    {"name":"get_import_status","input_schema":"job-id.input.v1","output_schema":"import-status.output.v1"},
+    {"name":"download_material","input_schema":"material-id.input.v1","output_schema":"bounded-download-ref.output.v1"},
+    {"name":"archive_material","input_schema":"material-mutation.input.v1","output_schema":"material.output.v1"},
+    {"name":"restore_material","input_schema":"material-mutation.input.v1","output_schema":"material.output.v1"},
+    {"name":"prepare_delete_material","input_schema":"material-mutation.input.v1","output_schema":"delete-challenge.output.v1"},
+    {"name":"confirm_delete_material","input_schema":"confirm-delete-material.input.v1","output_schema":"no-content.output.v1"},
+    {"name":"list_annotations","input_schema":"annotation-page.input.v1","output_schema":"annotation-page.output.v1"},
+    {"name":"create_highlight","input_schema":"create-highlight.input.v1","output_schema":"annotation.output.v1"},
+    {"name":"create_note","input_schema":"create-note.input.v1","output_schema":"annotation.output.v1"},
+    {"name":"create_bookmark","input_schema":"create-bookmark.input.v1","output_schema":"annotation.output.v1"},
+    {"name":"update_annotation","input_schema":"update-annotation.input.v1","output_schema":"annotation.output.v1"},
+    {"name":"delete_annotation","input_schema":"delete-annotation.input.v1","output_schema":"no-content.output.v1"},
+    {"name":"create_summary_task","input_schema":"create-summary-task.input.v1","output_schema":"ai-task.output.v1"},
+    {"name":"create_abridgement_task","input_schema":"create-abridgement-task.input.v1","output_schema":"ai-task.output.v1"},
+    {"name":"get_summary","input_schema":"get-summary.input.v1","output_schema":"summary-artifact.v1"},
+    {"name":"list_ai_tasks","input_schema":"list-ai-tasks.input.v1","output_schema":"ai-task-page.output.v1"},
+    {"name":"claim_ai_task","input_schema":"claim-ai-task.input.v1","output_schema":"ai-task-claim.output.v1"},
+    {"name":"get_ai_task_context","input_schema":"ai-task-claim-fence.input.v1","output_schema":"ai-context-pack.v1"},
+    {"name":"update_ai_task_progress","input_schema":"ai-task-progress.input.v1","output_schema":"ai-task-claim.output.v1"},
+    {"name":"complete_ai_task","input_schema":"complete-ai-task.input.v1","output_schema":"complete-ai-task.output.v1"},
+    {"name":"fail_ai_task","input_schema":"fail-ai-task.input.v1","output_schema":"ai-task.output.v1"},
+    {"name":"release_ai_task","input_schema":"release-ai-task.input.v1","output_schema":"ai-task.output.v1"},
+    {"name":"get_ai_artifact","input_schema":"artifact-id.input.v1","output_schema":"ai-artifact.output.v1"},
+    {"name":"list_learning_items","input_schema":"list-learning-items.input.v1","output_schema":"learning-item-page.output.v1"},
+    {"name":"create_flashcard_task","input_schema":"create-flashcard-task.input.v1","output_schema":"ai-task.output.v1"},
+    {"name":"submit_learning_answer","input_schema":"submit-learning-answer.input.v1","output_schema":"learning-attempt.output.v1"}
+  ],
+  "claim_fencing": {
+    "claim_result_required": [
+      "task_id",
+      "run_id",
+      "claim_id",
+      "fence",
+      "lease_expires_at",
+      "task_revision",
+      "result_kind",
+      "result_schema_version",
+      "context_pack_id"
+    ],
+    "mutation_required": [
+      "task_id",
+      "run_id",
+      "claim_id",
+      "fence",
+      "task_revision"
+    ],
+    "completion_required": [
+      "idempotency_key",
+      "result"
+    ]
+  }
+}

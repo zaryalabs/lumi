@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
-use crate::{DOMAIN_SCHEMA_VERSION, NORMALIZED_PACKAGE_VERSION};
+use crate::{SourceCitation, DOMAIN_SCHEMA_VERSION, NORMALIZED_PACKAGE_VERSION};
 
 const S0_DOMAIN_SCHEMA_VERSION: &str = "s0.2026-06-21";
 
@@ -156,7 +156,7 @@ pub fn s1_schema_migrations() -> Vec<SchemaMigration> {
             id: "s1-0006-web-telegram-sources".to_owned(),
             schema_version: DOMAIN_SCHEMA_VERSION.to_owned(),
             description:
-                "Source-neutral web and Telegram imports, pairing and durable update claims."
+                "Source-neutral web and Telegram imports, admin auto-link and durable update claims."
                     .to_owned(),
         },
         SchemaMigration {
@@ -164,6 +164,152 @@ pub fn s1_schema_migrations() -> Vec<SchemaMigration> {
             schema_version: DOMAIN_SCHEMA_VERSION.to_owned(),
             description:
                 "Composite Telegram envelopes, partial artifacts and durable media groups."
+                    .to_owned(),
+        },
+        SchemaMigration {
+            id: "s1-0008-pdf-fixed-layout".to_owned(),
+            schema_version: DOMAIN_SCHEMA_VERSION.to_owned(),
+            description:
+                "PDF source imports, fixed-layout packages and page fidelity reader contracts."
+                    .to_owned(),
+        },
+        SchemaMigration {
+            id: "s1-0009-markdown-import".to_owned(),
+            schema_version: DOMAIN_SCHEMA_VERSION.to_owned(),
+            description:
+                "Markdown source locators, deterministic GFM compilation and durable imports."
+                    .to_owned(),
+        },
+        SchemaMigration {
+            id: "s1-0010-lum-import".to_owned(),
+            schema_version: DOMAIN_SCHEMA_VERSION.to_owned(),
+            description: "Portable LUM packages, chapter source locators and durable import jobs."
+                .to_owned(),
+        },
+        SchemaMigration {
+            id: "s1-0011-ai-contract-freeze-v1".to_owned(),
+            schema_version: DOMAIN_SCHEMA_VERSION.to_owned(),
+            description:
+                "Versioned AI task, context, artifact, provider event and MCP claim contracts."
+                    .to_owned(),
+        },
+        SchemaMigration {
+            id: "s1-0012-ai-persistence-job-runtime".to_owned(),
+            schema_version: DOMAIN_SCHEMA_VERSION.to_owned(),
+            description:
+                "AI task/run/context/artifact persistence, reusable secret envelopes and common Job runtime."
+                    .to_owned(),
+        },
+        SchemaMigration {
+            id: "s1-0013-personal-ai-assistant".to_owned(),
+            schema_version: DOMAIN_SCHEMA_VERSION.to_owned(),
+            description:
+                "Explicit source context, OpenRouter BYOK and durable streaming conversations."
+                    .to_owned(),
+        },
+        SchemaMigration {
+            id: "s1-0014-ai-tasks-and-summaries".to_owned(),
+            schema_version: DOMAIN_SCHEMA_VERSION.to_owned(),
+            description:
+                "Durable internal AI task execution, summary artifacts and manual-edit candidates."
+                    .to_owned(),
+        },
+        SchemaMigration {
+            id: "s1-0015-mcp-external-agents".to_owned(),
+            schema_version: DOMAIN_SCHEMA_VERSION.to_owned(),
+            description:
+                "Revocable account MCP connections, Streamable HTTP tools and fenced external AI workers."
+                    .to_owned(),
+        },
+        SchemaMigration {
+            id: "s1-0017-learning-core".to_owned(),
+            schema_version: DOMAIN_SCHEMA_VERSION.to_owned(),
+            description:
+                "Revision-bound learning sources, completions, items, sessions and append-only attempts."
+                    .to_owned(),
+        },
+        SchemaMigration {
+            id: "s1-0018-learning-scheduling".to_owned(),
+            schema_version: DOMAIN_SCHEMA_VERSION.to_owned(),
+            description:
+                "Versioned FSRS schedules, ordered hint evidence and bounded Challenges projections."
+                    .to_owned(),
+        },
+        SchemaMigration {
+            id: "s1-0019-learning-ai".to_owned(),
+            schema_version: DOMAIN_SCHEMA_VERSION.to_owned(),
+            description:
+                "Source-backed generated drafts and immutable open-answer/explain-back evaluations."
+                    .to_owned(),
+        },
+        SchemaMigration {
+            id: "s1-0020-learning-voice".to_owned(),
+            schema_version: DOMAIN_SCHEMA_VERSION.to_owned(),
+            description:
+                "Owner-scoped audio uploads, learning attachments and immutable transcript revisions."
+                    .to_owned(),
+        },
+        SchemaMigration {
+            id: "s1-0021-records-v2".to_owned(),
+            schema_version: DOMAIN_SCHEMA_VERSION.to_owned(),
+            description:
+                "Queryable Annotation v2 targets, rich highlight styles, metadata and normalized tags."
+                    .to_owned(),
+        },
+        SchemaMigration {
+            id: "s1-0022-voice-notes-links".to_owned(),
+            schema_version: DOMAIN_SCHEMA_VERSION.to_owned(),
+            description:
+                "Generic Voice Note attachments, stable internal LinkTarget bindings and backlinks."
+                    .to_owned(),
+        },
+        SchemaMigration {
+            id: "s1-0023-search-core".to_owned(),
+            schema_version: DOMAIN_SCHEMA_VERSION.to_owned(),
+            description:
+                "Rebuildable source-aware chunks, common search jobs and BM25 plus fastText retrieval."
+                    .to_owned(),
+        },
+        SchemaMigration {
+            id: "s1-0024-desk-projection".to_owned(),
+            schema_version: DOMAIN_SCHEMA_VERSION.to_owned(),
+            description:
+                "Rebuildable owner-scoped Desk projection, unified search surfaces and MCP parity."
+                    .to_owned(),
+        },
+        SchemaMigration {
+            id: "s1-0025-community-spaces-access".to_owned(),
+            schema_version: DOMAIN_SCHEMA_VERSION.to_owned(),
+            description:
+                "Community Space identity, memberships, revocable link access and sync projection."
+                    .to_owned(),
+        },
+        SchemaMigration {
+            id: "s1-0026-material-sharing-matching".to_owned(),
+            schema_version: DOMAIN_SCHEMA_VERSION.to_owned(),
+            description:
+                "Server-internal material fingerprints, shared identities and conservative user copy claims."
+                    .to_owned(),
+        },
+        SchemaMigration {
+            id: "s1-0027-material-discussions".to_owned(),
+            schema_version: DOMAIN_SCHEMA_VERSION.to_owned(),
+            description:
+                "Material-level Community threads, replies, tombstones and append-only moderation actions."
+                    .to_owned(),
+        },
+        SchemaMigration {
+            id: "s1-0028-community-chat-activity".to_owned(),
+            schema_version: DOMAIN_SCHEMA_VERSION.to_owned(),
+            description:
+                "Member-only Space chat, cursor activity delivery and chat moderation tombstones."
+                    .to_owned(),
+        },
+        SchemaMigration {
+            id: "s1-0029-deferred-social-reading".to_owned(),
+            schema_version: DOMAIN_SCHEMA_VERSION.to_owned(),
+            description:
+                "Cross-copy shared anchors, social search invalidation, generic Space images and durable fingerprint jobs."
                     .to_owned(),
         },
     ]);
@@ -276,10 +422,16 @@ pub struct UpdateLibraryStateCommand {
 pub enum MaterialKind {
     /// DRM-free reflowable EPUB imported through the S0 fixture path.
     Epub,
+    /// Fixed-layout PDF document rendered through a page fidelity surface.
+    Pdf,
     /// Public web page captured into an immutable text-first snapshot.
     WebPage,
     /// Direct or forwarded Telegram text normalized into the common reader.
     Telegram,
+    /// UTF-8 Markdown document normalized through the common reflowable reader.
+    Markdown,
+    /// Portable book-first LUM package compiled from Markdown chapters.
+    Lum,
 }
 
 /// User-visible library state.
@@ -311,10 +463,16 @@ pub struct SourceIdentity {
 pub enum SourceFormat {
     /// EPUB source.
     Epub,
+    /// PDF source.
+    Pdf,
     /// Immutable web page snapshot.
     WebPage,
     /// Telegram Bot API message snapshot.
     Telegram,
+    /// Standalone UTF-8 Markdown source.
+    Markdown,
+    /// Portable book-first LUM package.
+    Lum,
 }
 
 /// Immutable result of one successful import.
@@ -363,6 +521,52 @@ pub struct NormalizedContentPackage {
     pub diagnostics: Vec<ImportDiagnostic>,
 }
 
+impl NormalizedContentPackage {
+    /// Build the platform-independent Reader projection for this package.
+    #[must_use]
+    pub fn reading_document(&self, material_id: MaterialId) -> ReadingDocument {
+        let nodes = self
+            .units
+            .iter()
+            .enumerate()
+            .map(|(index, unit)| ReadingNode {
+                id: unit.id.clone(),
+                path: vec![format!("unit-{index}")],
+                kind: ReadingNodeKind::Section,
+                text: Some(unit.title.clone()),
+                resource_hash: None,
+                content_hash: content_hash(unit.title.as_bytes()),
+                source_locator: unit.source_locator.clone(),
+                links: Vec::new(),
+                children: unit
+                    .block_ids
+                    .iter()
+                    .filter_map(|id| self.blocks.iter().find(|block| block.id == *id))
+                    .map(|block| ReadingNode {
+                        id: block.id.clone(),
+                        path: block.node_path.clone(),
+                        kind: block.kind.clone(),
+                        text: block.text.clone(),
+                        resource_hash: block.resource_hash.clone(),
+                        content_hash: block.content_hash.clone(),
+                        source_locator: block.source_locator.clone(),
+                        links: block.links.clone(),
+                        children: Vec::new(),
+                    })
+                    .collect(),
+            })
+            .collect();
+        ReadingDocument {
+            material_id,
+            revision_id: self.revision_id,
+            title: self.manifest.title.clone(),
+            creators: self.manifest.creators.clone(),
+            nodes,
+            navigation: self.navigation.clone(),
+        }
+    }
+}
+
 /// Manifest fields for a normalized package.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct NormalizedPackageManifest {
@@ -378,6 +582,9 @@ pub struct NormalizedPackageManifest {
     pub reading_order: Vec<String>,
     /// Source provenance summary.
     pub source: SourceIdentity,
+    /// Strong normalized identifiers used only as matching evidence.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub identifiers: Vec<MaterialIdentifier>,
 }
 
 impl NormalizedPackageManifest {
@@ -397,8 +604,30 @@ impl NormalizedPackageManifest {
             language,
             reading_order,
             source,
+            identifiers: Vec::new(),
         }
     }
+}
+
+/// Kind of strong material identifier retained in normalized metadata.
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MaterialIdentifierKind {
+    /// International Standard Book Number.
+    Isbn,
+    /// Digital Object Identifier.
+    Doi,
+    /// Canonical public URL for a captured web publication.
+    CanonicalUrl,
+}
+
+/// Bounded normalized identifier used by revision matching.
+#[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
+pub struct MaterialIdentifier {
+    /// Identifier family.
+    pub kind: MaterialIdentifierKind,
+    /// Canonical value. Social APIs never expose the protected derived hash.
+    pub value: String,
 }
 
 /// A chapter, section or comparable reading unit.
@@ -453,6 +682,340 @@ pub struct ReadingDocument {
     pub navigation: Vec<NavigationItem>,
 }
 
+/// Reader-facing document for PDF and other fixed-layout revisions.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct PageFidelityDocument {
+    /// Material id represented by this document.
+    pub material_id: MaterialId,
+    /// Revision id represented by this document.
+    pub revision_id: DocumentRevisionId,
+    /// Reader-facing title.
+    pub title: String,
+    /// Creator names for reader chrome and export.
+    pub creators: Vec<String>,
+    /// Stable physical page models in document order.
+    pub pages: Vec<PdfPage>,
+    /// PDF outline/bookmark tree.
+    pub outline: Vec<PdfOutlineItem>,
+    /// Links grouped by source page.
+    pub links: Vec<PdfLink>,
+    /// State of the document-wide text layer.
+    pub text_layer_state: PdfTextLayerState,
+}
+
+/// Fixed-layout normalized package persisted for one PDF revision.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct FixedLayoutContentPackage {
+    /// Stable package id.
+    pub id: NormalizedPackageId,
+    /// Revision represented by this package.
+    pub revision_id: DocumentRevisionId,
+    /// Package manifest shared with reflowable packages.
+    pub manifest: NormalizedPackageManifest,
+    /// Stable physical page models.
+    pub pages: Vec<PdfPage>,
+    /// Extracted native or OCR text layers.
+    pub text_layers: Vec<PdfTextLayer>,
+    /// PDF outline/bookmark tree.
+    pub outline: Vec<PdfOutlineItem>,
+    /// Internal and external page links.
+    pub links: Vec<PdfLink>,
+    /// Resource manifest for source and derived assets.
+    pub resources: BlobManifest,
+    /// Structured diagnostics retained with the package.
+    pub diagnostics: Vec<ImportDiagnostic>,
+}
+
+impl FixedLayoutContentPackage {
+    /// Build the reader-facing page fidelity projection.
+    #[must_use]
+    pub fn page_fidelity_document(&self, material_id: MaterialId) -> PageFidelityDocument {
+        PageFidelityDocument {
+            material_id,
+            revision_id: self.revision_id,
+            title: self.manifest.title.clone(),
+            creators: self.manifest.creators.clone(),
+            pages: self.pages.clone(),
+            outline: self.outline.clone(),
+            links: self.links.clone(),
+            text_layer_state: aggregate_text_layer_state(&self.pages),
+        }
+    }
+}
+
+fn aggregate_text_layer_state(pages: &[PdfPage]) -> PdfTextLayerState {
+    let mut has_native = false;
+    let mut has_ocr = false;
+    let mut has_failed = false;
+    for page in pages {
+        match page.text_layer_state {
+            PdfTextLayerState::Native => has_native = true,
+            PdfTextLayerState::Ocr => has_ocr = true,
+            PdfTextLayerState::Mixed => {
+                has_native = true;
+                has_ocr = true;
+            }
+            PdfTextLayerState::None => {}
+            PdfTextLayerState::Failed => has_failed = true,
+        }
+    }
+    if has_native && has_ocr {
+        PdfTextLayerState::Mixed
+    } else if has_native {
+        PdfTextLayerState::Native
+    } else if has_ocr {
+        PdfTextLayerState::Ocr
+    } else if has_failed {
+        PdfTextLayerState::Failed
+    } else {
+        PdfTextLayerState::None
+    }
+}
+
+/// PDF document metadata extracted without executing active content.
+#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+pub struct PdfMetadata {
+    /// Document title.
+    pub title: Option<String>,
+    /// Document author.
+    pub author: Option<String>,
+    /// Document subject.
+    pub subject: Option<String>,
+    /// Document keywords.
+    pub keywords: Vec<String>,
+    /// Creating application.
+    pub creator: Option<String>,
+    /// Producing application.
+    pub producer: Option<String>,
+    /// PDF version reported by the parser.
+    pub pdf_version: Option<String>,
+}
+
+/// PDF encryption and access state.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PdfSecurityState {
+    /// The document is not encrypted.
+    None,
+    /// A password is required before import can continue.
+    PasswordRequired,
+    /// The document was opened with a supplied password.
+    Unlocked,
+    /// The document uses unsupported DRM.
+    UnsupportedDrm,
+    /// The document is malformed.
+    Malformed,
+    /// Suspicious active content or actions were found.
+    SuspiciousActions,
+}
+
+/// Availability and provenance of a PDF page text layer.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PdfTextLayerState {
+    /// No extractable text is available.
+    None,
+    /// Text was extracted from native PDF objects.
+    Native,
+    /// Text was produced by OCR.
+    Ocr,
+    /// Native and OCR text coexist.
+    Mixed,
+    /// Text extraction failed.
+    Failed,
+}
+
+/// Rectangle in a PDF page coordinate system.
+#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
+pub struct PdfRect {
+    /// Left coordinate.
+    pub x: f32,
+    /// Top coordinate after crop and rotation are applied.
+    pub y: f32,
+    /// Rectangle width.
+    pub width: f32,
+    /// Rectangle height.
+    pub height: f32,
+}
+
+impl PartialEq for PdfRect {
+    fn eq(&self, other: &Self) -> bool {
+        self.x.to_bits() == other.x.to_bits()
+            && self.y.to_bits() == other.y.to_bits()
+            && self.width.to_bits() == other.width.to_bits()
+            && self.height.to_bits() == other.height.to_bits()
+    }
+}
+
+impl Eq for PdfRect {}
+
+/// Four-corner PDF text geometry in canonical page points.
+#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
+pub struct PdfQuad {
+    /// Top-left X coordinate.
+    pub x1: f32,
+    /// Top-left Y coordinate.
+    pub y1: f32,
+    /// Top-right X coordinate.
+    pub x2: f32,
+    /// Top-right Y coordinate.
+    pub y2: f32,
+    /// Bottom-left X coordinate.
+    pub x3: f32,
+    /// Bottom-left Y coordinate.
+    pub y3: f32,
+    /// Bottom-right X coordinate.
+    pub x4: f32,
+    /// Bottom-right Y coordinate.
+    pub y4: f32,
+}
+
+impl PartialEq for PdfQuad {
+    fn eq(&self, other: &Self) -> bool {
+        self.x1.to_bits() == other.x1.to_bits()
+            && self.y1.to_bits() == other.y1.to_bits()
+            && self.x2.to_bits() == other.x2.to_bits()
+            && self.y2.to_bits() == other.y2.to_bits()
+            && self.x3.to_bits() == other.x3.to_bits()
+            && self.y3.to_bits() == other.y3.to_bits()
+            && self.x4.to_bits() == other.x4.to_bits()
+            && self.y4.to_bits() == other.y4.to_bits()
+    }
+}
+
+impl Eq for PdfQuad {}
+
+/// Stable page model for a fixed-layout PDF revision.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct PdfPage {
+    /// Zero-based physical page index.
+    pub page_index: u32,
+    /// User-visible page label.
+    pub page_label: String,
+    /// MediaBox in canonical page coordinates.
+    pub media_box: PdfRect,
+    /// CropBox in canonical page coordinates.
+    pub crop_box: PdfRect,
+    /// Clockwise rotation in degrees.
+    pub rotation: i16,
+    /// Visible page width in PDF points.
+    pub width_points: f32,
+    /// Visible page height in PDF points.
+    pub height_points: f32,
+    /// Content hash used to validate page anchors.
+    pub page_hash: String,
+    /// Text layer availability for this page.
+    pub text_layer_state: PdfTextLayerState,
+    /// Optional thumbnail resource hash.
+    pub thumbnail_resource_hash: Option<String>,
+    /// Stable diagnostic codes affecting this page.
+    pub import_issues: Vec<String>,
+}
+
+/// PDF outline entry used for reader navigation.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct PdfOutlineItem {
+    /// Stable outline id.
+    pub id: String,
+    /// User-visible label.
+    pub label: String,
+    /// Zero-based target page when resolvable.
+    pub target_page_index: Option<u32>,
+    /// Optional target rectangle.
+    pub target_rect: Option<PdfRect>,
+    /// Nested outline entries.
+    pub children: Vec<PdfOutlineItem>,
+}
+
+/// PDF link behavior.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", tag = "type")]
+pub enum PdfLinkTarget {
+    /// Link to another page in the same document.
+    Internal {
+        /// Zero-based target page.
+        page_index: u32,
+    },
+    /// Sanitized external HTTP(S) link.
+    External {
+        /// Absolute URL opened only after explicit user action.
+        url: String,
+    },
+}
+
+/// Link hit area on a PDF page.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct PdfLink {
+    /// Zero-based source page index.
+    pub page_index: u32,
+    /// Link hit area in canonical page points.
+    pub rect: PdfRect,
+    /// Navigation target.
+    pub target: PdfLinkTarget,
+}
+
+/// Extracted text layer for one PDF page.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct PdfTextLayer {
+    /// Zero-based page index.
+    pub page_index: u32,
+    /// Engine that created this layer.
+    pub extraction_engine: String,
+    /// Versioned extraction rules marker.
+    pub extraction_revision: String,
+    /// Best-effort language hints.
+    pub language_hints: Vec<String>,
+    /// Confidence in reconstructed reading order from zero to one.
+    pub reading_order_confidence: f32,
+    /// Ordered text blocks.
+    pub blocks: Vec<PdfTextBlock>,
+}
+
+/// Text block reconstructed from one PDF page.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct PdfTextBlock {
+    /// Stable block index within the page.
+    pub block_index: u32,
+    /// Block bounds.
+    pub bbox: PdfRect,
+    /// Reconstructed block text.
+    pub text: String,
+    /// Ordered lines in the block.
+    pub lines: Vec<PdfTextLine>,
+}
+
+/// Text line reconstructed from one PDF block.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct PdfTextLine {
+    /// Stable line index within the block.
+    pub line_index: u32,
+    /// Line bounds.
+    pub bbox: PdfRect,
+    /// Reconstructed line text.
+    pub text: String,
+    /// Ordered spans in the line.
+    pub spans: Vec<PdfTextSpan>,
+}
+
+/// Text span and geometry reconstructed from a PDF page.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct PdfTextSpan {
+    /// Stable span index within the line.
+    pub span_index: u32,
+    /// Span text.
+    pub text: String,
+    /// Span bounds.
+    pub bbox: PdfRect,
+    /// Precise glyph or run quads when provided by the engine.
+    pub quads: Vec<PdfQuad>,
+    /// Optional source font name.
+    pub font_name: Option<String>,
+    /// Optional font size in points.
+    pub font_size: Option<f32>,
+    /// Text direction marker such as `ltr`, `rtl` or `ttb`.
+    pub direction: Option<String>,
+}
+
 /// Reader-facing node independent of DOM, WebView or Dioxus types.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct ReadingNode {
@@ -491,6 +1054,9 @@ pub struct ReadingLink {
     /// Sanitized absolute external URL for external links.
     #[serde(default)]
     pub external_url: Option<String>,
+    /// Original relative or wiki target retained for package-level resolution.
+    #[serde(default)]
+    pub source_target: Option<String>,
 }
 
 /// Reader-native internal link behavior.
@@ -635,15 +1201,67 @@ pub enum BlobRole {
 pub enum SourceLocator {
     /// EPUB-specific source locator.
     Epub(EpubSourceLocator),
+    /// PDF page and optional text geometry provenance.
+    Pdf(PdfSourceLocator),
     /// Web snapshot DOM provenance.
     Web(WebSourceLocator),
     /// Telegram message provenance.
     Telegram(TelegramSourceLocator),
+    /// Markdown source range and generated heading provenance.
+    Markdown(MarkdownSourceLocator),
+    /// LUM package, chapter and source range provenance.
+    Lum(LumSourceLocator),
     /// Normalized package path when no source-specific locator exists.
     Normalized {
         /// Normalized node path.
         node_path: Vec<String>,
     },
+}
+
+/// Markdown-specific source locator retained alongside the shared anchor.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct MarkdownSourceLocator {
+    /// Logical source file name or package-relative path.
+    pub file_path: String,
+    /// Markdown dialect used for parsing.
+    pub dialect: String,
+    /// Inclusive byte offset of the source range start.
+    pub byte_start: usize,
+    /// Exclusive byte offset of the source range end.
+    pub byte_end: usize,
+    /// One-based line containing the source range start.
+    pub line_start: usize,
+    /// One-based line containing the source range end.
+    pub line_end: usize,
+    /// Heading labels above the located node.
+    pub heading_path: Vec<String>,
+    /// Deterministic heading id when the located node is a heading.
+    pub generated_heading_id: Option<String>,
+}
+
+/// LUM-specific source locator retained alongside the shared anchor.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct LumSourceLocator {
+    /// Stable book identifier declared by `lum.toml`.
+    pub book_id: String,
+    /// LUM format version declared by the package.
+    pub format_version: String,
+    /// Stable chapter identifier declared by the spine.
+    pub chapter_id: String,
+    /// Package-relative Markdown source path.
+    pub source_path: String,
+    /// Inclusive byte offset of the source range start.
+    pub byte_start: usize,
+    /// Exclusive byte offset of the source range end.
+    pub byte_end: usize,
+    /// One-based line containing the source range start.
+    pub line_start: usize,
+    /// One-based line containing the source range end.
+    pub line_end: usize,
+    /// Heading labels above the located node.
+    pub heading_path: Vec<String>,
+    /// Deterministic heading id when the located node is a heading.
+    pub generated_heading_id: Option<String>,
 }
 
 /// Web-specific source locator retained alongside the shared anchor.
@@ -712,6 +1330,35 @@ pub struct EpubSourceLocator {
     pub text_offset_end: Option<usize>,
     /// EPUB CFI compatibility field when available.
     pub epub_cfi: Option<String>,
+}
+
+/// PDF-specific source locator retained alongside the shared anchor.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct PdfSourceLocator {
+    /// SHA-256 checksum of the immutable source PDF.
+    pub pdf_file_checksum: String,
+    /// Zero-based physical page index.
+    pub page_index: u32,
+    /// User-visible page label.
+    pub page_label: String,
+    /// Hash of the imported page model.
+    pub page_revision_hash: String,
+    /// Bounding rectangles in canonical page points.
+    pub page_rects: Vec<PdfRect>,
+    /// Precise selection quads in canonical page points.
+    pub page_quads: Vec<PdfQuad>,
+    /// Optional text layer extraction revision.
+    pub text_layer_revision: Option<String>,
+    /// Optional start block index.
+    pub text_block_start: Option<u32>,
+    /// Optional end block index.
+    pub text_block_end: Option<u32>,
+    /// Optional Unicode scalar start offset.
+    pub text_char_start: Option<usize>,
+    /// Optional Unicode scalar end offset.
+    pub text_char_end: Option<usize>,
+    /// Normalized page rectangles used only as a recovery fallback.
+    pub normalized_rects: Vec<PdfRect>,
 }
 
 /// Source-backed reader anchor.
@@ -811,125 +1458,6 @@ pub struct PageRect {
     pub height: f32,
 }
 
-/// Annotation record backed by a source anchor.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub struct Annotation {
-    /// Stable annotation id.
-    pub id: AnnotationId,
-    /// Parent material id.
-    pub material_id: MaterialId,
-    /// Revision the anchor targets.
-    pub revision_id: DocumentRevisionId,
-    /// Source-backed target anchor.
-    pub anchor: Anchor,
-    /// Annotation kind.
-    pub kind: AnnotationKind,
-    /// Domain revision counter for optimistic writes.
-    pub revision: u64,
-    /// Creation timestamp.
-    pub created_at: TimestampMs,
-    /// Last update timestamp.
-    pub updated_at: TimestampMs,
-}
-
-impl Annotation {
-    /// Create a new annotation from a command.
-    #[must_use]
-    pub fn create(command: CreateAnnotationCommand, timestamp: TimestampMs) -> Self {
-        Self {
-            id: Uuid::now_v7(),
-            material_id: command.material_id,
-            revision_id: command.revision_id,
-            anchor: command.anchor,
-            kind: command.kind,
-            revision: 1,
-            created_at: timestamp,
-            updated_at: timestamp,
-        }
-    }
-
-    /// Replace the annotation payload and advance its optimistic revision.
-    pub fn update_kind(&mut self, kind: AnnotationKind, timestamp: TimestampMs) {
-        self.kind = kind;
-        self.revision = self.revision.saturating_add(1);
-        self.updated_at = timestamp;
-    }
-
-    /// Return the note body when this annotation is a note.
-    #[must_use]
-    pub fn note_body(&self) -> Option<&str> {
-        match &self.kind {
-            AnnotationKind::Note { body } => Some(body),
-            AnnotationKind::Highlight { .. } => None,
-        }
-    }
-}
-
-/// Command for creating an annotation.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub struct CreateAnnotationCommand {
-    /// Parent material id.
-    pub material_id: MaterialId,
-    /// Revision id targeted by the anchor.
-    pub revision_id: DocumentRevisionId,
-    /// Source-backed anchor.
-    pub anchor: Anchor,
-    /// Annotation kind.
-    pub kind: AnnotationKind,
-}
-
-/// Command for editing an existing annotation.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub struct UpdateAnnotationCommand {
-    /// Parent material id.
-    pub material_id: MaterialId,
-    /// Annotation to edit.
-    pub annotation_id: AnnotationId,
-    /// Expected annotation revision for optimistic concurrency.
-    pub expected_revision: u64,
-    /// Replacement annotation payload.
-    pub kind: AnnotationKind,
-}
-
-/// Command for deleting an annotation with optimistic concurrency.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
-pub struct DeleteAnnotationCommand {
-    /// Parent material id.
-    pub material_id: MaterialId,
-    /// Annotation to delete.
-    pub annotation_id: AnnotationId,
-    /// Expected annotation revision for optimistic concurrency.
-    pub expected_revision: u64,
-}
-
-/// Annotation kind.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case", tag = "type")]
-pub enum AnnotationKind {
-    /// Highlight annotation.
-    Highlight {
-        /// Highlight style.
-        style: HighlightStyle,
-    },
-    /// Markdown note attached to an anchor.
-    Note {
-        /// Note body.
-        body: String,
-    },
-}
-
-/// Highlight style token.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum HighlightStyle {
-    /// Yellow highlight.
-    Yellow,
-    /// Green highlight.
-    Green,
-    /// Blue highlight.
-    Blue,
-}
-
 /// Reading progress persisted through the account state.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ReadingProgress {
@@ -952,77 +1480,6 @@ pub struct ContinueReadingEntry {
     pub entry: LibraryEntry,
     /// Most recently updated non-zero reading position for the entry.
     pub progress: ReadingProgress,
-}
-
-/// Portable export for annotations attached to one material.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub struct AnnotationExport {
-    /// Portable annotation export schema marker.
-    pub schema_version: String,
-    /// Material whose annotations were exported.
-    pub material_id: MaterialId,
-    /// Active revision at export time.
-    pub revision_id: DocumentRevisionId,
-    /// User-facing material title at export time.
-    pub material_title: String,
-    /// Source identity and provenance for the material.
-    pub source: SourceIdentity,
-    /// Exported annotation entries.
-    pub entries: Vec<AnnotationExportEntry>,
-}
-
-impl AnnotationExport {
-    /// Build an annotation export for `material`.
-    #[must_use]
-    pub fn for_material(material: &Material, annotations: &[Annotation]) -> Self {
-        Self {
-            schema_version: "lumi.annotations.v1".to_owned(),
-            material_id: material.id,
-            revision_id: material.active_revision_id,
-            material_title: material.display_title().to_owned(),
-            source: material.source_identity.clone(),
-            entries: annotations
-                .iter()
-                .map(AnnotationExportEntry::from_annotation)
-                .collect(),
-        }
-    }
-}
-
-/// One annotation entry in a portable export.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub struct AnnotationExportEntry {
-    /// Annotation id.
-    pub annotation_id: AnnotationId,
-    /// Annotation revision at export time.
-    pub annotation_revision: u64,
-    /// Annotation kind and payload.
-    pub kind: AnnotationKind,
-    /// Quoted source text stored with the anchor.
-    pub quote: String,
-    /// Note body when the annotation is a note.
-    pub note_body: Option<String>,
-    /// Full source-backed anchor, serialized as JSON in the export response.
-    pub anchor: Anchor,
-    /// Annotation creation timestamp.
-    pub created_at: TimestampMs,
-    /// Annotation last-update timestamp.
-    pub updated_at: TimestampMs,
-}
-
-impl AnnotationExportEntry {
-    fn from_annotation(annotation: &Annotation) -> Self {
-        Self {
-            annotation_id: annotation.id,
-            annotation_revision: annotation.revision,
-            kind: annotation.kind.clone(),
-            quote: annotation.anchor.quote.clone(),
-            note_body: annotation.note_body().map(str::to_owned),
-            anchor: annotation.anchor.clone(),
-            created_at: annotation.created_at,
-            updated_at: annotation.updated_at,
-        }
-    }
 }
 
 /// Command for moving the reading position.
@@ -1105,6 +1562,8 @@ pub enum JobStage {
     ExtractingContent,
     /// EPUB container and package metadata are being validated.
     ValidatingContainer,
+    /// A fixed-layout document is being inspected for pages, metadata and text.
+    InspectingDocument,
     /// Normalization is in progress.
     Normalizing,
     /// Immutable blobs and package records are being persisted.
@@ -1129,30 +1588,6 @@ pub struct AcceptedImport {
 pub struct ImportWebUrlRequest {
     /// Public URL to capture through the bounded server-side source adapter.
     pub url: String,
-}
-
-/// One-time Telegram pairing token shown exactly once to an authenticated user.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-pub struct TelegramPairingResponse {
-    /// Plaintext token used in `/start <token>`; it is never persisted.
-    pub token: String,
-    /// Telegram deep link when a bot username is configured.
-    pub deep_link: Option<String>,
-    /// Expiry timestamp in milliseconds.
-    pub expires_at: TimestampMs,
-}
-
-/// Account-scoped Telegram connection projection.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-pub struct TelegramConnectionStatus {
-    /// Whether one active Telegram identity is linked.
-    pub connected: bool,
-    /// Linked Telegram user id, if connected.
-    pub telegram_user_id: Option<i64>,
-    /// Link creation timestamp in milliseconds.
-    pub linked_at: Option<TimestampMs>,
-    /// Expiry of the most recently issued unconsumed token.
-    pub pairing_expires_at: Option<TimestampMs>,
 }
 
 /// Runtime state of the instance-wide Telegram bot listener.
@@ -1218,7 +1653,7 @@ pub enum MaterialImportStatus {
 }
 
 /// Server-backed projection used by the library for every import lifecycle state.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct LibraryEntry {
     /// Stable material id allocated when upload is accepted.
     pub id: MaterialId,
@@ -1240,10 +1675,32 @@ pub struct LibraryEntry {
     pub import_status: MaterialImportStatus,
     /// Latest durable import job, including diagnostics.
     pub latest_job: Job,
+    /// Exact original relation for a generated material.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub derivation: Option<DerivedMaterialRelation>,
     /// Material creation timestamp.
     pub created_at: TimestampMs,
     /// Last material or import state change timestamp.
     pub updated_at: TimestampMs,
+}
+
+/// Reader-facing owner-scoped provenance for one generated material.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct DerivedMaterialRelation {
+    /// Stable relation kind.
+    pub kind: String,
+    /// Exact source material.
+    pub source_material_id: MaterialId,
+    /// Exact immutable source revision.
+    pub source_revision_id: DocumentRevisionId,
+    /// Producing AI task.
+    pub task_id: Uuid,
+    /// Producing AI artifact.
+    pub artifact_id: Uuid,
+    /// Whether the original now has a newer active revision.
+    pub source_changed: bool,
+    /// Source-backed navigation refs retained from generation.
+    pub source_refs: Vec<SourceCitation>,
 }
 
 impl LibraryEntry {
@@ -1301,6 +1758,60 @@ mod tests {
     fn migrations_cover_s1_contract_groups() {
         let migrations = s1_schema_migrations();
 
-        assert_eq!(migrations.len(), 11);
+        assert_eq!(migrations.len(), 32);
+        assert!(migrations
+            .iter()
+            .any(|migration| migration.id == "s1-0011-ai-contract-freeze-v1"));
+        assert!(migrations
+            .iter()
+            .any(|migration| migration.id == "s1-0012-ai-persistence-job-runtime"));
+        assert!(migrations
+            .iter()
+            .any(|migration| migration.id == "s1-0013-personal-ai-assistant"));
+        assert!(migrations
+            .iter()
+            .any(|migration| migration.id == "s1-0014-ai-tasks-and-summaries"));
+        assert!(migrations
+            .iter()
+            .any(|migration| migration.id == "s1-0015-mcp-external-agents"));
+        assert!(migrations
+            .iter()
+            .any(|migration| migration.id == "s1-0017-learning-core"));
+        assert!(migrations
+            .iter()
+            .any(|migration| migration.id == "s1-0018-learning-scheduling"));
+        assert!(migrations
+            .iter()
+            .any(|migration| migration.id == "s1-0019-learning-ai"));
+        assert!(migrations
+            .iter()
+            .any(|migration| migration.id == "s1-0020-learning-voice"));
+        assert!(migrations
+            .iter()
+            .any(|migration| migration.id == "s1-0021-records-v2"));
+        assert!(migrations
+            .iter()
+            .any(|migration| migration.id == "s1-0022-voice-notes-links"));
+        assert!(migrations
+            .iter()
+            .any(|migration| migration.id == "s1-0023-search-core"));
+        assert!(migrations
+            .iter()
+            .any(|migration| migration.id == "s1-0024-desk-projection"));
+        assert!(migrations
+            .iter()
+            .any(|migration| migration.id == "s1-0025-community-spaces-access"));
+        assert!(migrations
+            .iter()
+            .any(|migration| migration.id == "s1-0026-material-sharing-matching"));
+        assert!(migrations
+            .iter()
+            .any(|migration| migration.id == "s1-0027-material-discussions"));
+        assert!(migrations
+            .iter()
+            .any(|migration| migration.id == "s1-0028-community-chat-activity"));
+        assert!(migrations
+            .iter()
+            .any(|migration| migration.id == "s1-0029-deferred-social-reading"));
     }
 }

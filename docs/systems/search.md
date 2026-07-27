@@ -11,12 +11,20 @@ Status: accepted
 - заметки, хайлайты, comments и margin notes;
 - база знаний;
 - summaries, карточки, вопросы и other accepted AI/learning artifacts;
-- shared folder comments и activity, к которым у пользователя есть access.
+- Community Space comments и chat messages, к которым у пользователя есть
+  access.
 
 Поиск является не только UI-функцией. Он также дает retrieval layer для RAG-like
 ИИ-сценариев: собрать релевантный контекст из книг, заметок и artifacts,
 после чего другой слой может использовать его в чате, объяснении или генерации
 упражнений.
+
+До появления serious search ИИ и learning могут работать только с явно
+выбранным bounded source scope: selection, anchor, chapter или material
+revision. Такой контекст строит общий `SourceContextResolver` непосредственно
+из нормализованного документа и source-backed anchors. Он не выполняет
+ранжирование по библиотеке, не объявляет capability `ai-retrieval` и не
+является скрытым вторым поисковым движком.
 
 Базовый retrieval approach для `v01`: **BM25 candidate generation + fastText
 rerank**. BM25 дает большой хвост кандидатов по точному лексическому совпадению,
@@ -29,7 +37,7 @@ cross-encoder rerankers и future hybrid search.
 - Пользователь ищет слово или фразу по всей библиотеке, заметкам и базе
   знаний.
 - Пользователь ограничивает поиск типом: книги, PDF, заметки, highlights,
-  shared folder, generated artifacts.
+  Community Space, generated artifacts.
 - Пользователь ищет внутри текущего материала из reader panel.
 - Пользователь открывает search result exactly at anchor: page, paragraph,
   note, highlight или KB heading.
@@ -54,10 +62,10 @@ cross-encoder rerankers и future hybrid search.
 - Markdown and `lum` chapters, headings, concepts and glossary.
 - Annotations, highlights, notes, voice note transcripts when available.
 - KB notes, front matter, wikilinks, tags and attachments text where extracted.
-- AI artifacts accepted or visible to the user.
+- Saved/accepted typed AI artifacts visible to the user.
 - Learning artifacts: flashcards/questions/explanations where search policy
   allows.
-- Shared comments/chat within accessible shared folders.
+- Shared comments/chat within accessible Community Spaces.
 
 Не индексируются по умолчанию:
 
@@ -68,15 +76,20 @@ cross-encoder rerankers и future hybrid search.
 
 ### Search surfaces
 
+Первый personal search slice:
+
 - Global search page.
 - Library search/filter.
 - Reader in-document search.
-- KB search.
-- Shared folder search.
+- Desk search/filter over records, поддержанные текущим release scope.
 - AI retrieval API.
 
-All surfaces should use common indexed chunks and result anchors, but can apply
-different filters, boosts and presentation.
+KB search и Community Space search являются отдельными последующими
+поверхностями над тем же index/query contract. Их отсутствие не делает
+personal search slice частично реализованным.
+
+Все подключенные поверхности используют общие indexed chunks и result anchors,
+но могут применять разные filters, boosts и presentation.
 
 ### Chunking
 
@@ -132,7 +145,7 @@ Score fusion:
 - exact title/heading matches get boost;
 - personal notes/highlights may get boost for user-facing search;
 - current material gets boost for reader search;
-- recent/current shared folder context can boost social search;
+- recent/current Community Space context can boost social search;
 - AI retrieval should prioritize source diversity and citation quality, not
   just top repeated chunks.
 
@@ -157,12 +170,18 @@ Each `RetrievedChunk` includes:
 AI layer decides how to pack context into prompts. Search should not call LLM
 itself.
 
+`retrieve` применяется для открытого запроса по material/library/record scope.
+Selection, chapter и whole-material workflows с детерминированным обходом
+могут использовать `SourceContextResolver` без search index. Оба пути
+возвращают совместимые source refs и citations, но только indexed path
+объявляет `SEARCH-005`/`ai-retrieval`.
+
 ### Permissions and privacy
 
 - Search only returns objects user can access.
-- Personal search and shared search must not leak private notes into shared
-  folder results.
-- Shared folder results for material-specific comments require material access
+- Personal search and Community Space search must not leak private notes into
+  social results.
+- Community Space results for material-specific comments require material access
   check described in [`social.md`](social.md).
 - External agent retrieval must receive only chunks explicitly included in task
   context policy.
@@ -231,6 +250,32 @@ SearchChunk {
 
 ## Реализация
 
+Web personal search foundation реализован в `0.4.0/E3`, а поверхности и MCP
+parity — в `0.4.0/E4` по [`ADR 0033`](../adr/0033-search-chunks-tantivy-fasttext.md)
+и [`ADR 0034`](../adr/0034-desk-projection-and-search-surfaces.md):
+
+- `search.contract.v1` и `search.chunker.v1` находятся в `lumi-core`;
+- Tantivy `0.26` выполняет BM25 с owner/material/type/tag filters до stored
+  payload;
+- `finalfusion 0.18` читает проверенный fastText `.bin`/`.fifu`;
+- `search_index_requests` и common `Job(kind = search_index)` создаются
+  транзакционно с domain changes;
+- incremental replace/delete, restart recovery и full owner rebuild используют
+  один worker/runtime;
+- `/api/v1/search`, `/search/retrieve`, `/search/status` и `/search/rebuild`
+  являются общим Web/MCP application boundary;
+- status различает `ready`/`partial`/`rebuilding`/`failed` и отдельно сообщает
+  количество source documents без searchable text;
+- Global page, Library form, Reader material search и Desk filter/search
+  используют один `SearchRuntime`, exact open targets и типизированные
+  reload-safe routes;
+- `mcp-tools.v3` добавляет global/material/records search и bounded context
+  retrieval с теми же capability, permission и cursor rules.
+
+Отсутствие model/checksum не включает BM25 fallback: status становится
+`failed`, а capabilities не публикуются. Desk и primary CRUD при этом остаются
+доступны; Search UI показывает failure вместо пустого успешного результата.
+
 ### Libraries
 
 Primary candidates:
@@ -260,7 +305,7 @@ Need prototype for fastText in Rust/native/server:
 ### Query pipeline
 
 1. Parse query string: terms, phrases, filters, tags, type qualifiers.
-2. Resolve scope: personal, material, KB, shared folder, AI context.
+2. Resolve scope: personal, material, KB, Community Space, AI context.
 3. Run BM25 top N.
 4. Compute query vector.
 5. Rerank candidate chunks by fused lexical + vector score.
@@ -295,6 +340,8 @@ Reindex when:
 
 - **Reader.** Search results open reader at `Anchor`. Reader search uses same
   text layers.
+- **Desk.** Search может открыть конкретный Desk item, Desk материала или
+  сквозное представление с восстановимыми filters/query state.
 - **Форматы.** Importers provide normalized text and source maps.
 - **Синхронизация.** Index is derived local data. Sync delivers source objects;
   indexing rebuilds locally.
@@ -305,7 +352,9 @@ Reindex when:
 - **Learning.** Search can find learning items and supply retrieval context for
   generated questions.
 - **ИИ.** AI uses search retrieval, but search does not call LLM.
-- **Social.** Search respects shared folder permissions and material ownership
+- **MCP.** Search and Desk query tools reuse the same permission filters,
+  cursor contracts, status and bounded context APIs as Web.
+- **Social.** Search respects Community Space permissions and material ownership
   checks.
 - **Плагины.** Plugins may provide text extractors or index fields through
   controlled extension points; they cannot bypass permission filters.
@@ -324,13 +373,14 @@ Reindex when:
 - `revisit`: cross-encoder rerank. Better quality for AI retrieval, but
   requires heavier model/runtime.
 
-## Открытые вопросы
+## Принятые параметры первого среза
 
-- Какой fastText model and runtime использовать для Russian/English mixed
-  libraries and web compatibility?
-- Каким должен быть default BM25 candidate tail size before rerank?
-- Нужно ли хранить vector index locally on mobile or compute semantic rerank
-  server-side when allowed?
-- Какой query syntax дать пользователю: `tag:`, `type:`, `in:`, quotes?
-- Нужно ли индексировать rejected/generated drafts or keep them invisible until
-  accepted?
+- Runtime: pure-Rust `finalfusion`, модельная семья `cc.ru.300`, exact
+  deployment checksum; candidate tail ограничен 500 chunks.
+- Rejected/candidate/superseded AI artifacts и draft/rejected/archived learning
+  items не индексируются.
+- Public API принимает explicit `scope`, `type`, `tag`, `material_id`, cursor и
+  limit. Расширенный user query syntax остаётся последующим совместимым
+  дополнением.
+- Web использует server-side index. Native vector storage/runtime выбирается
+  вместе с первой full-copy replica, сохраняя текущие DTO и versions.

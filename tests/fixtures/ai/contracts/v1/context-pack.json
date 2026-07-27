@@ -1,0 +1,34 @@
+{
+  "schema_version": "ai-context-pack.v1",
+  "context_pack_id": "00000000-0000-7000-8000-000000000030",
+  "owner_id": "00000000-0000-7000-8000-000000000010",
+  "task_id": "00000000-0000-7000-8000-000000000001",
+  "scope": {
+    "kind": "chapter",
+    "material_id": "00000000-0000-7000-8000-000000000020",
+    "revision_id": "00000000-0000-7000-8000-000000000021",
+    "scope_ref": "chapter-1"
+  },
+  "permission_snapshot": {
+    "actor_id": "00000000-0000-7000-8000-000000000010",
+    "decision": "allowed",
+    "policy_version": "personal-owner.v1"
+  },
+  "limits_version": "explicit-context-limits.v1",
+  "fragments": [
+    {
+      "citation_id": "ctx:fixture:1",
+      "unit_id": "chapter-1",
+      "block_id": "paragraph-1",
+      "text": "Явно выбранный фрагмент с кириллицей и emoji 📚.",
+      "text_hash": "fixture-sha256",
+      "source_locator": {
+        "format": "markdown",
+        "file_path": "chapter-1.md",
+        "byte_start": 0,
+        "byte_end": 89
+      }
+    }
+  ],
+  "pack_hash": "fixture-pack-sha256"
+}

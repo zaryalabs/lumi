@@ -3,6 +3,7 @@ import re
 import stat
 import subprocess
 import tempfile
+import tomllib
 import unittest
 from pathlib import Path
 
@@ -12,6 +13,54 @@ WORKFLOWS = ROOT / ".github" / "workflows"
 
 
 class WorkflowContractTests(unittest.TestCase):
+    def test_rust_toolchain_is_synchronized_across_build_environments(self) -> None:
+        toolchain = tomllib.loads(
+            (ROOT / "rust-toolchain.toml").read_text(encoding="utf-8")
+        )["toolchain"]
+        version = toolchain["channel"]
+
+        workspace = tomllib.loads((ROOT / "Cargo.toml").read_text(encoding="utf-8"))
+        self.assertEqual(version, workspace["workspace"]["package"]["rust-version"])
+
+        workflow = (WORKFLOWS / "main.yml").read_text(encoding="utf-8")
+        self.assertIn(f"toolchain: {version}", workflow)
+
+        for name in ("Dockerfile.server", "Dockerfile.web"):
+            dockerfile = (ROOT / "deployments" / name).read_text(encoding="utf-8")
+            self.assertIn(f"FROM rust:{version}-bookworm AS builder", dockerfile)
+
+        devcontainer = (ROOT / ".devcontainer" / "Dockerfile").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn(
+            "COPY --chown=vscode:vscode rust-toolchain.toml "
+            "/tmp/lumi-toolchain/rust-toolchain.toml",
+            devcontainer,
+        )
+        self.assertIn("rustup toolchain install", devcontainer)
+        self.assertNotIn("ARG RUST_VERSION", devcontainer)
+
+        makefile = (ROOT / "Makefile").read_text(encoding="utf-8")
+        self.assertIn(
+            "CARGO ?= $(if $(RUSTUP_TOOLCHAIN_BIN),"
+            "PATH=$(RUSTUP_TOOLCHAIN_BIN):$$PATH "
+            "$(RUSTUP_TOOLCHAIN_BIN)/cargo,cargo)",
+            makefile,
+        )
+        self.assertIn(
+            "$(DEVCONTAINER) up --workspace-folder .",
+            makefile,
+        )
+        self.assertIn(
+            "$(DEVCONTAINER) exec --workspace-folder . bash",
+            makefile,
+        )
+        self.assertIn(
+            "--project-name $(DEVCONTAINER_COMPOSE_PROJECT) "
+            "--file $(DEVCONTAINER_COMPOSE_FILE) down --remove-orphans",
+            makefile,
+        )
+
     def test_workflows_never_run_for_pull_requests(self) -> None:
         for path in sorted(WORKFLOWS.glob("*.yml")):
             text = path.read_text(encoding="utf-8")
@@ -89,6 +138,80 @@ class OperationsContractTests(unittest.TestCase):
             text,
         )
         self.assertNotIn("platform-auth-chain@file", text)
+
+    def test_production_persists_runtime_state_outside_read_only_container(
+        self,
+    ) -> None:
+        text = (ROOT / "ops" / "compose.yaml").read_text(encoding="utf-8")
+
+        self.assertIn(
+            "chown -R 65532:65532 /var/lib/lumi/blobs "
+            "/var/lib/lumi/secrets /var/lib/lumi/search",
+            text,
+        )
+        self.assertIn("LUMI_SECRET_ROOT: /var/lib/lumi/secrets", text)
+        self.assertIn("LUMI_SEARCH_ROOT: /var/lib/lumi/search", text)
+        self.assertIn("./volumes/secrets:/var/lib/lumi/secrets", text)
+        self.assertIn("./volumes/search:/var/lib/lumi/search", text)
+        self.assertIn("./volumes/models:/var/lib/lumi/models:ro", text)
+
+    def test_backup_contract_covers_secret_keyring(self) -> None:
+        backup = (ROOT / "scripts" / "backup.sh").read_text(encoding="utf-8")
+        restore = (ROOT / "scripts" / "restore-drill.sh").read_text(
+            encoding="utf-8"
+        )
+        validator = (
+            ROOT / "scripts" / "validate_restore_attestation.py"
+        ).read_text(encoding="utf-8")
+
+        self.assertIn('"lumi.backup.v2"', backup)
+        self.assertIn('"secrets":"secrets.tar.gz"', backup)
+        self.assertIn('"$target/secrets.tar.gz"', backup)
+        self.assertIn('"$backup/secrets.tar.gz"', restore)
+        self.assertIn("secret-store.instance", restore)
+        self.assertIn("secret-store.active", restore)
+        self.assertIn('"secrets", "row_counts"', validator)
+        self.assertIn('"secret_keyring_match"', validator)
+
+    def test_production_smoke_runs_backup_and_restore_drill(self) -> None:
+        text = (ROOT / "scripts" / "production-compose-smoke.sh").read_text(
+            encoding="utf-8"
+        )
+
+        self.assertIn('cp "$root/scripts/backup.sh"', text)
+        self.assertIn("LUMI_BACKUP_DRILL_MODE=1", text)
+        self.assertIn("$compose run --rm backup", text)
+        self.assertIn("$compose run --rm restore-drill", text)
+
+    def test_main_release_smokes_production_topology_before_push(self) -> None:
+        text = (WORKFLOWS / "main.yml").read_text(encoding="utf-8")
+        build = text.index("make build ")
+        smoke = text.index("make production-compose-smoke ")
+        push = text.index("make push ")
+
+        self.assertLess(build, smoke)
+        self.assertLess(smoke, push)
+
+    def test_local_release_smokes_do_not_consume_persistent_state_or_placeholders(
+        self,
+    ) -> None:
+        makefile = (ROOT / "Makefile").read_text(encoding="utf-8")
+        web_e2e = (ROOT / "scripts" / "web-e2e.sh").read_text(encoding="utf-8")
+        beta_local = (ROOT / "scripts" / "beta-local-gate.sh").read_text(
+            encoding="utf-8"
+        )
+        staging_smoke = (ROOT / "scripts" / "staging-smoke.sh").read_text(
+            encoding="utf-8"
+        )
+
+        self.assertIn('./scripts/web-e2e.sh', makefile)
+        self.assertIn('mktemp -d /tmp/lumi-e2e.', web_e2e)
+        self.assertIn('down --volumes --remove-orphans', web_e2e)
+        self.assertIn('Dockerfile.poppler', web_e2e)
+        self.assertIn('mktemp -d /tmp/lumi-beta-local.', beta_local)
+        self.assertIn('down --volumes --remove-orphans', beta_local)
+        self.assertIn("export LUMI_ADMIN_LOOKUP_IDS=''", staging_smoke)
+        self.assertIn('export LUMI_STAGING_PORT="$staging_port"', staging_smoke)
 
     def test_root_wrapper_limits_manifest_source(self) -> None:
         text = (ROOT / "ops" / "lumi-ci-root").read_text(encoding="utf-8")

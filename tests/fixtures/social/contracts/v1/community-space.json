@@ -1,0 +1,21 @@
+{
+  "contract_version": "community-space.v1",
+  "space": {
+    "id": "019c0000-0000-7000-8000-000000000101",
+    "sync_space_id": "019c0000-0000-7000-8000-000000000102",
+    "slug": "space-019c00000000",
+    "name": "Книжный клуб",
+    "description": "Безопасный contract fixture",
+    "discoverability": "unlisted",
+    "entry_policy": "by_link",
+    "created_by_user_id": "019c0000-0000-7000-8000-000000000001",
+    "object_revision": 1,
+    "member_count": 1,
+    "created_at": 1785024000000,
+    "updated_at": 1785024000000
+  },
+  "capabilities": [
+    "community-spaces",
+    "community-link-access"
+  ]
+}

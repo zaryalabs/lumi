@@ -1,0 +1,42 @@
+{
+  "contract_version": "ai.contract.v1",
+  "routes": [
+    {"method":"GET","path":"/api/v1/providers","request":null,"response":"AiPage<AiProviderDescriptor>"},
+    {"method":"GET","path":"/api/v1/providers/openrouter","request":null,"response":"AiProviderDescriptor"},
+    {"method":"PUT","path":"/api/v1/providers/openrouter/credential","request":"PutProviderCredentialRequest","response":"ProviderCredentialState"},
+    {"method":"DELETE","path":"/api/v1/providers/openrouter/credential","request":null,"response":"NoContent"},
+    {"method":"PATCH","path":"/api/v1/providers/openrouter/preferences","request":"UpdateProviderPreferencesRequest","response":"ProviderPreferences"},
+    {"method":"POST","path":"/api/v1/providers/openrouter/validate","request":"ValidateProviderRequest","response":"ProviderValidationResult"},
+    {"method":"GET","path":"/api/v1/ai/conversations","request":null,"response":"AiPage<AiConversation>"},
+    {"method":"POST","path":"/api/v1/ai/conversations","request":"CreateConversationRequest","response":"AiConversation"},
+    {"method":"GET","path":"/api/v1/ai/conversations/{conversation_id}","request":null,"response":"ConversationDetail"},
+    {"method":"PATCH","path":"/api/v1/ai/conversations/{conversation_id}","request":"UpdateConversationRequest","response":"AiConversation"},
+    {"method":"DELETE","path":"/api/v1/ai/conversations/{conversation_id}","request":null,"response":"NoContent"},
+    {"method":"POST","path":"/api/v1/ai/conversations/{conversation_id}/messages","request":"CreateMessageRequest","response":"CreateMessageResponse"},
+    {"method":"GET","path":"/api/v1/ai/generations/{generation_id}/events","request":null,"response":"AiProviderEventStream"},
+    {"method":"POST","path":"/api/v1/ai/generations/{generation_id}/stop","request":"GenerationMutationRequest","response":"AiGeneration"},
+    {"method":"POST","path":"/api/v1/ai/generations/{generation_id}/retry","request":"GenerationMutationRequest","response":"AiGeneration"},
+    {"method":"POST","path":"/api/v1/ai/generations/{generation_id}/regenerate","request":"GenerationMutationRequest","response":"AiGeneration"},
+    {"method":"GET","path":"/api/v1/ai/tasks","request":null,"response":"AiPage<AiTask>"},
+    {"method":"POST","path":"/api/v1/ai/tasks","request":"CreateAiTaskCommand","response":"AiTask"},
+    {"method":"GET","path":"/api/v1/ai/tasks/{task_id}","request":null,"response":"AiTask"},
+    {"method":"POST","path":"/api/v1/ai/tasks/{task_id}/execute","request":"TaskMutationRequest","response":"AiTask"},
+    {"method":"POST","path":"/api/v1/ai/tasks/{task_id}/cancel","request":"TaskMutationRequest","response":"AiTask"},
+    {"method":"POST","path":"/api/v1/ai/tasks/{task_id}/retry","request":"TaskMutationRequest","response":"AiTask"},
+    {"method":"POST","path":"/api/v1/ai/tasks/bulk-execute","request":"BulkExecuteTasksRequest","response":"BulkTaskResult"},
+    {"method":"GET","path":"/api/v1/ai/artifacts/{artifact_id}","request":null,"response":"AiArtifact"},
+    {"method":"POST","path":"/api/v1/ai/artifacts/{artifact_id}/accept","request":"ArtifactMutationRequest","response":"AiArtifact"},
+    {"method":"POST","path":"/api/v1/ai/artifacts/{artifact_id}/reject","request":"ArtifactMutationRequest","response":"AiArtifact"},
+    {"method":"GET","path":"/api/v1/materials/{material_id}/summaries","request":null,"response":"AiPage<SummaryArtifact>"},
+    {"method":"POST","path":"/api/v1/materials/{material_id}/summary-tasks","request":"CreateSummaryTaskRequest","response":"AiTask"},
+    {"method":"PATCH","path":"/api/v1/ai/summaries/{summary_id}","request":"UpdateSummaryRequest","response":"SummaryArtifact"},
+    {"method":"DELETE","path":"/api/v1/ai/summaries/{summary_id}","request":null,"response":"NoContent"},
+    {"method":"POST","path":"/api/v1/materials/{material_id}/abridgement-tasks","request":"CreateAbridgementTaskRequest","response":"AiTask"}
+  ],
+  "mcp_connection_routes": [
+    {"method":"GET","path":"/api/v1/mcp/connections","request":null,"response":"AiPage<McpConnection>"},
+    {"method":"POST","path":"/api/v1/mcp/connections","request":"CreateMcpConnectionRequest","response":"McpConnectionTokenResponse"},
+    {"method":"DELETE","path":"/api/v1/mcp/connections/{connection_id}","request":"RevokeMcpConnectionRequest","response":"NoContent"},
+    {"method":"POST","path":"/api/v1/mcp/connections/{connection_id}/rotate","request":"RotateMcpConnectionRequest","response":"McpConnectionTokenResponse"}
+  ]
+}

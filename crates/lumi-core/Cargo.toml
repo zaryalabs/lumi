@@ -8,6 +8,7 @@ rust-version.workspace = true
 [dependencies]
 ammonia.workspace = true
 base64.workspace = true
+comrak = { workspace = true, optional = true }
 ed25519-dalek.workspace = true
 flate2.workspace = true
 hkdf.workspace = true
@@ -17,10 +18,15 @@ serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
 thiserror.workspace = true
+toml.workspace = true
 url.workspace = true
 uuid.workspace = true
 zeroize.workspace = true
 zip.workspace = true
+
+[features]
+default = ["markdown-import"]
+markdown-import = ["dep:comrak"]
 
 [lints]
 workspace = true

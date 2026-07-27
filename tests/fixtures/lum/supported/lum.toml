@@ -1,0 +1,17 @@
+format_version = "0.1"
+
+[book]
+id = "lumi-lum-fixture"
+title = "Книга LUM"
+language = "ru"
+authors = ["Lumi QA"]
+
+[[spine]]
+id = "intro"
+path = "content/intro.md"
+title = "Введение"
+
+[[spine]]
+id = "details"
+path = "content/details.md"
+title = "Подробности"

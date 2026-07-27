@@ -1,8 +1,15 @@
-FROM rust:1.88-bookworm AS builder
+FROM node:24-bookworm-slim AS web-assets
+WORKDIR /src/apps/web
+COPY apps/web/package.json apps/web/package-lock.json ./
+COPY apps/web/scripts ./scripts
+RUN npm ci --ignore-scripts && npm run prepare:pdfjs
+
+FROM rust:1.93.1-bookworm AS builder
 WORKDIR /src
 RUN rustup target add wasm32-unknown-unknown \
     && cargo install dioxus-cli --version 0.7.9 --locked
 COPY . .
+COPY --from=web-assets /src/apps/web/assets/vendor /src/apps/web/assets/vendor
 WORKDIR /src/apps/web
 ENV LUMI_API_BASE=/api/v1
 RUN dx build --platform web --release

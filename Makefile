@@ -1,18 +1,25 @@
 SHELL := /bin/sh
 
-CARGO ?= cargo
 DX ?= dx
 NPM ?= npm
 PRE_COMMIT ?= pre-commit
 DOCKER ?= docker
+DEVCONTAINER ?= devcontainer
 
 RUST_MANIFEST := Cargo.toml
+DEVCONTAINER_COMPOSE_FILE := .devcontainer/docker-compose.yml
+DEVCONTAINER_COMPOSE_PROJECT := lumi_devcontainer
 STAGE0_SPIKE_PACKAGE := lumi-stage0-spikes
 WEB_DIR := apps/web
 WEB_PACKAGE := $(WEB_DIR)/Cargo.toml
 E2E_DIR := tests/e2e
 E2E_PACKAGE := $(E2E_DIR)/package.json
 E2E_NODE_MODULES := $(E2E_DIR)/node_modules
+AI_WEB_SPIKE_DIR := spikes/ai-web
+AI_WEB_SPIKE_PACKAGE := $(AI_WEB_SPIKE_DIR)/package.json
+AI_WEB_SPIKE_NODE_MODULES := $(AI_WEB_SPIKE_DIR)/node_modules
+WEB_NODE_MODULES := $(WEB_DIR)/node_modules
+WASM_TARGET_DIR := target/wasm
 OPS_DIR := ops
 
 GIT_SHA ?= $(shell git rev-parse HEAD)
@@ -41,10 +48,11 @@ LUMI_BLOB_ROOT ?= .local/blob-store
 LUMI_PROTOTYPE_PORT ?= 4173
 RUSTUP_TOOLCHAIN_BIN ?= $(shell if command -v rustup >/dev/null 2>&1; then dirname "$$(rustup which rustc 2>/dev/null)"; fi)
 RUSTUP_PATH_ENV := $(if $(RUSTUP_TOOLCHAIN_BIN),PATH=$(RUSTUP_TOOLCHAIN_BIN):$$PATH,)
+CARGO ?= $(if $(RUSTUP_TOOLCHAIN_BIN),PATH=$(RUSTUP_TOOLCHAIN_BIN):$$PATH $(RUSTUP_TOOLCHAIN_BIN)/cargo,cargo)
 
 .DEFAULT_GOAL := help
 
-.PHONY: help prepare build push release-manifest deploy ci-clean-images ops-config cicd-contract-test production-compose-smoke init fmt l dl t c pc docs-fmt docs-l rust-fmt rust-l rust-web-check rust-web-l rust-dl rust-t up logs down reset server-r telegram-r db-up db-down db-migrate web-r prototype-r prototype-e2e pagination-spike-r pagination-spike-e2e stage0-spikes web-build e2e-fmt e2e-fmt-check e2e-l e2e-dl web-e2e pg-t compatibility security performance staging-config staging-smoke backup restore-drill restore-attestation-test restore-attestation beta-local beta agent-inspect
+.PHONY: help prepare build push release-manifest deploy ci-clean-images ops-config cicd-contract-test production-compose-smoke init fmt l dl t c pc docs-fmt docs-l rust-fmt rust-l rust-web-check rust-web-l rust-dl rust-t plan-runner-check plan-list devcontainer-up devcontainer-down up logs down reset server-r admin-lookup-id telegram-r db-up db-down db-migrate pdfjs-assets web-r prototype-r prototype-e2e pagination-spike-r pagination-spike-e2e ai-chat-spike-e2e stage0-spikes web-build e2e-fmt e2e-fmt-check e2e-l e2e-dl web-e2e pg-t compatibility security performance search-performance staging-config staging-smoke backup restore-drill restore-attestation-test restore-attestation beta-local beta agent-inspect
 
 help: ## Show available make targets
 	@awk 'BEGIN {FS = ":.*## "}; /^[a-zA-Z0-9_.-]+:.*## / {printf "  %-16s %s\n", $$1, $$2}' $(MAKEFILE_LIST)
@@ -112,6 +120,11 @@ init: ## Install hooks and local dependencies when tools are available
 	else \
 		echo "No $(E2E_PACKAGE) found; skipping Playwright dependency install"; \
 	fi
+	@if [ -f "$(AI_WEB_SPIKE_PACKAGE)" ]; then \
+		$(NPM) --prefix $(AI_WEB_SPIKE_DIR) install; \
+	else \
+		echo "No $(AI_WEB_SPIKE_PACKAGE) found; skipping AI Web spike dependency install"; \
+	fi
 	@if command -v $(DX) >/dev/null 2>&1; then \
 		$(DX) doctor; \
 	else \
@@ -124,7 +137,7 @@ l: docs-l rust-l e2e-l ## Run light checks
 
 dl: l rust-dl e2e-dl ## Run deeper optional checks
 
-t: rust-t ## Run implemented test suites
+t: rust-t plan-runner-check ## Run implemented test suites
 
 c: fmt dl t ## Run full local quality gate
 
@@ -135,6 +148,20 @@ pc: ## Run pre-commit hooks on all files
 		echo "pre-commit is not installed; cannot run hooks"; \
 		exit 1; \
 	fi
+
+plan-runner-check: ## Validate the autonomous plan runner and stage manifest
+	python3 scripts/execute_plan.py --self-check
+	python3 -m unittest scripts/test_execute_plan.py
+
+plan-list: ## List autonomous implementation stages, commits and gates
+	python3 scripts/execute_plan.py --list
+
+devcontainer-up: ## Build/start the devcontainer and open an interactive shell
+	$(DEVCONTAINER) up --workspace-folder .
+	$(DEVCONTAINER) exec --workspace-folder . bash
+
+devcontainer-down: ## Stop and remove devcontainer services while preserving named volumes
+	$(DOCKER) compose --project-name $(DEVCONTAINER_COMPOSE_PROJECT) --file $(DEVCONTAINER_COMPOSE_FILE) down --remove-orphans
 
 docs-fmt: ## Format/check docs when a formatter is available
 	@echo "No docs formatter configured yet; skipping docs format"
@@ -171,7 +198,7 @@ rust-web-l: ## Run Dioxus web lint when wasm target is installed
 	@if [ -f "$(WEB_PACKAGE)" ]; then \
 		WASM_LIBDIR=$$($(RUSTUP_PATH_ENV) rustc --target wasm32-unknown-unknown --print target-libdir 2>/dev/null); \
 		if [ -n "$$WASM_LIBDIR" ] && [ -d "$$WASM_LIBDIR" ]; then \
-			$(RUSTUP_PATH_ENV) $(CARGO) clippy -p lumi-web --target wasm32-unknown-unknown --no-default-features --features web -- -D warnings; \
+			$(RUSTUP_PATH_ENV) CARGO_TARGET_DIR=$(WASM_TARGET_DIR) $(CARGO) clippy -p lumi-web --target wasm32-unknown-unknown --no-default-features --features web -- -D warnings; \
 		else \
 			echo "wasm32-unknown-unknown is not installed; skipping Dioxus web lint"; \
 		fi; \
@@ -204,7 +231,7 @@ rust-t: ## Run Rust tests for implemented crates
 		echo "No Cargo.toml found; skipping Rust tests"; \
 	fi
 
-up: ## Build and start the complete local stack
+up: ## Build and start the complete local stack, loading .env through Docker Compose
 	LUMI_SERVER_PORT=$(LUMI_SERVER_PORT) LUMI_WEB_PORT=$(LUMI_WEB_PORT) LUMI_POSTGRES_PORT=$(LUMI_POSTGRES_PORT) docker compose up -d --build --wait
 	@echo "Lumi is ready: http://127.0.0.1:$(LUMI_WEB_PORT)"
 	@echo "Logs: make logs | Stop: make down | Delete local data: make reset"
@@ -226,11 +253,14 @@ server-r: ## Run the local Axum server
 			echo "Then apply migrations with: make db-migrate"; \
 			exit 1; \
 		fi; \
-		DATABASE_URL=$(DATABASE_URL) LUMI_SERVER_BIND=$(LUMI_SERVER_BIND) $(CARGO) run -p lumi-server --bin lumi-server; \
+		DATABASE_URL=$(DATABASE_URL) LUMI_SERVER_BIND=$(LUMI_SERVER_BIND) LUMI_ADMIN_LOOKUP_IDS="$${LUMI_ADMIN_LOOKUP_IDS:-}" $(CARGO) run -p lumi-server --bin lumi-server; \
 	else \
 		echo "No Cargo.toml found; cannot run server"; \
 		exit 1; \
 	fi
+
+admin-lookup-id: ## Derive a public admin lookup id from a recovery phrase supplied through stdin
+	@$(CARGO) run --quiet -p lumi-server --bin lumi-admin-id
 
 db-up: ## Start the local PostgreSQL service
 	LUMI_POSTGRES_PORT=$(LUMI_POSTGRES_PORT) docker compose up -d --wait postgres
@@ -241,7 +271,11 @@ db-down: ## Stop the local PostgreSQL service
 db-migrate: ## Apply forward-only SQLx migrations
 	DATABASE_URL=$(DATABASE_URL) $(CARGO) run -p lumi-server --bin lumi-migrate
 
-web-r: ## Run the Dioxus web development server
+pdfjs-assets: ## Prepare pinned PDF.js browser assets
+	@if [ ! -d "$(WEB_NODE_MODULES)/pdfjs-dist" ]; then $(NPM) --prefix $(WEB_DIR) ci --ignore-scripts; fi
+	@$(NPM) --prefix $(WEB_DIR) run prepare:pdfjs
+
+web-r: pdfjs-assets ## Run the Dioxus web development server
 	@if [ -f "$(WEB_PACKAGE)" ]; then \
 		if command -v $(DX) >/dev/null 2>&1; then \
 			cd $(WEB_DIR) && $(RUSTUP_PATH_ENV) LUMI_API_BASE=$(LUMI_API_BASE) $(DX) serve --web --addr $(LUMI_WEB_HOST) --port $(LUMI_WEB_PORT); \
@@ -276,11 +310,20 @@ pagination-spike-e2e: ## Run Stage 0 pagination browser checks
 		exit 1; \
 	fi
 
-stage0-spikes: ## Run executable auth, EPUB and pagination spikes
+ai-chat-spike-e2e: ## Run the Stage 0 Deep Chat browser checks
+	@if [ -f "$(E2E_PACKAGE)" ] && [ -f "$(AI_WEB_SPIKE_PACKAGE)" ]; then \
+		if [ -d "$(E2E_NODE_MODULES)" ] && [ -d "$(AI_WEB_SPIKE_NODE_MODULES)" ]; then $(NPM) --prefix $(E2E_DIR) run test:ai-stage0-spike; else echo "Spike dependencies are not installed; run make init"; exit 1; fi; \
+	else \
+		echo "AI Web spike packages are missing"; \
+		exit 1; \
+	fi
+
+stage0-spikes: ## Run executable architecture risk spikes
 	$(CARGO) test -p $(STAGE0_SPIKE_PACKAGE)
 	$(MAKE) pagination-spike-e2e
+	$(MAKE) ai-chat-spike-e2e
 
-web-build: ## Build the Dioxus web app when dx is available
+web-build: pdfjs-assets ## Build the Dioxus web app when dx is available
 	@if [ -f "$(WEB_PACKAGE)" ]; then \
 		if command -v $(DX) >/dev/null 2>&1; then \
 			cd $(WEB_DIR) && $(RUSTUP_PATH_ENV) $(DX) build --web; \
@@ -322,7 +365,7 @@ e2e-dl: ## Run optional Playwright static checks when dependencies exist
 
 web-e2e: ## Run Playwright browser E2E tests
 	@if [ -f "$(E2E_PACKAGE)" ]; then \
-		if [ -d "$(E2E_NODE_MODULES)" ]; then $(NPM) --prefix $(E2E_DIR) test; else echo "E2E dependencies are not installed; run make init"; exit 1; fi; \
+		if [ -d "$(E2E_NODE_MODULES)" ]; then NPM="$(NPM)" ./scripts/web-e2e.sh; else echo "E2E dependencies are not installed; run make init"; exit 1; fi; \
 	else \
 		echo "No $(E2E_PACKAGE) found; cannot run E2E tests"; \
 		exit 1; \
@@ -333,6 +376,8 @@ pg-t: db-up db-migrate ## Run mandatory PostgreSQL-backed integration suites
 
 compatibility: ## Run committed EPUB, Web and Telegram compatibility suites
 	$(CARGO) test -p lumi-core epub::tests
+	$(CARGO) test -p lumi-core pdf::tests
+	$(CARGO) test -p lumi-server pdf_engine::tests
 	$(CARGO) test -p lumi-core fixtures
 	$(CARGO) test -p lumi-core sources
 	LUMI_TEST_DATABASE_URL=$(DATABASE_URL) $(CARGO) test -p lumi-server telegram
@@ -344,6 +389,9 @@ security: ## Run import, session, ownership and transport security suites
 
 performance: db-up db-migrate ## Run release-mode beta performance budgets
 	LUMI_TEST_DATABASE_URL=$(DATABASE_URL) LUMI_PERFORMANCE=1 $(CARGO) test --release -p lumi-core -p lumi-server performance_
+
+search-performance: ## Run the 500k-chunk search quality and latency budget
+	LUMI_SEARCH_PERFORMANCE=1 $(CARGO) test --release -p lumi-server performance_search_ --lib -- --nocapture
 
 staging-config: ## Validate the executable staging Compose model
 	docker compose --env-file deployments/staging.env.example -f deployments/compose.staging.yaml config --quiet
@@ -381,4 +429,4 @@ clean: ## Remove common local build and cache artifacts
 	rm -rf $(WEB_DIR)/dist $(WEB_DIR)/target
 	rm -rf $(E2E_DIR)/test-results $(E2E_DIR)/playwright-report
 
-.PHONY: help init fmt l dl t c pc docs-fmt docs-l rust-fmt rust-l rust-web-check rust-web-l rust-dl rust-t up logs down reset db-up db-down db-migrate server-r web-r prototype-r prototype-e2e pagination-spike-r pagination-spike-e2e stage0-spikes web-build e2e-fmt e2e-l e2e-dl web-e2e agent-inspect clean
+.PHONY: help init fmt l dl t c pc docs-fmt docs-l rust-fmt rust-l rust-web-check rust-web-l rust-dl rust-t devcontainer-up devcontainer-down up logs down reset db-up db-down db-migrate server-r web-r prototype-r prototype-e2e pagination-spike-r pagination-spike-e2e ai-chat-spike-e2e stage0-spikes web-build e2e-fmt e2e-l e2e-dl web-e2e agent-inspect clean

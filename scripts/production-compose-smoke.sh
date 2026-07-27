@@ -27,7 +27,16 @@ cleanup() {
 }
 trap cleanup EXIT INT TERM
 
-mkdir -p "$temporary/volumes/postgres-data" "$temporary/volumes/blobs" "$temporary/backups" "$temporary/scripts"
+mkdir -p \
+  "$temporary/volumes/postgres-data" \
+  "$temporary/volumes/blobs" \
+  "$temporary/volumes/secrets" \
+  "$temporary/volumes/search" \
+  "$temporary/volumes/models" \
+  "$temporary/backups" \
+  "$temporary/scripts"
+cp "$root/scripts/backup.sh" "$temporary/scripts/backup.sh"
+cp "$root/scripts/restore-drill.sh" "$temporary/scripts/restore-drill.sh"
 printf '%s\n' \
   'LUMI_POSTGRES_IMAGE=postgres:17-alpine' \
   'LUMI_BLOB_INIT_IMAGE=busybox:1.37' \
@@ -38,6 +47,9 @@ printf '%s\n' \
   'LUMI_TELEGRAM_BOT_SCOPE=lumi-production-smoke' \
   'LUMI_TELEGRAM_BOT_USERNAME=' \
   'LUMI_TELEGRAM_WEBHOOK_SECRET=' \
+  'LUMI_FASTTEXT_MODEL=' \
+  'LUMI_FASTTEXT_MODEL_SHA256=' \
+  'LUMI_FASTTEXT_MODEL_VERSION=cc.ru.300.fasttext.v1' \
   'RUST_LOG=info,tower_http=info' > "$runtime_env"
 printf '%s\n' \
   'LUMI_RELEASE_ID=production-smoke' \
@@ -58,5 +70,16 @@ $compose up -d --wait postgres
 $compose run --rm migrate
 $compose up -d --wait server web
 $compose exec -T web wget --quiet --spider http://127.0.0.1:8080/api/v1/ready
+$compose stop server
+backup_path=$(
+  LUMI_BACKUP_WRITES_QUIESCED=1 \
+    LUMI_BACKUP_DRILL_MODE=1 \
+    LUMI_BACKUP_REQUIRE_SEEDED=0 \
+    $compose run --rm backup |
+    tail -n 1
+)
+backup_id=${backup_path##*/}
+[ -n "$backup_id" ] || { echo "backup did not return an id" >&2; exit 1; }
+LUMI_RESTORE_BACKUP_ID="$backup_id" $compose run --rm restore-drill
 $compose ps
 echo "production Compose smoke passed"

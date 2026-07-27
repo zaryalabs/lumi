@@ -5,11 +5,9 @@
 интеграции и набор реализуемых подсистем.
 
 Мы проектируем полную реализацию продукта, а не MVP и не временный срез.
-Ранние срезы разработки определены отдельно в
-[`../early-slices.md`](../early-slices.md).
 Текущее состояние документов - **Final v01**: целевая архитектура принята для
-планирования первого среза, а открытые вопросы считаются задачами прототипов,
-ADR или реализации, но не блокируют сам target design.
+планирования вертикальных продуктовых срезов, а открытые вопросы считаются
+задачами прототипов, ADR или реализации, но не блокируют сам target design.
 
 ## Цель
 
@@ -54,11 +52,17 @@ ADR или реализации, но не блокируют сам target desi
 - **Draft-to-accepted flow.** AI, generated learning items, KB drafts and
   social publication не становятся сильными knowledge/search/social объектами
   без принятия пользователем или явной policy.
+- **Material-centered Desk.** Записи, learning state и сохраненные
+  артефакты доступны через отдельную межматериальную поверхность. Она строится
+  как projection над primary domain objects, а не хранит их отдельные копии.
+- **Spaces as social subjects.** User Space представляет персональную страницу
+  и опыт одного account, Community Space — страницу сообщества с несколькими
+  участниками. Space не является разделом навигации, Desk или `SyncSpace`.
 - **Cloud-backed web, full-copy native later.** Первый web target хранит
   состояние в облачной реплике аккаунта. Desktop/mobile проектируются как
   будущие full-copy replicas, а private/decentralized mode остается
   долгосрочным accepted requirement.
-- **Shared spaces do not distribute private files.** Социальные функции
+- **Community Spaces do not distribute private files.** Социальные функции
   синхронизируют comments, highlights, activity and material claims, но не
   раздают source blobs участникам без их собственной копии/прав.
 - **One Job engine.** Imports, indexing, AI, transcription, exports, deletion
@@ -74,6 +78,8 @@ ADR или реализации, но не блокируют сам target desi
 - `draft` - первичная гипотеза, требует обсуждения;
 - `accepted` - целевое решение принято для `v01`; открытые вопросы внутри
   документа остаются implementation/prototype questions;
+- `deferred` - target design зафиксирован, но реализация сознательно вынесена
+  за текущую платформу/основной продуктовый scope;
 - `revisit` - решение временно принято, но требует возврата после проработки
   связанных подсистем;
 - `rejected` - вариант рассмотрен и отклонен с указанием причины;
@@ -90,6 +96,7 @@ docs/systems/
   feature-registry.md
   normalized-content.md
   reading-screen.md
+  desk.md
   reader-architecture.md
   backend-api.md
   security-privacy.md
@@ -111,6 +118,12 @@ docs/systems/
   learning.md
   social.md
   ai.md
+  ai-contracts.md
+  ai-chat.md
+  ai-summaries.md
+  ai-task-queue.md
+  ai-threat-review.md
+  mcp.md
   plugins.md
 ```
 
@@ -121,6 +134,7 @@ docs/systems/
 | Регистр функций | `feature-registry.md` | `accepted` |
 | Нормализованный контент | `normalized-content.md` | `accepted` |
 | Экран чтения | `reading-screen.md` | `accepted` |
+| Desk | `desk.md` | `accepted` |
 | Архитектура экрана чтения | `reader-architecture.md` | `accepted` |
 | Backend и API boundaries | `backend-api.md` | `accepted` |
 | Security и privacy | `security-privacy.md` | `accepted` |
@@ -136,11 +150,17 @@ docs/systems/
 | Веб-аккаунт и облачная реплика | `web-account.md` | `accepted` |
 | Синхронизация | `sync.md` | `accepted` |
 | База знаний | `knowledge-base.md` | `accepted` |
-| Интеграция с Obsidian | `obsidian.md` | `accepted` |
+| Интеграция с Obsidian | `obsidian.md` | `deferred` |
 | Поиск | `search.md` | `accepted` |
 | Механики обучения | `learning.md` | `accepted` |
 | Социальные функции | `social.md` | `accepted` |
 | ИИ-функционал | `ai.md` | `accepted` |
+| AI/MCP Contract Freeze 1 | `ai-contracts.md` | `accepted` |
+| Глобальный ИИ-чат | `ai-chat.md` | `accepted` |
+| ИИ-саммари и сокращенные материалы | `ai-summaries.md` | `accepted` |
+| Очередь ИИ-задач | `ai-task-queue.md` | `accepted` |
+| Threat review AI/MCP `0.2.0` | `ai-threat-review.md` | `accepted` |
+| MCP-интерфейс для внешних агентов | `mcp.md` | `accepted` |
 | Плагины | `plugins.md` | `accepted` |
 
 ## Регистр функций
@@ -154,12 +174,6 @@ design docs.
 изменение scope должны обновлять соответствующую строку регистра или добавлять
 новый stable feature id.
 
-[`../early-slices.md`](../early-slices.md) задает первые implementation slices:
-core architecture skeleton, web EPUB reader, macOS desktop reader and Android
-reader. Эти срезы используют ID из регистра, но остаются отдельным документом,
-потому что отвечают за порядок разработки, а не за полный функциональный
-inventory.
-
 ## Композиционная модель
 
 Функциональные направления делятся на четыре слоя:
@@ -168,9 +182,9 @@ inventory.
   anchors and API boundaries.
 - **Reading layer.** Library/import, reader, annotations, navigation,
   page/fidelity surfaces and reader timeline.
-- **Knowledge layer.** Search, KB, learning and AI artifacts, all tied back to
-  source refs.
-- **Coordination/extension layer.** Social shared spaces, Obsidian projection,
+- **Knowledge layer.** Desk, search, KB, learning and AI artifacts, all
+  tied back to source refs.
+- **Coordination/extension layer.** Community Spaces, Obsidian projection,
   plugins, external agents and future private/decentralized mode.
 
 При выборе первого или следующего среза лучше брать вертикальный пользовательский
@@ -233,6 +247,12 @@ Status: draft
 - Reader должен иметь унифицированную внутреннюю модель отображения, чтобы
   заметки, хайлайты, поиск, обучение и ИИ-функции работали поверх разных
   исходных форматов одинаково.
+- Desk является отдельной material-centered поверхностью над записями,
+  learning state и сохраненными artifacts. Reader side panel остается
+  контекстным представлением текущего материала.
+- User Space представляет текущий персональный опыт Lumi целиком, а Community
+  Space — страницу сообщества. Это product-level subjects, а не варианты Desk
+  или инфраструктурного `SyncSpace`.
 - Все импортеры должны создавать immutable `DocumentRevision` и внутренний
   Normalized Content Package. `ReadingDocument` и `PageFidelityDocument` являются
   reader-facing view models поверх этого пакета, а не исходным форматом

@@ -1,0 +1,18 @@
+{
+  "schema_version": "summary-artifact.v1",
+  "artifact_id": "00000000-0000-7000-8000-000000000040",
+  "task_id": "00000000-0000-7000-8000-000000000001",
+  "run_id": "00000000-0000-7000-8000-000000000041",
+  "kind": "summary_artifact",
+  "status": "candidate",
+  "source_revision_id": "00000000-0000-7000-8000-000000000021",
+  "scope_kind": "chapter",
+  "scope_ref": "chapter-1",
+  "form": "brief",
+  "content": "Краткий source-backed результат.",
+  "citation_ids": [
+    "ctx:fixture:1"
+  ],
+  "authored_by": "ai",
+  "artifact_revision": 1
+}

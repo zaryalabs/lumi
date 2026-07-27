@@ -7,13 +7,16 @@
 Текущие документы:
 
 - [`vision.md`](vision.md) - продуктовый vision.
-- [`early-slices.md`](early-slices.md) - первые реализационные срезы.
 - [`systems/`](systems/) - принятое устройство систем Lumi для `v01`.
 - [`adr/`](adr/) - долговечные архитектурные решения.
 - [`runbooks/local-dev.md`](runbooks/local-dev.md) - локальный workflow
   разработки.
+- [`runbooks/codex-plan-runner.md`](runbooks/codex-plan-runner.md) -
+  изолированный последовательный запуск этапов через Codex CLI.
 - [`visuals/`](visuals/) - статический UI/UX-прототип и связанные визуальные
   решения.
+- [`releases/0.4.0.md`](releases/0.4.0.md) - release notes, ограничения и
+  rollback выпуска записей, Desk, Search и record RAG.
 
 Временные реализационные планы живут отдельно в
 [`tmp-plans`](tmp-plans). Это tactical working documents для активных
