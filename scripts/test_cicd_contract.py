@@ -184,11 +184,19 @@ class OperationsContractTests(unittest.TestCase):
         text = (ROOT / "scripts" / "production-compose-smoke.sh").read_text(
             encoding="utf-8"
         )
+        override = (ROOT / "ops" / "compose.smoke.yaml").read_text(
+            encoding="utf-8"
+        )
 
         self.assertIn('cp "$root/scripts/backup.sh"', text)
         self.assertIn("LUMI_BACKUP_DRILL_MODE=1", text)
         self.assertIn("$compose run --rm backup", text)
         self.assertIn("$compose run --rm restore-drill", text)
+        self.assertIn("-f $root/ops/compose.smoke.yaml", text)
+        self.assertIn("$compose ps -aq blob-init", text)
+        self.assertNotIn("$docker_cmd wait lumi-blob-init", text)
+        self.assertEqual(7, override.count("container_name:"))
+        self.assertNotIn("container_name: lumi-", override)
 
     def test_main_release_smokes_production_topology_before_push(self) -> None:
         text = (WORKFLOWS / "main.yml").read_text(encoding="utf-8")
