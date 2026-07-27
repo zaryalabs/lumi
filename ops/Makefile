@@ -81,7 +81,13 @@ smoke: require-files ## Check internal readiness and external Traefik routing
 			sleep 3; \
 		done; \
 		test "$$attempt" -le 20 || { $(COMPOSE_CMD) logs --tail=100 server web; exit 1; }; \
-		status="$$(curl --silent --show-error --output /dev/null --write-out '%{http_code}' "$$external_url")"; \
+		external_attempt=1; \
+		status=000; \
+		while [ "$$external_attempt" -le 20 ]; do \
+			if status="$$(curl --silent --show-error --output /dev/null --write-out '%{http_code}' "$$external_url")" && [ "$$status" = 200 ]; then break; fi; \
+			external_attempt=$$((external_attempt + 1)); \
+			sleep 3; \
+		done; \
 		test "$$status" = 200 || { echo "External smoke returned HTTP $$status" >&2; exit 1; }; \
 		printf 'Lumi smoke passed (external HTTP %s)\n' "$$status"
 
