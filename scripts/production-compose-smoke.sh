@@ -7,10 +7,11 @@ docker_cmd=${DOCKER:-docker}
 project="lumi-production-smoke-$$"
 temporary=$(mktemp -d)
 platform_created=0
+export LUMI_SMOKE_CONTAINER_PREFIX="$project"
 
 runtime_env="$temporary/runtime.env"
 images_env="$temporary/images.env"
-compose="$docker_cmd compose --project-directory $temporary -p $project --env-file $runtime_env --env-file $images_env -f $root/ops/compose.yaml"
+compose="$docker_cmd compose --project-directory $temporary -p $project --env-file $runtime_env --env-file $images_env -f $root/ops/compose.yaml -f $root/ops/compose.smoke.yaml"
 
 cleanup() {
   status=$?
@@ -64,7 +65,9 @@ if ! $docker_cmd network inspect platform >/dev/null 2>&1; then
 fi
 
 $compose up -d postgres blob-init
-blob_init_status=$($docker_cmd wait lumi-blob-init)
+blob_init_container=$($compose ps -aq blob-init)
+[ -n "$blob_init_container" ] || { echo "blob-init container was not created" >&2; exit 1; }
+blob_init_status=$($docker_cmd wait "$blob_init_container")
 [ "$blob_init_status" = 0 ] || { echo "blob-init failed with status $blob_init_status" >&2; exit 1; }
 $compose up -d --wait postgres
 $compose run --rm migrate

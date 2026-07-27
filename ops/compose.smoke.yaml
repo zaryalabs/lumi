@@ -1,0 +1,21 @@
+services:
+  postgres:
+    container_name: ${LUMI_SMOKE_CONTAINER_PREFIX:?set LUMI_SMOKE_CONTAINER_PREFIX}-postgres
+
+  migrate:
+    container_name: ${LUMI_SMOKE_CONTAINER_PREFIX:?set LUMI_SMOKE_CONTAINER_PREFIX}-migrate
+
+  blob-init:
+    container_name: ${LUMI_SMOKE_CONTAINER_PREFIX:?set LUMI_SMOKE_CONTAINER_PREFIX}-blob-init
+
+  server:
+    container_name: ${LUMI_SMOKE_CONTAINER_PREFIX:?set LUMI_SMOKE_CONTAINER_PREFIX}-server
+
+  web:
+    container_name: ${LUMI_SMOKE_CONTAINER_PREFIX:?set LUMI_SMOKE_CONTAINER_PREFIX}-web
+
+  backup:
+    container_name: ${LUMI_SMOKE_CONTAINER_PREFIX:?set LUMI_SMOKE_CONTAINER_PREFIX}-backup
+
+  restore-drill:
+    container_name: ${LUMI_SMOKE_CONTAINER_PREFIX:?set LUMI_SMOKE_CONTAINER_PREFIX}-restore-drill
