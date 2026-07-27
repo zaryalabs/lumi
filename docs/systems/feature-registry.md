@@ -212,6 +212,13 @@ server-side `whisper-1`, editable transcript acceptance, retry и retention.
 | PLG-005 | Plugin-owned data, sync objects, uninstall safety and migrations | extension | PLG-001, SYNC-002 | `plugins.md`, `sync.md` |
 | PLG-006 | Marketplace/trust path: first-party, verified, community and dev packages | extension | PLG-001 | `plugins.md` |
 
+`SOC-005` выпускается по capability slices. `material-discussions` покрывает
+material-level threads/replies и moderation без зависимости от `RD-006`.
+`community-communications` покрывает Space chat, append-only activity,
+cursor/polling delivery и MCP parity без доступа к private content.
+Полный `shared-reading` остаётся зависимым от Records v2: shared anchors,
+explicit published highlights и Reader overlay не считаются готовыми.
+
 ## Quality And Spikes
 
 | ID | Функция | Тип | Зависит от | Документы |

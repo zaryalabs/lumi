@@ -23,7 +23,11 @@ class RestoreAttestationTests(unittest.TestCase):
             artifacts = {
                 "postgres.dump": b"database",
                 "blobs.tar.gz": b"blobs",
-                "row-counts.txt": b"accounts 1\nmaterials 1\n",
+                "row-counts.txt": (
+                    b"accounts 2\ncommunity_access_links 1\n"
+                    b"community_revoked_links 1\ncommunity_spaces 1\n"
+                    b"shared_activity_events 3\nshared_chat_messages 1\n"
+                ),
                 "blob-records.txt": b"a" * 64 + b" sha256/aa/object 6\n",
             }
             for name, content in artifacts.items():

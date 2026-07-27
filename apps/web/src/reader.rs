@@ -147,6 +147,7 @@ pub(crate) fn ReaderApp(
     initial_anchor: Option<String>,
     csrf_token: String,
     record_rag_enabled: bool,
+    material_sharing_available: bool,
     on_close: EventHandler<()>,
     on_open_learning_session: EventHandler<Uuid>,
     on_manage_learning: EventHandler<(Uuid, Uuid)>,
@@ -408,6 +409,12 @@ pub(crate) fn ReaderApp(
                                         scope_ref: "material".to_owned(),
                                         label: "Саммари материала".to_owned(),
                                         csrf_token: csrf.read().clone(),
+                                    }
+                                    crate::community::ShareMaterialAction {
+                                        material_id: view.entry.id,
+                                        csrf_token: csrf.read().clone(),
+                                        available: material_sharing_available,
+                                        label: "Поделиться в сообществе".to_owned(),
                                     }
                                 }
                             }
@@ -2392,6 +2399,7 @@ fn focus_drawer_edge(panel_id: &str, first: bool) {
 }
 
 fn toggle_reader_panel(mut state: Signal<ReaderState>, panel: ReaderPanel) {
+    close_reader_more_menu();
     let (open, target) = if let ReaderState::Ready(view) = &mut *state.write() {
         let was_open = match panel {
             ReaderPanel::Toc => view.toc_open,
@@ -2422,6 +2430,16 @@ fn toggle_reader_panel(mut state: Signal<ReaderState>, panel: ReaderPanel) {
     } else {
         defer_reader_focus(panel_trigger(panel));
     }
+}
+
+fn close_reader_more_menu() {
+    let Some(document) = web_sys::window().and_then(|window| window.document()) else {
+        return;
+    };
+    let Ok(Some(details)) = document.query_selector(".reader-more[open]") else {
+        return;
+    };
+    let _ = details.remove_attribute("open");
 }
 
 fn close_reader_panel(mut state: Signal<ReaderState>, panel: ReaderPanel) {

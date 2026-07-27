@@ -10,6 +10,7 @@ mod annotations;
 mod auth;
 mod desk;
 mod epub;
+mod fingerprints;
 mod fixtures;
 mod learning;
 mod links;
@@ -22,6 +23,7 @@ mod models;
 mod pdf;
 mod reader;
 mod search;
+mod social;
 mod sources;
 
 pub use ai::*;
@@ -29,6 +31,7 @@ pub use annotations::*;
 pub use auth::*;
 pub use desk::*;
 pub use epub::*;
+pub use fingerprints::*;
 pub use fixtures::{
     import_epub_fixture, rich_epub_fixture, sample_fixture_highlight, sample_learning_fixture,
     simple_epub_fixture, EpubFixture, EpubFixtureResource, EpubFixtureSection, ImportError,
@@ -45,6 +48,7 @@ pub use models::*;
 pub use pdf::*;
 pub use reader::*;
 pub use search::*;
+pub use social::*;
 pub use sources::*;
 
 use serde::{Deserialize, Serialize};
@@ -53,7 +57,7 @@ use serde::{Deserialize, Serialize};
 pub const API_VERSION: &str = "v1";
 
 /// Current domain schema marker for the frozen `0.2.0` AI contracts.
-pub const DOMAIN_SCHEMA_VERSION: &str = "s1.2026-07-27.record-rag-v1";
+pub const DOMAIN_SCHEMA_VERSION: &str = "s1.2026-07-27.community-spaces-v1";
 
 /// Current normalized content package marker for reflowable S1 documents.
 pub const NORMALIZED_PACKAGE_VERSION: &str = "normalized.reflowable.s1";

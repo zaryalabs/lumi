@@ -28,6 +28,12 @@ pub(crate) const API_BASE: &str = match option_env!("LUMI_API_BASE") {
     None => "/api/v1",
 };
 
+fn community_join_token() -> Option<String> {
+    web_sys::window()
+        .and_then(|window| window.location().hash().ok())
+        .and_then(|hash| hash.strip_prefix("#join/").map(str::to_owned))
+        .filter(|token| !token.is_empty())
+}
 #[derive(Clone)]
 enum AccountState {
     Loading,
@@ -56,6 +62,11 @@ pub(crate) fn AccountGate() -> Element {
     let mut csrf = use_signal(String::new);
     let mut service_capabilities = use_signal(|| Option::<ServiceCapabilities>::None);
     let mut bootstrap_generation = use_signal(|| 0_u64);
+    let mut community_available = use_signal(|| false);
+    let mut material_sharing_available = use_signal(|| false);
+    let mut material_discussions_available = use_signal(|| false);
+    let mut community_communications_available = use_signal(|| false);
+    let mut capability_error = use_signal(String::new);
     use_effect(move || {
         let Some(window) = web_sys::window() else {
             return;
@@ -87,6 +98,9 @@ pub(crate) fn AccountGate() -> Element {
     use_effect(move || {
         let title = match route() {
             AppRoute::Library => "Библиотека — Lumi",
+            AppRoute::Community => "Сообщества — Lumi",
+            AppRoute::CommunitySpace(_) => "Сообщество — Lumi",
+            AppRoute::CommunityJoin => "Вступление в сообщество — Lumi",
             AppRoute::Challenges => "Челленджи — Lumi",
             AppRoute::AiQueue => "AI-задачи — Lumi",
             AppRoute::Connections => "Подключения — Lumi",
@@ -119,6 +133,44 @@ pub(crate) fn AccountGate() -> Element {
             match load_account().await {
                 Ok(account) => {
                     csrf.set(read_cookie("lumi_csrf").unwrap_or_default());
+                    match load_capabilities().await {
+                        Ok(capabilities) => {
+                            community_available.set(
+                                capabilities
+                                    .features
+                                    .iter()
+                                    .any(|feature| feature == "community-spaces"),
+                            );
+                            material_sharing_available.set(
+                                capabilities
+                                    .features
+                                    .iter()
+                                    .any(|feature| feature == "material-sharing"),
+                            );
+                            material_discussions_available.set(
+                                capabilities
+                                    .features
+                                    .iter()
+                                    .any(|feature| feature == "material-discussions"),
+                            );
+                            community_communications_available.set(
+                                capabilities
+                                    .features
+                                    .iter()
+                                    .any(|feature| feature == "community-communications"),
+                            );
+                            capability_error.set(String::new());
+                        }
+                        Err(api_error) => {
+                            community_available.set(false);
+                            material_sharing_available.set(false);
+                            material_discussions_available.set(false);
+                            community_communications_available.set(false);
+                            capability_error.set(format!(
+                                "Не удалось проверить возможности сервера: {api_error}"
+                            ));
+                        }
+                    }
                     if account.instance_role != InstanceRole::Admin
                         && (route() == AppRoute::Settings || browser_requests_system_settings())
                     {
@@ -157,6 +209,46 @@ pub(crate) fn AccountGate() -> Element {
             AccountEntry {
                 on_authenticated: move |session: SessionBootstrap| {
                     csrf.set(session.csrf_token.clone());
+                    spawn(async move {
+                        match load_capabilities().await {
+                            Ok(capabilities) => {
+                                community_available.set(
+                                    capabilities
+                                        .features
+                                        .iter()
+                                        .any(|feature| feature == "community-spaces"),
+                                );
+                                material_sharing_available.set(
+                                    capabilities
+                                        .features
+                                        .iter()
+                                        .any(|feature| feature == "material-sharing"),
+                                );
+                                material_discussions_available.set(
+                                    capabilities
+                                        .features
+                                        .iter()
+                                        .any(|feature| feature == "material-discussions"),
+                                );
+                                community_communications_available.set(
+                                    capabilities
+                                        .features
+                                        .iter()
+                                        .any(|feature| feature == "community-communications"),
+                                );
+                                capability_error.set(String::new());
+                            }
+                            Err(api_error) => {
+                                community_available.set(false);
+                                material_sharing_available.set(false);
+                                material_discussions_available.set(false);
+                                community_communications_available.set(false);
+                                capability_error.set(format!(
+                                    "Не удалось проверить возможности сервера: {api_error}"
+                                ));
+                            }
+                        }
+                    });
                     if session.account.instance_role != InstanceRole::Admin
                         && (route() == AppRoute::Settings || browser_requests_system_settings())
                     {
@@ -212,6 +304,12 @@ pub(crate) fn AccountGate() -> Element {
                                 set_browser_route(&next);
                                 route.set(next);
                             }, "Поиск" }
+                            if community_available() {
+                                a { href: "#communities", aria_current: if matches!(route(), AppRoute::Community | AppRoute::CommunitySpace(_) | AppRoute::CommunityJoin) { "page" } else { "false" }, onclick: move |_| {
+                                    set_browser_route(&AppRoute::Community);
+                                    route.set(AppRoute::Community);
+                                }, "Сообщества" }
+                            }
                             a { href: "#challenges", aria_current: if route() == AppRoute::Challenges { "page" } else { "false" }, onclick: move |_| {
                                 set_browser_route(&AppRoute::Challenges);
                                 route.set(AppRoute::Challenges);
@@ -250,12 +348,54 @@ pub(crate) fn AccountGate() -> Element {
                         }
                     }
                     }
+                    if !capability_error().is_empty() {
+                        div { class: "library-alert", role: "alert",
+                            span { "{capability_error}" }
+                            button { r#type: "button", onclick: move |_| {
+                                capability_error.set(String::new());
+                                spawn(async move {
+                                    match load_capabilities().await {
+                                        Ok(capabilities) => {
+                                            community_available.set(
+                                                capabilities
+                                                    .features
+                                                    .iter()
+                                                    .any(|feature| feature == "community-spaces"),
+                                            );
+                                            material_sharing_available.set(
+                                                capabilities
+                                                    .features
+                                                    .iter()
+                                                    .any(|feature| feature == "material-sharing"),
+                                            );
+                                            material_discussions_available.set(
+                                                capabilities
+                                                    .features
+                                                    .iter()
+                                                    .any(|feature| feature == "material-discussions"),
+                                            );
+                                            community_communications_available.set(
+                                                capabilities
+                                                    .features
+                                                    .iter()
+                                                    .any(|feature| feature == "community-communications"),
+                                            );
+                                        }
+                                        Err(api_error) => capability_error.set(format!(
+                                            "Не удалось проверить возможности сервера: {api_error}"
+                                        )),
+                                    }
+                                });
+                            }, "Повторить" }
+                        }
+                    }
                     if let AppRoute::Reader(material_id, return_to, anchor) = route() {
                         crate::pdf_reader::ReaderRoute {
                             material_id,
                             initial_anchor: anchor,
                             csrf_token: csrf.read().clone(),
                             record_rag_enabled,
+                            material_sharing_available: material_sharing_available(),
                             on_close: move |_| {
                                 let next = return_to.map_or(AppRoute::Library, AppRoute::LearningSession);
                                 set_browser_route(&next);
@@ -299,6 +439,26 @@ pub(crate) fn AccountGate() -> Element {
                         }
                     } else if route() == AppRoute::Connections {
                         ConnectionsApp { csrf_token: csrf.read().clone() }
+                    } else if matches!(route(), AppRoute::Community | AppRoute::CommunitySpace(_) | AppRoute::CommunityJoin) {
+                        crate::community::CommunityPage {
+                            current_user_id: account.user_id,
+                            csrf_token: csrf.read().clone(),
+                            space_id: if let AppRoute::CommunitySpace(space_id) = route() { Some(space_id) } else { None },
+                            join_token: if route() == AppRoute::CommunityJoin { community_join_token() } else { None },
+                            available: community_available(),
+                            material_sharing_available: material_sharing_available(),
+                            material_discussions_available: material_discussions_available(),
+                            community_communications_available: community_communications_available(),
+                            on_open_space: move |space_id| {
+                                let next = AppRoute::CommunitySpace(space_id);
+                                set_browser_route(&next);
+                                route.set(next);
+                            },
+                            on_open_list: move |_| {
+                                set_browser_route(&AppRoute::Community);
+                                route.set(AppRoute::Community);
+                            },
+                        }
                     } else if route() == AppRoute::Challenges {
                         crate::learning::ChallengesPage {
                             csrf_token: csrf.read().clone(),
@@ -922,6 +1082,12 @@ fn LibraryApp(
             .iter()
             .any(|feature| feature == "ai-abridged-lum")
     });
+    let material_sharing_enabled = capabilities.read().as_ref().is_some_and(|value| {
+        value
+            .features
+            .iter()
+            .any(|feature| feature == "material-sharing")
+    });
     rsx! {
         main { id: "main-content", class: "library-view", aria_label: "Библиотека Lumi",
             header { class: if loaded { "library-hero compact" } else { "library-hero" },
@@ -1009,6 +1175,7 @@ fn LibraryApp(
                                 key: "{entry.id}",
                                 entry,
                                 csrf_token: csrf_token.clone(),
+                                material_sharing_enabled,
                                 on_changed: move |_| {
                                     spawn(async move {
                                         match refresh_library(entries, continue_reading, refresh_generation).await {
@@ -1043,6 +1210,7 @@ fn LibraryApp(
                                 key: "archived-{entry.id}",
                                 entry,
                                 csrf_token: csrf_token.clone(),
+                                material_sharing_enabled,
                                 on_changed: move |_| {
                                     spawn(async move {
                                         let _ = refresh_library(entries, continue_reading, refresh_generation).await;
@@ -1083,7 +1251,7 @@ fn LibraryApp(
         }
 
         if let Some(entry) = details.read().clone() {
-            MaterialDetailsDialog { entry: entry.clone(), csrf_token: csrf_token.clone(), abridgement_enabled, on_close: move |_| {
+            MaterialDetailsDialog { entry: entry.clone(), csrf_token: csrf_token.clone(), abridgement_enabled, material_sharing_enabled, on_close: move |_| {
                 details.set(None);
                 defer_account_focus(&format!("details-{}", entry.id));
             } }
@@ -1128,6 +1296,7 @@ fn LibraryApp(
 fn MaterialCard(
     entry: LibraryEntry,
     csrf_token: String,
+    material_sharing_enabled: bool,
     on_changed: EventHandler<()>,
     on_details: EventHandler<LibraryEntry>,
     on_delete: EventHandler<LibraryEntry>,
@@ -1148,7 +1317,8 @@ fn MaterialCard(
     let delete_entry = entry.clone();
     let state_csrf = csrf_token.clone();
     let cancel_job_csrf = csrf_token.clone();
-    let retry_job_csrf = csrf_token;
+    let retry_job_csrf = csrf_token.clone();
+    let share_csrf = csrf_token;
     let state_changed = on_changed;
     let job_changed = on_changed;
     let state_error = on_error;
@@ -1199,6 +1369,14 @@ fn MaterialCard(
                         div { class: "material-menu-actions",
                             button { id: "details-{material_id}", class: "text-action", r#type: "button", onclick: move |_| on_details.call(details_entry.clone()), "Сведения" }
                             a { class: "text-action", href: "{API_BASE}/materials/{material_id}/source", "{source_download_label}" }
+                            if entry.import_status == MaterialImportStatus::Ready {
+                                crate::community::ShareMaterialAction {
+                                    material_id,
+                                    csrf_token: share_csrf.clone(),
+                                    available: material_sharing_enabled,
+                                    label: "Поделиться в сообществе".to_owned(),
+                                }
+                            }
                             if matches!(entry.latest_job.status, JobStatus::Queued | JobStatus::Running) {
                                 button { class: "text-action", r#type: "button", onclick: move |_| {
                                     let csrf = cancel_job_csrf.clone();
@@ -1490,6 +1668,7 @@ fn MaterialDetailsDialog(
     entry: LibraryEntry,
     csrf_token: String,
     abridgement_enabled: bool,
+    material_sharing_enabled: bool,
     on_close: EventHandler<()>,
 ) -> Element {
     let revision = entry
@@ -1545,6 +1724,14 @@ fn MaterialDetailsDialog(
             }
             div { class: "dialog-actions",
                 a { class: "secondary-action", href: "{API_BASE}/materials/{entry.id}/source", "{download_label}" }
+                if entry.import_status == MaterialImportStatus::Ready {
+                    crate::community::ShareMaterialAction {
+                        material_id: entry.id,
+                        csrf_token: csrf_token.clone(),
+                        available: material_sharing_enabled,
+                        label: "Поделиться".to_owned(),
+                    }
+                }
                 if let Some(revision_id) = entry.active_revision_id {
                     crate::ai::SummaryAction {
                         material_id: entry.id,
@@ -1658,7 +1845,7 @@ fn AccountEntry(on_authenticated: EventHandler<SessionBootstrap>) -> Element {
 }
 
 #[derive(Debug)]
-enum ApiError {
+pub(crate) enum ApiError {
     Unauthorized,
     Message(String),
 }
@@ -2106,7 +2293,7 @@ where
     parse_json(response).await
 }
 
-async fn parse_json<T>(response: gloo_net::http::Response) -> Result<T, ApiError>
+pub(crate) async fn parse_json<T>(response: gloo_net::http::Response) -> Result<T, ApiError>
 where
     T: for<'de> serde::Deserialize<'de>,
 {
@@ -2116,7 +2303,7 @@ where
     response.json().await.map_err(network_error)
 }
 
-fn api_response_error(response: &gloo_net::http::Response) -> ApiError {
+pub(crate) fn api_response_error(response: &gloo_net::http::Response) -> ApiError {
     if response.status() == 401 {
         notify_session_expired();
         ApiError::Unauthorized
@@ -2217,7 +2404,7 @@ fn defer_account_dialog(id: &str) {
     });
 }
 
-fn network_error(error: impl std::fmt::Display) -> ApiError {
+pub(crate) fn network_error(error: impl std::fmt::Display) -> ApiError {
     ApiError::Message(format!("Сеть/API недоступны: {error}"))
 }
 

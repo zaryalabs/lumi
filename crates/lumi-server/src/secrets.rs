@@ -231,6 +231,29 @@ impl SecretStore {
         })
     }
 
+    /// Derive a versioned feature key without exposing the key-ring root.
+    ///
+    /// Derived keys are for server-internal one-way signals only. Persisted
+    /// values must retain the returned key version so rotation can trigger a
+    /// bounded rebuild instead of comparing incompatible signatures.
+    pub(crate) fn derive_feature_key(
+        &self,
+        purpose: &str,
+    ) -> Result<(u32, [u8; 32]), SecretStoreError> {
+        if purpose.is_empty() || purpose.len() > 128 {
+            return Err(SecretStoreError::InvalidContext);
+        }
+        let (version, key) = read_key_ring(&self.key_ring)?.active()?;
+        let mut input = Vec::with_capacity(32 + purpose.len());
+        input.extend_from_slice(b"lumi.feature-derived-key.v1\0");
+        input.extend_from_slice(purpose.as_bytes());
+        let tag = hmac::sign(&key.fingerprint, &input);
+        let mut derived = [0_u8; 32];
+        derived.copy_from_slice(tag.as_ref());
+        input.zeroize();
+        Ok((version, derived))
+    }
+
     /// Encrypt and persist one new account/purpose-bound envelope.
     ///
     /// # Errors

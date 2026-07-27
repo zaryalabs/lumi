@@ -15,6 +15,9 @@ alerts:
   - name: lumi-abridgement-recovery-rejections
     signal: rate(log_events_total{message="invalid abridgement candidate rejected during recovery"}[15m]) > 0
     for: 5m
+  - name: lumi-community-communications-failures
+    signal: rate(log_events_total{message="Community communications request failed",result=~"rate_limited|unavailable"}[15m]) > 0.05
+    for: 10m
   - name: lumi-backup-stale
     signal: time() - backup_manifest_created_timestamp_seconds > 90000
     for: 15m

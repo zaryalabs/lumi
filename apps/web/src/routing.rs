@@ -7,6 +7,9 @@ use uuid::Uuid;
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) enum AppRoute {
     Library,
+    Community,
+    CommunitySpace(Uuid),
+    CommunityJoin,
     Challenges,
     AiQueue,
     Connections,
@@ -86,6 +89,7 @@ fn parse_hash(hash: &str) -> Option<AppRoute> {
     match path {
         "" | "library" => Some(AppRoute::Library),
         "settings" => Some(AppRoute::Settings),
+        "communities" => Some(AppRoute::Community),
         "challenges" => Some(AppRoute::Challenges),
         "connections" => Some(AppRoute::Connections),
         "ai-queue" => Some(AppRoute::AiQueue),
@@ -108,6 +112,15 @@ fn parse_hash(hash: &str) -> Option<AppRoute> {
 }
 
 fn parse_dynamic_route(path: &str, query: &str) -> Option<AppRoute> {
+    if path
+        .strip_prefix("join/")
+        .is_some_and(|token| !token.is_empty())
+    {
+        return Some(AppRoute::CommunityJoin);
+    }
+    if let Some(id) = path.strip_prefix("community/") {
+        return Uuid::parse_str(id).ok().map(AppRoute::CommunitySpace);
+    }
     if let Some(id) = path.strip_prefix("learn/session/") {
         return Uuid::parse_str(id).ok().map(AppRoute::LearningSession);
     }
@@ -163,6 +176,9 @@ fn parse_dynamic_route(path: &str, query: &str) -> Option<AppRoute> {
 fn route_hash(route: &AppRoute) -> String {
     match route {
         AppRoute::Library => "library".to_owned(),
+        AppRoute::Community => "communities".to_owned(),
+        AppRoute::CommunitySpace(space_id) => format!("community/{space_id}"),
+        AppRoute::CommunityJoin => "join".to_owned(),
         AppRoute::Challenges => "challenges".to_owned(),
         AppRoute::AiQueue => "ai-queue".to_owned(),
         AppRoute::Connections => "connections".to_owned(),

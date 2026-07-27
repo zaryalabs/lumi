@@ -17,7 +17,7 @@ hkdf = "0.12.4"
 flate2 = { version = "1.1.9", default-features = false, features = [
   "rust_backend",
 ] }
-lumi-core = { version = "0.4.0", path = "../../crates/lumi-core", features = [
+lumi-core = { version = "0.5.0", path = "../../crates/lumi-core", features = [
   "markdown-import",
 ] }
 quick-xml = "0.41.0"

@@ -154,6 +154,34 @@ exact chunk ids/hashes и возвращает citations с едиными open 
 [`runbook`](docs/runbooks/record-rag.md) и
 [`release notes`](docs/releases/0.4.0.md).
 
+Для `0.5.0/E1` реализован Community Spaces vertical: отдельные product/sync
+identities, owner/admin/member permission matrix, scoped memberships,
+отзывные и ротируемые link invitations, safe preview и explicit join.
+Community Web shell поддерживает создание и настройку Space, управление
+ролями, ссылками и выходом; capability flags публикуются только для готового
+контура. В `0.5.0/E2` добавлена публикация material identity без source blob:
+сервер сам строит versioned privacy-protected fingerprint текущей личной
+копии, дедуплицирует identity внутри Space и создаёт personal claim с
+консервативными состояниями `matched`, `manual_review` или `rejected`.
+Карточка, сведения и оба Reader предоставляют явный Share flow, а участник
+может подключить только материал из собственной библиотеки. Persistent server
+публикует capability `material-sharing`. Зависимые от ещё выполняемого `0.4.0`
+shared anchors, social search, generic images и автоматический fingerprint
+lifecycle перечислены в
+[`docs/tmp-plans/0.5.0-deferred-until-0.4.0.md`](docs/tmp-plans/0.5.0-deferred-until-0.4.0.md).
+Для независимой части `0.5.0/E3` реализованы material-level threads/replies,
+author edit/delete, moderation tombstones, cursor API и Community discussion
+surface. Persistent server публикует capability `material-discussions`, но не
+`shared-reading`: anchor comments, published highlights и Reader overlay
+остаются отложены до общего Records v2 target/provenance contract `0.4.0`.
+Для независимой части `0.5.0/E4` добавлены отдельные Space chat и append-only
+activity, author CRUD/moderation tombstones, bounded cursor/polling delivery и
+account-scoped social tools в registry `mcp-tools.v4` поверх общих application
+services. Backup/restore evidence включает community state и revoked links,
+performance gate проверяет 50 000 сообщений и 100 000 событий. Workspace и Web
+package имеют версию `0.5.0`. Permission-aware social search events остаются
+выключены до завершения интеграции social surface с общим search runtime.
+
 ## Локальный запуск
 
 Для основного пути нужны Docker с Compose и `make`. Он собирает и запускает

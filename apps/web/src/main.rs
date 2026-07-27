@@ -5,6 +5,8 @@ mod account;
 #[cfg(target_arch = "wasm32")]
 mod ai;
 #[cfg(target_arch = "wasm32")]
+mod community;
+#[cfg(target_arch = "wasm32")]
 mod desk;
 #[cfg(target_arch = "wasm32")]
 mod learning;

@@ -281,5 +281,8 @@ citation DTO закреплены в
 
 - Exact serialization format for `units.jsonl`, `blocks.jsonl` and source maps.
 - Retention policy for old `DocumentRevision` packages after anchor migration.
-- Which fingerprints are safe enough for social matching without leaking too
-  much source text.
+
+Формат безопасного social matching принят в
+[`ADR 0037`](../adr/0037-material-fingerprints-and-community-claims.md):
+canonical hashes и HMAC-protected MinHash остаются server-internal, API
+возвращает только status/basis/bounded score.

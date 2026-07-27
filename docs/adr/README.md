@@ -44,6 +44,10 @@ plugin, AI, search and account/auth boundaries.
   snapshots.
 - [`0027`](0027-fsrs-scheduling-challenges.md) — versioned FSRS schedules,
   ordered hint evidence и bounded Challenges projection.
+- [`0028`](0028-learning-ai-evaluation-explain-back.md) — source-backed AI
+  drafts, open-answer evaluation и explain-back.
+- [`0029`](0029-learning-voice-attachments-transcripts.md) — owner-scoped audio
+  attachments, transcript revisions и voice learning lifecycle.
 - [`0030`](0030-annotation-v2-rich-reader.md) — совместимый Annotation v2,
   source-backed targets и paint-only rich overlays Reader.
 - [`0031`](0031-voice-note-audio-lifecycle.md) — общий owner-scoped audio
@@ -56,6 +60,14 @@ plugin, AI, search and account/auth boundaries.
   projection, типизированные routes и единые Web/MCP search surfaces.
 - [`0035`](0035-record-scoped-rag-global-chat.md) — record-only retrieval,
   visible context и citations в существующем durable global chat.
+- [`0036`](0036-community-space-sync-membership-links.md) — граница
+  CommunitySpace/SyncSpace, membership, roles и безопасные link invitations.
+- [`0037`](0037-material-fingerprints-and-community-claims.md) —
+  privacy-protected fingerprints и conservative claims личных копий.
+- [`0038`](0038-material-discussions-and-moderation.md) — material-level
+  discussions, author CRUD и moderation tombstones.
+- [`0039`](0039-community-chat-activity-and-mcp.md) — Space chat, append-only
+  activity, bounded polling и social MCP parity.
 
 ## Template
 

@@ -20,6 +20,7 @@ mod pdf_engine;
 mod scheduler;
 mod search;
 pub mod secrets;
+mod social;
 mod telegram;
 mod telegram_media;
 mod telegram_runtime;
@@ -333,6 +334,7 @@ pub struct AppState {
     mcp: Arc<mcp::McpRuntime>,
     search: Arc<search::SearchRuntime>,
     desk: Arc<desk::DeskRuntime>,
+    social: Arc<social::SocialRuntime>,
     ai_capabilities: ai::AiCapabilityReadiness,
 }
 
@@ -377,6 +379,7 @@ impl AppState {
             mcp: Arc::new(mcp::McpRuntime::memory()),
             search: Arc::new(search::SearchRuntime::empty_memory()),
             desk: Arc::new(desk::DeskRuntime::empty_memory()),
+            social: Arc::new(social::SocialRuntime::memory()),
             ai_capabilities: ai::AiCapabilityReadiness::default(),
         }
     }
@@ -436,6 +439,11 @@ impl AppState {
         .await
         .map_err(|error| anyhow::anyhow!(error))?;
         let mcp = Arc::new(mcp::McpRuntime::postgres(accounts.pool().clone()));
+        let social = Arc::new(
+            social::SocialRuntime::postgres(accounts.pool().clone(), config.secret_root())
+                .await
+                .map_err(|error| anyhow::anyhow!(error))?,
+        );
         let learning = Arc::new(learning::LearningRuntime::postgres(accounts.pool().clone()));
         let audio = Some(Arc::new(audio::AudioRuntime::postgres(
             accounts.pool().clone(),
@@ -468,6 +476,7 @@ impl AppState {
             mcp,
             search,
             desk,
+            social,
             ai_capabilities: ai::AiCapabilityReadiness::e4_release(),
         })
     }
@@ -497,6 +506,7 @@ impl AppState {
             mcp: Arc::new(mcp::McpRuntime::memory()),
             search,
             desk,
+            social: Arc::new(social::SocialRuntime::memory()),
             ai_capabilities: ai::AiCapabilityReadiness::default(),
         }
     }
@@ -527,6 +537,10 @@ impl AppState {
 
     fn mcp_runtime(&self) -> &mcp::McpRuntime {
         self.mcp.as_ref()
+    }
+
+    fn social_runtime(&self) -> &social::SocialRuntime {
+        self.social.as_ref()
     }
 
     fn learning_runtime(&self) -> &learning::LearningRuntime {
@@ -812,6 +826,25 @@ pub(crate) fn service_capabilities(state: &AppState) -> ServiceCapabilities {
         capabilities
             .features
             .push("learning-explain-back".to_owned());
+    }
+    capabilities.route_groups.push("spaces".to_owned());
+    capabilities.route_groups.push("shares".to_owned());
+    capabilities.features.push("community-spaces".to_owned());
+    capabilities
+        .features
+        .push("community-link-access".to_owned());
+    if state.social_runtime().supports_material_sharing() {
+        capabilities.features.push("material-sharing".to_owned());
+    }
+    if state.social_runtime().supports_material_discussions() {
+        capabilities
+            .features
+            .push("material-discussions".to_owned());
+    }
+    if state.social_runtime().supports_communications() {
+        capabilities
+            .features
+            .push("community-communications".to_owned());
     }
     capabilities
 }
@@ -2035,6 +2068,7 @@ enum AppError {
     Unauthorized,
     Forbidden(&'static str),
     Conflict(String),
+    Unprocessable(String),
     TooManyRequests(&'static str),
     PayloadTooLarge,
     Unavailable(&'static str),
@@ -2057,6 +2091,11 @@ impl IntoResponse for AppError {
             ),
             AppError::Forbidden(detail) => (StatusCode::FORBIDDEN, "forbidden", detail.to_owned()),
             AppError::Conflict(detail) => (StatusCode::CONFLICT, "conflict", detail),
+            AppError::Unprocessable(detail) => (
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "unprocessable_entity",
+                detail,
+            ),
             AppError::TooManyRequests(detail) => (
                 StatusCode::TOO_MANY_REQUESTS,
                 "too_many_requests",
@@ -2116,6 +2155,7 @@ mod tests {
     use lumi_core::{
         sample_fixture_highlight, AnnotationKind, HighlightStyle, ImportedFixture, WebAccount,
     };
+    use sqlx_core::row::Row;
     use tower::ServiceExt;
 
     use super::*;
@@ -2399,7 +2439,7 @@ mod tests {
         let migrations: Vec<SchemaMigration> =
             json_get(build_router(), "/api/v1/schema/migrations").await?;
 
-        assert_eq!(migrations.len(), 27);
+        assert_eq!(migrations.len(), 31);
         assert!(migrations
             .iter()
             .any(|migration| migration.id == "s1-0017-learning-core"));
@@ -2424,6 +2464,18 @@ mod tests {
         assert!(migrations
             .iter()
             .any(|migration| migration.id == "s1-0024-desk-projection"));
+        assert!(migrations
+            .iter()
+            .any(|migration| migration.id == "s1-0025-community-spaces-access"));
+        assert!(migrations
+            .iter()
+            .any(|migration| migration.id == "s1-0026-material-sharing-matching"));
+        assert!(migrations
+            .iter()
+            .any(|migration| migration.id == "s1-0027-material-discussions"));
+        assert!(migrations
+            .iter()
+            .any(|migration| migration.id == "s1-0028-community-chat-activity"));
         Ok(())
     }
 
@@ -2947,6 +2999,584 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn postgres_community_link_flow_enforces_membership_and_revocation(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let Ok(database_url) = std::env::var("LUMI_TEST_DATABASE_URL") else {
+            return Ok(());
+        };
+        let _recovery_guard = crate::imports::POSTGRES_RECOVERY_TEST_LOCK.lock().await;
+        run_migrations(&database_url).await?;
+        let blob_root =
+            std::env::temp_dir().join(format!("lumi-community-{}", uuid::Uuid::now_v7()));
+        let secret_root =
+            std::env::temp_dir().join(format!("lumi-community-secrets-{}", uuid::Uuid::now_v7()));
+        let mut config = AppConfig::from_env();
+        config.database_url = database_url.clone();
+        config.blob_root = blob_root;
+        config.secret_root = secret_root;
+        config.bind_address = DEFAULT_BIND_ADDRESS.to_owned();
+        config.deployment_mode = "local".to_owned();
+        let app = build_router_with_state(AppState::persistent(&config).await?);
+        let owner = register_unique_test_session(app.clone()).await?;
+        let member = register_unique_test_session(app.clone()).await?;
+
+        let create_response = app
+            .clone()
+            .oneshot(
+                owner.apply(
+                    Request::builder()
+                        .method("POST")
+                        .uri("/api/v1/spaces")
+                        .header(header::CONTENT_TYPE, "application/json")
+                        .header("idempotency-key", "community-create-flow")
+                        .body(json_body(&lumi_core::CreateCommunitySpaceRequest {
+                            name: "Книжный клуб".to_owned(),
+                            description: Some("Два браузера".to_owned()),
+                        })?)?,
+                ),
+            )
+            .await?;
+        assert_eq!(create_response.status(), StatusCode::CREATED);
+        let body = axum::body::to_bytes(create_response.into_body(), usize::MAX).await?;
+        let created: lumi_core::CommunitySpaceDetail = serde_json::from_slice(&body)?;
+
+        let link_response = app
+            .clone()
+            .oneshot(
+                owner.apply(
+                    Request::builder()
+                        .method("POST")
+                        .uri(format!("/api/v1/spaces/{}/access-links", created.space.id))
+                        .header(header::CONTENT_TYPE, "application/json")
+                        .header("idempotency-key", "community-link-flow")
+                        .body(json_body(&lumi_core::CreateCommunityAccessLinkRequest {
+                            expires_at: None,
+                            max_uses: None,
+                        })?)?,
+                ),
+            )
+            .await?;
+        assert_eq!(link_response.status(), StatusCode::CREATED);
+        let body = axum::body::to_bytes(link_response.into_body(), usize::MAX).await?;
+        let link: lumi_core::CreatedCommunityAccessLink = serde_json::from_slice(&body)?;
+
+        let preview_response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/shares/community-link/preview")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(json_body(&lumi_core::PreviewCommunityLinkRequest {
+                        token: link.token.clone(),
+                    })?)?,
+            )
+            .await?;
+        assert_eq!(preview_response.status(), StatusCode::OK);
+
+        let hidden_before_join = app
+            .clone()
+            .oneshot(
+                member.apply(
+                    Request::builder()
+                        .uri(format!("/api/v1/spaces/{}", created.space.id))
+                        .body(Body::empty())?,
+                ),
+            )
+            .await?;
+        assert_eq!(hidden_before_join.status(), StatusCode::NOT_FOUND);
+
+        let join_response = app
+            .clone()
+            .oneshot(
+                member.apply(
+                    Request::builder()
+                        .method("POST")
+                        .uri("/api/v1/shares/community-link/join")
+                        .header(header::CONTENT_TYPE, "application/json")
+                        .header("idempotency-key", "community-join-flow")
+                        .body(json_body(&lumi_core::JoinCommunityLinkRequest {
+                            token: link.token.clone(),
+                        })?)?,
+                ),
+            )
+            .await?;
+        assert_eq!(join_response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(join_response.into_body(), usize::MAX).await?;
+        let joined: lumi_core::CommunitySpaceDetail = serde_json::from_slice(&body)?;
+
+        let revoke_response = app
+            .clone()
+            .oneshot(
+                owner.apply(
+                    Request::builder()
+                        .method("DELETE")
+                        .uri(format!(
+                            "/api/v1/spaces/{}/access-links/{}",
+                            created.space.id, link.link.id
+                        ))
+                        .header("idempotency-key", "community-revoke-flow")
+                        .body(Body::empty())?,
+                ),
+            )
+            .await?;
+        assert_eq!(revoke_response.status(), StatusCode::NO_CONTENT);
+
+        let revoked_preview = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/shares/community-link/preview")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(json_body(&lumi_core::PreviewCommunityLinkRequest {
+                        token: link.token.clone(),
+                    })?)?,
+            )
+            .await?;
+        assert_eq!(revoked_preview.status(), StatusCode::NOT_FOUND);
+
+        let remove_response = app
+            .clone()
+            .oneshot(
+                owner.apply(
+                    Request::builder()
+                        .method("DELETE")
+                        .uri(format!(
+                            "/api/v1/spaces/{}/members/{}",
+                            created.space.id, joined.membership.user_id
+                        ))
+                        .header("idempotency-key", "community-remove-flow")
+                        .body(Body::empty())?,
+                ),
+            )
+            .await?;
+        assert_eq!(remove_response.status(), StatusCode::NO_CONTENT);
+        let hidden_after_remove = app
+            .clone()
+            .oneshot(
+                member.apply(
+                    Request::builder()
+                        .uri(format!("/api/v1/spaces/{}", created.space.id))
+                        .body(Body::empty())?,
+                ),
+            )
+            .await?;
+        assert_eq!(hidden_after_remove.status(), StatusCode::NOT_FOUND);
+        let chat_after_remove = app
+            .clone()
+            .oneshot(
+                member.apply(
+                    Request::builder()
+                        .uri(format!("/api/v1/spaces/{}/chat", created.space.id))
+                        .body(Body::empty())?,
+                ),
+            )
+            .await?;
+        assert_eq!(chat_after_remove.status(), StatusCode::NOT_FOUND);
+        let activity_after_remove = app
+            .oneshot(
+                member.apply(
+                    Request::builder()
+                        .uri(format!("/api/v1/spaces/{}/activity", created.space.id))
+                        .body(Body::empty())?,
+                ),
+            )
+            .await?;
+        assert_eq!(activity_after_remove.status(), StatusCode::NOT_FOUND);
+
+        let audit_store = PgAccountStore::connect(&database_url, HashSet::new()).await?;
+        let stored_response: serde_json::Value = sqlx_core::query::query(
+            "SELECT response_body FROM idempotency_keys
+             WHERE scope_id = $1 AND idempotency_key = 'community-link-flow'",
+        )
+        .bind(created.space.id)
+        .fetch_one(audit_store.pool())
+        .await?
+        .try_get("response_body")?;
+        assert!(!stored_response.to_string().contains(&link.token));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn postgres_material_sharing_matches_copies_without_exposing_source(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let Ok(database_url) = std::env::var("LUMI_TEST_DATABASE_URL") else {
+            return Ok(());
+        };
+        let _recovery_guard = crate::imports::POSTGRES_RECOVERY_TEST_LOCK.lock().await;
+        run_migrations(&database_url).await?;
+        let blob_root =
+            std::env::temp_dir().join(format!("lumi-social-material-{}", uuid::Uuid::now_v7()));
+        let secret_root = std::env::temp_dir().join(format!(
+            "lumi-social-material-secrets-{}",
+            uuid::Uuid::now_v7()
+        ));
+        let mut config = AppConfig::from_env();
+        config.database_url = database_url.clone();
+        config.blob_root = blob_root;
+        config.secret_root = secret_root;
+        config.bind_address = DEFAULT_BIND_ADDRESS.to_owned();
+        config.deployment_mode = "local".to_owned();
+        let app = build_router_with_state(AppState::persistent(&config).await?);
+        let owner = register_unique_test_session(app.clone()).await?;
+        let member = register_unique_test_session(app.clone()).await?;
+        let reviewer = register_unique_test_session(app.clone()).await?;
+        let owner_material = persist_social_fixture(&database_url, owner.user_id, None).await?;
+        let member_material = persist_social_fixture(&database_url, member.user_id, None).await?;
+        let reviewer_material = persist_social_fixture(
+            &database_url,
+            reviewer.user_id,
+            Some("Совершенно другое короткое содержание с тем же заголовком."),
+        )
+        .await?;
+
+        let created: lumi_core::CommunitySpaceDetail = request_json_with_session_status(
+            app.clone(),
+            Request::builder()
+                .method("POST")
+                .uri("/api/v1/spaces")
+                .header(header::CONTENT_TYPE, "application/json")
+                .header("idempotency-key", "material-space")
+                .body(json_body(&lumi_core::CreateCommunitySpaceRequest {
+                    name: "Сопоставление копий".to_owned(),
+                    description: None,
+                })?)?,
+            &owner,
+            StatusCode::CREATED,
+        )
+        .await?;
+        let link: lumi_core::CreatedCommunityAccessLink = request_json_with_session_status(
+            app.clone(),
+            Request::builder()
+                .method("POST")
+                .uri(format!("/api/v1/spaces/{}/access-links", created.space.id))
+                .header(header::CONTENT_TYPE, "application/json")
+                .header("idempotency-key", "material-space-link")
+                .body(json_body(&lumi_core::CreateCommunityAccessLinkRequest {
+                    expires_at: None,
+                    max_uses: None,
+                })?)?,
+            &owner,
+            StatusCode::CREATED,
+        )
+        .await?;
+        for (session, idempotency_key) in [
+            (&member, "member-material-join"),
+            (&reviewer, "reviewer-material-join"),
+        ] {
+            let _: lumi_core::CommunitySpaceDetail = request_json_with_session(
+                app.clone(),
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/shares/community-link/join")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .header("idempotency-key", idempotency_key)
+                    .body(json_body(&lumi_core::JoinCommunityLinkRequest {
+                        token: link.token.clone(),
+                    })?)?,
+                session,
+            )
+            .await?;
+        }
+
+        let owner_shared: lumi_core::SharedMaterial = request_json_with_session(
+            app.clone(),
+            Request::builder()
+                .method("POST")
+                .uri(format!(
+                    "/api/v1/spaces/{}/materials/share",
+                    created.space.id
+                ))
+                .header(header::CONTENT_TYPE, "application/json")
+                .header("idempotency-key", "owner-material-share")
+                .body(json_body(&lumi_core::ShareMaterialRequest {
+                    material_id: owner_material,
+                })?)?,
+            &owner,
+        )
+        .await?;
+        assert_eq!(
+            owner_shared.claim.as_ref().map(|claim| claim.status),
+            Some(lumi_core::UserMaterialClaimStatus::Matched)
+        );
+
+        let member_shared: lumi_core::SharedMaterial = request_json_with_session(
+            app.clone(),
+            Request::builder()
+                .method("POST")
+                .uri(format!(
+                    "/api/v1/spaces/{}/materials/share",
+                    created.space.id
+                ))
+                .header(header::CONTENT_TYPE, "application/json")
+                .header("idempotency-key", "member-material-share")
+                .body(json_body(&lumi_core::ShareMaterialRequest {
+                    material_id: member_material,
+                })?)?,
+            &member,
+        )
+        .await?;
+        assert_eq!(member_shared.identity.id, owner_shared.identity.id);
+        assert_eq!(
+            member_shared.claim.as_ref().map(|claim| claim.basis),
+            Some(lumi_core::MaterialMatchBasis::ExactContent)
+        );
+        let social_store = PgAccountStore::connect(&database_url, HashSet::new()).await?;
+        let sync_payloads = sqlx_core::query::query(
+            "SELECT change.payload::text AS payload
+             FROM sync_changes change
+             JOIN community_spaces space ON space.sync_space_id = change.space_id
+             WHERE space.community_space_id = $1",
+        )
+        .bind(created.space.id)
+        .fetch_all(social_store.pool())
+        .await?;
+        for row in sync_payloads {
+            let payload: String = row.try_get("payload")?;
+            assert!(!payload.contains(&owner_material.to_string()));
+            assert!(!payload.contains(&member_material.to_string()));
+        }
+
+        let ambiguous: lumi_core::SharedMaterial = request_json_with_session(
+            app.clone(),
+            Request::builder()
+                .method("POST")
+                .uri(format!(
+                    "/api/v1/spaces/{}/materials/share",
+                    created.space.id
+                ))
+                .header(header::CONTENT_TYPE, "application/json")
+                .header("idempotency-key", "reviewer-material-share")
+                .body(json_body(&lumi_core::ShareMaterialRequest {
+                    material_id: reviewer_material,
+                })?)?,
+            &reviewer,
+        )
+        .await?;
+        assert_eq!(
+            ambiguous.claim.as_ref().map(|claim| claim.status),
+            Some(lumi_core::UserMaterialClaimStatus::ManualReview)
+        );
+        let serialized = serde_json::to_string(&member_shared)?;
+        assert!(!serialized.contains("protected_similarity_signature"));
+        assert!(!serialized.contains("exact_normalized_hash"));
+
+        let forged = app
+            .clone()
+            .oneshot(
+                owner.apply(
+                    Request::builder()
+                        .method("POST")
+                        .uri(format!(
+                            "/api/v1/spaces/{}/materials/share",
+                            created.space.id
+                        ))
+                        .header(header::CONTENT_TYPE, "application/json")
+                        .header("idempotency-key", "foreign-material-share")
+                        .body(json_body(&lumi_core::ShareMaterialRequest {
+                            material_id: member_material,
+                        })?)?,
+                ),
+            )
+            .await?;
+        assert_eq!(forged.status(), StatusCode::NOT_FOUND);
+        let source = app
+            .clone()
+            .oneshot(
+                member.apply(
+                    Request::builder()
+                        .uri(format!("/api/v1/materials/{owner_material}/source"))
+                        .body(Body::empty())?,
+                ),
+            )
+            .await?;
+        assert_eq!(source.status(), StatusCode::NOT_FOUND);
+
+        let thread: lumi_core::SharedCommentThread = request_json_with_session_status(
+            app.clone(),
+            Request::builder()
+                .method("POST")
+                .uri(format!(
+                    "/api/v1/spaces/{}/materials/{}/threads",
+                    created.space.id, owner_shared.identity.id
+                ))
+                .header(header::CONTENT_TYPE, "application/json")
+                .header("idempotency-key", "discussion-create")
+                .body(json_body(&lumi_core::CreateSharedThreadRequest {
+                    body_markdown: "Первая тема без цитаты из личной копии".to_owned(),
+                })?)?,
+            &owner,
+            StatusCode::CREATED,
+        )
+        .await?;
+        let reply: lumi_core::SharedComment = request_json_with_session_status(
+            app.clone(),
+            Request::builder()
+                .method("POST")
+                .uri(format!(
+                    "/api/v1/spaces/{}/threads/{}/comments",
+                    created.space.id, thread.id
+                ))
+                .header(header::CONTENT_TYPE, "application/json")
+                .header("idempotency-key", "discussion-reply")
+                .body(json_body(&lumi_core::CreateSharedCommentRequest {
+                    parent_comment_id: thread.comments.first().map(|comment| comment.id),
+                    body_markdown: "Ответ участника".to_owned(),
+                })?)?,
+            &member,
+            StatusCode::CREATED,
+        )
+        .await?;
+        let edited: lumi_core::SharedComment = request_json_with_session(
+            app.clone(),
+            Request::builder()
+                .method("PATCH")
+                .uri(format!(
+                    "/api/v1/spaces/{}/comments/{}",
+                    created.space.id, reply.id
+                ))
+                .header(header::CONTENT_TYPE, "application/json")
+                .header("idempotency-key", "discussion-reply-edit")
+                .body(json_body(&lumi_core::UpdateSharedCommentRequest {
+                    body_markdown: "Исправленный ответ участника".to_owned(),
+                    expected_revision: reply.object_revision,
+                })?)?,
+            &member,
+        )
+        .await?;
+        let _: lumi_core::ModerationAction = request_json_with_session(
+            app.clone(),
+            Request::builder()
+                .method("POST")
+                .uri(format!(
+                    "/api/v1/spaces/{}/moderation/actions",
+                    created.space.id
+                ))
+                .header(header::CONTENT_TYPE, "application/json")
+                .header("idempotency-key", "discussion-reply-hide")
+                .body(json_body(&lumi_core::ModerateSocialContentRequest {
+                    target_type: lumi_core::ModerationTargetType::Comment,
+                    target_id: reply.id,
+                    action: lumi_core::ModerationActionKind::Hide,
+                    expected_revision: edited.object_revision,
+                    reason: Some("Проверка модерации".to_owned()),
+                })?)?,
+            &owner,
+        )
+        .await?;
+        let discussions: lumi_core::SharedDiscussionPage = request_json_with_session(
+            app.clone(),
+            Request::builder()
+                .uri(format!(
+                    "/api/v1/spaces/{}/materials/{}/threads?limit=50",
+                    created.space.id, owner_shared.identity.id
+                ))
+                .body(Body::empty())?,
+            &member,
+        )
+        .await?;
+        let hidden_reply = discussions
+            .threads
+            .first()
+            .and_then(|loaded_thread| {
+                loaded_thread
+                    .comments
+                    .iter()
+                    .find(|comment| comment.id == reply.id)
+            })
+            .ok_or_else(|| std::io::Error::other("hidden reply missing"))?;
+        assert_eq!(
+            (hidden_reply.state, hidden_reply.body_markdown.as_deref()),
+            (lumi_core::SocialContentState::Hidden, None)
+        );
+
+        let message: lumi_core::SharedChatMessage = request_json_with_session_status(
+            app.clone(),
+            Request::builder()
+                .method("POST")
+                .uri(format!("/api/v1/spaces/{}/chat", created.space.id))
+                .header(header::CONTENT_TYPE, "application/json")
+                .header("idempotency-key", "space-chat-create")
+                .body(json_body(&lumi_core::CreateSharedChatMessageRequest {
+                    body_markdown: "Сообщение участника".to_owned(),
+                })?)?,
+            &member,
+            StatusCode::CREATED,
+        )
+        .await?;
+        let replayed: lumi_core::SharedChatMessage = request_json_with_session_status(
+            app.clone(),
+            Request::builder()
+                .method("POST")
+                .uri(format!("/api/v1/spaces/{}/chat", created.space.id))
+                .header(header::CONTENT_TYPE, "application/json")
+                .header("idempotency-key", "space-chat-create")
+                .body(json_body(&lumi_core::CreateSharedChatMessageRequest {
+                    body_markdown: "Сообщение участника".to_owned(),
+                })?)?,
+            &member,
+            StatusCode::CREATED,
+        )
+        .await?;
+        assert_eq!(message.id, replayed.id);
+
+        let _: lumi_core::ModerationAction = request_json_with_session(
+            app.clone(),
+            Request::builder()
+                .method("POST")
+                .uri(format!(
+                    "/api/v1/spaces/{}/moderation/actions",
+                    created.space.id
+                ))
+                .header(header::CONTENT_TYPE, "application/json")
+                .header("idempotency-key", "space-chat-hide")
+                .body(json_body(&lumi_core::ModerateSocialContentRequest {
+                    target_type: lumi_core::ModerationTargetType::ChatMessage,
+                    target_id: message.id,
+                    action: lumi_core::ModerationActionKind::Hide,
+                    expected_revision: message.object_revision,
+                    reason: None,
+                })?)?,
+            &owner,
+        )
+        .await?;
+        let chat: lumi_core::SharedChatPage = request_json_with_session(
+            app.clone(),
+            Request::builder()
+                .uri(format!("/api/v1/spaces/{}/chat", created.space.id))
+                .body(Body::empty())?,
+            &member,
+        )
+        .await?;
+        let hidden_message = chat
+            .messages
+            .iter()
+            .find(|candidate| candidate.id == message.id)
+            .ok_or_else(|| std::io::Error::other("hidden chat message missing"))?;
+        assert_eq!(
+            (
+                hidden_message.state,
+                hidden_message.body_markdown.as_deref()
+            ),
+            (lumi_core::SocialContentState::Hidden, None)
+        );
+        let activity: lumi_core::CommunityActivityPage = request_json_with_session(
+            app,
+            Request::builder()
+                .uri(format!("/api/v1/spaces/{}/activity", created.space.id))
+                .body(Body::empty())?,
+            &member,
+        )
+        .await?;
+        assert!(activity.events.iter().any(|event| {
+            event.kind == lumi_core::CommunityActivityKind::ChatMessageCreated
+                && event.subject_id == message.id
+        }));
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn postgres_account_session_csrf_route_matrix() -> Result<(), Box<dyn std::error::Error>>
     {
         let Ok(database_url) = std::env::var("LUMI_TEST_DATABASE_URL") else {
@@ -3437,6 +4067,7 @@ mod tests {
     struct TestSession {
         cookie: String,
         csrf: String,
+        user_id: UserId,
     }
 
     impl TestSession {
@@ -3463,11 +4094,99 @@ mod tests {
         }
     }
 
+    async fn persist_social_fixture(
+        database_url: &str,
+        user_id: UserId,
+        replacement_text: Option<&str>,
+    ) -> Result<MaterialId, Box<dyn std::error::Error>> {
+        let store = PgAccountStore::connect(database_url, HashSet::new()).await?;
+        let space_id: uuid::Uuid = sqlx_core::query::query(
+            "SELECT space_id FROM sync_spaces
+             WHERE owner_user_id = $1 AND kind = 'personal' AND deleted_at IS NULL",
+        )
+        .bind(user_id)
+        .fetch_one(store.pool())
+        .await?
+        .try_get("space_id")?;
+        let mut imported = import_epub_fixture(user_id, &simple_epub_fixture())?;
+        if let Some(text) = replacement_text {
+            if let Some(block) = imported.package.blocks.first_mut() {
+                block.text = Some(text.to_owned());
+                block.content_hash = lumi_core::content_hash(text.as_bytes());
+            }
+        }
+        let material_id = imported.material.id;
+        let revision_id = imported.revision.id;
+        let mut transaction = store.pool().begin().await?;
+        sqlx_core::query::query(
+            "INSERT INTO materials
+             (material_id, space_id, owner_user_id, kind, canonical_title,
+              active_revision_id, library_state, source_identity, import_status,
+              object_revision, created_at, updated_at)
+             VALUES ($1, $2, $3, 'epub', $4, NULL, 'active', $5, 'ready', 1, now(), now())",
+        )
+        .bind(material_id)
+        .bind(space_id)
+        .bind(user_id)
+        .bind(&imported.material.canonical_title)
+        .bind(serde_json::to_value(&imported.material.source_identity)?)
+        .execute(&mut *transaction)
+        .await?;
+        sqlx_core::query::query(
+            "INSERT INTO document_revisions
+             (revision_id, material_id, space_id, source_format, source_hash,
+              importer_id, importer_version, normalized_hash,
+              package_format_version, created_at)
+             VALUES ($1, $2, $3, 'epub', $4, $5, $6, $7, $8, now())",
+        )
+        .bind(revision_id)
+        .bind(material_id)
+        .bind(space_id)
+        .bind(&imported.revision.source_hash)
+        .bind(&imported.revision.importer_id)
+        .bind(&imported.revision.importer_version)
+        .bind(&imported.revision.normalized_hash)
+        .bind(&imported.revision.package_format_version)
+        .execute(&mut *transaction)
+        .await?;
+        sqlx_core::query::query(
+            "INSERT INTO normalized_packages
+             (package_id, revision_id, schema_version, payload, source_map, created_at)
+             VALUES ($1, $2, $3, $4, '{}'::jsonb, now())",
+        )
+        .bind(imported.package.id)
+        .bind(revision_id)
+        .bind(&imported.revision.package_format_version)
+        .bind(serde_json::to_value(&imported.package)?)
+        .execute(&mut *transaction)
+        .await?;
+        sqlx_core::query::query(
+            "UPDATE materials SET active_revision_id = $2 WHERE material_id = $1",
+        )
+        .bind(material_id)
+        .bind(revision_id)
+        .execute(&mut *transaction)
+        .await?;
+        transaction.commit().await?;
+        Ok(material_id)
+    }
+
     async fn register_test_session(
         app: Router,
         seed: u8,
     ) -> Result<TestSession, Box<dyn std::error::Error>> {
         register_test_session_with_credentials(app, [seed; 32], [seed.wrapping_add(1); 32]).await
+    }
+
+    async fn register_unique_test_session(
+        app: Router,
+    ) -> Result<TestSession, Box<dyn std::error::Error>> {
+        register_test_session_with_credentials(
+            app,
+            unique_test_auth_bytes(),
+            unique_test_auth_bytes(),
+        )
+        .await
     }
 
     async fn register_test_session_with_credentials(
@@ -3523,6 +4242,7 @@ mod tests {
         Ok(TestSession {
             cookie,
             csrf: bootstrap.csrf_token,
+            user_id: bootstrap.account.user_id,
         })
     }
 
@@ -3533,6 +4253,18 @@ mod tests {
     ) -> Result<T, Box<dyn std::error::Error>> {
         let response = app.oneshot(session.apply(request)).await?;
         assert_eq!(response.status(), StatusCode::OK);
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX).await?;
+        Ok(serde_json::from_slice(&bytes)?)
+    }
+
+    async fn request_json_with_session_status<T: for<'de> Deserialize<'de>>(
+        app: Router,
+        request: Request<Body>,
+        session: &TestSession,
+        expected_status: StatusCode,
+    ) -> Result<T, Box<dyn std::error::Error>> {
+        let response = app.oneshot(session.apply(request)).await?;
+        assert_eq!(response.status(), expected_status);
         let bytes = axum::body::to_bytes(response.into_body(), usize::MAX).await?;
         Ok(serde_json::from_slice(&bytes)?)
     }

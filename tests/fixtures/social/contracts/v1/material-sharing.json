@@ -1,0 +1,37 @@
+{
+  "contract_version": "community-material-sharing.v1",
+  "identity": {
+    "id": "019c0000-0000-7000-8000-000000000201",
+    "community_space_id": "019c0000-0000-7000-8000-000000000101",
+    "canonical_title": "Книга двух копий",
+    "creators": ["Автор"],
+    "source_formats": ["epub", "pdf"],
+    "created_by_user_id": "019c0000-0000-7000-8000-000000000001",
+    "object_revision": 1,
+    "created_at": 1785024000000,
+    "updated_at": 1785024000000
+  },
+  "claim": {
+    "id": "019c0000-0000-7000-8000-000000000202",
+    "community_space_id": "019c0000-0000-7000-8000-000000000101",
+    "shared_material_id": "019c0000-0000-7000-8000-000000000201",
+    "user_id": "019c0000-0000-7000-8000-000000000002",
+    "material_id": "019c0000-0000-7000-8000-000000000203",
+    "revision_id": "019c0000-0000-7000-8000-000000000204",
+    "status": "matched",
+    "basis": "exact_content",
+    "score_bps": 10000,
+    "fingerprint_version": "material-fingerprint.v1:key-1",
+    "object_revision": 1,
+    "created_at": 1785024000000,
+    "updated_at": 1785024000000
+  },
+  "forbidden_fields": [
+    "source_blob",
+    "normalized_package",
+    "protected_similarity_signature",
+    "exact_normalized_hash",
+    "private_annotations",
+    "progress"
+  ]
+}

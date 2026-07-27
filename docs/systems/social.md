@@ -113,10 +113,24 @@ entry: by_link
 
 Space не обязан отображаться в глобальном каталоге или поиске сообществ, но
 человек со ссылкой может открыть его и пройти предусмотренный flow входа.
-Ссылка должна быть отзывной и перевыпускаемой. Точная граница между guest view,
-автоматическим вступлением и подтверждением вступления остается отдельным
-продуктовым решением; право комментировать, писать в chat и добавлять материалы
-требует membership и проверяется сервером.
+Ссылка должна быть отзывной и перевыпускаемой. Открытие ссылки показывает
+безопасный preview с name, description и числом участников. Membership
+создаётся только после явного действия `Вступить`. Preview не возвращает
+identities участников, материалы, activity или social content. Право
+комментировать, писать в chat и добавлять материалы требует active membership
+и проверяется сервером.
+
+Секрет ссылки передаётся в fragment URL. Browser извлекает его и отправляет
+только в bounded JSON body preview/join; token не попадает в HTTP request URL,
+Referer или application logs. В PostgreSQL хранится cryptographic hash, а
+зашифрованный envelope нужен только для deterministic idempotent replay
+create/rotate response. После успешного join Web заменяет fragment route и тем
+самым очищает token из адресной строки.
+
+`left` membership может снова стать active по действующей ссылке. `removed`
+membership не восстанавливается общей ссылкой: нужен отдельный будущий
+moderation/invite command. Owner не может выйти, быть удалён или понижен без
+явной передачи ownership.
 
 Доступ по ссылке не дает доступа к приватным source blobs, личным notes,
 прогрессу или learning state участников.
@@ -206,6 +220,22 @@ Social entities:
 Personal notes are not social comments. User can convert/share selected note или
 highlight explicitly.
 
+До готовности Records v2 отдельно выпускается material-level discussion
+contract из [`ADR 0038`](../adr/0038-material-discussions-and-moderation.md):
+
+- active member видит и создаёт discussion целого материала даже без matched
+  claim, потому что ответ не содержит quote или текст книги;
+- thread создаётся вместе с первым comment, replies имеют один уровень;
+- автор редактирует/удаляет своё с `expected_revision`;
+- owner/admin скрывает, восстанавливает или удаляет social content;
+- delete оставляет tombstone, hide маскирует body для обычного участника;
+- выдача cursor-paginated и не содержит anchor, source annotation, private
+  material/revision или normalized package.
+
+Эта capability называется `material-discussions`. Она не публикует
+`shared-reading`: anchor comments, shared highlights и Reader overlay остаются
+зависимыми от общего target/provenance contract `0.4.0`.
+
 Chat и comments имеют разные контексты:
 
 - comment является устойчивым обсуждением материала, главы или anchor;
@@ -213,6 +243,19 @@ Chat и comments имеют разные контексты:
   к материалу;
 - activity содержит системные события и не является третьей пользовательской
   лентой сообщений.
+
+Capability `community-communications` фиксирует первый release contract:
+
+- chat CRUD использует active membership, author-only edit/delete,
+  `expected_revision`, idempotency и общие moderation tombstones;
+- activity является append-only projection и возвращает только allowlisted
+  kinds/subjects без body, source metadata и fingerprint payload;
+- chat/activity имеют cursor pages до 100 объектов и Web polling с паузой в
+  hidden tab, backoff после ошибки и ручным retry;
+- account-scoped MCP adapters используют те же `SocialRuntime` services и
+  маскируют forbidden cross-Space resource как not found;
+- решение и границы описаны в
+  [`ADR 0039`](../adr/0039-community-chat-activity-and-mcp.md).
 
 ### Privacy controls
 
@@ -230,6 +273,11 @@ Chat и comments имеют разные контексты:
 - Admin/owner can moderate comments.
 - Deletes create tombstones for sync consistency.
 - Export/audit should show who created shared content and when.
+- Выход из Space не удаляет уже опубликованный social content: оно сохраняет
+  stable authorship до удаления автором, moderator action или account deletion
+  policy.
+- Удалённый account отображается как `Удалённый пользователь`; ACL и
+  provenance продолжают ссылаться на stable `user_id`, а не nickname.
 
 ## Нефункциональные требования
 
@@ -349,13 +397,23 @@ SharedAnchor {
 ### Fingerprinting pipeline
 
 1. Importer creates normalized text layer.
-2. Fingerprint job computes metadata fingerprint and text shingles.
+2. Server computes a versioned metadata/content fingerprint. В E2 explicit
+   share/claim/recheck делает это для текущей immutable active revision;
+   durable Job/backfill подключается после стабилизации revision lifecycle
+   `0.4.0`.
 3. Community Space claim compares local fingerprint to shared identity.
-4. Server stores match score/status, not necessarily raw full text.
+4. Server stores match score/status и server-internal evidence, но не raw full
+   text.
 5. Client maps shared anchors to local document revision.
 
-Open privacy choice: exact fingerprint payload must be designed so it is useful
-for matching but does not become a practical substitute for the text.
+Принятый `material-fingerprint.v1` описан в
+[`ADR 0037`](../adr/0037-material-fingerprints-and-community-claims.md):
+canonical exact hash дополняется 32-lane MinHash по нормализованным shingles,
+защищённым версионированным server-side HMAC key. Raw/protected signatures,
+metadata key и section hash никогда не возвращаются клиенту. Exact non-empty
+content совпадает автоматически; similarity требует не менее 100 tokens,
+90% MinHash similarity, совместимый размер и metadata/section evidence.
+Metadata-only и неоднозначные случаи дают `manual_review`, а не `matched`.
 
 ### Community Space sync
 
@@ -462,11 +520,5 @@ material comments и общий chat.
 
 ## Открытые вопросы
 
-- What exact fingerprint format balances matching quality and text privacy?
-- Which similarity threshold is safe enough across EPUB/FB2/PDF editions?
-- Should metadata-only shared material pages show discussion to users without a
-  matching local copy, or only invite them to import?
 - How should quoted snippets in comments be limited to avoid reconstructing a
   book through many comments?
-- Does opening an unlisted link create membership immediately, show a guest
-  preview or require an explicit join confirmation?

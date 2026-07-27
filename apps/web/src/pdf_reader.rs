@@ -54,6 +54,7 @@ pub(crate) fn ReaderRoute(
     initial_anchor: Option<String>,
     csrf_token: String,
     record_rag_enabled: bool,
+    material_sharing_available: bool,
     on_close: EventHandler<()>,
     on_open_learning_session: EventHandler<Uuid>,
     on_manage_learning: EventHandler<(Uuid, Uuid)>,
@@ -79,6 +80,7 @@ pub(crate) fn ReaderRoute(
                 initial_anchor: initial_anchor.clone(),
                 csrf_token,
                 record_rag_enabled,
+                material_sharing_available,
                 on_close,
                 on_open_learning_session,
                 on_manage_learning,
@@ -90,6 +92,7 @@ pub(crate) fn ReaderRoute(
                 initial_anchor,
                 csrf_token,
                 record_rag_enabled,
+                material_sharing_available,
                 on_close,
                 on_open_learning_session,
                 on_manage_learning,
@@ -111,6 +114,7 @@ fn PdfReaderApp(
     initial_anchor: Option<String>,
     csrf_token: String,
     record_rag_enabled: bool,
+    material_sharing_available: bool,
     on_close: EventHandler<()>,
     on_open_learning_session: EventHandler<Uuid>,
     on_manage_learning: EventHandler<(Uuid, Uuid)>,
@@ -334,6 +338,12 @@ fn PdfReaderApp(
                                 scope_ref: "material".to_owned(),
                                 label: "Саммари".to_owned(),
                                 csrf_token: csrf.read().clone(),
+                            }
+                            crate::community::ShareMaterialAction {
+                                material_id,
+                                csrf_token: csrf.read().clone(),
+                                available: material_sharing_available,
+                                label: "Поделиться".to_owned(),
                             }
                             a { class: "secondary-action", href: "{API_BASE}/materials/{material_id}/source", download: "{data.entry.source_identity.source_name}", "Скачать PDF" }
                         }

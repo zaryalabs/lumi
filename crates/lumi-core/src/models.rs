@@ -277,6 +277,34 @@ pub fn s1_schema_migrations() -> Vec<SchemaMigration> {
                 "Rebuildable owner-scoped Desk projection, unified search surfaces and MCP parity."
                     .to_owned(),
         },
+        SchemaMigration {
+            id: "s1-0025-community-spaces-access".to_owned(),
+            schema_version: DOMAIN_SCHEMA_VERSION.to_owned(),
+            description:
+                "Community Space identity, memberships, revocable link access and sync projection."
+                    .to_owned(),
+        },
+        SchemaMigration {
+            id: "s1-0026-material-sharing-matching".to_owned(),
+            schema_version: DOMAIN_SCHEMA_VERSION.to_owned(),
+            description:
+                "Server-internal material fingerprints, shared identities and conservative user copy claims."
+                    .to_owned(),
+        },
+        SchemaMigration {
+            id: "s1-0027-material-discussions".to_owned(),
+            schema_version: DOMAIN_SCHEMA_VERSION.to_owned(),
+            description:
+                "Material-level Community threads, replies, tombstones and append-only moderation actions."
+                    .to_owned(),
+        },
+        SchemaMigration {
+            id: "s1-0028-community-chat-activity".to_owned(),
+            schema_version: DOMAIN_SCHEMA_VERSION.to_owned(),
+            description:
+                "Member-only Space chat, cursor activity delivery and chat moderation tombstones."
+                    .to_owned(),
+        },
     ]);
     migrations
 }
@@ -1652,7 +1680,7 @@ mod tests {
     fn migrations_cover_s1_contract_groups() {
         let migrations = s1_schema_migrations();
 
-        assert_eq!(migrations.len(), 27);
+        assert_eq!(migrations.len(), 31);
         assert!(migrations
             .iter()
             .any(|migration| migration.id == "s1-0011-ai-contract-freeze-v1"));
@@ -1692,5 +1720,17 @@ mod tests {
         assert!(migrations
             .iter()
             .any(|migration| migration.id == "s1-0024-desk-projection"));
+        assert!(migrations
+            .iter()
+            .any(|migration| migration.id == "s1-0025-community-spaces-access"));
+        assert!(migrations
+            .iter()
+            .any(|migration| migration.id == "s1-0026-material-sharing-matching"));
+        assert!(migrations
+            .iter()
+            .any(|migration| migration.id == "s1-0027-material-discussions"));
+        assert!(migrations
+            .iter()
+            .any(|migration| migration.id == "s1-0028-community-chat-activity"));
     }
 }
