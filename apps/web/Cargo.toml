@@ -41,12 +41,14 @@ web-sys = { version = "0.3.91", features = [
   "Node",
   "NodeList",
   "Range",
+  "ResizeObserver",
   "ScrollBehavior",
   "ScrollToOptions",
   "Selection",
   "Storage",
   "Text",
   "Url",
+  "VisualViewport",
   "Window",
 ] }
 

@@ -36,8 +36,8 @@ export default defineConfig({
           command: `make -C ../.. web-r LUMI_API_BASE=${apiBase} LUMI_WEB_PORT=${webPort}`,
           reuseExistingServer: true,
           timeout: 120_000,
-          // The generated wasm exists only after the current Dioxus build is
-          // ready; the source PDF.js asset is available too early.
+          // With index_on_404 disabled, this turns 200 only after the current
+          // Dioxus build is ready instead of accepting the HTML fallback.
           url: `${baseURL}/wasm/lumi-web_bg.wasm`,
         },
         {
@@ -51,6 +51,21 @@ export default defineConfig({
     {
       name: "chromium",
       use: { ...devices["Desktop Chrome"] },
+    },
+    {
+      name: "mobile-chromium",
+      testMatch: "platform.spec.ts",
+      use: { ...devices["Pixel 7"] },
+    },
+    {
+      name: "iphone-webkit",
+      testMatch: "platform.spec.ts",
+      use: { ...devices["iPhone 15"] },
+    },
+    {
+      name: "tablet-webkit",
+      testMatch: "platform.spec.ts",
+      use: { ...devices["iPad Pro 11"] },
     },
   ],
 });

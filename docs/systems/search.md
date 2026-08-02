@@ -84,6 +84,12 @@ cross-encoder rerankers и future hybrid search.
 - Desk search/filter over records, поддержанные текущим release scope.
 - AI retrieval API.
 
+Library search является локальным фильтром уже загруженной библиотеки и явно
+отделён от Global Search. Global Search группирует personal и permission-aware
+social source types. Открытие результата сериализует полный bounded `Anchor`;
+social result дополнительно сохраняет shared material/source или message
+identity. Raw ranking score в обычном UI не показывается.
+
 KB search и Community Space search являются отдельными последующими
 поверхностями над тем же index/query contract. Их отсутствие не делает
 personal search slice частично реализованным.

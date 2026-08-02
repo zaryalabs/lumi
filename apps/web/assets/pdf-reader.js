@@ -269,6 +269,8 @@ async function mount(config) {
     rendered: new Set(),
     zoom: 1,
     observer: null,
+    selectionTimer: null,
+    selectionHandler: null,
     destroyed: false,
     annotations: config.annotations || [],
     sharedAnnotations: config.sharedAnnotations || [],
@@ -316,10 +318,16 @@ async function mount(config) {
   for (const shell of container.querySelectorAll("[data-pdf-page]")) {
     state.observer.observe(shell);
   }
-  container.addEventListener("mouseup", () => {
-    const detail = selectionDetail(state);
-    if (detail) dispatch(container, "lumi-pdf-selection", detail);
-  });
+  state.selectionHandler = () => {
+    window.clearTimeout(state.selectionTimer);
+    state.selectionTimer = window.setTimeout(() => {
+      const detail = selectionDetail(state);
+      if (detail) dispatch(container, "lumi-pdf-selection", detail);
+    }, 40);
+  };
+  container.addEventListener("pointerup", state.selectionHandler);
+  container.addEventListener("keyup", state.selectionHandler);
+  document.addEventListener("selectionchange", state.selectionHandler);
   container.dataset.pdfState = "ready";
   const initialPage = Math.min(
     Math.max(Number(config.initialPage || 0) + 1, 1),
@@ -339,6 +347,12 @@ async function destroy(containerId) {
   readers.delete(containerId);
   state.destroyed = true;
   state.observer?.disconnect();
+  window.clearTimeout(state.selectionTimer);
+  if (state.selectionHandler) {
+    state.container.removeEventListener("pointerup", state.selectionHandler);
+    state.container.removeEventListener("keyup", state.selectionHandler);
+    document.removeEventListener("selectionchange", state.selectionHandler);
+  }
   await state.loadingTask?.destroy();
 }
 
@@ -355,9 +369,12 @@ function setZoom(containerId, zoom) {
 
 function goToPage(containerId, pageIndex) {
   const state = readers.get(containerId);
+  const behavior = window.matchMedia("(prefers-reduced-motion: reduce)").matches
+    ? "auto"
+    : "smooth";
   state?.container
     .querySelector(`[data-pdf-page="${Number(pageIndex) + 1}"]`)
-    ?.scrollIntoView({ behavior: "smooth", block: "start" });
+    ?.scrollIntoView({ behavior, block: "start" });
 }
 
 function setAnnotations(containerId, annotations) {

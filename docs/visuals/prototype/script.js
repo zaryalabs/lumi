@@ -1,6 +1,7 @@
 const app = document.querySelector(".app-shell");
 const libraryView = document.querySelector("#library");
 const readerView = document.querySelector("#reader");
+const appViews = [...document.querySelectorAll(".app-view")];
 const tocPanel = document.querySelector("#toc-panel");
 const notesPanel = document.querySelector("#notes-panel");
 const settingsPanel = document.querySelector("#reader-settings");
@@ -13,6 +14,16 @@ const nextButton = document.querySelector("#next-page");
 const pageIndicator = document.querySelector("#page-indicator");
 const chapterProgress = document.querySelector(".chapter-progress span");
 const toast = document.querySelector("#toast");
+const contextTitle = document.querySelector(".context-title");
+const viewTitles = {
+  library: "Библиотека",
+  desk: "Desk",
+  spaces: "Пространства",
+  repetition: "Повторение",
+  search: "Поиск",
+  activity: "Активность",
+  settings: "Настройки",
+};
 let currentPage = 0;
 let toastTimeout;
 
@@ -28,14 +39,28 @@ function showToast(message) {
 
 function showView(view) {
   const isReader = view === "reader";
-  libraryView.hidden = isReader;
-  readerView.hidden = !isReader;
+  appViews.forEach((surface) => {
+    surface.hidden = surface.id !== view;
+  });
   app.dataset.view = view;
-  document
-    .querySelector("#library-navigation")
-    .toggleAttribute("aria-current", !isReader);
+  contextTitle.textContent = viewTitles[view] ?? "Lumi";
+  document.querySelectorAll("[data-view-target]").forEach((control) => {
+    const active = control.dataset.viewTarget === view;
+    control.classList.toggle("active", active);
+    if (active) control.setAttribute("aria-current", "page");
+    else control.removeAttribute("aria-current");
+  });
   window.scrollTo({ top: 0, behavior: "instant" });
 }
+
+document.querySelectorAll("[data-view-target]").forEach((control) => {
+  control.addEventListener("click", () => showView(control.dataset.viewTarget));
+});
+
+document.querySelector(".brand").addEventListener("click", (event) => {
+  event.preventDefault();
+  showView("library");
+});
 
 function setPanel(panel, button, open) {
   panel.hidden = !open;
@@ -72,6 +97,7 @@ document.querySelector("#back-to-library").addEventListener("click", () => {
   setPanel(notesPanel, notesButton, false);
   settingsPanel.hidden = true;
   settingsButton.setAttribute("aria-expanded", "false");
+  document.querySelector(".reader-more").removeAttribute("open");
   showView("library");
 });
 

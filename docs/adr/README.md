@@ -71,6 +71,8 @@ plugin, AI, search and account/auth boundaries.
 - [`0040`](0040-shared-reading-social-index-images-and-fingerprint-lifecycle.md)
   — shared anchors/Reader layers, permission-aware social index, Community
   images и автоматический fingerprint lifecycle.
+- [`0041`](0041-web-pwa-shell-and-exact-routes.md) — installable Web PWA со
+  static-only cache, controlled update, semantic shell и exact typed routes.
 
 ## Template
 

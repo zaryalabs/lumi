@@ -1,24 +1,60 @@
 //! Typed, reload-safe hash routing for the Web application.
 
-use lumi_core::{DeskObjectType, SearchSourceType};
+use lumi_core::{Anchor, DeskObjectType, SearchSourceType};
 use uuid::Uuid;
 
 /// Top-level Web route.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub(crate) enum AppRoute {
     Library,
     Community,
-    CommunitySpace(Uuid),
+    CommunitySpace(Uuid, Option<CommunityTarget>),
     CommunityJoin,
     Challenges,
     AiQueue,
     Connections,
     Settings,
-    Reader(Uuid, Option<Uuid>, Option<String>),
-    LearningSession(Uuid),
+    Admin,
+    Reader(Uuid, Option<ReaderOrigin>, Option<Box<Anchor>>),
+    LearningSession(Uuid, LearningOrigin),
     MaterialLearning(Uuid, Option<Uuid>),
     Desk(DeskRoute),
     Search(SearchRoute),
+}
+
+/// User-visible destination restored after leaving Reader.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum ReaderOrigin {
+    Library,
+    LearningSession {
+        session_id: Uuid,
+        parent: LearningOrigin,
+    },
+    CommunitySpace(Uuid),
+}
+
+/// User-visible destination restored after finishing a learning session.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(crate) enum LearningOrigin {
+    #[default]
+    Library,
+    Challenges,
+    Material {
+        material_id: Uuid,
+        source_id: Option<Uuid>,
+    },
+}
+
+/// Exact social identity preserved by Community search routes.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum CommunityTarget {
+    Material {
+        shared_material_id: Uuid,
+        source_id: Option<Uuid>,
+    },
+    Chat {
+        message_id: Uuid,
+    },
 }
 
 /// Typed Desk view and selected object.
@@ -72,7 +108,7 @@ pub(crate) fn set_browser_route(route: &AppRoute) {
 }
 
 pub(crate) fn browser_requests_system_settings() -> bool {
-    browser_hash() == "#settings"
+    browser_hash() == "#admin"
 }
 
 fn browser_hash() -> String {
@@ -89,6 +125,7 @@ fn parse_hash(hash: &str) -> Option<AppRoute> {
     match path {
         "" | "library" => Some(AppRoute::Library),
         "settings" => Some(AppRoute::Settings),
+        "admin" => Some(AppRoute::Admin),
         "communities" => Some(AppRoute::Community),
         "challenges" => Some(AppRoute::Challenges),
         "connections" => Some(AppRoute::Connections),
@@ -119,17 +156,22 @@ fn parse_dynamic_route(path: &str, query: &str) -> Option<AppRoute> {
         return Some(AppRoute::CommunityJoin);
     }
     if let Some(id) = path.strip_prefix("community/") {
-        return Uuid::parse_str(id).ok().map(AppRoute::CommunitySpace);
+        return Uuid::parse_str(id)
+            .ok()
+            .map(|space_id| AppRoute::CommunitySpace(space_id, parse_community_target(query)));
     }
     if let Some(id) = path.strip_prefix("learn/session/") {
-        return Uuid::parse_str(id).ok().map(AppRoute::LearningSession);
+        return Uuid::parse_str(id)
+            .ok()
+            .map(|session_id| AppRoute::LearningSession(session_id, parse_learning_origin(query)));
     }
     if let Some(id) = path.strip_prefix("reader/") {
         return Uuid::parse_str(id).ok().map(|material_id| {
             AppRoute::Reader(
                 material_id,
-                query_value(query, "return_to").and_then(|id| Uuid::parse_str(&id).ok()),
-                query_value(query, "anchor"),
+                parse_reader_origin(query),
+                query_value(query, "anchor")
+                    .and_then(|value| serde_json::from_str::<Anchor>(&value).ok().map(Box::new)),
             )
         });
     }
@@ -177,23 +219,50 @@ fn route_hash(route: &AppRoute) -> String {
     match route {
         AppRoute::Library => "library".to_owned(),
         AppRoute::Community => "communities".to_owned(),
-        AppRoute::CommunitySpace(space_id) => format!("community/{space_id}"),
+        AppRoute::CommunitySpace(space_id, target) => {
+            let mut parameters = Vec::new();
+            match target {
+                Some(CommunityTarget::Material {
+                    shared_material_id,
+                    source_id,
+                }) => {
+                    parameters.push("target=material".to_owned());
+                    parameters.push(format!("shared_material_id={shared_material_id}"));
+                    if let Some(source_id) = source_id {
+                        parameters.push(format!("source_id={source_id}"));
+                    }
+                }
+                Some(CommunityTarget::Chat { message_id }) => {
+                    parameters.push("target=chat".to_owned());
+                    parameters.push(format!("message_id={message_id}"));
+                }
+                None => {}
+            }
+            with_query(format!("community/{space_id}"), parameters)
+        }
         AppRoute::CommunityJoin => "join".to_owned(),
         AppRoute::Challenges => "challenges".to_owned(),
         AppRoute::AiQueue => "ai-queue".to_owned(),
         AppRoute::Connections => "connections".to_owned(),
         AppRoute::Settings => "settings".to_owned(),
-        AppRoute::Reader(material_id, return_to, anchor) => {
+        AppRoute::Admin => "admin".to_owned(),
+        AppRoute::Reader(material_id, origin, anchor) => {
             let mut parameters = Vec::new();
-            if let Some(session_id) = return_to {
-                parameters.push(format!("return_to={session_id}"));
+            if let Some(origin) = origin {
+                push_reader_origin(&mut parameters, *origin);
             }
             if let Some(anchor) = anchor {
-                parameters.push(format!("anchor={}", percent_encode(anchor)));
+                if let Ok(serialized) = serde_json::to_string(anchor) {
+                    parameters.push(format!("anchor={}", percent_encode(&serialized)));
+                }
             }
             with_query(format!("reader/{material_id}"), parameters)
         }
-        AppRoute::LearningSession(session_id) => format!("learn/session/{session_id}"),
+        AppRoute::LearningSession(session_id, origin) => {
+            let mut parameters = Vec::new();
+            push_learning_origin(&mut parameters, *origin, "origin");
+            with_query(format!("learn/session/{session_id}"), parameters)
+        }
         AppRoute::MaterialLearning(material_id, source_id) => source_id.map_or_else(
             || format!("material/{material_id}/learning"),
             |source_id| format!("material/{material_id}/learning?source={source_id}"),
@@ -212,6 +281,96 @@ fn route_hash(route: &AppRoute) -> String {
             }
             with_query("search".to_owned(), parameters)
         }
+    }
+}
+
+fn parse_reader_origin(query: &str) -> Option<ReaderOrigin> {
+    match query_value(query, "origin").as_deref() {
+        Some("library") => Some(ReaderOrigin::Library),
+        Some("learning") => {
+            let session_id =
+                query_value(query, "session").and_then(|value| Uuid::parse_str(&value).ok())?;
+            Some(ReaderOrigin::LearningSession {
+                session_id,
+                parent: parse_learning_origin_with_prefix(query, "parent"),
+            })
+        }
+        Some("community") => query_value(query, "space")
+            .and_then(|value| Uuid::parse_str(&value).ok())
+            .map(ReaderOrigin::CommunitySpace),
+        _ => query_value(query, "return_to")
+            .and_then(|value| Uuid::parse_str(&value).ok())
+            .map(|session_id| ReaderOrigin::LearningSession {
+                session_id,
+                parent: LearningOrigin::Library,
+            }),
+    }
+}
+
+fn push_reader_origin(parameters: &mut Vec<String>, origin: ReaderOrigin) {
+    match origin {
+        ReaderOrigin::Library => parameters.push("origin=library".to_owned()),
+        ReaderOrigin::LearningSession { session_id, parent } => {
+            parameters.push("origin=learning".to_owned());
+            parameters.push(format!("session={session_id}"));
+            push_learning_origin(parameters, parent, "parent");
+        }
+        ReaderOrigin::CommunitySpace(space_id) => {
+            parameters.push("origin=community".to_owned());
+            parameters.push(format!("space={space_id}"));
+        }
+    }
+}
+
+fn parse_learning_origin(query: &str) -> LearningOrigin {
+    parse_learning_origin_with_prefix(query, "origin")
+}
+
+fn parse_learning_origin_with_prefix(query: &str, prefix: &str) -> LearningOrigin {
+    match query_value(query, prefix).as_deref() {
+        Some("challenges") => LearningOrigin::Challenges,
+        Some("material") => query_value(query, &format!("{prefix}_material"))
+            .and_then(|value| Uuid::parse_str(&value).ok())
+            .map_or(LearningOrigin::Library, |material_id| {
+                LearningOrigin::Material {
+                    material_id,
+                    source_id: query_value(query, &format!("{prefix}_source"))
+                        .and_then(|value| Uuid::parse_str(&value).ok()),
+                }
+            }),
+        _ => LearningOrigin::Library,
+    }
+}
+
+fn push_learning_origin(parameters: &mut Vec<String>, origin: LearningOrigin, prefix: &str) {
+    match origin {
+        LearningOrigin::Library => parameters.push(format!("{prefix}=library")),
+        LearningOrigin::Challenges => parameters.push(format!("{prefix}=challenges")),
+        LearningOrigin::Material {
+            material_id,
+            source_id,
+        } => {
+            parameters.push(format!("{prefix}=material"));
+            parameters.push(format!("{prefix}_material={material_id}"));
+            if let Some(source_id) = source_id {
+                parameters.push(format!("{prefix}_source={source_id}"));
+            }
+        }
+    }
+}
+
+fn parse_community_target(query: &str) -> Option<CommunityTarget> {
+    match query_value(query, "target").as_deref() {
+        Some("material") => Some(CommunityTarget::Material {
+            shared_material_id: query_value(query, "shared_material_id")
+                .and_then(|value| Uuid::parse_str(&value).ok())?,
+            source_id: query_value(query, "source_id")
+                .and_then(|value| Uuid::parse_str(&value).ok()),
+        }),
+        Some("chat") => query_value(query, "message_id")
+            .and_then(|value| Uuid::parse_str(&value).ok())
+            .map(|message_id| CommunityTarget::Chat { message_id }),
+        _ => None,
     }
 }
 
@@ -365,7 +524,39 @@ mod tests {
 
     #[test]
     fn reader_route_round_trips_anchor() {
-        let route = AppRoute::Reader(Uuid::nil(), None, Some("глава 1/node:2".to_owned()));
+        let route = AppRoute::Reader(
+            Uuid::nil(),
+            Some(ReaderOrigin::LearningSession {
+                session_id: Uuid::from_u128(1),
+                parent: LearningOrigin::Challenges,
+            }),
+            Some(Box::new(Anchor {
+                revision_id: Uuid::from_u128(2),
+                node_path: vec!["глава 1".to_owned(), "node:2".to_owned()],
+                end_node_path: vec!["глава 1".to_owned(), "node:2".to_owned()],
+                text_range: None,
+                quote: String::new(),
+                prefix: String::new(),
+                suffix: String::new(),
+                content_hash: "hash".to_owned(),
+                source_locator: None,
+                end_source_locator: None,
+                page_rects: Vec::new(),
+            })),
+        );
+
+        assert_eq!(parse_hash(&format!("#{}", route_hash(&route))), Some(route));
+    }
+
+    #[test]
+    fn community_route_round_trips_social_identity() {
+        let route = AppRoute::CommunitySpace(
+            Uuid::from_u128(3),
+            Some(CommunityTarget::Material {
+                shared_material_id: Uuid::from_u128(4),
+                source_id: Some(Uuid::from_u128(5)),
+            }),
+        );
 
         assert_eq!(parse_hash(&format!("#{}", route_hash(&route))), Some(route));
     }

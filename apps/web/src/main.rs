@@ -32,6 +32,7 @@ fn App() -> Element {
     #[cfg(target_arch = "wasm32")]
     {
         let _ = asset!("/assets/vendor/pdfjs", AssetOptions::folder());
+        let _ = asset!("/assets/styles", AssetOptions::folder());
         use_effect(|| {
             if let Some(root) = web_sys::window()
                 .and_then(|window| window.document())
@@ -50,6 +51,17 @@ fn App() -> Element {
                 r#type: "module",
             }
             document::Meta { name: "theme-color", content: "#f4f0e8" }
+            document::Meta {
+                name: "viewport",
+                content: "width=device-width, initial-scale=1, viewport-fit=cover",
+            }
+            document::Meta { name: "mobile-web-app-capable", content: "yes" }
+            document::Meta { name: "apple-mobile-web-app-capable", content: "yes" }
+            document::Meta { name: "apple-mobile-web-app-status-bar-style", content: "default" }
+            document::Link { rel: "manifest", href: "/manifest.webmanifest" }
+            document::Link { rel: "icon", href: "/icons/favicon.svg", r#type: "image/svg+xml" }
+            document::Link { rel: "apple-touch-icon", href: "/icons/apple-touch-icon.png" }
+            document::Script { src: "/pwa.js", r#type: "module" }
             account::AccountGate {}
         }
     }

@@ -4,8 +4,8 @@ use dioxus::prelude::*;
 use gloo_net::http::Request;
 use lumi_core::{
     Annotation, AnnotationBacklink, AnnotationKind, DeskItem, DeskItemPage, DeskLearningState,
-    DeskMaterialPage, DeskObjectType, MaterialDesk, RecordSearchScope, SearchOpenTarget,
-    SearchSourceType, UpdateAnnotationCommand, RECORD_RETRIEVAL_VERSION,
+    DeskMaterialPage, DeskObjectType, MaterialDesk, RecordSearchScope, SearchSourceType,
+    UpdateAnnotationCommand, RECORD_RETRIEVAL_VERSION,
 };
 use uuid::Uuid;
 use web_sys::RequestCredentials;
@@ -22,8 +22,10 @@ pub(crate) fn DeskPage(
 ) -> Element {
     let mut state = use_signal(|| DeskState::Loading);
     let mut search_query = use_signal(String::new);
+    let mut reload_generation = use_signal(|| 0_u64);
     let route_for_load = route.clone();
     use_effect(move || {
+        let _ = reload_generation();
         state.set(DeskState::Loading);
         let route = route_for_load.clone();
         spawn(async move {
@@ -81,6 +83,19 @@ pub(crate) fn DeskPage(
         || "Все личные записи".to_owned(),
         |_| "Записи текущего материала".to_owned(),
     );
+    let available_tags = match &*state.read() {
+        DeskState::Items(page) => {
+            let mut tags = page
+                .items
+                .iter()
+                .flat_map(|item| item.tags.iter().cloned())
+                .collect::<Vec<_>>();
+            tags.sort_by_key(|tag| tag.to_lowercase());
+            tags.dedup_by(|left, right| left.eq_ignore_ascii_case(right));
+            tags
+        }
+        _ => route.tag.clone().into_iter().collect(),
+    };
     rsx! {
         main { id: "main-content", class: "desk-view", aria_label: "Desk",
             header { class: "desk-hero",
@@ -132,32 +147,36 @@ pub(crate) fn DeskPage(
                 }
             }
             nav { class: "desk-tabs", aria_label: "Разделы Desk",
-                DeskNavLink { label: "Обзор", target: DeskView::Overview, current: route.view.clone(), on_route }
-                DeskNavLink { label: "Все записи", target: DeskView::Records(None), current: route.view.clone(), on_route }
-                DeskNavLink { label: "Обучение", target: DeskView::Learning(None), current: route.view.clone(), on_route }
-                DeskNavLink { label: "AI-артефакты", target: DeskView::Artifacts(None), current: route.view.clone(), on_route }
+                DeskNavLink { label: "Обзор", target: DeskView::Overview, route: route.clone(), on_route }
+                DeskNavLink { label: "Заметки и выделения", target: DeskView::Records(None), route: route.clone(), on_route }
+                DeskNavLink { label: "Обучение", target: DeskView::Learning(None), route: route.clone(), on_route }
+                DeskNavLink { label: "ИИ-результаты", target: DeskView::Artifacts(None), route: route.clone(), on_route }
             }
-            DeskFilters { route: route.clone(), on_route }
+            DeskFilters { route: route.clone(), available_tags, on_route }
             match state.read().clone() {
                 DeskState::Loading => rsx! {
                     p { class: "desk-state", role: "status", "Обновляем Desk…" }
                 },
                 DeskState::Failed(error) => rsx! {
-                    p { class: "library-alert", role: "alert", "{error}" }
+                    div { class: "library-alert", role: "alert",
+                        span { "{error}" }
+                        button { r#type: "button", onclick: move |_| reload_generation += 1, "Повторить" }
+                    }
                 },
                 DeskState::Materials(page) => rsx! {
                     DeskMaterialGrid { page, on_route }
                 },
                 DeskState::Material(material) => rsx! {
-                    MaterialOverview { material: *material, on_route }
+                    MaterialOverview { material: *material, route: route.clone(), on_route }
                 },
                 DeskState::Items(page) => rsx! {
-                    DeskItemList { page, on_route }
+                    DeskItemList { page, route: route.clone(), on_route }
                 },
                 DeskState::Item(item) => rsx! {
                     DeskItemDetail {
                         item,
                         csrf_token: csrf_token.clone(),
+                        route: route.clone(),
                         on_route,
                         on_saved: move |updated| state.set(DeskState::Item(updated)),
                     }
@@ -171,26 +190,31 @@ pub(crate) fn DeskPage(
 fn DeskNavLink(
     label: &'static str,
     target: DeskView,
-    current: DeskView,
+    route: DeskRoute,
     on_route: EventHandler<AppRoute>,
 ) -> Element {
-    let active = same_section(&target, &current);
+    let active = same_section(&target, &route.view);
     rsx! {
         button {
             class: if active { "active" } else { "" },
             r#type: "button",
             aria_current: if active { "page" } else { "false" },
-            onclick: move |_| on_route.call(AppRoute::Desk(DeskRoute {
-                view: target.clone(),
-                ..DeskRoute::default()
-            })),
+            onclick: move |_| {
+                let mut next = route.clone();
+                next.view = target.clone();
+                on_route.call(AppRoute::Desk(next));
+            },
             "{label}"
         }
     }
 }
 
 #[component]
-fn DeskFilters(route: DeskRoute, on_route: EventHandler<AppRoute>) -> Element {
+fn DeskFilters(
+    route: DeskRoute,
+    available_tags: Vec<String>,
+    on_route: EventHandler<AppRoute>,
+) -> Element {
     if matches!(
         route.view,
         DeskView::Overview | DeskView::Material(_) | DeskView::Item(_, _)
@@ -199,6 +223,7 @@ fn DeskFilters(route: DeskRoute, on_route: EventHandler<AppRoute>) -> Element {
     }
     let current_route = route.clone();
     let route_for_status = route.clone();
+    let route_for_tag = route.clone();
     rsx! {
         div { class: "desk-filters", role: "group", aria_label: "Фильтры Desk",
             label {
@@ -234,6 +259,23 @@ fn DeskFilters(route: DeskRoute, on_route: EventHandler<AppRoute>) -> Element {
                     }
                 }
             }
+            if matches!(route.view, DeskView::Records(_)) && !available_tags.is_empty() {
+                label {
+                    span { "Тег" }
+                    select {
+                        value: route.tag.as_deref().unwrap_or(""),
+                        onchange: move |event| {
+                            let mut next = route_for_tag.clone();
+                            next.tag = non_empty(event.value());
+                            on_route.call(AppRoute::Desk(next));
+                        },
+                        option { value: "", "Все теги" }
+                        for tag in available_tags {
+                            option { value: "{tag}", "{tag}" }
+                        }
+                    }
+                }
+            }
         }
     }
 }
@@ -252,7 +294,7 @@ fn DeskMaterialGrid(page: DeskMaterialPage, on_route: EventHandler<AppRoute>) ->
         section { aria_label: "Материалы в Desk",
             div { class: "section-heading",
                 div { p { class: "eyebrow", "Материалы" } h2 { "Работа по материалам" } }
-                span { "Проекция {page.projection_generation}" }
+                span { "{page.items.len()} материалов" }
             }
             div { class: "desk-material-grid",
                 for material in page.items {
@@ -280,7 +322,11 @@ fn DeskMaterialGrid(page: DeskMaterialPage, on_route: EventHandler<AppRoute>) ->
 }
 
 #[component]
-fn MaterialOverview(material: MaterialDesk, on_route: EventHandler<AppRoute>) -> Element {
+fn MaterialOverview(
+    material: MaterialDesk,
+    route: DeskRoute,
+    on_route: EventHandler<AppRoute>,
+) -> Element {
     let material_id = material.material.material_id;
     rsx! {
         section { class: "material-desk",
@@ -292,18 +338,18 @@ fn MaterialOverview(material: MaterialDesk, on_route: EventHandler<AppRoute>) ->
                 span { "{material.material.record_count + material.material.learning_count + material.material.artifact_count} элементов" }
             }
             div { class: "desk-overview-actions",
-                button { class: "secondary-action", r#type: "button", onclick: move |_| on_route.call(AppRoute::Desk(DeskRoute { view: DeskView::Records(Some(material_id)), ..DeskRoute::default() })), "Записи ({material.material.record_count})" }
-                button { class: "secondary-action", r#type: "button", onclick: move |_| on_route.call(AppRoute::Desk(DeskRoute { view: DeskView::Learning(Some(material_id)), ..DeskRoute::default() })), "Обучение ({material.material.learning_count})" }
-                button { class: "secondary-action", r#type: "button", onclick: move |_| on_route.call(AppRoute::Desk(DeskRoute { view: DeskView::Artifacts(Some(material_id)), ..DeskRoute::default() })), "Артефакты ({material.material.artifact_count})" }
+                button { class: "secondary-action", r#type: "button", onclick: { let route = route.clone(); move |_| on_route.call(AppRoute::Desk(DeskRoute { view: DeskView::Records(Some(material_id)), ..route.clone() })) }, "Записи ({material.material.record_count})" }
+                button { class: "secondary-action", r#type: "button", onclick: { let route = route.clone(); move |_| on_route.call(AppRoute::Desk(DeskRoute { view: DeskView::Learning(Some(material_id)), ..route.clone() })) }, "Обучение ({material.material.learning_count})" }
+                button { class: "secondary-action", r#type: "button", onclick: { let route = route.clone(); move |_| on_route.call(AppRoute::Desk(DeskRoute { view: DeskView::Artifacts(Some(material_id)), ..route.clone() })) }, "ИИ-результаты ({material.material.artifact_count})" }
                 button { class: "primary-action", r#type: "button", onclick: move |_| on_route.call(AppRoute::Reader(material_id, None, None)), "Открыть Reader" }
             }
-            DeskItemList { page: material.items, on_route }
+            DeskItemList { page: material.items, route: route.clone(), on_route }
         }
     }
 }
 
 #[component]
-fn DeskItemList(page: DeskItemPage, on_route: EventHandler<AppRoute>) -> Element {
+fn DeskItemList(page: DeskItemPage, route: DeskRoute, on_route: EventHandler<AppRoute>) -> Element {
     if page.items.is_empty() {
         return rsx! {
             section { class: "desk-empty", h2 { "Здесь пока нет элементов" } p { "Измените фильтры или создайте запись в Reader." } }
@@ -312,31 +358,37 @@ fn DeskItemList(page: DeskItemPage, on_route: EventHandler<AppRoute>) -> Element
     rsx! {
         ol { class: "desk-item-list", aria_live: "polite",
             for item in page.items {
-                li {
-                    article { class: "desk-item-card",
-                        div {
-                            span { class: "status-pill ready", "{desk_type_label(item.object_type)}" }
-                            span { class: "desk-material-name", "{item.material_title}" }
-                            h3 { "{item.title}" }
-                            p { "{item.preview}" }
-                            if !item.structural_path.is_empty() {
-                                p { class: "search-path", "{item.structural_path.join(\" › \")}" }
-                            }
-                            if item.attention {
-                                p { class: "attention-note", "Требует внимания" }
-                            }
-                            if let Some(state) = item.learning_state {
-                                p { class: "match-reason", "{learning_state_label(state)} · попыток {item.attempt_count}" }
-                            }
-                        }
-                        button { class: "secondary-action", r#type: "button", onclick: move |_| {
-                            on_route.call(AppRoute::Desk(DeskRoute {
-                                view: DeskView::Item(item.object_type, item.object_id),
-                                ..DeskRoute::default()
-                            }));
-                        }, "Открыть" }
+                DeskItemCard { item, route: route.clone(), on_route }
+            }
+        }
+    }
+}
+
+#[component]
+fn DeskItemCard(item: DeskItem, route: DeskRoute, on_route: EventHandler<AppRoute>) -> Element {
+    rsx! {
+        li {
+            article { class: "desk-item-card",
+                div {
+                    span { class: "status-pill ready", "{desk_type_label(item.object_type)}" }
+                    span { class: "desk-material-name", "{item.material_title}" }
+                    h3 { "{item.title}" }
+                    p { "{item.preview}" }
+                    if !item.structural_path.is_empty() {
+                        p { class: "search-path", "{item.structural_path.join(\" › \")}" }
+                    }
+                    if item.attention {
+                        p { class: "attention-note", "Требует внимания" }
+                    }
+                    if let Some(state) = item.learning_state {
+                        p { class: "match-reason", "{learning_state_label(state)} · попыток {item.attempt_count}" }
                     }
                 }
+                button { class: "secondary-action", r#type: "button", onclick: move |_| {
+                    let mut next = route.clone();
+                    next.view = DeskView::Item(item.object_type, item.object_id);
+                    on_route.call(AppRoute::Desk(next));
+                }, "Открыть" }
             }
         }
     }
@@ -346,6 +398,7 @@ fn DeskItemList(page: DeskItemPage, on_route: EventHandler<AppRoute>) -> Element
 fn DeskItemDetail(
     item: DeskItem,
     csrf_token: String,
+    route: DeskRoute,
     on_route: EventHandler<AppRoute>,
     on_saved: EventHandler<DeskItem>,
 ) -> Element {
@@ -378,7 +431,10 @@ fn DeskItemDetail(
             });
         }
     });
-    let source_anchor = item.structural_path.last().cloned();
+    let source_anchor = annotation
+        .read()
+        .as_ref()
+        .map(|value| Box::new(value.anchor.clone()));
     rsx! {
         article { class: "desk-detail",
             p { class: "eyebrow", "{desk_type_label(item.object_type)} · {item.material_title}" }
@@ -446,7 +502,15 @@ fn DeskItemDetail(
                 if item.object_type == DeskObjectType::LearningItem {
                     button { class: "secondary-action", r#type: "button", onclick: move |_| on_route.call(AppRoute::Challenges), "Открыть Челленджи" }
                 }
-                button { class: "secondary-action", r#type: "button", onclick: move |_| on_route.call(AppRoute::Desk(DeskRoute { view: DeskView::Material(item.material_id), ..DeskRoute::default() })), "К материалу" }
+                button { class: "secondary-action", r#type: "button", onclick: move |_| {
+                    let mut next = route.clone();
+                    next.view = match item.object_type {
+                        DeskObjectType::Annotation => DeskView::Records(Some(item.material_id)),
+                        DeskObjectType::LearningItem => DeskView::Learning(Some(item.material_id)),
+                        DeskObjectType::AiArtifact => DeskView::Artifacts(Some(item.material_id)),
+                    };
+                    on_route.call(AppRoute::Desk(next));
+                }, "К списку" }
             }
             if !backlinks.read().is_empty() {
                 section { class: "desk-backlinks", aria_label: "Обратные ссылки",
@@ -598,7 +662,7 @@ fn desk_type_label(value: DeskObjectType) -> &'static str {
     match value {
         DeskObjectType::Annotation => "Запись",
         DeskObjectType::LearningItem => "Обучение",
-        DeskObjectType::AiArtifact => "AI-артефакт",
+        DeskObjectType::AiArtifact => "ИИ-результат",
     }
 }
 
@@ -624,39 +688,4 @@ fn parse_tags(value: &str) -> Vec<String> {
 fn non_empty(value: String) -> Option<String> {
     let value = value.trim().to_owned();
     (!value.is_empty()).then_some(value)
-}
-
-#[allow(dead_code)]
-fn open_target_route(target: &SearchOpenTarget) -> AppRoute {
-    match target {
-        SearchOpenTarget::Material { material_id } => AppRoute::Desk(DeskRoute {
-            view: DeskView::Material(*material_id),
-            ..DeskRoute::default()
-        }),
-        SearchOpenTarget::Reader {
-            material_id,
-            anchor,
-            ..
-        } => AppRoute::Reader(
-            *material_id,
-            None,
-            anchor
-                .as_ref()
-                .and_then(|anchor| anchor.node_path.last().cloned()),
-        ),
-        SearchOpenTarget::Annotation { annotation_id, .. } => AppRoute::Desk(DeskRoute {
-            view: DeskView::Item(DeskObjectType::Annotation, *annotation_id),
-            ..DeskRoute::default()
-        }),
-        SearchOpenTarget::LearningItem { item_id } => AppRoute::Desk(DeskRoute {
-            view: DeskView::Item(DeskObjectType::LearningItem, *item_id),
-            ..DeskRoute::default()
-        }),
-        SearchOpenTarget::AiArtifact { artifact_id } => AppRoute::Desk(DeskRoute {
-            view: DeskView::Item(DeskObjectType::AiArtifact, *artifact_id),
-            ..DeskRoute::default()
-        }),
-        SearchOpenTarget::CommunityMaterial { space_id, .. }
-        | SearchOpenTarget::CommunityChat { space_id, .. } => AppRoute::CommunitySpace(*space_id),
-    }
 }

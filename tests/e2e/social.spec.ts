@@ -1,4 +1,5 @@
 import { expect, test, type BrowserContext, type Page } from "@playwright/test";
+import { gotoBuiltApp } from "./app-ready.js";
 
 const sharedMarkdown = Buffer.from(
   "# Клубная книга\n\n## Глава\n\nОдин и тот же текст в независимых пользовательских копиях.\n",
@@ -9,7 +10,7 @@ const ambiguousMarkdown = Buffer.from(
 
 async function register(context: BrowserContext): Promise<Page> {
   const page = await context.newPage();
-  await page.goto("/");
+  await gotoBuiltApp(page);
   await page
     .getByRole("button", { name: "Создать фразу восстановления" })
     .click();
@@ -18,14 +19,14 @@ async function register(context: BrowserContext): Promise<Page> {
   await expect(
     page.getByRole("region", { name: "Пустая библиотека" }),
   ).toBeVisible();
-  await expect(page.getByRole("link", { name: "Сообщества" })).toBeVisible();
+  await expect(page.getByRole("link", { name: "Пространства" })).toBeVisible();
   return page;
 }
 
 async function importMarkdown(page: Page, buffer: Buffer) {
   await page.getByRole("link", { name: "Библиотека", exact: true }).click();
   await page
-    .getByRole("button", { name: "＋ Добавить материал", exact: true })
+    .getByRole("button", { name: "Открыть добавление материала", exact: true })
     .click();
   const dialog = page.getByRole("dialog", { name: "Добавить материал" });
   await dialog.getByRole("tab", { name: "Markdown" }).click();
@@ -47,6 +48,17 @@ async function joinByLink(page: Page, inviteUrl: string) {
     .getByRole("button", { name: "Вступить" })
     .click();
   await expect(page).not.toHaveURL(/#join\//);
+}
+
+async function createSpace(page: Page, name: string, description?: string) {
+  const communityList = page.getByRole("main", { name: "Сообщества Lumi" });
+  await communityList
+    .getByRole("button", { name: "Создать пространство" })
+    .click();
+  const dialog = page.getByRole("dialog", { name: "Создать пространство" });
+  await dialog.getByLabel("Название").fill(name);
+  if (description) await dialog.getByLabel("Описание").fill(description);
+  await dialog.getByRole("button", { name: "Создать", exact: true }).click();
 }
 
 async function selectReaderText(page: Page) {
@@ -79,17 +91,8 @@ test("two accounts create, preview, join, revoke and remove Community access", a
   const rejectedContext = await browser.newContext();
   const owner = await register(ownerContext);
 
-  await owner.getByRole("link", { name: "Сообщества" }).click();
-  const communityList = owner.getByRole("main", {
-    name: "Сообщества Lumi",
-  });
-  await communityList.getByLabel("Название").fill("Клуб двух копий");
-  await communityList
-    .getByLabel("Описание")
-    .fill("Без публикации исходных файлов");
-  await communityList
-    .getByRole("button", { name: "Создать пространство" })
-    .click();
+  await owner.getByRole("link", { name: "Пространства" }).click();
+  await createSpace(owner, "Клуб двух копий", "Без публикации исходных файлов");
 
   const ownerSpace = owner.getByRole("main", {
     name: "Пространство сообщества",
@@ -165,12 +168,8 @@ test("shares metadata and matches only each participant's own copy", async ({
   const owner = await register(ownerContext);
   const ownerCard = await importMarkdown(owner, sharedMarkdown);
 
-  await owner.getByRole("link", { name: "Сообщества" }).click();
-  const communityList = owner.getByRole("main", { name: "Сообщества Lumi" });
-  await communityList.getByLabel("Название").fill("Клубная полка");
-  await communityList
-    .getByRole("button", { name: "Создать пространство" })
-    .click();
+  await owner.getByRole("link", { name: "Пространства" }).click();
+  await createSpace(owner, "Клубная полка");
   const ownerSpace = owner.getByRole("main", {
     name: "Пространство сообщества",
   });
@@ -247,6 +246,7 @@ test("shares metadata and matches only each participant's own copy", async ({
   await privateNoteSaved;
 
   await selectReaderText(owner);
+  await owner.locator(".reader-more summary").click();
   await owner.getByRole("button", { name: /Сообщество \(1\)/ }).click();
   const ownerSocialReader = owner.getByRole("complementary", {
     name: "Совместное чтение",
@@ -293,6 +293,7 @@ test("shares metadata and matches only each participant's own copy", async ({
   });
   await memberCard.getByRole("button", { name: "Читать" }).click();
   await expect(member.locator(".shared-highlight").first()).toBeVisible();
+  await member.locator(".reader-more summary").click();
   await member.getByRole("button", { name: /Сообщество \(1\)/ }).click();
   const memberSocialReader = member.getByRole("complementary", {
     name: "Совместное чтение",
@@ -310,7 +311,7 @@ test("shares metadata and matches only each participant's own copy", async ({
     .getByRole("button", { name: "Закрыть совместное чтение" })
     .click();
   await member.getByRole("button", { name: "Вернуться в библиотеку" }).click();
-  await member.getByRole("link", { name: "Сообщества" }).click();
+  await member.getByRole("link", { name: "Пространства" }).click();
   await member
     .getByRole("main", { name: "Сообщества Lumi" })
     .getByRole("article")
@@ -318,7 +319,7 @@ test("shares metadata and matches only each participant's own copy", async ({
     .getByRole("button", { name: "Открыть" })
     .click();
 
-  await owner.getByRole("link", { name: "Сообщества" }).click();
+  await owner.getByRole("link", { name: "Пространства" }).click();
   await owner
     .getByRole("main", { name: "Сообщества Lumi" })
     .getByRole("article")

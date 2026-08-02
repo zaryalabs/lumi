@@ -99,7 +99,7 @@ pub(crate) fn CompletionOffer(
                         if offer.active_item_count > 0 {
                             "Короткая самопроверка: до {offer.active_item_count.min(7)} заданий. Можно остановиться в любой момент."
                         } else {
-                            "Готовых вопросов по этой главе пока нет. Создайте свой — без подключения AI."
+                            "Готовых вопросов по этой главе пока нет. Создайте свой — без подключения ИИ."
                         }
                     }
                     div { class: "dialog-actions",
@@ -429,11 +429,11 @@ pub(crate) fn ChallengesPage(
     });
     let snapshot = today.read().clone();
     rsx! {
-        main { id: "main-content", class: "library-view challenges-view", aria_label: "Челленджи",
+        main { id: "main-content", class: "library-view challenges-view", aria_label: "Повторение",
             header { class: "library-hero compact",
                 div {
                     p { class: "eyebrow", "Повторение с учётом забывания" }
-                    h1 { "Челленджи" }
+                    h1 { "Повторение" }
                     p { class: "library-lead", "Короткая очередь на сегодня. Подсказки и открытие источника учитываются, но не превращаются в штраф." }
                 }
                 if let Some(value) = snapshot.as_ref() {
@@ -534,7 +534,7 @@ pub(crate) fn ChallengesPage(
                 section { class: "library-section challenge-future", aria_label: "Другие режимы",
                     article {
                         h2 { "Объяснить" }
-                        p { "Explain-back появится в следующем learning-эпике. Готовые тесты, подсказки и расписание работают без AI-провайдера." }
+                        p { "Сформулируйте ответ своими словами, затем сравните его с подсказками и источником. Готовые задания и расписание работают без подключения ИИ." }
                     }
                     article {
                         h2 { "Черновики" }

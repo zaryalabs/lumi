@@ -1,0 +1,63 @@
+:root {
+  color-scheme: light;
+  --font-ui: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont,
+    "Segoe UI", sans-serif;
+  --font-reading: Georgia, "Times New Roman", serif;
+  --font-display: var(--font-ui);
+  --canvas: #f4f0e8;
+  --surface-1: #fffdf8;
+  --surface-2: #ebe6dc;
+  --surface-inset: #e4ded2;
+  --text-primary: #252822;
+  --text-secondary: #60665c;
+  --text-soft: #747a70;
+  --border-subtle: #d9d2c5;
+  --border-strong: #bdb5a7;
+  --accent-primary: #315f50;
+  --accent-hover: #24493e;
+  --accent-subtle: #dfeae4;
+  --status-success: #2f6a50;
+  --status-success-bg: #dfeae4;
+  --status-warning: #7c5d18;
+  --status-warning-bg: #f5ecca;
+  --status-danger: #9f3d3d;
+  --status-danger-bg: #f8e7e4;
+  --focus-ring: #558d7a;
+  --selection: #f3dda1;
+  --elevation-1: 0 8px 26px rgb(45 43 35 / 8%);
+  --elevation-2: 0 18px 60px rgb(45 43 35 / 12%);
+  --radius-control: 0.625rem;
+  --radius-surface: 1rem;
+  --radius-dialog: 1.25rem;
+  --layer-sticky: 20;
+  --layer-popover: 40;
+  --layer-sheet: 50;
+  --layer-toast: 60;
+  --layer-assistant: 70;
+  --layer-modal: 80;
+
+  /* Compatibility aliases are centralized while feature CSS migrates. */
+  --paper: var(--canvas);
+  --paper-raised: var(--surface-1);
+  --ink-soft: var(--text-secondary);
+  --border: var(--border-subtle);
+  --sage: #708a72;
+  --sage-500: #708a72;
+  --sage-strong: #436653;
+  --sage-deep: var(--accent-primary);
+}
+
+.reader-workspace.night {
+  --surface-1: #1d211e;
+  --surface-2: #252a26;
+  --text-primary: #e8e3d8;
+  --text-secondary: #aaa99e;
+  --border-subtle: #3e4540;
+  --border-strong: #59615b;
+  --accent-subtle: #284438;
+  --paper: #121512;
+  --paper-raised: #1d211e;
+  --ink-soft: #aaa99e;
+  --border: #3e4540;
+  color-scheme: dark;
+}

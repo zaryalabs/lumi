@@ -2,6 +2,23 @@
 
 Status: accepted
 
+## Web interaction baseline
+
+Основной Reader toolbar содержит только Поиск, Оглавление, Заметки и Ещё.
+Настройки, Community, export, summary и создание записи на полях находятся в
+contextual layer; selection actions появляются рядом с выделением. На mobile
+основные четыре действия образуют нижний dock, а panels становятся sheets.
+
+Одновременно открыт один основной Reader overlay. Он получает focus entry,
+Escape/back и focus return; глобальный ИИ-trigger скрыт при Reader, modal,
+scrim или composer. Notes использует ARIA tabs с roving tabindex.
+
+PageMap пересчитывается по реальному stage при ResizeObserver,
+visualViewport/window resize и восстанавливает текущий source boundary. Panel
+не участвует в pagination geometry. Большое оглавление ограничено 160
+ближайшими либо отфильтрованными строками. PDF selection обрабатывает
+`pointerup`, `selectionchange` и keyboard path.
+
 ## Контекст
 
 Экран чтения - центральная рабочая поверхность Lumi. Через него пользователь не

@@ -16,6 +16,7 @@ Lumi — open-source приложение для вдумчивого чтени
 - Axum API в `crates/lumi-server`;
 - Dioxus web-приложение в `apps/web`;
 - Playwright E2E coverage в `tests/e2e`;
+- installable PWA shell с безопасным static-only offline fallback;
 - цели `make` и pre-commit hooks для локальных quality gates.
 
 Текущая реализованная основа — S1 Web Reader. EPUB остаётся полным эталонным
@@ -25,7 +26,8 @@ durable-импорт реальных EPUB, Markdown и portable `.lum` packages
 API-backed библиотека, рабочий
 browser-measured пагинированный reader, durable-аннотации, progress UX и общий
 baseline приёма источников из Web/Telegram. Web-библиотека и reader используют
-reader-first визуальную систему paper/sage на desktop и touch layouts, включая
+единый application shell v2 и reader-first визуальную систему paper/sage на
+desktop и touch layouts, включая
 реальные save states, keyboard flows модальных окон и панелей, capability-aware
 source UI и восстановление истёкшей сессии. Реализован repository-side baseline
 beta hardening: server-side continuation projection, граница Telegram webhook,

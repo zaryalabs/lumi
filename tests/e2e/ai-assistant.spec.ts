@@ -1,5 +1,6 @@
 import { expect, test } from "@playwright/test";
 import { readFileSync } from "node:fs";
+import { gotoBuiltApp } from "./app-ready.js";
 
 const supportedMarkdown = readFileSync(
   new URL("../fixtures/markdown/supported.md", import.meta.url),
@@ -9,7 +10,7 @@ const apiBase = `http://127.0.0.1:${
 }/api/v1`;
 
 async function register(page: import("@playwright/test").Page) {
-  await page.goto("/");
+  await gotoBuiltApp(page);
   await page
     .getByRole("button", { name: "Создать фразу восстановления" })
     .click();
@@ -44,19 +45,19 @@ async function selectReaderText(page: import("@playwright/test").Page) {
 async function configureOpenRouter(page: import("@playwright/test").Page) {
   await page.getByRole("button", { name: "ИИ-чат" }).click();
   const chat = page.getByRole("complementary", {
-    name: "Персональный AI-ассистент",
+    name: "Персональный ИИ-помощник",
   });
   await chat.getByRole("button", { name: "Настройки OpenRouter" }).click();
   await chat.getByLabel("Ключ OpenRouter").fill("sk-e2e-openrouter");
   await chat.getByRole("button", { name: "Проверить и сохранить" }).click();
   await expect(chat.getByText("готов", { exact: true })).toBeVisible();
   await chat.getByRole("button", { name: "Настройки OpenRouter" }).click();
-  await chat.getByRole("button", { name: "Свернуть AI-чат" }).click();
+  await chat.getByRole("button", { name: "Свернуть ИИ-чат" }).click();
 }
 
 async function importMarkdown(page: import("@playwright/test").Page) {
   await page
-    .getByRole("button", { name: "＋ Добавить материал", exact: true })
+    .getByRole("button", { name: "Открыть добавление материала", exact: true })
     .click();
   const uploadDialog = page.getByRole("dialog", {
     name: "Добавить материал",
@@ -84,7 +85,7 @@ test("persists OpenRouter chat and returns a Reader citation", async ({
   await register(page);
   await configureOpenRouter(page);
   const chat = page.getByRole("complementary", {
-    name: "Персональный AI-ассистент",
+    name: "Персональный ИИ-помощник",
   });
   const card = await importMarkdown(page);
   await card.getByRole("button", { name: "Читать" }).click();
@@ -98,6 +99,7 @@ test("persists OpenRouter chat and returns a Reader citation", async ({
   const citation = chat.getByRole("button", { name: /^Источник 1:/ });
   await expect(citation).toBeVisible();
 
+  await page.getByRole("button", { name: "Вернуться в библиотеку" }).click();
   await page.reload();
   await page.getByRole("button", { name: "ИИ-чат" }).click();
   await expect(
@@ -107,7 +109,7 @@ test("persists OpenRouter chat and returns a Reader citation", async ({
   await expect(
     page.getByRole("main", { name: "Чтение Руководство Lumi" }),
   ).toBeVisible();
-  await expect(page.getByText("Открыт источник ответа AI.")).toBeVisible();
+  await expect(page.getByText("Открыт источник ответа ИИ.")).toBeVisible();
 });
 
 test("grounds record RAG in the persistent search index and opens its source", async ({
@@ -119,6 +121,7 @@ test("grounds record RAG in the persistent search index and opens its source", a
   const card = await importMarkdown(page);
   await card.getByRole("button", { name: "Читать" }).click();
 
+  await page.locator(".reader-more summary").click();
   await page.getByRole("button", { name: "Запись на полях" }).click();
   await page
     .getByLabel("Заголовок (необязательно)")
@@ -177,12 +180,10 @@ test("grounds record RAG in the persistent search index and opens its source", a
 
   await search.getByRole("button", { name: "Спросить по записям" }).click();
   const chat = page.getByRole("complementary", {
-    name: "Персональный AI-ассистент",
+    name: "Персональный ИИ-помощник",
   });
   await expect(chat).toBeVisible();
-  await chat
-    .getByLabel("Сообщение AI-ассистенту")
-    .fill("Где хранится Маяк Зари?");
+  await chat.getByLabel("Сообщение помощнику").fill("Где хранится Маяк Зари?");
   await expect(chat.getByRole("button", { name: "Отправить" })).toBeEnabled();
   await chat.getByRole("button", { name: "Отправить" }).click();
   await expect(
@@ -243,9 +244,9 @@ test("keeps a manual summary edit and offers regeneration as a candidate", async
 
   await summary.getByRole("button", { name: "Закрыть саммари" }).click();
   await details.getByRole("button", { name: "Готово" }).click();
-  await page.getByRole("link", { name: "AI-задачи" }).click();
+  await page.getByRole("link", { name: "Активность" }).click();
   await page.getByLabel("Показывать завершённые").check();
-  const queue = page.getByRole("main", { name: "Очередь AI-задач" });
+  const queue = page.getByRole("main", { name: "Активность ИИ" });
   const completedSummaries = queue
     .getByRole("row")
     .filter({ hasText: "Саммари" })
@@ -275,7 +276,7 @@ test("publishes an abridged lum only after ordinary import validation", async ({
     .click();
   await abridgement.getByRole("link", { name: "Открыть очередь" }).click();
 
-  const queue = page.getByRole("main", { name: "Очередь AI-задач" });
+  const queue = page.getByRole("main", { name: "Активность ИИ" });
   await page.getByLabel("Показывать завершённые").check();
   const row = queue.getByRole("row").filter({ hasText: "Сокращённый .lum" });
   await expect

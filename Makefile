@@ -52,7 +52,7 @@ CARGO ?= $(if $(RUSTUP_TOOLCHAIN_BIN),PATH=$(RUSTUP_TOOLCHAIN_BIN):$$PATH $(RUST
 
 .DEFAULT_GOAL := help
 
-.PHONY: help prepare build push release-manifest deploy ci-clean-images ops-config cicd-contract-test production-compose-smoke init fmt l dl t c pc docs-fmt docs-l rust-fmt rust-l rust-web-check rust-web-l rust-dl rust-t plan-runner-check plan-list devcontainer-up devcontainer-down up logs down reset server-r admin-lookup-id telegram-r db-up db-down db-migrate pdfjs-assets web-r prototype-r prototype-e2e pagination-spike-r pagination-spike-e2e ai-chat-spike-e2e stage0-spikes web-build e2e-fmt e2e-fmt-check e2e-l e2e-dl web-e2e pg-t compatibility security performance search-performance staging-config staging-smoke backup restore-drill restore-attestation-test restore-attestation beta-local beta agent-inspect
+.PHONY: help prepare build push release-manifest deploy ci-clean-images ops-config cicd-contract-test production-compose-smoke init fmt l dl t c pc docs-fmt docs-l web-css-l rust-fmt rust-l rust-web-check rust-web-l rust-dl rust-t plan-runner-check plan-list devcontainer-up devcontainer-down up logs down reset server-r admin-lookup-id telegram-r db-up db-down db-migrate pdfjs-assets web-r prototype-r prototype-e2e pagination-spike-r pagination-spike-e2e ai-chat-spike-e2e stage0-spikes web-build e2e-fmt e2e-fmt-check e2e-l e2e-dl web-e2e pg-t compatibility security performance search-performance staging-config staging-smoke backup restore-drill restore-attestation-test restore-attestation beta-local beta agent-inspect
 
 help: ## Show available make targets
 	@awk 'BEGIN {FS = ":.*## "}; /^[a-zA-Z0-9_.-]+:.*## / {printf "  %-16s %s\n", $$1, $$2}' $(MAKEFILE_LIST)
@@ -133,7 +133,7 @@ init: ## Install hooks and local dependencies when tools are available
 
 fmt: docs-fmt rust-fmt e2e-fmt ## Format all supported project files
 
-l: docs-l rust-l e2e-l ## Run light checks
+l: docs-l web-css-l rust-l e2e-l ## Run light checks
 
 dl: l rust-dl e2e-dl ## Run deeper optional checks
 
@@ -169,6 +169,9 @@ docs-fmt: ## Format/check docs when a formatter is available
 docs-l: ## Run lightweight docs checks
 	@find README.md AGENTS.md CONTRIBUTING.md docs ops -type f \( -name '*.md' -o -name '*.toml' -o -name '*.yaml' -o -name '*.yml' -o -name '*.json' \) -print >/dev/null
 	@echo "Docs files are present"
+
+web-css-l: ## Reject CSS references to undeclared custom properties
+	./scripts/check-css-tokens.sh $(WEB_DIR)/assets
 
 rust-fmt: ## Format Rust code when Cargo workspace exists
 	@if [ -f "$(RUST_MANIFEST)" ]; then \

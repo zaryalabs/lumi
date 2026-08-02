@@ -2,7 +2,10 @@
 <html lang="ru">
   <head>
     <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta
+      name="viewport"
+      content="width=device-width, initial-scale=1.0, viewport-fit=cover"
+    />
     <meta
       name="description"
       content="Reader-first UI/UX prototype for Lumi deliberate reading"
@@ -23,25 +26,47 @@
           <span>Lumi</span>
         </a>
 
+        <span class="context-title" aria-live="polite">Библиотека</span>
+
         <nav class="app-navigation" aria-label="Основная навигация">
           <button
             class="nav-button active"
             id="library-navigation"
+            data-view-target="library"
             type="button"
             aria-current="page"
           >
-            Библиотека
+            <span class="nav-icon nav-icon-library" aria-hidden="true"></span>
+            <span>Библиотека</span>
+          </button>
+          <button class="nav-button" type="button" data-view-target="desk">
+            <span class="nav-icon nav-icon-desk" aria-hidden="true"></span>
+            <span>Desk</span>
+          </button>
+          <button class="nav-button" type="button" data-view-target="spaces">
+            <span class="nav-icon nav-icon-spaces" aria-hidden="true"></span>
+            <span>Пространства</span>
+          </button>
+          <button class="nav-button" type="button" data-view-target="repetition">
+            <span class="nav-icon nav-icon-repeat" aria-hidden="true"></span>
+            <span>Повторение</span>
           </button>
         </nav>
 
         <div class="account-cluster">
-          <span class="sync-state"
-            ><span aria-hidden="true">●</span> Всё сохранено</span
-          >
+          <button class="header-action" type="button" data-view-target="search">
+            <span class="nav-icon nav-icon-search" aria-hidden="true"></span>
+            <span>Поиск</span>
+          </button>
+          <button class="header-action" type="button" data-view-target="activity">
+            <span class="nav-icon nav-icon-activity" aria-hidden="true"></span>
+            <span>Активность</span>
+          </button>
           <button
             class="avatar-button"
             type="button"
             aria-label="Открыть профиль"
+            data-view-target="settings"
           >
             М
           </button>
@@ -232,6 +257,50 @@
           </dialog>
         </section>
 
+        <section id="desk" class="app-view feature-view" hidden>
+          <p class="overline">Рабочая поверхность</p>
+          <h1>Desk</h1>
+          <p class="lead">Заметки, обучение и ИИ-результаты рядом с материалами.</p>
+          <div class="prototype-grid">
+            <article><h2>Заметки и выделения</h2><p>12 записей · теги «внимание», «память»</p></article>
+            <article><h2>Обучение</h2><p>4 задания пора повторить сегодня.</p></article>
+          </div>
+        </section>
+
+        <section id="spaces" class="app-view feature-view" hidden>
+          <p class="overline">Личные сообщества</p>
+          <h1>Пространства</h1>
+          <div class="prototype-grid">
+            <article><h2>Книжный клуб</h2><p>3 материала · 8 новых сообщений</p><button class="primary-button" type="button">Открыть</button></article>
+            <article><h2>Создать пространство</h2><p>Создание открывается отдельным диалогом и не конкурирует со списком.</p></article>
+          </div>
+        </section>
+
+        <section id="repetition" class="app-view feature-view" hidden>
+          <p class="overline">Практика</p>
+          <h1>Повторение</h1>
+          <p class="lead">Сегодня готовы четыре вопроса из двух материалов.</p>
+        </section>
+
+        <section id="search" class="app-view feature-view" hidden>
+          <p class="overline">По всему Lumi</p>
+          <h1>Поиск</h1>
+          <label class="prototype-search">Запрос<input type="search" value="внимание" /></label>
+          <div class="prototype-grid"><article><h2>Личные записи</h2><p>Точное место в главе «Внимание как выбор».</p></article><article><h2>Пространства</h2><p>Обсуждение в «Книжном клубе».</p></article></div>
+        </section>
+
+        <section id="activity" class="app-view feature-view" hidden>
+          <p class="overline">Фоновые действия</p>
+          <h1>Активность</h1>
+          <div class="prototype-grid"><article><h2>Саммари готово</h2><p>Результат сохранён в Desk.</p></article></div>
+        </section>
+
+        <section id="settings" class="app-view feature-view" hidden>
+          <p class="overline">Аккаунт</p>
+          <h1>Настройки</h1>
+          <div class="prototype-grid"><article><h2>Чтение</h2><p>Тема и параметры страницы.</p></article><article><h2>Подключения</h2><p>Telegram и внешние агенты.</p></article><article><h2>ИИ в Lumi</h2><p>Модель и личный ключ.</p></article></div>
+        </section>
+
         <section
           id="reader"
           class="app-view reader-view"
@@ -249,6 +318,7 @@
             </div>
 
             <div class="reader-actions">
+              <button class="reader-action" type="button">Поиск</button>
               <button
                 class="reader-action"
                 id="toggle-toc"
@@ -260,16 +330,6 @@
                 Содержание
               </button>
               <button
-                class="reader-action compact-action"
-                id="toggle-settings"
-                type="button"
-                aria-expanded="false"
-                aria-controls="reader-settings"
-                aria-label="Настройки чтения"
-              >
-                Aa
-              </button>
-              <button
                 class="reader-action"
                 id="toggle-notes"
                 type="button"
@@ -279,6 +339,20 @@
               >
                 Заметки <span class="count-badge">2</span>
               </button>
+              <details class="reader-more">
+                <summary class="reader-action">Ещё</summary>
+                <div class="reader-more-menu">
+                  <button
+                    id="toggle-settings"
+                    type="button"
+                    aria-expanded="false"
+                    aria-controls="reader-settings"
+                    aria-label="Настройки чтения"
+                  >Настройки чтения</button>
+                  <button type="button">Сообщество</button>
+                  <button type="button">Экспорт заметок</button>
+                </div>
+              </details>
             </div>
 
             <div class="chapter-progress" aria-hidden="true"><span></span></div>
@@ -609,6 +683,25 @@
           </div>
         </section>
       </main>
+
+      <nav class="mobile-navigation" aria-label="Мобильная навигация">
+        <button type="button" data-view-target="library">
+          <span class="nav-icon nav-icon-library" aria-hidden="true"></span>
+          <span>Библиотека</span>
+        </button>
+        <button type="button" data-view-target="desk">
+          <span class="nav-icon nav-icon-desk" aria-hidden="true"></span>
+          <span>Desk</span>
+        </button>
+        <button type="button" data-view-target="spaces">
+          <span class="nav-icon nav-icon-spaces" aria-hidden="true"></span>
+          <span>Пространства</span>
+        </button>
+        <button type="button" data-view-target="repetition">
+          <span class="nav-icon nav-icon-repeat" aria-hidden="true"></span>
+          <span>Повторение</span>
+        </button>
+      </nav>
 
       <div id="toast" class="toast" role="status" aria-live="polite"></div>
     </div>

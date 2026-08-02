@@ -52,7 +52,8 @@ struct PdfSelection {
 #[component]
 pub(crate) fn ReaderRoute(
     material_id: Uuid,
-    initial_anchor: Option<String>,
+    initial_anchor: Option<Box<Anchor>>,
+    back_label: String,
     csrf_token: String,
     record_rag_enabled: bool,
     material_sharing_available: bool,
@@ -80,6 +81,7 @@ pub(crate) fn ReaderRoute(
             crate::reader::ReaderApp {
                 material_id,
                 initial_anchor: initial_anchor.clone(),
+                back_label: back_label.clone(),
                 csrf_token,
                 record_rag_enabled,
                 material_sharing_available,
@@ -93,6 +95,7 @@ pub(crate) fn ReaderRoute(
             PdfReaderApp {
                 material_id,
                 initial_anchor,
+                back_label,
                 csrf_token,
                 record_rag_enabled,
                 material_sharing_available,
@@ -106,7 +109,7 @@ pub(crate) fn ReaderRoute(
             main { id: "main-content", class: "reader-loading", aria_label: "Ошибка чтения",
                 h1 { "Не удалось открыть материал" }
                 p { class: "library-alert", role: "alert", "{error}" }
-                button { class: "secondary-action", r#type: "button", onclick: move |_| on_close.call(()), "Вернуться в библиотеку" }
+                button { class: "secondary-action", r#type: "button", onclick: move |_| on_close.call(()), "{back_label}" }
             }
         },
     }
@@ -115,7 +118,8 @@ pub(crate) fn ReaderRoute(
 #[component]
 fn PdfReaderApp(
     material_id: Uuid,
-    initial_anchor: Option<String>,
+    initial_anchor: Option<Box<Anchor>>,
+    back_label: String,
     csrf_token: String,
     record_rag_enabled: bool,
     material_sharing_available: bool,
@@ -184,7 +188,7 @@ fn PdfReaderApp(
                         Vec::new()
                     };
                     let target = crate::ai::take_reader_target(material_id);
-                    let target_anchor = target.as_ref().and_then(|attachment| {
+                    let ai_target_anchor = target.as_ref().and_then(|attachment| {
                         let AiContextAttachment::Source {
                             revision_id, scope, ..
                         } = attachment
@@ -201,6 +205,11 @@ fn PdfReaderApp(
                             _ => None,
                         }
                     });
+                    let route_anchor = initial_anchor
+                        .as_deref()
+                        .filter(|anchor| anchor.revision_id == data.document.revision_id)
+                        .cloned();
+                    let target_anchor = ai_target_anchor.or(route_anchor);
                     let target_page = target_anchor.as_ref().and_then(|anchor| {
                         match anchor.source_locator.as_ref() {
                             Some(SourceLocator::Pdf(locator)) => Some(locator.page_index),
@@ -223,15 +232,6 @@ fn PdfReaderApp(
                     selected_anchor.set(target_anchor);
                     annotations.set(loaded_annotations);
                     shared_layers.set(loaded_shared_layers);
-                    if let Some(page_index) = initial_anchor
-                        .as_deref()
-                        .and_then(|value| value.strip_prefix("page-"))
-                        .and_then(|value| value.parse::<u32>().ok())
-                    {
-                        current_page.set(
-                            page_index.min(data.document.pages.len().saturating_sub(1) as u32),
-                        );
-                    }
                     state.set(PdfReaderState::Ready(Box::new(data)));
                     mount_config.set(Some(config));
                 }
@@ -273,7 +273,7 @@ fn PdfReaderApp(
                 p { class: "eyebrow", "PDF недоступен" }
                 h1 { "Не удалось открыть PDF" }
                 p { class: "library-alert", role: "alert", "{error}" }
-                button { class: "secondary-action", r#type: "button", onclick: move |_| on_close.call(()), "Вернуться в библиотеку" }
+                button { class: "secondary-action", r#type: "button", onclick: move |_| on_close.call(()), "{back_label}" }
             }
         },
         PdfReaderState::Ready(data) => {
@@ -299,13 +299,17 @@ fn PdfReaderApp(
                 main {
                     id: "main-content",
                     class: "reader-workspace pdf-reader-workspace",
+                    "data-update-safe": "false",
                     aria_label: "Чтение PDF {title}",
                     style: "--reader-progress: {progress_percent}%;",
                     header { class: "reader-topbar pdf-reader-topbar",
-                        button { class: "reader-back", r#type: "button", aria_label: "Вернуться в библиотеку", onclick: move |_| {
+                        button { class: "reader-back", r#type: "button", aria_label: "{back_label}", title: "{back_label}", onclick: move |_| {
                             destroy_pdf();
                             on_close.call(());
-                        }, "← Библиотека" }
+                        },
+                            span { aria_hidden: "true", "←" }
+                            span { class: "reader-back-label", "{back_label}" }
+                        }
                         div { class: "reader-title",
                             h1 { "{title}" }
                             span { "{creator}" }
@@ -324,44 +328,50 @@ fn PdfReaderApp(
                                 current_page.set(page);
                                 call_pdf_two("goToPage", JsValue::from_str(PDF_CONTAINER_ID), JsValue::from_f64(f64::from(page)));
                             }, "→" }
-                            button { r#type: "button", aria_label: "Уменьшить масштаб", onclick: move |_| {
-                                let next = (zoom() - 0.1).max(0.5);
-                                zoom.set(next);
-                                call_pdf_two("setZoom", JsValue::from_str(PDF_CONTAINER_ID), JsValue::from_f64(next));
-                            }, "−" }
-                            output { aria_label: "Масштаб", "{(zoom() * 100.0).round()}%" }
-                            button { r#type: "button", aria_label: "Увеличить масштаб", onclick: move |_| {
-                                let next = (zoom() + 0.1).min(3.0);
-                                zoom.set(next);
-                                call_pdf_two("setZoom", JsValue::from_str(PDF_CONTAINER_ID), JsValue::from_f64(next));
-                            }, "+" }
-                            button { r#type: "button", onclick: move |_| {
-                                if let Some(anchor) = anchor_for_page(&margin_data, current_page()) {
-                                    selected_anchor.set(Some(anchor));
-                                    selected_target.set(AnnotationTarget::PageArea {
-                                        page_index: current_page(),
-                                        exact: false,
-                                    });
-                                    note_title.set(String::new());
-                                    note_draft.set(String::new());
-                                    note_tags.set(String::new());
+                            details { class: "reader-more pdf-reader-more",
+                                summary { role: "button", aria_label: "Дополнительные действия PDF", "Ещё" }
+                                div { class: "reader-more-menu",
+                                    button { r#type: "button", aria_label: "Уменьшить масштаб", onclick: move |_| {
+                                        let next = (zoom() - 0.1).max(0.5);
+                                        zoom.set(next);
+                                        call_pdf_two("setZoom", JsValue::from_str(PDF_CONTAINER_ID), JsValue::from_f64(next));
+                                    }, "Уменьшить масштаб" }
+                                    output { aria_label: "Масштаб", "Масштаб: {(zoom() * 100.0).round()}%" }
+                                    button { r#type: "button", aria_label: "Увеличить масштаб", onclick: move |_| {
+                                        let next = (zoom() + 0.1).min(3.0);
+                                        zoom.set(next);
+                                        call_pdf_two("setZoom", JsValue::from_str(PDF_CONTAINER_ID), JsValue::from_f64(next));
+                                    }, "Увеличить масштаб" }
+                                    button { r#type: "button", onclick: move |_| {
+                                        close_pdf_more_menu();
+                                        if let Some(anchor) = anchor_for_page(&margin_data, current_page()) {
+                                            selected_anchor.set(Some(anchor));
+                                            selected_target.set(AnnotationTarget::PageArea {
+                                                page_index: current_page(),
+                                                exact: false,
+                                            });
+                                            note_title.set(String::new());
+                                            note_draft.set(String::new());
+                                            note_tags.set(String::new());
+                                        }
+                                    }, "Запись на полях" }
+                                    crate::ai::SummaryAction {
+                                        material_id,
+                                        revision_id: data.document.revision_id,
+                                        scope_kind: lumi_core::SummaryScopeKind::Material,
+                                        scope_ref: "material".to_owned(),
+                                        label: "Саммари".to_owned(),
+                                        csrf_token: csrf.read().clone(),
+                                    }
+                                    crate::community::ShareMaterialAction {
+                                        material_id,
+                                        csrf_token: csrf.read().clone(),
+                                        available: material_sharing_available,
+                                        label: "Поделиться".to_owned(),
+                                    }
+                                    a { class: "secondary-action", href: "{API_BASE}/materials/{material_id}/source", download: "{data.entry.source_identity.source_name}", "Скачать PDF" }
                                 }
-                            }, "Запись на полях" }
-                            crate::ai::SummaryAction {
-                                material_id,
-                                revision_id: data.document.revision_id,
-                                scope_kind: lumi_core::SummaryScopeKind::Material,
-                                scope_ref: "material".to_owned(),
-                                label: "Саммари".to_owned(),
-                                csrf_token: csrf.read().clone(),
                             }
-                            crate::community::ShareMaterialAction {
-                                material_id,
-                                csrf_token: csrf.read().clone(),
-                                available: material_sharing_available,
-                                label: "Поделиться".to_owned(),
-                            }
-                            a { class: "secondary-action", href: "{API_BASE}/materials/{material_id}/source", download: "{data.entry.source_identity.source_name}", "Скачать PDF" }
                         }
                         div { class: "reader-chapter-progress", aria_hidden: "true", span {} }
                     }
@@ -1144,7 +1154,7 @@ fn apply_pdf_ai_reader_target(
         JsValue::from_str(PDF_CONTAINER_ID),
         JsValue::from_f64(f64::from(page)),
     );
-    reader_message.set("Открыт источник ответа AI.".to_owned());
+    reader_message.set("Открыт источник ответа ИИ.".to_owned());
 }
 
 fn restored_pdf_page(progress: &Option<ReadingProgress>) -> u32 {
@@ -1996,6 +2006,16 @@ fn call_pdf_two(name: &str, first: JsValue, second: JsValue) {
 
 fn destroy_pdf() {
     let _ = call_pdf_one("destroy", JsValue::from_str(PDF_CONTAINER_ID));
+}
+
+fn close_pdf_more_menu() {
+    let Some(document) = web_sys::window().and_then(|window| window.document()) else {
+        return;
+    };
+    let Ok(Some(details)) = document.query_selector(".pdf-reader-more[open]") else {
+        return;
+    };
+    let _ = details.remove_attribute("open");
 }
 
 fn clear_browser_selection() {

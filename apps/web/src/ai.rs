@@ -26,6 +26,7 @@ use super::account::{notify_session_expired, API_BASE};
 const HANDOFF_STORAGE_KEY: &str = "lumi:ai-handoff:v1";
 const READER_TARGET_STORAGE_KEY: &str = "lumi:reader-target:v1";
 const HANDOFF_EVENT: &str = "lumi:ai-handoff";
+const SETTINGS_EVENT: &str = "lumi:open-ai-settings";
 pub(crate) const READER_TARGET_EVENT: &str = "lumi:reader-target";
 const DEFAULT_MODEL: &str = "openai/gpt-4o-mini";
 
@@ -44,15 +45,15 @@ pub(crate) fn dispatch_reader_handoff(handoff: &ReaderAiHandoff) -> Result<(), S
         .map_err(|_| "Browser storage недоступен.".to_owned())?
         .ok_or_else(|| "Browser storage отключён.".to_owned())?;
     let payload = serde_json::to_string(handoff)
-        .map_err(|_| "Не удалось подготовить AI context.".to_owned())?;
+        .map_err(|_| "Не удалось подготовить выбранный фрагмент.".to_owned())?;
     storage
         .set_item(HANDOFF_STORAGE_KEY, &payload)
-        .map_err(|_| "Не удалось передать AI context.".to_owned())?;
+        .map_err(|_| "Не удалось передать выбранный фрагмент.".to_owned())?;
     let event = web_sys::CustomEvent::new(HANDOFF_EVENT)
-        .map_err(|_| "Не удалось открыть AI-чат.".to_owned())?;
+        .map_err(|_| "Не удалось открыть ИИ-чат.".to_owned())?;
     window
         .dispatch_event(&event)
-        .map_err(|_| "Не удалось открыть AI-чат.".to_owned())?;
+        .map_err(|_| "Не удалось открыть ИИ-чат.".to_owned())?;
     Ok(())
 }
 
@@ -106,11 +107,11 @@ pub(crate) fn AiQueuePage(csrf_token: String) -> Element {
     let selected_count = selected.read().len();
 
     rsx! {
-        main { id: "main-content", class: "library-view ai-queue-view", aria_label: "Очередь AI-задач",
+        main { id: "main-content", class: "library-view ai-queue-view", aria_label: "Активность ИИ",
             header { class: "library-hero compact",
                 div {
                     p { class: "eyebrow", "Durable execution" }
-                    h1 { "AI-задачи" }
+                    h1 { "Активность" }
                     p { class: "library-lead", "Фоновые саммари переживают reload и перезапуск сервера. Здесь их можно запустить, отменить или повторить." }
                 }
                 button { class: "secondary-action", r#type: "button", onclick: move |_| refresh += 1, "Обновить" }
@@ -707,6 +708,19 @@ pub(crate) fn GlobalAiChat(csrf_token: String) -> Element {
             csrf,
         );
     });
+    use_effect(move || {
+        let Some(window) = web_sys::window() else {
+            return;
+        };
+        let handler = Closure::<dyn FnMut(web_sys::Event)>::new(move |_| {
+            open.set(true);
+            settings_open.set(true);
+            defer_focus("openrouter_model");
+        });
+        let _ = window
+            .add_event_listener_with_callback(SETTINGS_EVENT, handler.as_ref().unchecked_ref());
+        handler.forget();
+    });
 
     let provider_snapshot = provider.read().clone();
     let detail_snapshot = detail.read().clone();
@@ -721,13 +735,18 @@ pub(crate) fn GlobalAiChat(csrf_token: String) -> Element {
 
     rsx! {
         button {
+            id: "global-ai-trigger",
             class: "ai-chat-trigger",
             r#type: "button",
             aria_expanded: open(),
             aria_controls: "global-ai-chat",
             onclick: move |_| {
                 open.toggle();
-                if open() { defer_focus("ai-chat-composer"); }
+                if open() {
+                    defer_focus("ai-chat-composer");
+                } else {
+                    defer_focus("global-ai-trigger");
+                }
             },
             span { aria_hidden: "true", "✦" }
             "ИИ-чат"
@@ -736,16 +755,17 @@ pub(crate) fn GlobalAiChat(csrf_token: String) -> Element {
             aside {
                 id: "global-ai-chat",
                 class: "ai-chat-panel",
-                aria_label: "Персональный AI-ассистент",
-                onkeydown: move |event| if event.key() == Key::Escape { open.set(false); },
+                role: "complementary",
+                aria_label: "Персональный ИИ-помощник",
+                onkeydown: move |event| if event.key() == Key::Escape { close_global_ai_chat(open); },
                 header { class: "ai-chat-header",
                     div {
                         p { class: "eyebrow", "Персональный ассистент" }
-                        h2 { "Lumi AI" }
+                        h2 { "Помощник Lumi" }
                     }
                     div { class: "ai-chat-header-actions",
                         button { r#type: "button", aria_label: "Настройки OpenRouter", onclick: move |_| settings_open.toggle(), "⚙" }
-                        button { r#type: "button", aria_label: "Свернуть AI-чат", onclick: move |_| open.set(false), "×" }
+                        button { r#type: "button", aria_label: "Свернуть ИИ-чат", onclick: move |_| close_global_ai_chat(open), "×" }
                     }
                 }
                 if !error().is_empty() {
@@ -769,6 +789,7 @@ pub(crate) fn GlobalAiChat(csrf_token: String) -> Element {
                         }
                         label { "Модель",
                             input {
+                                id: "openrouter_model",
                                 name: "openrouter_model",
                                 value: "{model}",
                                 oninput: move |event| model.set(event.value()),
@@ -963,7 +984,7 @@ pub(crate) fn GlobalAiChat(csrf_token: String) -> Element {
                                 ol { class: "ai-message-list", aria_live: "polite",
                                     for message in current.messages.items.clone() {
                                         li { class: if message.role == AiMessageRole::User { "ai-message user" } else { "ai-message assistant" },
-                                            p { class: "ai-message-role", if message.role == AiMessageRole::User { "Вы" } else { "Lumi AI" } }
+                                            p { class: "ai-message-role", if message.role == AiMessageRole::User { "Вы" } else { "Помощник Lumi" } }
                                             if message.content.is_empty() && message.status == AiMessageStatus::Streaming {
                                                 p { role: "status", "Думает…" }
                                             } else {
@@ -1042,7 +1063,7 @@ pub(crate) fn GlobalAiChat(csrf_token: String) -> Element {
                                         busy.set(false);
                                     });
                                 },
-                                    label { class: "sr-only", r#for: "ai-chat-composer", "Сообщение AI-ассистенту" }
+                                    label { class: "sr-only", r#for: "ai-chat-composer", "Сообщение помощнику" }
                                     textarea {
                                         id: "ai-chat-composer",
                                         rows: "3",
@@ -1131,6 +1152,11 @@ pub(crate) fn GlobalAiChat(csrf_token: String) -> Element {
             }
         }
     }
+}
+
+fn close_global_ai_chat(mut open: Signal<bool>) {
+    open.set(false);
+    defer_focus("global-ai-trigger");
 }
 
 fn retry_generation_ui(
@@ -1757,7 +1783,7 @@ fn task_progress_label(status: AiTaskStatus) -> &'static str {
     match status {
         AiTaskStatus::Queued => "Задача ожидает внутреннего worker.",
         AiTaskStatus::Running => "Контекст, синтез и проверка результата выполняются на сервере.",
-        AiTaskStatus::NeedsInput => "Проверьте настройки AI provider.",
+        AiTaskStatus::NeedsInput => "Проверьте настройки ИИ.",
         AiTaskStatus::Succeeded => "Результат опубликован.",
         AiTaskStatus::Failed => "Задачу можно повторить из этой панели или общей очереди.",
         AiTaskStatus::Cancelled => "Задача отменена.",

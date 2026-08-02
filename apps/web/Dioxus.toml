@@ -1,6 +1,7 @@
 [application]
 name = "lumi-web"
 asset_dir = "assets"
+public_dir = "public"
 sub_package = "lumi-web"
 
 [web.app]
@@ -8,7 +9,7 @@ title = "Lumi"
 
 [web.watcher]
 watch_path = ["src", "assets", "../../crates/lumi-core/src"]
-index_on_404 = true
+index_on_404 = false
 
 [web.resource.dev]
 style = []

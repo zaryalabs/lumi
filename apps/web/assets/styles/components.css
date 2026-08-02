@@ -1,0 +1,53 @@
+:where(
+    button,
+    a.primary-action,
+    a.secondary-action,
+    summary,
+    input:not([type="checkbox"]):not([type="radio"]),
+    select
+  ) {
+  min-height: 44px;
+}
+
+:where(input, textarea, select) {
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-control);
+  color: var(--text-primary);
+  background: var(--surface-1);
+}
+
+.surface-card {
+  padding: clamp(1rem, 3vw, 1.5rem);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-surface);
+  background: var(--surface-1);
+  box-shadow: var(--elevation-1);
+}
+
+.feedback-state {
+  display: grid;
+  gap: 0.75rem;
+  padding: 1.25rem;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-surface);
+  background: var(--surface-1);
+}
+
+.status-pill.ready,
+.status-pill.succeeded,
+.status-pill.success {
+  color: var(--status-success);
+  background: var(--status-success-bg);
+}
+
+.status-pill.failed,
+.status-pill.cancelled,
+.status-pill.danger {
+  color: var(--status-danger);
+  background: var(--status-danger-bg);
+}
+
+dialog::backdrop {
+  background: rgb(18 21 18 / 42%);
+  backdrop-filter: blur(2px);
+}

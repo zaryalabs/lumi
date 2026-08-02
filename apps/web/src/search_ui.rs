@@ -10,7 +10,7 @@ use uuid::Uuid;
 use web_sys::RequestCredentials;
 
 use crate::account::{notify_session_expired, API_BASE};
-use crate::routing::{percent_encode, source_type_token, SearchRoute};
+use crate::routing::{percent_encode, source_type_token, CommunityTarget, SearchRoute};
 
 #[component]
 pub(crate) fn GlobalSearchPage(
@@ -21,8 +21,10 @@ pub(crate) fn GlobalSearchPage(
     let mut query = use_signal(|| route.query.clone());
     let mut source_type = use_signal(|| route.source_type);
     let mut state = use_signal(SearchViewState::default);
+    let mut refresh = use_signal(|| 0_u64);
     let route_for_load = route.clone();
     use_effect(move || {
+        let _ = refresh();
         let route = route_for_load.clone();
         query.set(route.query.clone());
         source_type.set(route.source_type);
@@ -81,7 +83,7 @@ pub(crate) fn GlobalSearchPage(
             header { class: "search-hero",
                 p { class: "eyebrow", "Единый индекс" }
                 h1 { "Поиск по Lumi" }
-                p { "Материалы, записи, обучение и сохранённые AI-артефакты — через один permission-aware контракт." }
+                p { "Материалы, личные записи, обучение и доступные обсуждения — в одном поиске." }
                 form { class: "unified-search-form", role: "search", onsubmit: move |event| {
                     event.prevent_default();
                     let next = crate::routing::AppRoute::Search(SearchRoute {
@@ -112,7 +114,10 @@ pub(crate) fn GlobalSearchPage(
                             option { value: "note", "Заметки" }
                             option { value: "highlight", "Выделения" }
                             option { value: "learning_item", "Обучение" }
-                            option { value: "ai_artifact", "AI-артефакты" }
+                            option { value: "ai_artifact", "ИИ-результаты" }
+                            option { value: "shared_comment", "Комментарии пространств" }
+                            option { value: "shared_chat_message", "Чаты пространств" }
+                            option { value: "shared_highlight", "Общие выделения" }
                         }
                     }
                     button { class: "primary-action", r#type: "submit", "Найти" }
@@ -141,12 +146,15 @@ pub(crate) fn GlobalSearchPage(
                 p { class: "search-state", role: "status", "Ищем по единому индексу…" }
             }
             if let Some(ref error) = snapshot.error {
-                p { class: "library-alert", role: "alert", "{error}" }
+                div { class: "library-alert", role: "alert",
+                    span { "{error}" }
+                    button { r#type: "button", onclick: move |_| refresh += 1, "Повторить" }
+                }
             }
             if route.query.trim().is_empty() {
                 section { class: "search-empty",
                     h2 { "Введите запрос" }
-                    p { "Поиск не зависит от AI provider и остаётся доступным без BYOK." }
+                    p { "Поиск работает по сохранённым данным Lumi и не требует подключения ИИ." }
                 }
             } else if !snapshot.loading && items.is_empty() && snapshot.error.is_none() {
                 section { class: "search-empty",
@@ -156,32 +164,6 @@ pub(crate) fn GlobalSearchPage(
             } else {
                 SearchGroups { items, on_open }
             }
-        }
-    }
-}
-
-#[component]
-pub(crate) fn LibrarySearch(on_submit: EventHandler<String>) -> Element {
-    let mut query = use_signal(String::new);
-    rsx! {
-        form { class: "library-search", role: "search", aria_label: "Поиск в библиотеке", onsubmit: move |event| {
-            event.prevent_default();
-            let value = query().trim().to_owned();
-            if !value.is_empty() {
-                on_submit.call(value);
-            }
-        },
-            label {
-                span { "Найти в библиотеке и записях" }
-                input {
-                    r#type: "search",
-                    name: "library_search",
-                    placeholder: "Поиск по единому индексу",
-                    value: "{query}",
-                    oninput: move |event| query.set(event.value()),
-                }
-            }
-            button { class: "secondary-action", r#type: "submit", "Поиск" }
         }
     }
 }
@@ -270,7 +252,8 @@ fn SearchGroups(items: Vec<SearchResult>, on_open: EventHandler<SearchOpenTarget
         ("Материалы", SearchGroup::Materials),
         ("Записи", SearchGroup::Records),
         ("Обучение", SearchGroup::Learning),
-        ("ИИ-артефакты", SearchGroup::Artifacts),
+        ("ИИ-результаты", SearchGroup::Artifacts),
+        ("Пространства", SearchGroup::Social),
     ];
     rsx! {
         div { class: "search-groups", aria_live: "polite",
@@ -305,7 +288,7 @@ fn SearchResultCard(result: SearchResult, on_open: EventHandler<SearchOpenTarget
                 h3 { "{result.title}" }
                 p { class: "search-path", "{path}" }
                 p { "{result.snippet}" }
-                p { class: "match-reason", "Совпадение: {match_reason(result.source_type)} · score {result.score.total:.3}" }
+                p { class: "match-reason", "Совпадение: {match_reason(result.source_type)}" }
             }
             button { class: "secondary-action", r#type: "button", onclick: move |_| on_open.call(target.clone()), "Открыть" }
         }
@@ -342,6 +325,7 @@ enum SearchGroup {
     Records,
     Learning,
     Artifacts,
+    Social,
 }
 
 impl SearchGroup {
@@ -357,6 +341,7 @@ impl SearchGroup {
             ),
             Self::Learning => source_type == SearchSourceType::LearningItem,
             Self::Artifacts => source_type == SearchSourceType::AiArtifact,
+            Self::Social => source_type.is_social(),
         }
     }
 }
@@ -373,13 +358,7 @@ pub(crate) fn open_search_target(target: &SearchOpenTarget) {
             material_id,
             anchor,
             ..
-        } => crate::routing::AppRoute::Reader(
-            *material_id,
-            None,
-            anchor
-                .as_ref()
-                .and_then(|anchor| anchor.node_path.last().cloned()),
-        ),
+        } => crate::routing::AppRoute::Reader(*material_id, None, anchor.clone()),
         SearchOpenTarget::Annotation { annotation_id, .. } => {
             crate::routing::AppRoute::Desk(crate::routing::DeskRoute {
                 view: crate::routing::DeskView::Item(
@@ -407,10 +386,26 @@ pub(crate) fn open_search_target(target: &SearchOpenTarget) {
                 ..crate::routing::DeskRoute::default()
             })
         }
-        SearchOpenTarget::CommunityMaterial { space_id, .. }
-        | SearchOpenTarget::CommunityChat { space_id, .. } => {
-            crate::routing::AppRoute::CommunitySpace(*space_id)
-        }
+        SearchOpenTarget::CommunityMaterial {
+            space_id,
+            shared_material_id,
+            source_id,
+        } => crate::routing::AppRoute::CommunitySpace(
+            *space_id,
+            Some(CommunityTarget::Material {
+                shared_material_id: *shared_material_id,
+                source_id: *source_id,
+            }),
+        ),
+        SearchOpenTarget::CommunityChat {
+            space_id,
+            message_id,
+        } => crate::routing::AppRoute::CommunitySpace(
+            *space_id,
+            Some(CommunityTarget::Chat {
+                message_id: *message_id,
+            }),
+        ),
     };
     crate::routing::set_browser_route(&route);
 }
@@ -476,7 +471,7 @@ fn source_label(value: SearchSourceType) -> &'static str {
         SearchSourceType::Note => "Заметка",
         SearchSourceType::MarginNote => "Запись на полях",
         SearchSourceType::VoiceTranscript => "Голос",
-        SearchSourceType::AiArtifact => "AI-артефакт",
+        SearchSourceType::AiArtifact => "ИИ-результат",
         SearchSourceType::LearningItem => "Обучение",
         SearchSourceType::SharedComment => "Комментарий сообщества",
         SearchSourceType::SharedChatMessage => "Чат сообщества",

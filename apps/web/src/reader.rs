@@ -13,20 +13,21 @@ use lumi_core::{
     AnnotationTarget, AnnotationType, AudioAttachment, AudioRetentionPolicy, AudioUpload,
     CreateAnnotationCommand, CreateAudioAttachmentCommand, CreateAudioUploadCommand,
     CreateSharedThreadRequest, DeleteAnnotationCommand, HighlightStyle, LibraryEntry, LinkTarget,
-    LinkTargetType, MoveReadingPositionCommand, PageBoundary, PageFragment, PageMap,
-    PublishSharedHighlightRequest, ReaderNavigation, ReaderPage, ReaderSettings, ReaderTheme,
-    ReaderWidth, ReadingDocument, ReadingLink, ReadingLinkKind, ReadingProgress, RenderBlock,
-    RenderPlan, ResolveAnnotationLinkCommand, SharedAnchorDraft, SharedAnchorPlacement,
-    SharedCommentThreadScope, SharedHighlight, SharedReaderSpaceLayer, SharedThreadTargetDraft,
-    TextRange, TranscriptArtifact, UnpublishSharedHighlightRequest, UpdateAnnotationCommand,
-    UpdateReaderSettingsCommand,
+    LinkTargetType, MoveReadingPositionCommand, NavigationItem, PageBoundary, PageFragment,
+    PageMap, PublishSharedHighlightRequest, ReaderNavigation, ReaderPage, ReaderSettings,
+    ReaderTheme, ReaderWidth, ReadingDocument, ReadingLink, ReadingLinkKind, ReadingProgress,
+    RenderBlock, RenderPlan, ResolveAnnotationLinkCommand, SharedAnchorDraft,
+    SharedAnchorPlacement, SharedCommentThreadScope, SharedHighlight, SharedReaderSpaceLayer,
+    SharedThreadTargetDraft, TextRange, TranscriptArtifact, UnpublishSharedHighlightRequest,
+    UpdateAnnotationCommand, UpdateReaderSettingsCommand,
 };
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
 use wasm_bindgen::{closure::Closure, JsCast};
 use wasm_bindgen_futures::JsFuture;
 use web_sys::{
-    Element as DomElement, HtmlElement, Node, RequestCredentials, ScrollBehavior, ScrollToOptions,
+    Element as DomElement, HtmlElement, Node, RequestCredentials, ResizeObserver, ScrollBehavior,
+    ScrollToOptions,
 };
 
 use super::account::API_BASE;
@@ -153,7 +154,8 @@ enum NotesFilter {
 #[component]
 pub(crate) fn ReaderApp(
     material_id: Uuid,
-    initial_anchor: Option<String>,
+    initial_anchor: Option<Box<Anchor>>,
+    back_label: String,
     csrf_token: String,
     record_rag_enabled: bool,
     material_sharing_available: bool,
@@ -170,6 +172,47 @@ pub(crate) fn ReaderApp(
     let progress_in_flight = use_signal(|| false);
     let save_state = use_signal(SaveState::default);
     let mut reload_generation = use_signal(|| 0_u64);
+    let mut resize_generation = use_signal(|| 0_u64);
+    use_effect(move || {
+        let Some(window) = web_sys::window() else {
+            return;
+        };
+        let resize_handler = Closure::<dyn FnMut()>::new(move || resize_generation += 1);
+        let _ = window
+            .add_event_listener_with_callback("resize", resize_handler.as_ref().unchecked_ref());
+        if let Some(viewport) = window.visual_viewport() {
+            let _ = viewport.add_event_listener_with_callback(
+                "resize",
+                resize_handler.as_ref().unchecked_ref(),
+            );
+        }
+        if let Some(body) = window.document().and_then(|document| document.body()) {
+            if let Ok(observer) = ResizeObserver::new(resize_handler.as_ref().unchecked_ref()) {
+                observer.observe(&body);
+                std::mem::forget(observer);
+            }
+        }
+        resize_handler.forget();
+    });
+    use_effect(move || {
+        let generation = resize_generation();
+        if generation == 0 {
+            return;
+        }
+        let Some(window) = web_sys::window() else {
+            return;
+        };
+        let callback = Closure::<dyn FnMut()>::once(move || {
+            if resize_generation() == generation {
+                rebuild_reader_page_map(state);
+            }
+        });
+        let _ = window.set_timeout_with_callback_and_timeout_and_arguments_0(
+            callback.as_ref().unchecked_ref(),
+            160,
+        );
+        callback.forget();
+    });
     use_effect(move || {
         let Some(window) = web_sys::window() else {
             return;
@@ -278,24 +321,23 @@ pub(crate) fn ReaderApp(
                                 conflict_draft: None,
                                 annotation_message: None,
                             };
-                            if let Some(anchor_id) = initial_anchor.as_deref() {
-                                if let Some(block) = view
-                                    .plan
-                                    .blocks
-                                    .iter()
-                                    .find(|block| block.node_id == anchor_id)
+                            if let Some(anchor) = initial_anchor
+                                .as_deref()
+                                .filter(|anchor| anchor.revision_id == view.document.revision_id)
+                            {
+                                let offset = anchor.text_range.map_or(0, |range| range.start);
+                                if let Some(page) =
+                                    view.page_map.page_for_boundary(&anchor.node_path, offset)
                                 {
-                                    if let Some(page) =
-                                        view.page_map.page_for_boundary(&block.node_path, 0)
-                                    {
-                                        view.navigation.jump_to(page, view.page_map.pages.len());
-                                        view.annotation_message =
-                                            Some("Открыт результат поиска.".to_owned());
-                                    }
+                                    view.navigation.jump_to(page, view.page_map.pages.len());
+                                    view.annotation_message =
+                                        Some("Открыт точный результат поиска.".to_owned());
                                 }
                             }
                             apply_ai_reader_target(&mut view);
+                            sync_reader_theme_color(view.settings.theme);
                             state.set(ReaderState::Ready(Box::new(view)));
+                            resize_generation += 1;
                         }
                         Err(error) => state.set(ReaderState::Failed(error)),
                     }
@@ -328,7 +370,7 @@ pub(crate) fn ReaderApp(
                 p { class: "library-alert", role: "alert", "{error}" }
                 div { class: "dialog-actions",
                     button { class: "primary-action", r#type: "button", onclick: move |_| reload_generation += 1, "Повторить" }
-                    button { class: "secondary-action", r#type: "button", onclick: move |_| on_close.call(()), "Вернуться в библиотеку" }
+                    button { class: "secondary-action", r#type: "button", onclick: move |_| on_close.call(()), "{back_label}" }
                 }
             }
         },
@@ -392,6 +434,13 @@ pub(crate) fn ReaderApp(
             };
             let reader_overlay_open =
                 view.toc_open || view.settings_open || view.notes_open || view.social_open;
+            let toc_items = bounded_toc_items(
+                &view.document.navigation,
+                &view.page_map,
+                current_page,
+                &view.toc_query,
+            );
+            let toc_was_bounded = toc_items.len() < view.document.navigation.len();
             let shared_highlights = view
                 .shared_layers
                 .iter()
@@ -401,13 +450,14 @@ pub(crate) fn ReaderApp(
                 main {
                     id: "main-content",
                     class: "reader-workspace {theme_class}",
+                    "data-update-safe": "false",
                     aria_label: "Чтение {title}",
                     style: "--reader-font-size: {view.settings.font_size_px}px; --reader-line-height: {view.settings.line_height_percent}%; --reader-page-height: {page_height}px; --reader-progress: {((current_page + 1) * 100) / page_count.max(1)}%;",
                     onkeydown: move |event| if event.key() == Key::Escape { close_reader_overlay(state); },
                     header { class: "reader-topbar",
-                        button { class: "reader-back", r#type: "button", aria_label: "Вернуться в библиотеку", title: "Библиотека", onclick: move |_| on_close.call(()),
+                        button { class: "reader-back", r#type: "button", aria_label: "{back_label}", title: "{back_label}", onclick: move |_| on_close.call(()),
                             span { aria_hidden: "true", "←" }
-                            span { class: "reader-back-label", "Библиотека" }
+                            span { class: "reader-back-label", "{back_label}" }
                         }
                         div { class: "reader-title",
                             h1 { "{title}" }
@@ -416,29 +466,30 @@ pub(crate) fn ReaderApp(
                         div { class: "reader-tools", role: "toolbar", aria_label: "Инструменты чтения",
                             crate::search_ui::ReaderSearch { material_id, record_rag_enabled }
                             button { id: "reader-toc-button", r#type: "button", aria_expanded: view.toc_open, aria_controls: "reader-toc-panel", onclick: move |_| toggle_reader_panel(state, ReaderPanel::Toc), "Оглавление" }
-                            button { id: "reader-settings-button", r#type: "button", aria_expanded: view.settings_open, aria_controls: "reader-settings-panel", onclick: move |_| toggle_reader_panel(state, ReaderPanel::Settings), "Настройки" }
-                            button { id: "reader-margin-note-button", r#type: "button", onclick: move |_| start_margin_note(state, current_page), "Запись на полях" }
-                            button { id: "reader-voice-note-button", r#type: "button", onclick: move |_| start_margin_voice_note(state, current_page), "Голосовая заметка" }
                             button { id: "reader-notes-button", r#type: "button", aria_expanded: view.notes_open, aria_controls: "reader-notes-panel", onclick: move |_| {
                                 toggle_reader_panel(state, ReaderPanel::Notes);
                             }, "Заметки ({view.annotations.len()})" }
-                            if shared_reading_available {
-                                button {
-                                    id: "reader-social-button",
-                                    r#type: "button",
-                                    aria_expanded: view.social_open,
-                                    aria_controls: "reader-social-panel",
-                                    onclick: move |_| toggle_reader_panel(state, ReaderPanel::Social),
-                                    "Сообщество ({view.shared_layers.len()})"
-                                }
-                            }
                             details { class: "reader-more",
                                 summary {
+                                    id: "reader-more-button",
                                     role: "button",
                                     aria_label: "Дополнительные действия",
                                     "Ещё"
                                 }
                                 div { class: "reader-more-menu",
+                                    button { id: "reader-settings-button", r#type: "button", aria_expanded: view.settings_open, aria_controls: "reader-settings-panel", onclick: move |_| toggle_reader_panel(state, ReaderPanel::Settings), "Настройки чтения" }
+                                    button { id: "reader-margin-note-button", r#type: "button", onclick: move |_| start_margin_note(state, current_page), "Запись на полях" }
+                                    button { id: "reader-voice-note-button", r#type: "button", onclick: move |_| start_margin_voice_note(state, current_page), "Голосовая заметка" }
+                                    if shared_reading_available {
+                                        button {
+                                            id: "reader-social-button",
+                                            r#type: "button",
+                                            aria_expanded: view.social_open,
+                                            aria_controls: "reader-social-panel",
+                                            onclick: move |_| toggle_reader_panel(state, ReaderPanel::Social),
+                                            "Сообщество ({view.shared_layers.len()})"
+                                        }
+                                    }
                                     button { r#type: "button", onclick: move |_| export_annotations(state, export_material_id), "Экспорт заметок" }
                                     crate::ai::SummaryAction {
                                         material_id: view.entry.id,
@@ -494,23 +545,24 @@ pub(crate) fn ReaderApp(
                                     }
                                 }
                                 ol {
-                                    for item in view.document.navigation.clone() {
-                                        if view.toc_query.trim().is_empty() || item.label.to_lowercase().contains(&view.toc_query.trim().to_lowercase()) {
-                                            li { button {
-                                                class: if view.page_map.page_for_path(&item.target_path) == Some(current_page) { "current" } else { "" },
-                                                aria_current: if view.page_map.page_for_path(&item.target_path) == Some(current_page) { "location" } else { "false" },
-                                                r#type: "button",
-                                                onclick: move |_| jump_to_path(state, &item.target_path, csrf, progress_generation, progress_in_flight, save_state),
-                                                "{item.label}"
-                                            } }
-                                        }
+                                    for item in toc_items {
+                                        li { button {
+                                            class: if view.page_map.page_for_path(&item.target_path) == Some(current_page) { "current" } else { "" },
+                                            aria_current: if view.page_map.page_for_path(&item.target_path) == Some(current_page) { "location" } else { "false" },
+                                            r#type: "button",
+                                            onclick: move |_| jump_to_path(state, &item.target_path, csrf, progress_generation, progress_in_flight, save_state),
+                                            "{item.label}"
+                                        } }
                                     }
+                                }
+                                if toc_was_bounded {
+                                    p { class: "settings-note", "Показан ближайший фрагмент оглавления. Используйте поиск, чтобы перейти к другой главе." }
                                 }
                                 button { class: "focus-sentinel", r#type: "button", aria_label: "Вернуться в начало панели", onfocus: move |_| focus_drawer_edge("reader-toc-panel", true) }
                             }
                         }
 
-                        section { class: "reader-stage {width_class}", aria_label: "Страница книги", aria_hidden: reader_overlay_open, inert: reader_overlay_open.then_some(true),
+                        section { id: "reader-stage", class: "reader-stage {width_class}", aria_label: "Страница книги", aria_hidden: reader_overlay_open, inert: reader_overlay_open.then_some(true),
                             if view.navigation.can_go_back() || view.navigation.can_go_forward() {
                                 div { class: "reader-history", role: "toolbar", aria_label: "История переходов",
                                     button { r#type: "button", aria_label: "Назад по истории", disabled: !view.navigation.can_go_back(), onclick: move |_| {
@@ -923,29 +975,31 @@ fn NotesPanel(
                 button { id: "reader-notes-close", r#type: "button", aria_label: "Закрыть заметки", onclick: move |_| close_reader_panel(state, ReaderPanel::Notes), "×" }
             }
             div { class: "annotation-tabs", role: "tablist", aria_label: "Тип записей",
-                button { r#type: "button", role: "tab", aria_selected: view.notes_filter == NotesFilter::All, onclick: move |_| set_notes_filter(state, NotesFilter::All), "Все" }
-                button { r#type: "button", role: "tab", aria_selected: view.notes_filter == NotesFilter::Notes, onclick: move |_| set_notes_filter(state, NotesFilter::Notes), "Заметки" }
-                button { r#type: "button", role: "tab", aria_selected: view.notes_filter == NotesFilter::Highlights, onclick: move |_| set_notes_filter(state, NotesFilter::Highlights), "Выделения" }
-                button { r#type: "button", role: "tab", aria_selected: view.notes_filter == NotesFilter::Voice, onclick: move |_| set_notes_filter(state, NotesFilter::Voice), "Голос" }
+                button { id: "notes-tab-all", r#type: "button", role: "tab", aria_controls: "notes-tabpanel", aria_selected: view.notes_filter == NotesFilter::All, tabindex: if view.notes_filter == NotesFilter::All { "0" } else { "-1" }, onkeydown: move |event| move_notes_tab(state, NotesFilter::All, event.key()), onclick: move |_| set_notes_filter(state, NotesFilter::All), "Все" }
+                button { id: "notes-tab-notes", r#type: "button", role: "tab", aria_controls: "notes-tabpanel", aria_selected: view.notes_filter == NotesFilter::Notes, tabindex: if view.notes_filter == NotesFilter::Notes { "0" } else { "-1" }, onkeydown: move |event| move_notes_tab(state, NotesFilter::Notes, event.key()), onclick: move |_| set_notes_filter(state, NotesFilter::Notes), "Заметки" }
+                button { id: "notes-tab-highlights", r#type: "button", role: "tab", aria_controls: "notes-tabpanel", aria_selected: view.notes_filter == NotesFilter::Highlights, tabindex: if view.notes_filter == NotesFilter::Highlights { "0" } else { "-1" }, onkeydown: move |event| move_notes_tab(state, NotesFilter::Highlights, event.key()), onclick: move |_| set_notes_filter(state, NotesFilter::Highlights), "Выделения" }
+                button { id: "notes-tab-voice", r#type: "button", role: "tab", aria_controls: "notes-tabpanel", aria_selected: view.notes_filter == NotesFilter::Voice, tabindex: if view.notes_filter == NotesFilter::Voice { "0" } else { "-1" }, onkeydown: move |event| move_notes_tab(state, NotesFilter::Voice, event.key()), onclick: move |_| set_notes_filter(state, NotesFilter::Voice), "Голос" }
             }
-            if view.annotations.is_empty() {
-                p { class: "notes-empty", "Выделите фрагмент на странице, чтобы сохранить выделение или заметку." }
-            } else if visible_annotations.is_empty() {
-                p { class: "notes-empty", "Для этого фильтра записей пока нет." }
-            } else {
-                ol { class: "annotation-list",
-                    for item in visible_annotations {
-                        AnnotationPanelItem {
-                            state,
-                            csrf,
-                            save_state,
-                            progress_generation,
-                            progress_in_flight,
-                            item,
-                            editing: view.editing_note,
-                            draft: view.edit_note_draft.clone(),
-                            edit_title: view.edit_note_title.clone(),
-                            edit_tags: view.edit_note_tags.clone()
+            div { id: "notes-tabpanel", role: "tabpanel", aria_labelledby: notes_tab_id(view.notes_filter),
+                if view.annotations.is_empty() {
+                    p { class: "notes-empty", "Выделите фрагмент на странице, чтобы сохранить выделение или заметку." }
+                } else if visible_annotations.is_empty() {
+                    p { class: "notes-empty", "Для этого фильтра записей пока нет." }
+                } else {
+                    ol { class: "annotation-list",
+                        for item in visible_annotations {
+                            AnnotationPanelItem {
+                                state,
+                                csrf,
+                                save_state,
+                                progress_generation,
+                                progress_in_flight,
+                                item,
+                                editing: view.editing_note,
+                                draft: view.edit_note_draft.clone(),
+                                edit_title: view.edit_note_title.clone(),
+                                edit_tags: view.edit_note_tags.clone()
+                            }
                         }
                     }
                 }
@@ -1749,7 +1803,7 @@ fn apply_ai_reader_target(view: &mut ReaderView) {
                     view.navigation.jump_to(page, view.page_map.pages.len());
                 }
                 view.selected_anchor = Some(*anchor);
-                view.annotation_message = Some("Открыт источник ответа AI.".to_owned());
+                view.annotation_message = Some("Открыт источник ответа ИИ.".to_owned());
             }
             AnchorResolution::Unresolved => {
                 view.annotation_message =
@@ -2080,6 +2134,47 @@ fn set_notes_filter(mut state: Signal<ReaderState>, filter: NotesFilter) {
     if let ReaderState::Ready(view) = &mut *state.write() {
         view.notes_filter = filter;
     }
+}
+
+fn notes_tab_id(filter: NotesFilter) -> &'static str {
+    match filter {
+        NotesFilter::All => "notes-tab-all",
+        NotesFilter::Notes => "notes-tab-notes",
+        NotesFilter::Highlights => "notes-tab-highlights",
+        NotesFilter::Voice => "notes-tab-voice",
+    }
+}
+
+fn move_notes_tab(state: Signal<ReaderState>, current: NotesFilter, key: Key) {
+    let next = match (current, key) {
+        (_, Key::Home) => NotesFilter::All,
+        (_, Key::End) => NotesFilter::Voice,
+        (NotesFilter::All, Key::ArrowLeft) | (NotesFilter::All, Key::ArrowUp) => NotesFilter::Voice,
+        (NotesFilter::Notes, Key::ArrowLeft) | (NotesFilter::Notes, Key::ArrowUp) => {
+            NotesFilter::All
+        }
+        (NotesFilter::Highlights, Key::ArrowLeft) | (NotesFilter::Highlights, Key::ArrowUp) => {
+            NotesFilter::Notes
+        }
+        (NotesFilter::Voice, Key::ArrowLeft) | (NotesFilter::Voice, Key::ArrowUp) => {
+            NotesFilter::Highlights
+        }
+        (NotesFilter::All, Key::ArrowRight) | (NotesFilter::All, Key::ArrowDown) => {
+            NotesFilter::Notes
+        }
+        (NotesFilter::Notes, Key::ArrowRight) | (NotesFilter::Notes, Key::ArrowDown) => {
+            NotesFilter::Highlights
+        }
+        (NotesFilter::Highlights, Key::ArrowRight) | (NotesFilter::Highlights, Key::ArrowDown) => {
+            NotesFilter::Voice
+        }
+        (NotesFilter::Voice, Key::ArrowRight) | (NotesFilter::Voice, Key::ArrowDown) => {
+            NotesFilter::All
+        }
+        _ => return,
+    };
+    set_notes_filter(state, next);
+    defer_reader_focus(notes_tab_id(next));
 }
 
 fn parse_tags(value: &str) -> Vec<String> {
@@ -2880,9 +2975,9 @@ fn close_reader_panel(mut state: Signal<ReaderState>, panel: ReaderPanel) {
 fn panel_trigger(panel: ReaderPanel) -> &'static str {
     match panel {
         ReaderPanel::Toc => "reader-toc-button",
-        ReaderPanel::Settings => "reader-settings-button",
+        ReaderPanel::Settings => "reader-more-button",
         ReaderPanel::Notes => "reader-notes-button",
-        ReaderPanel::Social => "reader-social-button",
+        ReaderPanel::Social => "reader-more-button",
     }
 }
 
@@ -2896,13 +2991,13 @@ fn close_reader_overlay(mut state: Signal<ReaderState>) {
             Some("reader-toc-button")
         } else if view.settings_open {
             view.settings_open = false;
-            Some("reader-settings-button")
+            Some("reader-more-button")
         } else if view.notes_open {
             view.notes_open = false;
             Some("reader-notes-button")
         } else if view.social_open {
             view.social_open = false;
-            Some("reader-social-button")
+            Some("reader-more-button")
         } else if view.selected_anchor.is_some() {
             crate::voice::cancel_recording();
             if !view.voice_preview_url.is_empty() {
@@ -3562,6 +3657,7 @@ fn update_settings(
             .map(|page| page.start.clone());
         update(&mut current.settings);
         current.settings = current.settings.normalized();
+        sync_reader_theme_color(current.settings.theme);
         let layout_changed = previous_settings.font_size_px != current.settings.font_size_px
             || previous_settings.line_height_percent != current.settings.line_height_percent
             || previous_settings.width != current.settings.width;
@@ -3603,6 +3699,20 @@ fn update_settings(
             }
         });
     }
+}
+
+fn sync_reader_theme_color(theme: ReaderTheme) {
+    let Some(document) = web_sys::window().and_then(|window| window.document()) else {
+        return;
+    };
+    let Ok(Some(meta)) = document.query_selector("meta[name='theme-color']") else {
+        return;
+    };
+    let color = match theme {
+        ReaderTheme::Paper => "#ebe6dc",
+        ReaderTheme::Night => "#121512",
+    };
+    let _ = meta.set_attribute("content", color);
 }
 
 async fn browser_delay(milliseconds: i32) {
@@ -3806,30 +3916,118 @@ async fn save_progress(command: MoveReadingPositionCommand, csrf: &str) -> Resul
         .ok_or_else(|| format!("Позиция не сохранена: HTTP {}", response.status()))
 }
 
+const MAX_RENDERED_TOC_ITEMS: usize = 160;
+
+fn bounded_toc_items(
+    items: &[NavigationItem],
+    page_map: &PageMap,
+    current_page: usize,
+    query: &str,
+) -> Vec<NavigationItem> {
+    let query = query.trim().to_lowercase();
+    if !query.is_empty() {
+        return items
+            .iter()
+            .filter(|item| item.label.to_lowercase().contains(&query))
+            .take(MAX_RENDERED_TOC_ITEMS)
+            .cloned()
+            .collect();
+    }
+    if items.len() <= MAX_RENDERED_TOC_ITEMS {
+        return items.to_vec();
+    }
+    let current = items
+        .iter()
+        .position(|item| page_map.page_for_path(&item.target_path) == Some(current_page))
+        .unwrap_or_default();
+    let half = MAX_RENDERED_TOC_ITEMS / 2;
+    let start = current
+        .saturating_sub(half)
+        .min(items.len() - MAX_RENDERED_TOC_ITEMS);
+    items[start..start + MAX_RENDERED_TOC_ITEMS].to_vec()
+}
+
+fn rebuild_reader_page_map(mut state: Signal<ReaderState>) {
+    let (plan, settings, boundary, old_layout_key) = {
+        let ReaderState::Ready(view) = &*state.read() else {
+            return;
+        };
+        let boundary = view
+            .page_map
+            .pages
+            .get(view.navigation.current())
+            .map(|page| page.start.clone());
+        (
+            view.plan.clone(),
+            view.settings,
+            boundary,
+            view.page_map.layout_key.clone(),
+        )
+    };
+    let Ok(page_map) = browser_page_map(&plan, settings) else {
+        return;
+    };
+    if page_map.layout_key == old_layout_key {
+        return;
+    }
+    let restored_page = boundary
+        .as_ref()
+        .and_then(|boundary| page_map.page_for_boundary(&boundary.node_path, boundary.offset))
+        .unwrap_or_default();
+    if let ReaderState::Ready(view) = &mut *state.write() {
+        view.page_map = page_map;
+        view.navigation = ReaderNavigation::default();
+        view.navigation
+            .move_to(restored_page, view.page_map.pages.len());
+    }
+    reset_reader_page_view();
+}
+
 fn browser_page_dimensions(settings: ReaderSettings) -> Result<(f64, f64), String> {
     let window = web_sys::window().ok_or_else(|| "Browser window недоступен.".to_owned())?;
-    let viewport_width = window
-        .inner_width()
-        .map_err(|_| "Не удалось измерить viewport.".to_owned())?
-        .as_f64()
-        .unwrap_or(1024.0);
-    let viewport_height = window
-        .inner_height()
-        .map_err(|_| "Не удалось измерить высоту окна.".to_owned())?
-        .as_f64()
-        .unwrap_or(900.0);
+    let viewport = window.visual_viewport();
+    let viewport_width = viewport.as_ref().map_or_else(
+        || {
+            window
+                .inner_width()
+                .ok()
+                .and_then(|value| value.as_f64())
+                .unwrap_or(1024.0)
+        },
+        web_sys::VisualViewport::width,
+    );
+    let viewport_height = viewport.as_ref().map_or_else(
+        || {
+            window
+                .inner_height()
+                .ok()
+                .and_then(|value| value.as_f64())
+                .unwrap_or(900.0)
+        },
+        web_sys::VisualViewport::height,
+    );
+    let document = window.document();
+    let stage_width = document
+        .as_ref()
+        .and_then(|document| document.get_element_by_id("reader-stage"))
+        .map_or(viewport_width, |stage| f64::from(stage.client_width()));
     let width: f64 = match settings.width {
-        ReaderWidth::Narrow => 560.0_f64,
+        ReaderWidth::Narrow => 580.0_f64,
         ReaderWidth::Balanced => 680.0_f64,
         ReaderWidth::Wide => 820.0_f64,
     }
-    .min((viewport_width - 32.0).max(300.0));
-    let reader_chrome_height = if viewport_width <= 760.0 {
-        198.0
-    } else {
-        186.0
-    };
-    let height = (viewport_height - reader_chrome_height).clamp(320.0, 680.0);
+    .min((stage_width - 16.0).max(288.0));
+    let topbar_height = document
+        .as_ref()
+        .and_then(|document| document.query_selector(".reader-topbar").ok().flatten())
+        .map_or(72.0, |topbar| f64::from(topbar.client_height()));
+    let pagination_height = document
+        .as_ref()
+        .and_then(|document| document.query_selector(".reader-pagination").ok().flatten())
+        .map_or(56.0, |pagination| f64::from(pagination.client_height()));
+    let stage_vertical_space = if viewport_width <= 760.0 { 44.0 } else { 82.0 };
+    let height = (viewport_height - topbar_height - pagination_height - stage_vertical_space)
+        .clamp(280.0, 680.0);
     Ok((width, height))
 }
 
@@ -3857,6 +4055,7 @@ fn browser_page_map(plan: &RenderPlan, settings: ReaderSettings) -> Result<Rc<Pa
         .map_err(|_| "Не удалось создать measurement page.".to_owned())?
         .dyn_into::<HtmlElement>()
         .map_err(|_| "Measurement element несовместим с HTML.".to_owned())?;
+    page.set_class_name("reader-page-surface");
     let style = page.style();
     for (name, value) in [
         ("position", "fixed".to_owned()),
@@ -3865,16 +4064,16 @@ fn browser_page_map(plan: &RenderPlan, settings: ReaderSettings) -> Result<Rc<Pa
         ("left", "-10000px".to_owned()),
         ("top", "0".to_owned()),
         ("overflow", "hidden".to_owned()),
-        ("box-sizing", "border-box".to_owned()),
         ("width", format!("{width}px")),
         ("height", format!("{height}px")),
-        ("padding", "42px 48px".to_owned()),
+        ("--reader-page-height", format!("{height}px")),
+        ("--reader-font-size", format!("{}px", settings.font_size_px)),
         (
-            "font-family",
-            "Georgia, 'Times New Roman', serif".to_owned(),
+            "--reader-line-height",
+            format!("{}%", settings.line_height_percent),
         ),
-        ("font-size", format!("{}px", settings.font_size_px)),
-        ("line-height", format!("{}%", settings.line_height_percent)),
+        ("--reader-ink", "#252820".to_owned()),
+        ("--reader-paper", "#fffdf7".to_owned()),
     ] {
         style
             .set_property(name, &value)

@@ -9,6 +9,13 @@ importers, sync, search, AI artifacts, plugins and cloud/native storage. Эти
 границы нельзя стабилизировать только обсуждением; для них нужны ADR,
 fixtures, compatibility tests and performance budgets.
 
+Web release gate дополнительно проверяет desktop Chromium, mobile Chromium,
+iPhone WebKit и tablet WebKit для bounded platform spec: responsive shell,
+touch targets, focus, reduced motion, Reader resize/PDF selection и PWA
+install/offline/update. `make web-css-l` запрещает ссылки на необъявленные CSS
+custom properties. Основной acceptance-прототип проверяется
+`make prototype-e2e`.
+
 ## ADR policy
 
 ADR обязателен для решений, меняющих:

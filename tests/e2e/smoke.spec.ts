@@ -1,5 +1,6 @@
 import { devices, expect, test, type Page } from "@playwright/test";
 import { readFileSync } from "node:fs";
+import { gotoBuiltApp } from "./app-ready.js";
 
 const textLayerPdf = readFileSync(
   new URL("../fixtures/pdf/text-layer.pdf", import.meta.url),
@@ -205,7 +206,7 @@ test("retries a failed account bootstrap before offering sign-in", async ({
       await route.continue();
     }
   });
-  await page.goto("/");
+  await gotoBuiltApp(page);
   await expect(
     page.getByRole("main", { name: "Ошибка аккаунта" }),
   ).toBeVisible();
@@ -235,6 +236,7 @@ test("keeps system settings out of a regular user session", async ({
   await expect(
     page.getByRole("region", { name: "Подключение Telegram" }),
   ).toHaveCount(0);
+  await page.locator(".account-menu summary").click();
   await page.getByRole("link", { name: "Подключения" }).click();
   await expect(
     page.getByRole("main", { name: "Личные подключения" }),
@@ -265,7 +267,7 @@ test("keeps system settings out of a regular user session", async ({
   ).toBeVisible();
   await page.goto("/#settings");
   await expect(
-    page.getByRole("region", { name: "Пустая библиотека" }),
+    page.getByRole("main", { name: "Настройки аккаунта" }),
   ).toBeVisible();
   await expect(
     page.getByRole("heading", { name: "Системные настройки" }),
@@ -284,7 +286,7 @@ test("switches EPUB reader pages through user clicks", async ({ page }) => {
   ).toBeVisible();
 
   await page
-    .getByRole("button", { name: "＋ Добавить материал", exact: true })
+    .getByRole("button", { name: "Открыть добавление материала", exact: true })
     .click();
   const uploadDialog = page.getByRole("dialog", {
     name: "Добавить материал",
@@ -315,6 +317,15 @@ test("switches EPUB reader pages through user clicks", async ({ page }) => {
     }),
   ).toBe(true);
   const firstPageText = await pageSurface.textContent();
+  const sourceNodeBeforeResize = await pageSurface
+    .locator("[data-node-id]")
+    .first()
+    .getAttribute("data-node-id");
+  await page.setViewportSize({ width: 768, height: 1024 });
+  await expect(pageSurface.locator("[data-node-id]").first()).toHaveAttribute(
+    "data-node-id",
+    sourceNodeBeforeResize ?? "",
+  );
   const pagination = page.getByRole("navigation", {
     name: "Навигация по страницам",
   });
@@ -361,7 +372,7 @@ test("offers a reload-safe deterministic session after reading", async ({
   await page.getByRole("button", { name: "Создать аккаунт" }).click();
 
   await page
-    .getByRole("button", { name: "＋ Добавить материал", exact: true })
+    .getByRole("button", { name: "Открыть добавление материала", exact: true })
     .click();
   const uploadDialog = page.getByRole("dialog", {
     name: "Добавить материал",
@@ -457,7 +468,7 @@ test("offers a reload-safe deterministic session after reading", async ({
   await expect(
     page.getByRole("main", { name: "Чтение Stage Four Reader" }),
   ).toBeVisible();
-  await page.getByRole("button", { name: "Вернуться в библиотеку" }).click();
+  await page.getByRole("button", { name: "Вернуться к самопроверке" }).click();
   await expect(session.getByText("0 / 2")).toBeVisible();
 
   await page.reload();
@@ -530,8 +541,8 @@ test("offers a reload-safe deterministic session after reading", async ({
   await expect(session.getByText("Сессия завершена")).toBeVisible();
   await expect(session.getByText("Ответов сохранено: 2")).toBeVisible();
   await session.getByRole("button", { name: "Готово" }).click();
-  await page.getByRole("link", { name: "Челленджи" }).click();
-  const challenges = page.getByRole("main", { name: "Челленджи" });
+  await page.getByRole("link", { name: "Повторение" }).click();
+  const challenges = page.getByRole("main", { name: "Повторение" });
   await expect(challenges.getByText("На сегодня всё выполнено.")).toBeVisible();
   await expect(
     challenges.getByText("К повторению: 0 · Закрепить: 0 · Черновики: 0"),
@@ -558,7 +569,7 @@ test("imports Markdown through the shared reflowable reader", async ({
   ).toBeVisible();
 
   await page
-    .getByRole("button", { name: "＋ Добавить материал", exact: true })
+    .getByRole("button", { name: "Открыть добавление материала", exact: true })
     .click();
   const uploadDialog = page.getByRole("dialog", {
     name: "Добавить материал",
@@ -613,7 +624,7 @@ test("keeps Desk and unified search routes reload-safe and gates record RAG", as
   await page.getByRole("button", { name: "Создать аккаунт" }).click();
 
   await page
-    .getByRole("button", { name: "＋ Добавить материал", exact: true })
+    .getByRole("button", { name: "Открыть добавление материала", exact: true })
     .click();
   const uploadDialog = page.getByRole("dialog", {
     name: "Добавить материал",
@@ -783,7 +794,7 @@ test("hands an explicit record scope from Search to the durable AI chat", async 
   await search.getByRole("button", { name: "Спросить по записям" }).click();
 
   const chat = page.getByRole("complementary", {
-    name: "Персональный AI-ассистент",
+    name: "Персональный ИИ-помощник",
   });
   await expect(chat).toBeVisible();
   await expect(
@@ -805,7 +816,7 @@ test("imports a multi-chapter LUM package through the shared reader", async ({
   ).toBeVisible();
 
   await page
-    .getByRole("button", { name: "＋ Добавить материал", exact: true })
+    .getByRole("button", { name: "Открыть добавление материала", exact: true })
     .click();
   const uploadDialog = page.getByRole("dialog", {
     name: "Добавить материал",
@@ -851,7 +862,7 @@ test("imports and reads a PDF with selectable text and anchored highlights", asy
   ).toBeVisible();
 
   await page
-    .getByRole("button", { name: "＋ Добавить материал", exact: true })
+    .getByRole("button", { name: "Открыть добавление материала", exact: true })
     .click();
   const uploadDialog = page.getByRole("dialog", {
     name: "Добавить материал",
@@ -892,7 +903,7 @@ test("imports and reads a PDF with selectable text and anchored highlights", asy
     const selection = window.getSelection();
     selection?.removeAllRanges();
     selection?.addRange(range);
-    element.dispatchEvent(new MouseEvent("mouseup", { bubbles: true }));
+    element.dispatchEvent(new PointerEvent("pointerup", { bubbles: true }));
   });
   await expect(reader.getByText("Выбранный фрагмент")).toBeVisible();
   const highlightSaved = page.waitForResponse(
@@ -919,6 +930,7 @@ test("imports and reads a PDF with selectable text and anchored highlights", asy
     firstPage.locator(".pdf-annotation-rect.highlight-bold"),
   ).toBeVisible();
 
+  await reader.locator(".pdf-reader-more summary").click();
   await reader.getByRole("button", { name: "Запись на полях" }).click();
   await reader.getByLabel("Заголовок").fill("Страница PDF");
   await reader.getByLabel("Заметка").fill("Мысль на полях PDF");
@@ -960,23 +972,24 @@ test("persists an API-backed EPUB library lifecycle", async ({ page }) => {
   await page.getByText("Я сохранил(а) все 24 слова", { exact: false }).click();
   await page.getByRole("button", { name: "Создать аккаунт" }).click();
 
-  await expect(
-    page.getByRole("region", { name: "Активная сессия" }),
-  ).toBeVisible();
+  await expect(page.locator(".account-menu summary")).toBeVisible();
   await expect(
     page.getByRole("region", { name: "Пустая библиотека" }),
   ).toBeVisible();
   await page
-    .getByRole("button", { name: "＋ Добавить материал", exact: true })
+    .getByRole("button", { name: "Открыть добавление материала", exact: true })
     .click();
   let uploadDialog = page.getByRole("dialog", { name: "Добавить материал" });
   await expect(uploadDialog).toBeFocused();
   await page.keyboard.press("Escape");
   await expect(
-    page.getByRole("button", { name: "＋ Добавить материал", exact: true }),
+    page.getByRole("button", {
+      name: "Открыть добавление материала",
+      exact: true,
+    }),
   ).toBeFocused();
   await page
-    .getByRole("button", { name: "＋ Добавить материал", exact: true })
+    .getByRole("button", { name: "Открыть добавление материала", exact: true })
     .click();
   uploadDialog = page.getByRole("dialog", { name: "Добавить материал" });
   const epubTab = uploadDialog.getByRole("tab", { name: "EPUB" });
@@ -1028,7 +1041,7 @@ test("persists an API-backed EPUB library lifecycle", async ({ page }) => {
   ).toBeVisible();
 
   await page
-    .getByRole("button", { name: "＋ Добавить материал", exact: true })
+    .getByRole("button", { name: "Открыть добавление материала", exact: true })
     .click();
   const webDialog = page.getByRole("dialog", { name: "Добавить материал" });
   await webDialog.getByRole("tab", { name: "Web-ссылка" }).click();
@@ -1134,13 +1147,14 @@ test("persists an API-backed EPUB library lifecycle", async ({ page }) => {
   await expect(
     page.getByRole("button", { name: /Заметки \(1\)/ }),
   ).toBeVisible();
+  await notes.getByRole("button", { name: "Закрыть заметки" }).click();
+  await expect(notes).toHaveCount(0);
   const annotationExport = page.waitForEvent("download");
   await page.locator(".reader-more summary").click();
   await page.getByRole("button", { name: "Экспорт заметок" }).click();
   expect((await annotationExport).suggestedFilename()).toMatch(
     /^lumi-annotations-.*\.json$/,
   );
-  await notes.getByRole("button", { name: "Закрыть заметки" }).click();
 
   await reader.getByRole("button", { name: "Запись на полях" }).click();
   await expect(page.getByLabel("Текст заметки")).toBeFocused();
@@ -1186,6 +1200,7 @@ test("persists an API-backed EPUB library lifecycle", async ({ page }) => {
   await expect(notes.getByLabel("Голосовая заметка")).toBeVisible();
   await notes.getByRole("button", { name: "Закрыть заметки" }).click();
 
+  await page.locator(".reader-more summary").click();
   await reader.getByRole("button", { name: "Запись на полях" }).click();
   await page.getByLabel("Заголовок (необязательно)").fill("Связанная мысль");
   await page.getByLabel("Текст заметки").fill("Продолжение [[Идея");
@@ -1253,7 +1268,8 @@ test("persists an API-backed EPUB library lifecycle", async ({ page }) => {
     page.getByRole("heading", { name: "Вторая глава" }),
   ).toBeVisible();
 
-  await page.getByRole("button", { name: "Настройки" }).click();
+  await page.locator(".reader-more summary").click();
+  await page.getByRole("button", { name: "Настройки чтения" }).click();
   const settings = page.getByRole("complementary", {
     name: "Настройки чтения",
   });
@@ -1314,7 +1330,7 @@ test("persists an API-backed EPUB library lifecycle", async ({ page }) => {
   ).toContainText("Stage Four Reader");
 
   await page
-    .getByRole("button", { name: "＋ Добавить материал", exact: true })
+    .getByRole("button", { name: "Открыть добавление материала", exact: true })
     .click();
   uploadDialog = page.getByRole("dialog", { name: "Добавить материал" });
   await uploadDialog.getByLabel("Файл EPUB").setInputFiles({
@@ -1396,20 +1412,43 @@ test("persists an API-backed EPUB library lifecycle", async ({ page }) => {
       .getByRole("article", { name: "Материал Stage Four Reader" })
       .getByText("Готово", { exact: true }),
   ).toBeVisible();
-  await expect(
-    page.getByRole("navigation", { name: "Основная навигация" }),
-  ).toBeVisible();
-
   await page.setViewportSize({ width: 1280, height: 900 });
   await expect(
-    page.getByRole("navigation", { name: "Основная навигация" }),
+    page.getByRole("navigation", {
+      name: "Основная навигация",
+      exact: true,
+    }),
   ).toBeVisible();
+  await expect(
+    page
+      .getByRole("navigation", {
+        name: "Основная навигация",
+        exact: true,
+      })
+      .getByRole("link"),
+  ).toHaveCount(4);
+  await expect(page.locator(".app-topbar")).toHaveCSS("position", "fixed");
 
   await page.setViewportSize({ width: 390, height: 844 });
+  await expect(page.locator(".primary-navigation")).toBeHidden();
+  await expect(
+    page.getByRole("navigation", {
+      name: "Основная навигация на мобильном",
+    }),
+  ).toBeVisible();
+  await expect(
+    page
+      .getByRole("navigation", {
+        name: "Основная навигация на мобильном",
+      })
+      .getByRole("link"),
+  ).toHaveCount(4);
+  await expect(page.locator(".app-topbar")).toHaveCSS("position", "sticky");
   await expect(
     page.getByRole("article", { name: "Материал Stage Four Reader" }),
   ).toBeVisible();
 
+  await page.locator(".account-menu summary").click();
   await page.getByRole("button", { name: "Выйти" }).click();
   await page
     .getByRole("button", { name: "Создать фразу восстановления" })
@@ -1420,6 +1459,7 @@ test("persists an API-backed EPUB library lifecycle", async ({ page }) => {
     page.getByRole("region", { name: "Пустая библиотека" }),
   ).toBeVisible();
 
+  await page.locator(".account-menu summary").click();
   await page.getByRole("button", { name: "Выйти" }).click();
   await page.getByRole("tab", { name: "Войти / восстановить" }).click();
   await page.getByLabel("Фраза восстановления (24 слова)").fill(phrase);
@@ -1520,7 +1560,7 @@ test.describe("mobile touch reader", () => {
       hasText: "Не удалось проверить возможности сервера",
     });
     await expect(capabilityError).toBeVisible();
-    await expect(page.getByRole("link", { name: "Подключения" })).toBeVisible();
+    await expect(page.locator(".account-menu summary")).toBeVisible();
     await capabilityError.getByRole("button", { name: "Повторить" }).click();
     await expect.poll(() => capabilityAttempts).toBeGreaterThan(1);
     await expect(capabilityError).toHaveCount(0);
@@ -1544,7 +1584,7 @@ test.describe("mobile touch reader", () => {
 
     const reader = page.getByRole("main", { name: "Чтение Stage Four Reader" });
     await expect(reader).toBeVisible();
-    for (const name of ["Оглавление", "Настройки"]) {
+    for (const name of ["Оглавление", "Заметки (0)"]) {
       await expect(reader.getByRole("button", { name })).toBeVisible();
     }
     await expect(reader.locator(".reader-more summary")).toBeVisible();
@@ -1572,7 +1612,8 @@ test.describe("mobile touch reader", () => {
       }
       await route.continue();
     });
-    await reader.getByRole("button", { name: "Настройки" }).click();
+    await reader.locator(".reader-more summary").click();
+    await reader.getByRole("button", { name: "Настройки чтения" }).click();
     const settings = page.getByRole("complementary", {
       name: "Настройки чтения",
     });
@@ -1591,9 +1632,7 @@ test.describe("mobile touch reader", () => {
     await settingsSaved;
     await page.keyboard.press("Escape");
     await expect(settings).toHaveCount(0);
-    await expect(
-      reader.getByRole("button", { name: "Настройки" }),
-    ).toBeFocused();
+    await expect(reader.locator(".reader-more summary")).toBeFocused();
 
     const annotationExport = page.waitForEvent("download");
     await reader.locator(".reader-more summary").click();

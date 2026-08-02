@@ -22,12 +22,14 @@ use wasm_bindgen::{closure::Closure, JsCast};
 use web_sys::RequestCredentials;
 
 use crate::account::{api_response_error, network_error, parse_json, ApiError, API_BASE};
+use crate::routing::CommunityTarget;
 
 #[component]
 pub(crate) fn CommunityPage(
     current_user_id: Uuid,
     csrf_token: String,
     space_id: Option<Uuid>,
+    target: Option<CommunityTarget>,
     join_token: Option<String>,
     available: bool,
     material_sharing_available: bool,
@@ -36,6 +38,7 @@ pub(crate) fn CommunityPage(
     community_images_available: bool,
     on_open_space: EventHandler<Uuid>,
     on_open_list: EventHandler<()>,
+    on_open_reader: EventHandler<(Uuid, Uuid)>,
 ) -> Element {
     if !available {
         return rsx! {
@@ -68,7 +71,9 @@ pub(crate) fn CommunityPage(
                 material_discussions_available,
                 community_communications_available,
                 community_images_available,
+                target,
                 on_close: move |_| on_open_list.call(()),
+                on_open_reader,
             }
         };
     }
@@ -87,6 +92,7 @@ fn CommunityList(csrf_token: String, on_open_space: EventHandler<Uuid>) -> Eleme
     let mut name = use_signal(String::new);
     let mut description = use_signal(String::new);
     let mut busy = use_signal(|| false);
+    let mut create_open = use_signal(|| false);
     let mut generation = use_signal(|| 0_u64);
     use_effect(move || {
         let _ = generation();
@@ -100,6 +106,11 @@ fn CommunityList(csrf_token: String, on_open_space: EventHandler<Uuid>) -> Eleme
             }
         });
     });
+    use_effect(move || {
+        if create_open() {
+            crate::account::defer_account_dialog("create-community-dialog");
+        }
+    });
     let loaded = spaces.read().clone();
     rsx! {
         main { id: "main-content", class: "library-view community-view", aria_label: "Сообщества Lumi",
@@ -109,50 +120,12 @@ fn CommunityList(csrf_token: String, on_open_space: EventHandler<Uuid>) -> Eleme
                     h1 { "Сообщества" }
                     p { class: "library-lead", "Закрытые пространства для совместного чтения и обсуждения." }
                 }
+                button { class: "primary-action", r#type: "button", onclick: move |_| create_open.set(true), "Создать пространство" }
             }
             if !error().is_empty() {
                 div { class: "library-alert", role: "alert",
                     p { "{error}" }
                     button { r#type: "button", onclick: move |_| generation += 1, "Повторить" }
-                }
-            }
-            section { class: "library-section community-create", aria_label: "Создание сообщества",
-                h2 { "Создать пространство" }
-                label { "Название"
-                    input {
-                        value: "{name}",
-                        maxlength: "120",
-                        oninput: move |event| name.set(event.value()),
-                    }
-                }
-                label { "Описание"
-                    textarea {
-                        value: "{description}",
-                        maxlength: "4096",
-                        oninput: move |event| description.set(event.value()),
-                    }
-                }
-                button {
-                    class: "primary-action",
-                    r#type: "button",
-                    disabled: busy() || name().trim().is_empty(),
-                    onclick: move |_| {
-                        let csrf = csrf_token.clone();
-                        let request = CreateCommunitySpaceRequest {
-                            name: name(),
-                            description: Some(description()),
-                        };
-                        busy.set(true);
-                        error.set(String::new());
-                        spawn(async move {
-                            match create_space(&csrf, &request).await {
-                                Ok(detail) => on_open_space.call(detail.space.id),
-                                Err(create_error) => error.set(create_error.to_string()),
-                            }
-                            busy.set(false);
-                        });
-                    },
-                    if busy() { "Создаём…" } else { "Создать пространство" }
                 }
             }
             section { class: "library-section community-memberships", aria_label: "Ваши сообщества",
@@ -183,6 +156,51 @@ fn CommunityList(csrf_token: String, on_open_space: EventHandler<Uuid>) -> Eleme
                             }
                         }
                     },
+                }
+            }
+            if create_open() {
+                dialog {
+                    id: "create-community-dialog",
+                    class: "library-dialog community-create",
+                    open: true,
+                    aria_modal: "true",
+                    aria_label: "Создать пространство",
+                    oncancel: move |event| { event.prevent_default(); if !busy() { create_open.set(false); } },
+                    div { class: "dialog-heading",
+                        h2 { "Создать пространство" }
+                        button { class: "icon-action", r#type: "button", aria_label: "Закрыть", disabled: busy(), onclick: move |_| create_open.set(false), "×" }
+                    }
+                    label { "Название"
+                        input { value: "{name}", maxlength: "120", oninput: move |event| name.set(event.value()) }
+                    }
+                    label { "Описание"
+                        textarea { value: "{description}", maxlength: "4096", oninput: move |event| description.set(event.value()) }
+                    }
+                    div { class: "dialog-actions",
+                        button { class: "secondary-action", r#type: "button", disabled: busy(), onclick: move |_| create_open.set(false), "Отмена" }
+                        button {
+                            class: "primary-action",
+                            r#type: "button",
+                            disabled: busy() || name().trim().is_empty(),
+                            onclick: move |_| {
+                                let csrf = csrf_token.clone();
+                                let request = CreateCommunitySpaceRequest { name: name(), description: Some(description()) };
+                                busy.set(true);
+                                error.set(String::new());
+                                spawn(async move {
+                                    match create_space(&csrf, &request).await {
+                                        Ok(detail) => {
+                                            create_open.set(false);
+                                            on_open_space.call(detail.space.id);
+                                        }
+                                        Err(create_error) => error.set(create_error.to_string()),
+                                    }
+                                    busy.set(false);
+                                });
+                            },
+                            if busy() { "Создаём…" } else { "Создать" }
+                        }
+                    }
                 }
             }
         }
@@ -266,7 +284,9 @@ fn CommunityDetail(
     material_discussions_available: bool,
     community_communications_available: bool,
     community_images_available: bool,
+    target: Option<CommunityTarget>,
     on_close: EventHandler<()>,
+    on_open_reader: EventHandler<(Uuid, Uuid)>,
 ) -> Element {
     let csrf_token = use_signal(|| csrf_token);
     let mut detail = use_signal(|| Option::<CommunitySpaceDetail>::None);
@@ -296,6 +316,12 @@ fn CommunityDetail(
                 Err(load_error) => error.set(load_error.to_string()),
             }
         });
+    });
+    use_effect(move || {
+        let _ = generation();
+        if let Some(target) = target {
+            defer_community_target(target);
+        }
     });
     let detail_value = detail.read().clone();
     rsx! {
@@ -497,6 +523,8 @@ fn CommunityDetail(
                                                 current_user_id,
                                                 can_moderate: matches!(current.membership.role, CommunityRole::Owner | CommunityRole::Admin),
                                                 discussions_available: material_discussions_available,
+                                                target,
+                                                on_open_reader,
                                                 on_changed: move |_| generation += 1,
                                             }
                                         }
@@ -518,6 +546,7 @@ fn CommunityDetail(
                                 csrf_token: csrf_token(),
                                 current_user_id,
                                 can_moderate: matches!(current.membership.role, CommunityRole::Owner | CommunityRole::Admin),
+                                target,
                             }
                         } else {
                             p { "Чат и лента активности не включены capability-флагом." }
@@ -553,6 +582,7 @@ fn SpaceCommunications(
     csrf_token: String,
     current_user_id: Uuid,
     can_moderate: bool,
+    target: Option<CommunityTarget>,
 ) -> Element {
     let mut chat = use_signal(|| Option::<SharedChatPage>::None);
     let mut activity = use_signal(|| Option::<CommunityActivityPage>::None);
@@ -575,6 +605,9 @@ fn SpaceCommunications(
                     chat.set(Some(merge_chat_pages(current_chat, messages, true)));
                     activity.set(Some(merge_activity_pages(current_activity, events, true)));
                     error.set(String::new());
+                    if let Some(target) = target {
+                        defer_community_target(target);
+                    }
                     schedule_visible_refresh(generation, poll_ticket, 5_000);
                 }
                 (Err(load_error), _) | (_, Err(load_error)) => {
@@ -734,7 +767,10 @@ fn SpaceChatMessageView(
     let delete_csrf = csrf_token.clone();
     let moderation_csrf = csrf_token;
     rsx! {
-        article { class: "community-chat-message", aria_label: "Сообщение участника",
+        article {
+            class: "community-chat-message",
+            "data-social-id": "{message.id}",
+            aria_label: "Сообщение участника",
             header {
                 strong { "{message.author_nickname.as_deref().unwrap_or(\"Без псевдонима\")}" }
                 span { " · rev {message.object_revision}" }
@@ -1084,6 +1120,8 @@ fn CommunityMaterialCard(
     current_user_id: Uuid,
     can_moderate: bool,
     discussions_available: bool,
+    target: Option<CommunityTarget>,
+    on_open_reader: EventHandler<(Uuid, Uuid)>,
     on_changed: EventHandler<()>,
 ) -> Element {
     let creators = if material.identity.creators.is_empty() {
@@ -1093,7 +1131,11 @@ fn CommunityMaterialCard(
     };
     let claim = material.claim.clone();
     rsx! {
-        article { class: "community-material-card", aria_label: "Материал сообщества {material.identity.canonical_title}",
+        article {
+            class: "community-material-card",
+            id: "community-material-{material.identity.id}",
+            "data-social-id": "{material.identity.id}",
+            aria_label: "Материал сообщества {material.identity.canonical_title}",
             p { class: "eyebrow", "{claim_status_label(claim.as_ref().map(|value| value.status))}" }
             h3 { "{material.identity.canonical_title}" }
             p { "{creators}" }
@@ -1117,6 +1159,17 @@ fn CommunityMaterialCard(
                     "Проверить снова"
                 }
             }
+            if let Some(matched) = claim.as_ref().filter(|value| value.status == UserMaterialClaimStatus::Matched) {
+                button {
+                    class: "primary-action",
+                    r#type: "button",
+                    onclick: {
+                        let material_id = matched.material_id;
+                        move |_| on_open_reader.call((material_id, space_id))
+                    },
+                    "Открыть свою копию"
+                }
+            }
             if claim.as_ref().is_none_or(|value| value.status != UserMaterialClaimStatus::Matched) {
                 ClaimMaterialAction {
                     space_id,
@@ -1133,6 +1186,7 @@ fn CommunityMaterialCard(
                     csrf_token,
                     current_user_id,
                     can_moderate,
+                    target,
                 }
             }
         }
@@ -1147,8 +1201,16 @@ fn DiscussionPanel(
     csrf_token: String,
     current_user_id: Uuid,
     can_moderate: bool,
+    target: Option<CommunityTarget>,
 ) -> Element {
-    let mut open = use_signal(|| false);
+    let initially_open = matches!(
+        target,
+        Some(CommunityTarget::Material {
+            shared_material_id: target_id,
+            ..
+        }) if target_id == shared_material_id
+    );
+    let mut open = use_signal(|| initially_open);
     let mut page = use_signal(|| Option::<SharedDiscussionPage>::None);
     let mut new_body = use_signal(String::new);
     let mut error = use_signal(String::new);
@@ -1298,7 +1360,10 @@ fn DiscussionThreadView(
     let mut error = use_signal(String::new);
     let mut busy = use_signal(|| false);
     rsx! {
-        article { class: "community-thread", aria_label: "Ветка обсуждения",
+        article {
+            class: "community-thread",
+            "data-social-id": "{thread.id}",
+            aria_label: "Ветка обсуждения",
             header { class: "community-thread-heading",
                 strong { "{thread.creator_nickname.as_deref().unwrap_or(\"Участник\")}" }
                 span { "{social_state_label(thread.state)}" }
@@ -1480,7 +1545,9 @@ fn DiscussionCommentView(
     let csrf_for_hide = csrf_token.clone();
     let csrf_for_restore = csrf_token;
     rsx! {
-        article { aria_label: "Комментарий {comment.author_nickname.as_deref().unwrap_or(\"участника\")}",
+        article {
+            "data-social-id": "{comment.id}",
+            aria_label: "Комментарий {comment.author_nickname.as_deref().unwrap_or(\"участника\")}",
             header { class: "community-comment-heading",
                 strong { "{comment.author_nickname.as_deref().unwrap_or(\"Участник\")}" }
                 span { "{social_state_label(comment.state)}" }
@@ -2214,6 +2281,45 @@ fn join_url(token: &str) -> String {
 fn copy_to_clipboard(value: &str) {
     if let Some(window) = web_sys::window() {
         let _ = window.navigator().clipboard().write_text(value);
+    }
+}
+
+fn defer_community_target(target: CommunityTarget) {
+    let ids = match target {
+        CommunityTarget::Material {
+            shared_material_id,
+            source_id,
+        } => [
+            source_id.map(|id| id.to_string()),
+            Some(shared_material_id.to_string()),
+        ],
+        CommunityTarget::Chat { message_id } => [Some(message_id.to_string()), None],
+    };
+    let callback = Closure::<dyn FnMut()>::new(move || {
+        let Some(document) = web_sys::window().and_then(|window| window.document()) else {
+            return;
+        };
+        let element = ids.iter().flatten().find_map(|id| {
+            document
+                .query_selector(&format!("[data-social-id='{id}']"))
+                .ok()
+                .flatten()
+        });
+        let Some(element) = element else {
+            return;
+        };
+        element.scroll_into_view();
+        let _ = element.set_attribute("tabindex", "-1");
+        if let Ok(element) = element.dyn_into::<web_sys::HtmlElement>() {
+            let _ = element.focus();
+        }
+    });
+    if let Some(window) = web_sys::window() {
+        let _ = window.set_timeout_with_callback_and_timeout_and_arguments_0(
+            callback.as_ref().unchecked_ref(),
+            80,
+        );
+        callback.forget();
     }
 }
 

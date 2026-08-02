@@ -2,6 +2,18 @@
 
 Status: accepted
 
+## Responsive PageMap adapter
+
+Web adapter измеряет фактический content box Reader и применённые CSS styles,
+а не фиксированную пару `window.innerWidth/innerHeight`. ResizeObserver,
+`visualViewport.resize` и window resize сводятся bounded debounce; перед
+перестройкой сохраняется `PageBoundary`, после неё позиция восстанавливается
+через новый PageMap. Desktop panels являются overlay и не меняют geometry.
+
+Exact Web route переносит полный bounded `Anchor` и typed origin. Route может
+доставить Anchor adapter’у, но reader core остаётся независимым от DOM,
+hash/history и platform handles.
+
 ## Контекст
 
 Документ описывает техническую архитектуру reader: какие слои есть между

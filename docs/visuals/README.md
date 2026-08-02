@@ -8,6 +8,10 @@
 
 - [`prototype/`](prototype/) — текущий интерактивный прототип на чистых
   HTML, CSS и JavaScript;
+- [`application-shell-v3.md`](application-shell-v3.md) — текущая нативная
+  композиция shell и responsive navigation;
+- [`application-shell-v2.md`](application-shell-v2.md) — semantic tokens,
+  overlay, Reader и accessibility contract, сохранённые в v3;
 - остальные `*.md` в этой папке — заметки и решения, относящиеся к визуальному
   прототипу.
 
@@ -53,13 +57,13 @@ make prototype-e2e
 
 ## Текущее состояние
 
-Текущая версия проверяет reader-first направление расширенного S1 Web Reader
-на EPUB reference path; UI добавления web/Telegram sources уточняется
-в Этапах 6–7:
-библиотека и чтение разделены, текст является основной поверхностью, а
+Текущая версия проверяет application shell v3 и reader-first направление:
+desktop rail, compact tablet rail, mobile top bar и четыре нижние вкладки,
+Library, Desk, Search, Settings/Activity, один Community state и иммерсивный
+Reader. Текст остаётся основной поверхностью, а
 оглавление, настройки и личные аннотации открываются по запросу. Технические
-идентификаторы, экспорт и диагностика остаются доступны контекстно, но не
-конкурируют с чтением.
+идентификаторы, экспорт и диагностика доступны контекстно и не конкурируют с
+чтением.
 
 Для проверки поведения без backend добавлены небольшие локальные интеракции:
 переход из библиотеки в reader, панели оглавления и заметок, contextual actions

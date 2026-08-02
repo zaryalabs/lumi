@@ -20,7 +20,7 @@ use web_sys::RequestCredentials;
 
 use crate::routing::{
     browser_requests_system_settings, initial_route, set_browser_route, AppRoute, DeskRoute,
-    SearchRoute,
+    LearningOrigin, ReaderOrigin, SearchRoute,
 };
 
 pub(crate) const API_BASE: &str = match option_env!("LUMI_API_BASE") {
@@ -46,6 +46,7 @@ enum AccountState {
 const SESSION_EXPIRED_EVENT: &str = "lumi:session-expired";
 
 pub(crate) fn notify_session_expired() {
+    notify_pwa_account_cleared();
     let Some(window) = web_sys::window() else {
         return;
     };
@@ -53,6 +54,89 @@ pub(crate) fn notify_session_expired() {
         return;
     };
     let _ = window.dispatch_event(&event);
+}
+
+fn notify_pwa_account_cleared() {
+    let Some(window) = web_sys::window() else {
+        return;
+    };
+    let Ok(event) = web_sys::CustomEvent::new("lumi:pwa-clear-account") else {
+        return;
+    };
+    let _ = window.dispatch_event(&event);
+}
+
+fn sync_shell_theme_color(reader_open: bool) {
+    let Some(document) = web_sys::window().and_then(|window| window.document()) else {
+        return;
+    };
+    let Ok(Some(meta)) = document.query_selector("meta[name='theme-color']") else {
+        return;
+    };
+    let color = if reader_open { "#ebe6dc" } else { "#f4f0e8" };
+    let _ = meta.set_attribute("content", color);
+}
+
+fn account_initial(label: &str) -> String {
+    label.chars().next().unwrap_or('Л').to_uppercase().collect()
+}
+
+fn close_account_menu() {
+    let Some(document) = web_sys::window().and_then(|window| window.document()) else {
+        return;
+    };
+    let Ok(Some(details)) = document.query_selector(".account-menu[open]") else {
+        return;
+    };
+    let _ = details.remove_attribute("open");
+}
+
+fn app_route_label(route: &AppRoute) -> &'static str {
+    match route {
+        AppRoute::Library => "Библиотека",
+        AppRoute::Community | AppRoute::CommunitySpace(_, _) | AppRoute::CommunityJoin => {
+            "Пространства"
+        }
+        AppRoute::Challenges => "Повторение",
+        AppRoute::AiQueue => "Активность",
+        AppRoute::Connections => "Подключения",
+        AppRoute::Settings => "Настройки",
+        AppRoute::Admin => "Администрирование",
+        AppRoute::Reader(_, _, _) => "Чтение",
+        AppRoute::LearningSession(_, _) => "Самопроверка",
+        AppRoute::MaterialLearning(_, _) => "Обучение",
+        AppRoute::Desk(_) => "Desk",
+        AppRoute::Search(_) => "Поиск",
+    }
+}
+
+fn reader_origin_route(origin: ReaderOrigin) -> AppRoute {
+    match origin {
+        ReaderOrigin::Library => AppRoute::Library,
+        ReaderOrigin::LearningSession { session_id, parent } => {
+            AppRoute::LearningSession(session_id, parent)
+        }
+        ReaderOrigin::CommunitySpace(space_id) => AppRoute::CommunitySpace(space_id, None),
+    }
+}
+
+fn reader_origin_label(origin: Option<ReaderOrigin>) -> String {
+    match origin {
+        Some(ReaderOrigin::LearningSession { .. }) => "Вернуться к самопроверке".to_owned(),
+        Some(ReaderOrigin::CommunitySpace(_)) => "Вернуться в пространство".to_owned(),
+        Some(ReaderOrigin::Library) | None => "Вернуться в библиотеку".to_owned(),
+    }
+}
+
+fn learning_origin_route(origin: LearningOrigin) -> AppRoute {
+    match origin {
+        LearningOrigin::Library => AppRoute::Library,
+        LearningOrigin::Challenges => AppRoute::Challenges,
+        LearningOrigin::Material {
+            material_id,
+            source_id,
+        } => AppRoute::MaterialLearning(material_id, source_id),
+    }
 }
 
 #[component]
@@ -101,14 +185,15 @@ pub(crate) fn AccountGate() -> Element {
         let title = match route() {
             AppRoute::Library => "Библиотека — Lumi",
             AppRoute::Community => "Сообщества — Lumi",
-            AppRoute::CommunitySpace(_) => "Сообщество — Lumi",
+            AppRoute::CommunitySpace(_, _) => "Пространство — Lumi",
             AppRoute::CommunityJoin => "Вступление в сообщество — Lumi",
-            AppRoute::Challenges => "Челленджи — Lumi",
-            AppRoute::AiQueue => "AI-задачи — Lumi",
+            AppRoute::Challenges => "Повторение — Lumi",
+            AppRoute::AiQueue => "Активность — Lumi",
             AppRoute::Connections => "Подключения — Lumi",
-            AppRoute::Settings => "Администрирование — Lumi",
+            AppRoute::Settings => "Настройки — Lumi",
+            AppRoute::Admin => "Администрирование — Lumi",
             AppRoute::Reader(_, _, _) => "Чтение — Lumi",
-            AppRoute::LearningSession(_) => "Самопроверка — Lumi",
+            AppRoute::LearningSession(_, _) => "Самопроверка — Lumi",
             AppRoute::MaterialLearning(_, _) => "Обучение — Lumi",
             AppRoute::Desk(_) => "Desk — Lumi",
             AppRoute::Search(_) => "Поиск — Lumi",
@@ -116,6 +201,8 @@ pub(crate) fn AccountGate() -> Element {
         if let Some(document) = web_sys::window().and_then(|window| window.document()) {
             document.set_title(title);
         }
+        sync_shell_theme_color(matches!(route(), AppRoute::Reader(_, _, _)));
+        defer_account_focus("main-content");
     });
     use_effect(move || {
         let needs_record_capability = matches!(
@@ -188,7 +275,7 @@ pub(crate) fn AccountGate() -> Element {
                         }
                     }
                     if account.instance_role != InstanceRole::Admin
-                        && (route() == AppRoute::Settings || browser_requests_system_settings())
+                        && (route() == AppRoute::Admin || browser_requests_system_settings())
                     {
                         set_browser_route(&AppRoute::Library);
                         route.set(AppRoute::Library);
@@ -280,7 +367,7 @@ pub(crate) fn AccountGate() -> Element {
                         }
                     });
                     if session.account.instance_role != InstanceRole::Admin
-                        && (route() == AppRoute::Settings || browser_requests_system_settings())
+                        && (route() == AppRoute::Admin || browser_requests_system_settings())
                     {
                         set_browser_route(&AppRoute::Library);
                         route.set(AppRoute::Library);
@@ -310,8 +397,8 @@ pub(crate) fn AccountGate() -> Element {
             rsx! {
                 div { class: "library-app",
                     a { class: "skip-link", href: "#main-content", "Перейти к содержанию" }
-                    if !matches!(route(), AppRoute::Reader(_, _, _) | AppRoute::LearningSession(_)) {
-                    header { class: "library-topbar",
+                    if !matches!(route(), AppRoute::Reader(_, _, _) | AppRoute::LearningSession(_, _)) {
+                    header { class: "library-topbar app-topbar",
                         a { class: "library-brand", href: "#library", aria_label: "Lumi — библиотека", onclick: move |_| {
                             set_browser_route(&AppRoute::Library);
                             route.set(AppRoute::Library);
@@ -319,64 +406,92 @@ pub(crate) fn AccountGate() -> Element {
                             span { class: "brand-mark", aria_hidden: "true", "L" }
                             strong { "Lumi" }
                         }
-                        nav { aria_label: "Основная навигация",
+                        span { class: "app-context-title", "{app_route_label(&route())}" }
+                        nav { class: "primary-navigation", aria_label: "Основная навигация",
                             a { href: "#library", aria_current: if route() == AppRoute::Library { "page" } else { "false" }, onclick: move |_| {
                                 set_browser_route(&AppRoute::Library);
                                 route.set(AppRoute::Library);
-                            }, "Библиотека" }
+                            }, span { class: "app-nav-icon nav-icon-library", aria_hidden: "true" } span { class: "app-nav-label", "Библиотека" } }
                             a { href: "#desk", aria_current: if matches!(route(), AppRoute::Desk(_)) { "page" } else { "false" }, onclick: move |_| {
                                 let next = AppRoute::Desk(DeskRoute::default());
                                 set_browser_route(&next);
                                 route.set(next);
-                            }, "Desk" }
-                            a { href: "#search", aria_current: if matches!(route(), AppRoute::Search(_)) { "page" } else { "false" }, onclick: move |_| {
-                                let next = AppRoute::Search(SearchRoute::default());
-                                set_browser_route(&next);
-                                route.set(next);
-                            }, "Поиск" }
-                            if community_available() {
-                                a { href: "#communities", aria_current: if matches!(route(), AppRoute::Community | AppRoute::CommunitySpace(_) | AppRoute::CommunityJoin) { "page" } else { "false" }, onclick: move |_| {
-                                    set_browser_route(&AppRoute::Community);
-                                    route.set(AppRoute::Community);
-                                }, "Сообщества" }
-                            }
+                            }, span { class: "app-nav-icon nav-icon-desk", aria_hidden: "true" } span { class: "app-nav-label", "Desk" } }
+                            a { href: "#communities", aria_current: if matches!(route(), AppRoute::Community | AppRoute::CommunitySpace(_, _) | AppRoute::CommunityJoin) { "page" } else { "false" }, onclick: move |_| {
+                                set_browser_route(&AppRoute::Community);
+                                route.set(AppRoute::Community);
+                            }, span { class: "app-nav-icon nav-icon-spaces", aria_hidden: "true" } span { class: "app-nav-label", "Пространства" } }
                             a { href: "#challenges", aria_current: if route() == AppRoute::Challenges { "page" } else { "false" }, onclick: move |_| {
                                 set_browser_route(&AppRoute::Challenges);
                                 route.set(AppRoute::Challenges);
-                            }, "Челленджи" }
-                            a { href: "#ai-queue", aria_current: if route() == AppRoute::AiQueue { "page" } else { "false" }, onclick: move |_| {
+                            }, span { class: "app-nav-icon nav-icon-repeat", aria_hidden: "true" } span { class: "app-nav-label", "Повторение" } }
+                        }
+                        div { class: "app-utilities",
+                            a { class: "utility-action", href: "#search", aria_label: "Поиск", aria_current: if matches!(route(), AppRoute::Search(_)) { "page" } else { "false" }, onclick: move |_| {
+                                let next = AppRoute::Search(SearchRoute::default());
+                                set_browser_route(&next);
+                                route.set(next);
+                            }, span { class: "app-nav-icon nav-icon-search", aria_hidden: "true" } span { "Поиск" } }
+                            a { class: "utility-action", href: "#ai-queue", aria_label: "Активность", aria_current: if route() == AppRoute::AiQueue { "page" } else { "false" }, onclick: move |_| {
                                 set_browser_route(&AppRoute::AiQueue);
                                 route.set(AppRoute::AiQueue);
-                            }, "AI-задачи" }
-                            a { href: "#connections", aria_current: if route() == AppRoute::Connections { "page" } else { "false" }, onclick: move |_| {
-                                set_browser_route(&AppRoute::Connections);
-                                route.set(AppRoute::Connections);
-                            }, "Подключения" }
-                            if is_admin {
-                                a { href: "#settings", aria_current: if route() == AppRoute::Settings { "page" } else { "false" }, onclick: move |_| {
-                                    set_browser_route(&AppRoute::Settings);
-                                    route.set(AppRoute::Settings);
-                                }, "Администрирование" }
-                            }
-                        }
-                        div { class: "account-session-bar", role: "region", aria_label: "Активная сессия",
-                            span { "{account_label}" }
-                            button {
-                                r#type: "button",
-                                onclick: move |_| {
-                                    let csrf_token = csrf_for_logout.clone();
-                                    spawn(async move {
-                                        if logout(&csrf_token).await.is_ok() {
-                                            state.set(AccountState::SignedOut);
-                                            csrf.set(String::new());
-                                            service_capabilities.set(None);
-                                        }
-                                    });
-                                },
-                                "Выйти"
+                            }, span { class: "app-nav-icon nav-icon-activity", aria_hidden: "true" } span { "Активность" } }
+                            details { class: "account-menu",
+                                summary { aria_label: "Меню аккаунта {account_label}",
+                                    span { class: "account-avatar", aria_hidden: "true", "{account_initial(&account_label)}" }
+                                    span { class: "account-label", "{account_label}" }
+                                }
+                                div { class: "account-menu-popover",
+                                    a { href: "#settings", aria_current: if route() == AppRoute::Settings { "page" } else { "false" }, onclick: move |_| {
+                                        close_account_menu();
+                                        set_browser_route(&AppRoute::Settings);
+                                        route.set(AppRoute::Settings);
+                                    }, "Настройки" }
+                                    a { href: "#connections", aria_current: if route() == AppRoute::Connections { "page" } else { "false" }, onclick: move |_| {
+                                        close_account_menu();
+                                        set_browser_route(&AppRoute::Connections);
+                                        route.set(AppRoute::Connections);
+                                    }, "Подключения" }
+                                    if is_admin {
+                                        a { href: "#admin", aria_current: if route() == AppRoute::Admin { "page" } else { "false" }, onclick: move |_| {
+                                            close_account_menu();
+                                            set_browser_route(&AppRoute::Admin);
+                                            route.set(AppRoute::Admin);
+                                        }, "Администрирование" }
+                                    }
+                                    button { id: "pwa-install-button", class: "account-menu-action", r#type: "button", hidden: true, "Установить Lumi" }
+                                    button {
+                                        class: "account-menu-action danger-text",
+                                        r#type: "button",
+                                        onclick: move |_| {
+                                            let csrf_token = csrf_for_logout.clone();
+                                            spawn(async move {
+                                                if logout(&csrf_token).await.is_ok() {
+                                                    notify_pwa_account_cleared();
+                                                    state.set(AccountState::SignedOut);
+                                                    csrf.set(String::new());
+                                                    service_capabilities.set(None);
+                                                }
+                                            });
+                                        },
+                                        "Выйти"
+                                    }
+                                }
                             }
                         }
                     }
+                    nav { class: "mobile-navigation", aria_label: "Основная навигация на мобильном",
+                        a { href: "#library", aria_current: if route() == AppRoute::Library { "page" } else { "false" }, onclick: move |_| { set_browser_route(&AppRoute::Library); route.set(AppRoute::Library); }, span { class: "app-nav-icon nav-icon-library", aria_hidden: "true" } span { "Библиотека" } }
+                        a { href: "#desk", aria_current: if matches!(route(), AppRoute::Desk(_)) { "page" } else { "false" }, onclick: move |_| { let next = AppRoute::Desk(DeskRoute::default()); set_browser_route(&next); route.set(next); }, span { class: "app-nav-icon nav-icon-desk", aria_hidden: "true" } span { "Desk" } }
+                        a { href: "#communities", aria_current: if matches!(route(), AppRoute::Community | AppRoute::CommunitySpace(_, _) | AppRoute::CommunityJoin) { "page" } else { "false" }, onclick: move |_| { set_browser_route(&AppRoute::Community); route.set(AppRoute::Community); }, span { class: "app-nav-icon nav-icon-spaces", aria_hidden: "true" } span { "Пространства" } }
+                        a { href: "#challenges", aria_current: if route() == AppRoute::Challenges { "page" } else { "false" }, onclick: move |_| { set_browser_route(&AppRoute::Challenges); route.set(AppRoute::Challenges); }, span { class: "app-nav-icon nav-icon-repeat", aria_hidden: "true" } span { "Повторение" } }
+                    }
+                    }
+                    div { id: "offline-banner", class: "platform-banner", role: "status", hidden: true, "Нет сети. Доступна только оболочка Lumi; личные данные не показываются из кеша." }
+                    div { id: "pwa-update-banner", class: "platform-banner update-banner", role: "status", hidden: true,
+                        span { "Доступно обновление Lumi." }
+                        button { id: "pwa-update-button", r#type: "button", "Обновить сейчас" }
+                        button { id: "pwa-update-dismiss", r#type: "button", "Позже" }
                     }
                     if !capability_error().is_empty() {
                         div { class: "library-alert", role: "alert",
@@ -431,21 +546,22 @@ pub(crate) fn AccountGate() -> Element {
                             }, "Повторить" }
                         }
                     }
-                    if let AppRoute::Reader(material_id, return_to, anchor) = route() {
+                    if let AppRoute::Reader(material_id, origin, anchor) = route() {
                         crate::pdf_reader::ReaderRoute {
                             material_id,
                             initial_anchor: anchor,
+                            back_label: reader_origin_label(origin),
                             csrf_token: csrf.read().clone(),
                             record_rag_enabled,
                             material_sharing_available: material_sharing_available(),
                             shared_reading_available: shared_reading_available(),
                             on_close: move |_| {
-                                let next = return_to.map_or(AppRoute::Library, AppRoute::LearningSession);
+                                let next = origin.map_or(AppRoute::Library, reader_origin_route);
                                 set_browser_route(&next);
                                 route.set(next);
                             },
                             on_open_learning_session: move |session_id| {
-                                let next = AppRoute::LearningSession(session_id);
+                                let next = AppRoute::LearningSession(session_id, LearningOrigin::Library);
                                 set_browser_route(&next);
                                 route.set(next);
                             },
@@ -455,18 +571,26 @@ pub(crate) fn AccountGate() -> Element {
                                 route.set(next);
                             },
                         }
-                    } else if let AppRoute::LearningSession(session_id) = route() {
+                    } else if let AppRoute::LearningSession(session_id, origin) = route() {
                         crate::learning::LearningSessionPage {
                             session_id,
                             csrf_token: csrf.read().clone(),
                             on_open_source: move |(material_id, session_id)| {
-                                let next = AppRoute::Reader(material_id, Some(session_id), None);
+                                let next = AppRoute::Reader(
+                                    material_id,
+                                    Some(ReaderOrigin::LearningSession {
+                                        session_id,
+                                        parent: origin,
+                                    }),
+                                    None,
+                                );
                                 set_browser_route(&next);
                                 route.set(next);
                             },
                             on_close: move |_| {
-                                set_browser_route(&AppRoute::Library);
-                                route.set(AppRoute::Library);
+                                let next = learning_origin_route(origin);
+                                set_browser_route(&next);
+                                route.set(next);
                             },
                         }
                     } else if let AppRoute::MaterialLearning(material_id, source_id) = route() {
@@ -475,18 +599,25 @@ pub(crate) fn AccountGate() -> Element {
                             source_id,
                             csrf_token: csrf.read().clone(),
                             on_open_session: move |session_id| {
-                                let next = AppRoute::LearningSession(session_id);
+                                let next = AppRoute::LearningSession(
+                                    session_id,
+                                    LearningOrigin::Material {
+                                        material_id,
+                                        source_id,
+                                    },
+                                );
                                 set_browser_route(&next);
                                 route.set(next);
                             },
                         }
                     } else if route() == AppRoute::Connections {
                         ConnectionsApp { csrf_token: csrf.read().clone() }
-                    } else if matches!(route(), AppRoute::Community | AppRoute::CommunitySpace(_) | AppRoute::CommunityJoin) {
+                    } else if matches!(route(), AppRoute::Community | AppRoute::CommunitySpace(_, _) | AppRoute::CommunityJoin) {
                         crate::community::CommunityPage {
                             current_user_id: account.user_id,
                             csrf_token: csrf.read().clone(),
-                            space_id: if let AppRoute::CommunitySpace(space_id) = route() { Some(space_id) } else { None },
+                            space_id: if let AppRoute::CommunitySpace(space_id, _) = route() { Some(space_id) } else { None },
+                            target: if let AppRoute::CommunitySpace(_, target) = route() { target } else { None },
                             join_token: if route() == AppRoute::CommunityJoin { community_join_token() } else { None },
                             available: community_available(),
                             material_sharing_available: material_sharing_available(),
@@ -494,7 +625,7 @@ pub(crate) fn AccountGate() -> Element {
                             community_communications_available: community_communications_available(),
                             community_images_available: community_images_available(),
                             on_open_space: move |space_id| {
-                                let next = AppRoute::CommunitySpace(space_id);
+                                let next = AppRoute::CommunitySpace(space_id, None);
                                 set_browser_route(&next);
                                 route.set(next);
                             },
@@ -502,12 +633,21 @@ pub(crate) fn AccountGate() -> Element {
                                 set_browser_route(&AppRoute::Community);
                                 route.set(AppRoute::Community);
                             },
+                            on_open_reader: move |(material_id, space_id)| {
+                                let next = AppRoute::Reader(
+                                    material_id,
+                                    Some(ReaderOrigin::CommunitySpace(space_id)),
+                                    None,
+                                );
+                                set_browser_route(&next);
+                                route.set(next);
+                            },
                         }
                     } else if route() == AppRoute::Challenges {
                         crate::learning::ChallengesPage {
                             csrf_token: csrf.read().clone(),
                             on_open_session: move |session_id| {
-                                let next = AppRoute::LearningSession(session_id);
+                                let next = AppRoute::LearningSession(session_id, LearningOrigin::Challenges);
                                 set_browser_route(&next);
                                 route.set(next);
                             },
@@ -530,26 +670,15 @@ pub(crate) fn AccountGate() -> Element {
                             record_rag_enabled,
                             on_open: move |target| crate::search_ui::open_search_target(&target),
                         }
-                    } else if route() == AppRoute::Settings && is_admin {
+                    } else if route() == AppRoute::Settings {
+                        SettingsHub { account: account.clone(), is_admin }
+                    } else if route() == AppRoute::Admin && is_admin {
                         SettingsApp { csrf_token: csrf.read().clone() }
                     } else {
                         LibraryApp {
                             csrf_token: csrf.read().clone(),
                             on_open_reader: move |material_id| {
                                 let next = AppRoute::Reader(material_id, None, None);
-                                set_browser_route(&next);
-                                route.set(next);
-                            },
-                            on_open_learning: move |material_id| {
-                                let next = AppRoute::MaterialLearning(material_id, None);
-                                set_browser_route(&next);
-                                route.set(next);
-                            },
-                            on_search: move |query| {
-                                let next = AppRoute::Search(SearchRoute {
-                                    query,
-                                    ..SearchRoute::default()
-                                });
                                 set_browser_route(&next);
                                 route.set(next);
                             },
@@ -574,6 +703,73 @@ pub(crate) fn AccountGate() -> Element {
             }
         },
     }
+}
+
+#[component]
+fn SettingsHub(account: AccountSummary, is_admin: bool) -> Element {
+    let account_name = account.nickname.as_deref().unwrap_or("Без псевдонима");
+    rsx! {
+        main { id: "main-content", class: "library-view settings-hub", aria_label: "Настройки аккаунта",
+            header { class: "library-hero compact",
+                div {
+                    p { class: "eyebrow", "Аккаунт" }
+                    h1 { "Настройки" }
+                    p { class: "library-lead", "Личные параметры чтения, обучения, помощника и подключений собраны в одном месте." }
+                }
+            }
+            section { class: "settings-profile surface-card", aria_label: "Профиль",
+                span { class: "account-avatar large", aria_hidden: "true", "{account_initial(account_name)}" }
+                div {
+                    h2 { "{account_name}" }
+                    p { "Личный профиль Lumi" }
+                }
+            }
+            div { class: "settings-grid",
+                section { class: "surface-card",
+                    p { class: "eyebrow", "Чтение" }
+                    h2 { "Reader" }
+                    p { "Тема, размер текста и ширина страницы доступны прямо в Reader и сохраняются для аккаунта." }
+                    a { class: "secondary-action", href: "#library", "Выбрать материал" }
+                }
+                section { class: "surface-card",
+                    p { class: "eyebrow", "Обучение" }
+                    h2 { "Повторение" }
+                    p { "Расписание, пауза материала и ручная практика доступны в разделе повторения." }
+                    a { class: "secondary-action", href: "#challenges", "Открыть повторение" }
+                }
+                section { class: "surface-card",
+                    p { class: "eyebrow", "Интеграции" }
+                    h2 { "Подключения" }
+                    p { "Telegram и внешние агенты привязаны к вашему аккаунту отдельно от системного администрирования." }
+                    a { class: "secondary-action", href: "#connections", "Открыть подключения" }
+                }
+                section { class: "surface-card",
+                    p { class: "eyebrow", "Помощник" }
+                    h2 { "ИИ в Lumi" }
+                    p { "Настройки модели и личного ключа открываются внутри ИИ-чата только по вашему действию." }
+                    button { class: "secondary-action", r#type: "button", onclick: move |_| dispatch_open_ai_settings(), "Открыть настройки ИИ" }
+                }
+                if is_admin {
+                    section { class: "surface-card",
+                        p { class: "eyebrow", "Для администратора" }
+                        h2 { "Системные настройки" }
+                        p { "Настройки всего экземпляра отделены от личного профиля." }
+                        a { class: "secondary-action", href: "#admin", "Открыть администрирование" }
+                    }
+                }
+            }
+        }
+    }
+}
+
+fn dispatch_open_ai_settings() {
+    let Some(window) = web_sys::window() else {
+        return;
+    };
+    let Ok(event) = web_sys::CustomEvent::new("lumi:open-ai-settings") else {
+        return;
+    };
+    let _ = window.dispatch_event(&event);
 }
 
 #[component]
@@ -1046,12 +1242,7 @@ fn ConnectionsApp(csrf_token: String) -> Element {
 }
 
 #[component]
-fn LibraryApp(
-    csrf_token: String,
-    on_open_reader: EventHandler<Uuid>,
-    on_open_learning: EventHandler<Uuid>,
-    on_search: EventHandler<String>,
-) -> Element {
+fn LibraryApp(csrf_token: String, on_open_reader: EventHandler<Uuid>) -> Element {
     let entries = use_signal(|| Option::<Vec<LibraryEntry>>::None);
     let mut error = use_signal(String::new);
     let mut add_open = use_signal(|| false);
@@ -1060,6 +1251,9 @@ fn LibraryApp(
     let mut capabilities = use_signal(|| Option::<ServiceCapabilities>::None);
     let continue_reading = use_signal(|| Option::<(LibraryEntry, ReadingProgress)>::None);
     let refresh_generation = use_signal(|| 0_u64);
+    let mut library_query = use_signal(String::new);
+    let mut library_filter = use_signal(|| "all".to_owned());
+    let mut library_sort = use_signal(|| "recent".to_owned());
     use_effect(move || {
         if delete_candidate.read().is_some() {
             defer_account_dialog("delete-material-dialog");
@@ -1087,11 +1281,42 @@ fn LibraryApp(
     });
     let snapshot = entries.read().clone().unwrap_or_default();
     let loaded = entries.read().is_some();
-    let active_entries = snapshot
+    let query = library_query().trim().to_lowercase();
+    let mut active_entries = snapshot
         .iter()
         .filter(|entry| entry.library_state == LibraryState::Active)
+        .filter(|entry| {
+            query.is_empty()
+                || entry.display_title().to_lowercase().contains(&query)
+                || entry
+                    .source_identity
+                    .source_name
+                    .to_lowercase()
+                    .contains(&query)
+        })
+        .filter(|entry| match library_filter().as_str() {
+            "ready" => entry.import_status == MaterialImportStatus::Ready,
+            "processing" => matches!(
+                entry.import_status,
+                MaterialImportStatus::Queued | MaterialImportStatus::Importing
+            ),
+            "attention" => matches!(
+                entry.import_status,
+                MaterialImportStatus::Failed | MaterialImportStatus::Cancelled
+            ),
+            _ => true,
+        })
         .cloned()
         .collect::<Vec<_>>();
+    match library_sort().as_str() {
+        "title" => active_entries.sort_by(|left, right| {
+            left.display_title()
+                .to_lowercase()
+                .cmp(&right.display_title().to_lowercase())
+        }),
+        "oldest" => active_entries.sort_by_key(|entry| entry.created_at),
+        _ => active_entries.sort_by_key(|entry| std::cmp::Reverse(entry.updated_at)),
+    }
     let archived_entries = snapshot
         .iter()
         .filter(|entry| entry.library_state == LibraryState::Archived)
@@ -1144,11 +1369,42 @@ fn LibraryApp(
                     id: "add-material-button",
                     class: "primary-action add-material",
                     r#type: "button",
+                                    aria_label: "Открыть добавление материала",
                     onclick: move |_| add_open.set(true),
-                    "＋ Добавить материал"
+                    span { aria_hidden: "true", "＋" }
+                    span { "Добавить" }
                 }
             }
-            crate::search_ui::LibrarySearch { on_submit: on_search }
+            form { class: "library-search", role: "search", aria_label: "Фильтр личной библиотеки", onsubmit: move |event| event.prevent_default(),
+                label {
+                    span { "Найти в своей библиотеке" }
+                    input {
+                        r#type: "search",
+                        name: "library_filter",
+                        autocomplete: "off",
+                        placeholder: "Название или источник…",
+                        value: "{library_query}",
+                        oninput: move |event| library_query.set(event.value()),
+                    }
+                }
+                label {
+                    span { "Состояние" }
+                    select { name: "library_state", value: "{library_filter}", onchange: move |event| library_filter.set(event.value()),
+                        option { value: "all", "Все" }
+                        option { value: "ready", "Готовы к чтению" }
+                        option { value: "processing", "Обрабатываются" }
+                        option { value: "attention", "Требуют внимания" }
+                    }
+                }
+                label {
+                    span { "Сортировка" }
+                    select { name: "library_sort", value: "{library_sort}", onchange: move |event| library_sort.set(event.value()),
+                        option { value: "recent", "Недавно изменённые" }
+                        option { value: "oldest", "Сначала старые" }
+                        option { value: "title", "По названию" }
+                    }
+                }
+            }
 
             if !error().is_empty() {
                 div { class: "library-alert", role: "alert",
@@ -1178,13 +1434,23 @@ fn LibraryApp(
                     h2 { "Материалы пока не показаны" }
                     p { "Используйте «Повторить» в сообщении выше. Lumi не подменяет ошибку пустой библиотекой." }
                 }
-            } else if active_entries.is_empty() {
+            } else if active_entries.is_empty() && query.is_empty() && library_filter() == "all" {
                 section { class: "library-empty", aria_label: "Пустая библиотека",
                     div { class: "empty-glyph", aria_hidden: "true", "L" }
                     p { class: "eyebrow", "Первый материал" }
                     h2 { "Здесь пока тихо" }
                     p { "Добавьте EPUB без защиты, LUM, Markdown, PDF или публичную статью по ссылке." }
                     button { class: "primary-action", r#type: "button", onclick: move |_| add_open.set(true), "Добавить материал" }
+                }
+            } else if active_entries.is_empty() {
+                section { class: "library-empty feedback-state", aria_label: "Нет материалов по фильтру",
+                    h2 { "Ничего не найдено" }
+                    p { "Измените запрос или сбросьте фильтры. Глобальный поиск доступен в верхней панели." }
+                    button { class: "secondary-action", r#type: "button", onclick: move |_| {
+                        library_query.set(String::new());
+                        library_filter.set("all".to_owned());
+                        library_sort.set("recent".to_owned());
+                    }, "Сбросить фильтры" }
                 }
             } else {
                 if let Some((entry, progress)) = continue_reading.read().clone() {
@@ -1231,7 +1497,6 @@ fn LibraryApp(
                                 on_details: move |entry| details.set(Some(entry)),
                                 on_delete: move |entry| delete_candidate.set(Some(entry)),
                                 on_open_reader,
-                                on_open_learning,
                                 on_error: move |message| error.set(message),
                             }
                         }
@@ -1263,7 +1528,6 @@ fn LibraryApp(
                                 on_details: move |entry| details.set(Some(entry)),
                                 on_delete: move |entry| delete_candidate.set(Some(entry)),
                                 on_open_reader,
-                                on_open_learning,
                                 on_error: move |message| error.set(message),
                             }
                         }
@@ -1345,7 +1609,6 @@ fn MaterialCard(
     on_details: EventHandler<LibraryEntry>,
     on_delete: EventHandler<LibraryEntry>,
     on_open_reader: EventHandler<Uuid>,
-    on_open_learning: EventHandler<Uuid>,
     on_error: EventHandler<String>,
 ) -> Element {
     let status_label = material_status_label(entry.import_status);
@@ -1402,7 +1665,6 @@ fn MaterialCard(
                 div { class: "material-actions",
                     if entry.import_status == MaterialImportStatus::Ready && !archived {
                         button { class: "read-action", r#type: "button", onclick: move |_| on_open_reader.call(material_id), "Читать" }
-                        button { class: "secondary-action", r#type: "button", onclick: move |_| on_open_learning.call(material_id), "Учиться" }
                     }
                     details { class: "material-more",
                         summary {
@@ -1519,6 +1781,11 @@ fn AddMaterialDialog(
                 button { id: "source-tab-markdown", class: "secondary-action", r#type: "button", role: "tab", aria_selected: mode() == AddSourceMode::Markdown, aria_controls: "source-panel-markdown", aria_disabled: !markdown_import_enabled, disabled: !markdown_import_enabled, tabindex: if mode() == AddSourceMode::Markdown { "0" } else { "-1" }, onclick: move |_| { mode.set(AddSourceMode::Markdown); selected.set(None); }, onkeydown: move |event| if event.key() == Key::ArrowLeft && lum_import_enabled { event.prevent_default(); mode.set(AddSourceMode::Lum); selected.set(None); defer_account_focus("source-tab-lum"); } else if event.key() == Key::ArrowRight && pdf_import_enabled { event.prevent_default(); mode.set(AddSourceMode::Pdf); selected.set(None); defer_account_focus("source-tab-pdf"); }, "Markdown" }
                 button { id: "source-tab-pdf", class: "secondary-action", r#type: "button", role: "tab", aria_selected: mode() == AddSourceMode::Pdf, aria_controls: "source-panel-pdf", aria_disabled: !pdf_import_enabled, disabled: !pdf_import_enabled, tabindex: if mode() == AddSourceMode::Pdf { "0" } else { "-1" }, onclick: move |_| { mode.set(AddSourceMode::Pdf); selected.set(None); }, onkeydown: move |event| if event.key() == Key::ArrowLeft && markdown_import_enabled { event.prevent_default(); mode.set(AddSourceMode::Markdown); selected.set(None); defer_account_focus("source-tab-markdown"); } else if event.key() == Key::ArrowRight && web_import_enabled { event.prevent_default(); mode.set(AddSourceMode::Web); selected.set(None); defer_account_focus("source-tab-web"); }, "PDF" }
                 button { id: "source-tab-web", class: "secondary-action", r#type: "button", role: "tab", aria_selected: mode() == AddSourceMode::Web, aria_controls: "source-panel-web", aria_disabled: !web_import_enabled, disabled: !web_import_enabled, tabindex: if mode() == AddSourceMode::Web { "0" } else { "-1" }, onclick: move |_| { mode.set(AddSourceMode::Web); selected.set(None); }, onkeydown: move |event| if event.key() == Key::ArrowLeft && pdf_import_enabled { event.prevent_default(); mode.set(AddSourceMode::Pdf); defer_account_focus("source-tab-pdf"); } else if event.key() == Key::ArrowRight { event.prevent_default(); mode.set(AddSourceMode::Epub); defer_account_focus("source-tab-epub"); }, "Web-ссылка" }
+            }
+            aside { class: "source-callout", role: "note",
+                strong { "Материал уже в Telegram?" }
+                span { " Перешлите текст, фото или публичную ссылку подключённому боту." }
+                a { href: "#connections", "Настроить Telegram" }
             }
             if !capabilities_loaded {
                 p { class: "capability-note", role: "status", "Проверяем поддержку импорта по URL…" }
@@ -2427,7 +2694,7 @@ fn defer_account_focus(id: &str) {
     });
 }
 
-fn defer_account_dialog(id: &str) {
+pub(crate) fn defer_account_dialog(id: &str) {
     let id = id.to_owned();
     spawn(async move {
         browser_delay(20).await;

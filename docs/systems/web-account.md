@@ -24,6 +24,20 @@ outbox/sync and offline indexes. Веб-аккаунт дает identity, sessio
 Базовая формулировка: **web is a cloud-backed application, while native clients
 are future full-copy replicas**.
 
+## Web shell и PWA baseline
+
+Primary navigation Web-клиента: Библиотека, Desk, доступные Пространства и
+Повторение. Поиск и Активность находятся в app bar; Подключения, личные
+настройки и Admin — в account menu. Старые hash routes сохраняются как прямые
+reload-safe entry points.
+
+Web устанавливается как PWA, но кеширует только публичный static app shell.
+`/api/v1`, auth, source, audio и owner data не попадают в Cache Storage.
+Offline fallback не показывает stale private data и честно требует сеть.
+Controlled update не перезагружает Reader или dirty form без действия
+пользователя. Решение и rollback закреплены в
+[`ADR 0041`](../adr/0041-web-pwa-shell-and-exact-routes.md).
+
 ## Пользовательские сценарии
 
 - Пользователь открывает web-версию и создает аккаунт без email/password:
